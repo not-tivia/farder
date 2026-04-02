@@ -13,5 +13,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]

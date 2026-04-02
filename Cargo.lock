@@ -496,6 +496,7 @@ dependencies = [
  "rustls",
  "tokio",
  "tracing",
+ "x25519-dalek",
 ]
 
 [[package]]
