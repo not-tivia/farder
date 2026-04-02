@@ -15,5 +15,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+rcgen = "0.13"
 
 [dev-dependencies]

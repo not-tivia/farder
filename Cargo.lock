@@ -507,6 +507,7 @@ dependencies = [
  "farder-crypto",
  "farder-protocol",
  "quinn",
+ "rcgen",
  "rusqlite",
  "rustls",
  "tokio",
