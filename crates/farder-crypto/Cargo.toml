@@ -1,0 +1,17 @@
+[package]
+name = "farder-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = "0.10"
+rand = "0.8"
+serde = { workspace = true }
+anyhow = { workspace = true }
+argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]

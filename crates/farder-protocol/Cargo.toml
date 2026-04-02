@@ -1,0 +1,13 @@
+[package]
+name = "farder-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+farder-crypto = { workspace = true }
+serde = { workspace = true }
+rmp-serde = "1"
+anyhow = { workspace = true }
+
+[dev-dependencies]
