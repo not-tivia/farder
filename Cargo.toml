@@ -8,6 +8,21 @@ members = [
     "crates/farder-node",
 ]
 
+[package]
+name = "farder"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dev-dependencies]
+farder-crypto = { path = "crates/farder-crypto" }
+farder-protocol = { path = "crates/farder-protocol" }
+farder-node = { path = "crates/farder-node" }
+
+[[test]]
+name = "e2e_dm"
+path = "tests/e2e_dm.rs"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
