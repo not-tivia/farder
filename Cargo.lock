@@ -494,6 +494,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "farder-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "farder-crypto",
+ "farder-node",
+ "farder-protocol",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "farder-node"
 version = "0.1.0"
 dependencies = [

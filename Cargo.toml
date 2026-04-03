@@ -6,6 +6,7 @@ members = [
     "crates/farder-relay",
     "crates/farder-notify",
     "crates/farder-node",
+    "crates/farder-demo",
 ]
 
 [package]

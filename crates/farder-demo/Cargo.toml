@@ -1,0 +1,19 @@
+[package]
+name = "farder-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+farder-crypto = { workspace = true }
+farder-protocol = { workspace = true }
+farder-node = { workspace = true }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.13"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
