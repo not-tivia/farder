@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "farder_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "farder-server"
+path = "src/main.rs"
+
 [dependencies]
 farder-crypto = { workspace = true }
 farder-protocol = { workspace = true }

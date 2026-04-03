@@ -94,6 +94,9 @@ pub async fn handle_client(
 
     // Step 4: Check existing vs new member
     let pk_bytes = *public_key.as_bytes();
+    // Track whether the setup token was consumed so we can do the async owner update after all
+    // std::sync::MutexGuards are dropped.
+    let mut setup_token_used = false;
     let auth_result: Result<(), String> = {
         let conn = state.db.lock().unwrap();
         let existing = members::get_member(&conn, &public_key)?;
@@ -116,18 +119,15 @@ pub async fn handle_client(
                 active_setup_token.as_ref(),
             )? {
                 Ok(()) => {
-                    // If setup token was used, clear it and set owner
+                    // If setup token was used, clear it; the async owner update happens below.
                     if setup_token.is_some() {
-                        // Check setup token is still active (it was used)
-                        drop(conn); // release db lock before acquiring others
+                        drop(conn); // release db lock
                         let mut st = state.setup_token.lock().unwrap();
                         if st.is_some() {
                             *st = None;
+                            setup_token_used = true;
                         }
                         drop(st);
-                        let mut owner = state.owner.write().await;
-                        *owner = Some(public_key.clone());
-                        drop(owner);
                     }
                     Ok(())
                 }
@@ -135,6 +135,12 @@ pub async fn handle_client(
             }
         }
     };
+
+    // If the setup token was just consumed, set the owner (async, so must be outside the sync block).
+    if setup_token_used && auth_result.is_ok() {
+        let mut owner = state.owner.write().await;
+        *owner = Some(public_key.clone());
+    }
 
     // Step 5: Send Authenticated or AuthError
     match &auth_result {
