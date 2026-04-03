@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-02
 **Status:** Draft
-**Parent Spec:** `docs/superpowers/specs/2026-04-01-privacy-chat-platform-design.md`
+**Parent Spec:** `docs/specs/2026-04-01-privacy-chat-platform-design.md`
 
 ## Goal
 
@@ -25,7 +25,9 @@ A single Rust binary added to the workspace. Internal modules:
 
 ### Transport
 
-QUIC (via Quinn), same as Phase 1. Clients connect directly to the server for Phase 2 (relay routing deferred to a later phase — the server code is transport-agnostic). One persistent bi-directional stream per client for request/response and server-pushed events.
+QUIC (via Quinn), same as Phase 1. The parent spec mentions "WebSocket" for message delivery — this is superseded for Phase 2. QUIC is used for all server-client communication because the desktop client (Tauri) supports it natively and it's already proven in Phase 1. WebSocket support for browser clients will be added in Phase 5 as a compatibility layer. The server code is transport-agnostic (it operates on streams, not protocols), so adding WebSocket later requires no server changes.
+
+Clients connect directly to the server for Phase 2 (relay routing deferred — wiring through the relay is a deployment change, not a code change). One persistent bi-directional stream per client for request/response and server-pushed events.
 
 ### Storage
 
@@ -44,17 +46,22 @@ SQLite via rusqlite. Single database file. FTS5 extension for full-text message 
 
 ## Authentication & Membership
 
+### Server Bootstrapping (First Run)
+
+On first run, the server generates a one-time **setup token** (random 32 bytes, displayed in the server console). The first user to connect with this setup token becomes the Owner. The setup token is invalidated after use and never stored. After the owner is established, all subsequent joins require invite codes.
+
 ### Connection Flow
 
 1. Client opens QUIC connection to server.
 2. Server sends a random challenge (32 bytes) on the bi-stream.
 3. Client signs the challenge with their Ed25519 private key.
-4. Client sends: signed challenge + public key + invite code (if first time).
+4. Client sends: signed challenge + public key + invite code (if first time) or setup token (if claiming ownership).
 5. Server verifies signature against the public key.
-6. If new user: validates invite code, registers member with @everyone role.
-7. If existing member: looks up member by public key, verifies not banned.
-8. Server issues a session token (random 32 bytes, valid for 24h).
-9. Client includes session token in subsequent requests (avoids re-signing).
+6. If setup token provided and no owner exists: register as Owner with all permissions.
+7. If new user: validates invite code, registers member with @everyone role.
+8. If existing member: looks up member by public key, verifies not banned.
+9. Server issues a session token (random 32 bytes, valid for 24h).
+10. Client includes session token in subsequent requests (avoids re-signing).
 
 ### Member Data
 
@@ -150,15 +157,25 @@ fn resolve_permissions(member, channel) -> u64:
         perms |= role.permissions
 
     // 3. Apply category overrides (if channel is in a category)
+    //    Union all allows and denies across all of the member's roles first,
+    //    then apply once. This avoids order-dependent results.
     if channel.category:
+        combined_allow = 0
+        combined_deny = 0
         for override in category_overrides for member's roles:
-            perms &= !override.deny
-            perms |= override.allow
+            combined_allow |= override.allow
+            combined_deny |= override.deny
+        perms &= !combined_deny   // deny wins
+        perms |= combined_allow
 
-    // 4. Apply channel overrides
+    // 4. Apply channel overrides (same union approach)
+    combined_allow = 0
+    combined_deny = 0
     for override in channel_overrides for member's roles:
-        perms &= !override.deny
-        perms |= override.allow
+        combined_allow |= override.allow
+        combined_deny |= override.deny
+    perms &= !combined_deny   // deny wins
+    perms |= combined_allow
 
     // 5. Admin gets everything
     if perms & ADMIN:
@@ -199,7 +216,7 @@ No data for unauthorized resources is ever serialized or transmitted.
 | content | String | Markdown text |
 | timestamp | u64 | Server-assigned Unix timestamp (seconds) |
 | edited_at | Option<u64> | Null if never edited |
-| reply_to | Option<u64> | Message ID being replied to, null if not a reply |
+| reply_to | Option<u64> | Message ID being replied to, null if not a reply. If the replied-to message is deleted, this field is preserved as a dangling reference — the client displays "original message was deleted." |
 | pinned | bool | Whether the message is pinned |
 
 ### Client Requests
@@ -217,7 +234,7 @@ Sent by the client on the persistent bi-stream:
 | PinMessage | message_id | MANAGE_MESSAGES |
 | UnpinMessage | message_id | MANAGE_MESSAGES |
 | Search | query, channel_id?, limit | READ_MESSAGES per channel |
-| Typing | channel_id | SEND_MESSAGES |
+| Typing | channel_id | SEND_MESSAGES (indicator expires after 8 seconds without renewal) |
 | CreateChannel | name, type, category_id?, position? | MANAGE_CHANNEL |
 | UpdateChannel | channel_id, settings | MANAGE_CHANNEL |
 | DeleteChannel | channel_id | MANAGE_CHANNEL |
@@ -322,7 +339,7 @@ position = 3
 
 [[roles]]
 name = "Moderator"
-permissions = 2063  # view, read, send, manage_messages, kick, manage_channel
+permissions = 2191  # view, read, send, manage_messages, manage_channel, kick, ban (bits 0-3,7,10,11)
 color = "#00FF00"
 position = 2
 
