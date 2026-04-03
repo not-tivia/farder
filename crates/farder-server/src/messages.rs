@@ -1,20 +1,10 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::MessageInfo;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use crate::db::now;
 
 /// Shared SELECT column list for messages — must match `row_to_message_info` index order.
 pub const MSG_SELECT: &str =

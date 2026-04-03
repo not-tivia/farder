@@ -1,17 +1,10 @@
-use crate::{channels, messages};
+use crate::{channels, db, messages};
 use crate::state::ServerState;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::info;
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
 
 /// Purges messages in channels that have a `retention_secs` set, deleting
 /// any messages older than the retention window. Returns the total number of
@@ -22,7 +15,7 @@ pub fn purge_expired_messages(conn: &Connection) -> Result<u64> {
 
     for ch in all_channels {
         if let Some(secs) = ch.retention_secs {
-            let cutoff = now().saturating_sub(secs);
+            let cutoff = db::now().saturating_sub(secs);
             let deleted = messages::delete_messages_before(conn, ch.id, cutoff)?;
             if deleted > 0 {
                 info!(

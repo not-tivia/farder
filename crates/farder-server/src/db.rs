@@ -1,6 +1,13 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS members (

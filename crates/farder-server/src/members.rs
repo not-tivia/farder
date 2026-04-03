@@ -1,9 +1,10 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::RoleInfo;
+
+use crate::db::now;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -15,17 +16,6 @@ pub struct MemberRecord {
     pub joined_at: u64,
     pub banned: bool,
     pub revoked: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Helper
-// ---------------------------------------------------------------------------
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 // ---------------------------------------------------------------------------

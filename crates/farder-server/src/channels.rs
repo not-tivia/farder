@@ -1,19 +1,9 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use farder_protocol::server::{CategoryInfo, ChannelInfo, ChannelType, OverrideInfo};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use crate::db::now;
 
 pub fn channel_type_to_str(ct: &ChannelType) -> &'static str {
     match ct {
@@ -314,6 +304,17 @@ pub fn hard_delete_channel(conn: &Connection, id: u64) -> Result<()> {
         "DELETE FROM channel_overrides WHERE channel_id = ?1",
         params![id as i64],
     )?;
+    // Clean up FTS5 entries before deleting messages.
+    let mut stmt = conn.prepare("SELECT id, content FROM messages WHERE channel_id = ?1")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map(params![id as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (msg_id, content) in &rows {
+        conn.execute(
+            "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?1, ?2)",
+            params![msg_id, content],
+        )?;
+    }
     conn.execute(
         "DELETE FROM messages WHERE channel_id = ?1",
         params![id as i64],

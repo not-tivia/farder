@@ -57,6 +57,14 @@ pub fn authenticate_new_member(
                     return Ok(Err("invalid setup token".to_string()));
                 }
                 crate::members::register_member(conn, public_key, display_name)?;
+                let everyone_id: Option<u64> = conn.query_row(
+                    "SELECT id FROM roles WHERE name = '@everyone' AND builtin = 1",
+                    [],
+                    |row| Ok(row.get::<_, i64>(0)? as u64),
+                ).ok();
+                if let Some(eid) = everyone_id {
+                    crate::members::assign_role(conn, public_key, eid)?;
+                }
                 return Ok(Ok(()));
             }
         }
@@ -67,6 +75,14 @@ pub fn authenticate_new_member(
         match crate::invites::use_invite(conn, code)? {
             Ok(_info) => {
                 crate::members::register_member(conn, public_key, display_name)?;
+                let everyone_id: Option<u64> = conn.query_row(
+                    "SELECT id FROM roles WHERE name = '@everyone' AND builtin = 1",
+                    [],
+                    |row| Ok(row.get::<_, i64>(0)? as u64),
+                ).ok();
+                if let Some(eid) = everyone_id {
+                    crate::members::assign_role(conn, public_key, eid)?;
+                }
                 return Ok(Ok(()));
             }
             Err(reason) => {

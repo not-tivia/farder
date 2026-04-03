@@ -1,5 +1,5 @@
 use crate::{
-    channels, db,
+    channels,
     events::{BroadcastEvent, EventTarget},
     invites, members, messages, permissions,
 };
@@ -109,6 +109,44 @@ fn resolve_member_perms(
     Ok(permissions::resolve(ctx))
 }
 
+fn resolve_base_perms(conn: &Connection, member: &PublicKey, is_owner: bool) -> Result<u64> {
+    if is_owner {
+        return Ok(permissions::ALL_PERMISSIONS);
+    }
+    let everyone_perms: u64 = conn
+        .query_row(
+            "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        )
+        .unwrap_or(0);
+    let role_perms = members::get_member_role_permissions(conn, member)?;
+    let mut base = everyone_perms;
+    for rp in &role_perms {
+        base |= rp;
+    }
+    Ok(base)
+}
+
+fn require_base_perm(
+    conn: &Connection,
+    member: &PublicKey,
+    is_owner: bool,
+    perm: u64,
+    perm_name: &str,
+) -> Result<Option<HandleResult>> {
+    let base = resolve_base_perms(conn, member, is_owner)?;
+    if !permissions::has(base, perm) {
+        return Ok(Some(HandleResult {
+            response: ServerResponse::Error {
+                reason: format!("missing {} permission", perm_name),
+            },
+            events: Vec::new(),
+        }));
+    }
+    Ok(None)
+}
+
 // ---------------------------------------------------------------------------
 // Main dispatch
 // ---------------------------------------------------------------------------
@@ -128,6 +166,9 @@ pub fn handle_request(
             content,
             reply_to,
         } => {
+            if content.len() > 8000 {
+                return err("message content too long (max 8000 characters)");
+            }
             let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
             if !permissions::has(perms, permissions::SEND_MESSAGES) {
                 return err("missing SEND_MESSAGES permission");
@@ -152,6 +193,9 @@ pub fn handle_request(
             message_id,
             new_content,
         } => {
+            if new_content.len() > 8000 {
+                return err("message content too long (max 8000 characters)");
+            }
             let msg = match messages::get_message(conn, message_id)? {
                 Some(m) => m,
                 None => return err("message not found"),
@@ -210,6 +254,7 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::READ_MESSAGES) {
                 return err("missing READ_MESSAGES permission");
             }
+            let limit = limit.min(500);
             let msgs = messages::fetch_history(conn, channel_id, before_id, limit)?;
             ok(ServerResponse::History { messages: msgs })
         }
@@ -261,13 +306,25 @@ pub fn handle_request(
             channel_id,
             limit,
         } => {
+            let limit = limit.min(500);
             if let Some(cid) = channel_id {
                 let perms = resolve_member_perms(conn, member, cid, is_owner)?;
                 if !permissions::has(perms, permissions::READ_MESSAGES) {
                     return err("missing READ_MESSAGES permission");
                 }
             }
-            let msgs = messages::search_messages(conn, &query, channel_id, limit)?;
+            let mut msgs = messages::search_messages(conn, &query, channel_id, limit)?;
+            if channel_id.is_none() && !is_owner {
+                // Filter results to channels the member can read.
+                msgs.retain(|msg| {
+                    resolve_member_perms(conn, member, msg.channel_id, is_owner)
+                        .map(|p| {
+                            permissions::has(p, permissions::READ_MESSAGES)
+                                && permissions::has(p, permissions::VIEW_CHANNEL)
+                        })
+                        .unwrap_or(false)
+                });
+            }
             ok(ServerResponse::SearchResults { messages: msgs })
         }
 
@@ -295,22 +352,8 @@ pub fn handle_request(
             category_id,
             position,
         } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_CHANNEL) {
-                    return err("missing MANAGE_CHANNEL permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_CHANNEL, "MANAGE_CHANNEL")? {
+                return Ok(denied);
             }
             let pos = position.unwrap_or(0);
             let channel_id =
@@ -373,22 +416,8 @@ pub fn handle_request(
         // Category management
         // ----------------------------------------------------------------
         ServerRequest::CreateCategory { name, position } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_SERVER) {
-                    return err("missing MANAGE_SERVER permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
             }
             let pos = position.unwrap_or(0);
             let category_id = channels::create_category(conn, &name, pos)?;
@@ -407,22 +436,8 @@ pub fn handle_request(
             name,
             position,
         } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_SERVER) {
-                    return err("missing MANAGE_SERVER permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
             }
             channels::update_category(conn, category_id, name.as_deref(), position)?;
             let category = channels::get_category(conn, category_id)?.unwrap();
@@ -436,22 +451,8 @@ pub fn handle_request(
         }
 
         ServerRequest::DeleteCategory { category_id } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_SERVER) {
-                    return err("missing MANAGE_SERVER permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
             }
             channels::delete_category(conn, category_id)?;
             let event = BroadcastEvent {
@@ -470,22 +471,8 @@ pub fn handle_request(
             color,
             position,
         } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_ROLES) {
-                    return err("missing MANAGE_ROLES permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
+                return Ok(denied);
             }
             let pos = position.unwrap_or(0);
             let role_id = members::create_role(
@@ -511,22 +498,8 @@ pub fn handle_request(
             color,
             position,
         } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_ROLES) {
-                    return err("missing MANAGE_ROLES permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
+                return Ok(denied);
             }
             // color field in UpdateRole is Option<String> (not Option<Option<String>>),
             // so we pass it as Some(color.as_deref()) when present, None when absent.
@@ -548,22 +521,8 @@ pub fn handle_request(
         }
 
         ServerRequest::DeleteRole { role_id } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_ROLES) {
-                    return err("missing MANAGE_ROLES permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
+                return Ok(denied);
             }
             members::delete_role(conn, role_id)?;
             let event = BroadcastEvent {
@@ -574,22 +533,8 @@ pub fn handle_request(
         }
 
         ServerRequest::AssignRole { member_key, role_id } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_ROLES) {
-                    return err("missing MANAGE_ROLES permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
+                return Ok(denied);
             }
             members::assign_role(conn, &member_key, role_id)?;
             let event = BroadcastEvent {
@@ -600,22 +545,8 @@ pub fn handle_request(
         }
 
         ServerRequest::RemoveRole { member_key, role_id } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_ROLES) {
-                    return err("missing MANAGE_ROLES permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
+                return Ok(denied);
             }
             members::unassign_role(conn, &member_key, role_id)?;
             let event = BroadcastEvent {
@@ -629,22 +560,8 @@ pub fn handle_request(
         // Member management
         // ----------------------------------------------------------------
         ServerRequest::KickMember { member_key } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::KICK_MEMBERS) {
-                    return err("missing KICK_MEMBERS permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::KICK_MEMBERS, "KICK_MEMBERS")? {
+                return Ok(denied);
             }
             members::remove_member(conn, &member_key)?;
             let event = BroadcastEvent {
@@ -657,22 +574,8 @@ pub fn handle_request(
         }
 
         ServerRequest::BanMember { member_key } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::BAN_MEMBERS) {
-                    return err("missing BAN_MEMBERS permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::BAN_MEMBERS, "BAN_MEMBERS")? {
+                return Ok(denied);
             }
             members::ban_member(conn, &member_key)?;
             let event = BroadcastEvent {
@@ -692,22 +595,8 @@ pub fn handle_request(
             expires_in_secs,
             target_channel,
         } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::CREATE_INVITES) {
-                    return err("missing CREATE_INVITES permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::CREATE_INVITES, "CREATE_INVITES")? {
+                return Ok(denied);
             }
             let code =
                 invites::create_invite(conn, member, max_uses, expires_in_secs, target_channel)?;
@@ -776,22 +665,8 @@ pub fn handle_request(
             allow,
             deny,
         } => {
-            if !is_owner {
-                let everyone_perms: u64 = conn
-                    .query_row(
-                        "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
-                        [],
-                        |row| Ok(row.get::<_, i64>(0)? as u64),
-                    )
-                    .unwrap_or(0);
-                let role_perms = members::get_member_role_permissions(conn, member)?;
-                let mut base = everyone_perms;
-                for rp in &role_perms {
-                    base |= rp;
-                }
-                if !permissions::has(base, permissions::MANAGE_SERVER) {
-                    return err("missing MANAGE_SERVER permission");
-                }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
             }
             channels::set_category_override(conn, category_id, role_id, allow, deny)?;
             let event = BroadcastEvent {
@@ -815,6 +690,7 @@ pub fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db;
     use farder_crypto::identity::Keypair;
 
     fn setup() -> (Connection, PublicKey) {

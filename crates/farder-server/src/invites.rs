@@ -2,18 +2,8 @@ use anyhow::Result;
 use farder_crypto::identity::PublicKey;
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use crate::db::now;
 
 fn random_code() -> String {
     // 8 chars from an alphanumeric charset that excludes visually confusable
