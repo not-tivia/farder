@@ -344,6 +344,18 @@ pub fn get_member_role_ids(conn: &Connection, pk: &PublicKey) -> Result<Vec<u64>
     Ok(ids)
 }
 
+/// Get the highest role position for a member. Returns 0 if no roles assigned.
+pub fn get_highest_role_position(conn: &Connection, pk: &PublicKey) -> Result<u32> {
+    let pos: Option<i64> = conn.query_row(
+        "SELECT MAX(r.position) FROM roles r
+         INNER JOIN member_roles mr ON mr.role_id = r.id
+         WHERE mr.member_key = ?1",
+        params![pk.as_bytes().as_slice()],
+        |row| row.get(0),
+    ).ok().flatten();
+    Ok(pos.unwrap_or(0) as u32)
+}
+
 pub fn get_member_role_permissions(conn: &Connection, pk: &PublicKey) -> Result<Vec<u64>> {
     let mut stmt = conn.prepare(
         "SELECT r.permissions FROM member_roles mr \

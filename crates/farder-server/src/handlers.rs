@@ -147,6 +147,52 @@ fn require_base_perm(
     Ok(None)
 }
 
+/// Check that the actor's highest role position is above the target position.
+/// Owners bypass this check. Returns an error response if the check fails.
+fn require_role_hierarchy(
+    conn: &Connection,
+    actor: &PublicKey,
+    is_owner: bool,
+    target_position: u32,
+) -> Result<Option<HandleResult>> {
+    if is_owner {
+        return Ok(None);
+    }
+    let actor_pos = members::get_highest_role_position(conn, actor)?;
+    if actor_pos <= target_position {
+        return Ok(Some(HandleResult {
+            response: ServerResponse::Error {
+                reason: "cannot manage roles at or above your own position".to_string(),
+            },
+            events: Vec::new(),
+        }));
+    }
+    Ok(None)
+}
+
+/// Check that the actor outranks the target member.
+fn require_member_hierarchy(
+    conn: &Connection,
+    actor: &PublicKey,
+    is_owner: bool,
+    target: &PublicKey,
+) -> Result<Option<HandleResult>> {
+    if is_owner {
+        return Ok(None);
+    }
+    let actor_pos = members::get_highest_role_position(conn, actor)?;
+    let target_pos = members::get_highest_role_position(conn, target)?;
+    if actor_pos <= target_pos {
+        return Ok(Some(HandleResult {
+            response: ServerResponse::Error {
+                reason: "cannot manage members at or above your own role level".to_string(),
+            },
+            events: Vec::new(),
+        }));
+    }
+    Ok(None)
+}
+
 // ---------------------------------------------------------------------------
 // Main dispatch
 // ---------------------------------------------------------------------------
@@ -475,6 +521,9 @@ pub fn handle_request(
                 return Ok(denied);
             }
             let pos = position.unwrap_or(0);
+            if let Some(denied) = require_role_hierarchy(conn, member, is_owner, pos)? {
+                return Ok(denied);
+            }
             let role_id = members::create_role(
                 conn,
                 &name,
@@ -501,6 +550,15 @@ pub fn handle_request(
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
                 return Ok(denied);
             }
+            let target_role = members::get_role(conn, role_id)?.ok_or_else(|| anyhow::anyhow!("role not found"))?;
+            if let Some(denied) = require_role_hierarchy(conn, member, is_owner, target_role.position)? {
+                return Ok(denied);
+            }
+            if let Some(new_pos) = position {
+                if let Some(denied) = require_role_hierarchy(conn, member, is_owner, new_pos)? {
+                    return Ok(denied);
+                }
+            }
             // color field in UpdateRole is Option<String> (not Option<Option<String>>),
             // so we pass it as Some(color.as_deref()) when present, None when absent.
             let color_param: Option<Option<&str>> = color.as_ref().map(|c| Some(c.as_str()));
@@ -524,6 +582,10 @@ pub fn handle_request(
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
                 return Ok(denied);
             }
+            let target_role = members::get_role(conn, role_id)?.ok_or_else(|| anyhow::anyhow!("role not found"))?;
+            if let Some(denied) = require_role_hierarchy(conn, member, is_owner, target_role.position)? {
+                return Ok(denied);
+            }
             members::delete_role(conn, role_id)?;
             let event = BroadcastEvent {
                 target: EventTarget::All,
@@ -536,6 +598,10 @@ pub fn handle_request(
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
                 return Ok(denied);
             }
+            let target_role = members::get_role(conn, role_id)?.ok_or_else(|| anyhow::anyhow!("role not found"))?;
+            if let Some(denied) = require_role_hierarchy(conn, member, is_owner, target_role.position)? {
+                return Ok(denied);
+            }
             members::assign_role(conn, &member_key, role_id)?;
             let event = BroadcastEvent {
                 target: EventTarget::All,
@@ -546,6 +612,10 @@ pub fn handle_request(
 
         ServerRequest::RemoveRole { member_key, role_id } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
+                return Ok(denied);
+            }
+            let target_role = members::get_role(conn, role_id)?.ok_or_else(|| anyhow::anyhow!("role not found"))?;
+            if let Some(denied) = require_role_hierarchy(conn, member, is_owner, target_role.position)? {
                 return Ok(denied);
             }
             members::unassign_role(conn, &member_key, role_id)?;
@@ -563,6 +633,9 @@ pub fn handle_request(
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::KICK_MEMBERS, "KICK_MEMBERS")? {
                 return Ok(denied);
             }
+            if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
+                return Ok(denied);
+            }
             members::remove_member(conn, &member_key)?;
             let event = BroadcastEvent {
                 target: EventTarget::All,
@@ -575,6 +648,9 @@ pub fn handle_request(
 
         ServerRequest::BanMember { member_key } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::BAN_MEMBERS, "BAN_MEMBERS")? {
+                return Ok(denied);
+            }
+            if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
                 return Ok(denied);
             }
             members::ban_member(conn, &member_key)?;
@@ -1034,5 +1110,75 @@ mod tests {
         // Verify banned flag is set.
         let rec = members::get_member(&conn, &victim).unwrap().unwrap();
         assert!(rec.banned, "member should be banned");
+    }
+
+    #[test]
+    fn test_cannot_create_role_above_own_position() {
+        let (conn, _owner) = setup();
+        // Create a mod role at position 2
+        let mod_role_id = members::create_role(&conn, "Mod", permissions::MANAGE_ROLES | permissions::DEFAULT_EVERYONE, None, 2, false).unwrap();
+        let moderator = add_member(&conn, "Moderator");
+        members::assign_role(&conn, &moderator, mod_role_id).unwrap();
+
+        // Mod tries to create a role at position 3 (above their position 2) — should fail
+        let result = handle_request(&conn, &moderator, false, ServerRequest::CreateRole {
+            name: "SuperAdmin".to_string(),
+            permissions: permissions::ALL_PERMISSIONS,
+            color: None,
+            position: Some(3),
+        }).unwrap();
+        match result.response {
+            ServerResponse::Error { .. } => {}
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cannot_kick_member_with_higher_role() {
+        let (conn, _owner) = setup();
+        // Create admin role at position 3, mod role at position 2
+        let admin_role = members::create_role(&conn, "Admin", permissions::ALL_PERMISSIONS, None, 3, false).unwrap();
+        let mod_role = members::create_role(&conn, "Mod", permissions::KICK_MEMBERS | permissions::DEFAULT_EVERYONE, None, 2, false).unwrap();
+
+        let admin = add_member(&conn, "Admin");
+        members::assign_role(&conn, &admin, admin_role).unwrap();
+
+        let moderator = add_member(&conn, "Moderator");
+        members::assign_role(&conn, &moderator, mod_role).unwrap();
+
+        // Mod tries to kick Admin — should fail (admin position 3 > mod position 2)
+        let result = handle_request(&conn, &moderator, false, ServerRequest::KickMember {
+            member_key: admin.clone(),
+        }).unwrap();
+        match result.response {
+            ServerResponse::Error { .. } => {}
+            other => panic!("expected Error, got {:?}", other),
+        }
+
+        // Mod can kick a regular member (position 0, below mod's 2)
+        let regular = add_member(&conn, "Regular");
+        let result = handle_request(&conn, &moderator, false, ServerRequest::KickMember {
+            member_key: regular.clone(),
+        }).unwrap();
+        match result.response {
+            ServerResponse::Ok => {}
+            other => panic!("expected Ok, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_owner_bypasses_hierarchy() {
+        let (conn, owner) = setup();
+        // Owner can create roles at any position
+        let result = handle_request(&conn, &owner, true, ServerRequest::CreateRole {
+            name: "HighRole".to_string(),
+            permissions: 0xFF,
+            color: None,
+            position: Some(999),
+        }).unwrap();
+        match result.response {
+            ServerResponse::Ok => {}
+            other => panic!("expected Ok, got {:?}", other),
+        }
     }
 }
