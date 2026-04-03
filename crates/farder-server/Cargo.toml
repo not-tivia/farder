@@ -1,0 +1,25 @@
+[package]
+name = "farder-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+farder-crypto = { workspace = true }
+farder-protocol = { workspace = true }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+rcgen = "0.13"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+rand = "0.8"
+hex = "0.4"
+
+[dev-dependencies]
