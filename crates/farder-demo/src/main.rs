@@ -308,6 +308,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Install the ring crypto provider for rustls (required before any TLS operations)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let args = Args::parse();
 
     match (args.listen, args.connect) {
