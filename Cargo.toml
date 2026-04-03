@@ -7,6 +7,7 @@ members = [
     "crates/farder-notify",
     "crates/farder-node",
     "crates/farder-demo",
+    "crates/farder-server",
 ]
 
 [package]
@@ -19,10 +20,22 @@ license = "AGPL-3.0-or-later"
 farder-crypto = { path = "crates/farder-crypto" }
 farder-protocol = { path = "crates/farder-protocol" }
 farder-node = { path = "crates/farder-node" }
+farder-server = { path = "crates/farder-server" }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.13"
+tokio = { version = "1", features = ["full"] }
+hex = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
 
 [[test]]
 name = "e2e_dm"
 path = "tests/e2e_dm.rs"
+
+[[test]]
+name = "e2e_server"
+path = "tests/e2e_server.rs"
 
 [workspace.package]
 version = "0.1.0"
@@ -33,6 +46,7 @@ license = "AGPL-3.0-or-later"
 farder-crypto = { path = "crates/farder-crypto" }
 farder-protocol = { path = "crates/farder-protocol" }
 farder-node = { path = "crates/farder-node" }
+farder-server = { path = "crates/farder-server" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

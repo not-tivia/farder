@@ -1,0 +1,328 @@
+use farder_crypto::identity::PublicKey;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChannelType {
+    Text,
+    Announcement,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MessageInfo {
+    pub id: u64,
+    pub channel_id: u64,
+    pub author: PublicKey,
+    pub content: String,
+    pub timestamp: u64,
+    pub edited_at: Option<u64>,
+    pub reply_to: Option<u64>,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChannelInfo {
+    pub id: u64,
+    pub name: String,
+    pub channel_type: ChannelType,
+    pub category_id: Option<u64>,
+    pub position: u32,
+    pub topic: Option<String>,
+    pub nsfw: bool,
+    pub slow_mode_secs: u32,
+    pub retention_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CategoryInfo {
+    pub id: u64,
+    pub name: String,
+    pub position: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RoleInfo {
+    pub id: u64,
+    pub name: String,
+    pub permissions: u64,
+    pub color: Option<String>,
+    pub position: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MemberInfo {
+    pub public_key: PublicKey,
+    pub display_name: String,
+    pub joined_at: u64,
+    pub role_ids: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct OverrideInfo {
+    pub role_id: u64,
+    pub allow: u64,
+    pub deny: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ClientFrame {
+    Authenticate {
+        public_key: PublicKey,
+        signed_challenge: Vec<u8>,
+        invite_code: Option<String>,
+        setup_token: Option<String>,
+    },
+    Request {
+        id: u32,
+        body: ServerRequest,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServerRequest {
+    Subscribe { channel_ids: Vec<u64> },
+    SendMessage { channel_id: u64, content: String, reply_to: Option<u64> },
+    EditMessage { message_id: u64, new_content: String },
+    DeleteMessage { message_id: u64 },
+    FetchHistory { channel_id: u64, before_id: Option<u64>, limit: u32 },
+    PinMessage { message_id: u64 },
+    UnpinMessage { message_id: u64 },
+    Search { query: String, channel_id: Option<u64>, limit: u32 },
+    Typing { channel_id: u64 },
+    CreateChannel { name: String, channel_type: ChannelType, category_id: Option<u64>, position: Option<u32> },
+    UpdateChannel { channel_id: u64, name: Option<String>, topic: Option<String>, nsfw: Option<bool>, slow_mode_secs: Option<u32>, retention_secs: Option<Option<u64>> },
+    DeleteChannel { channel_id: u64 },
+    CreateCategory { name: String, position: Option<u32> },
+    UpdateCategory { category_id: u64, name: Option<String>, position: Option<u32> },
+    DeleteCategory { category_id: u64 },
+    CreateRole { name: String, permissions: u64, color: Option<String>, position: Option<u32> },
+    UpdateRole { role_id: u64, name: Option<String>, permissions: Option<u64>, color: Option<String>, position: Option<u32> },
+    DeleteRole { role_id: u64 },
+    AssignRole { member_key: PublicKey, role_id: u64 },
+    RemoveRole { member_key: PublicKey, role_id: u64 },
+    KickMember { member_key: PublicKey },
+    BanMember { member_key: PublicKey },
+    CreateInvite { max_uses: Option<u32>, expires_in_secs: Option<u64>, target_channel: Option<u64> },
+    GetServerInfo,
+    GetMembers,
+    SetChannelOverride { channel_id: u64, role_id: u64, allow: u64, deny: u64 },
+    SetCategoryOverride { category_id: u64, role_id: u64, allow: u64, deny: u64 },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServerFrame {
+    Challenge { nonce: [u8; 32] },
+    Authenticated { session_token: Vec<u8> },
+    AuthError { reason: String },
+    Response { request_id: u32, body: ServerResponse },
+    Event(ServerEvent),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServerResponse {
+    Ok,
+    Error { reason: String },
+    MessageSent { id: u64, timestamp: u64 },
+    History { messages: Vec<MessageInfo> },
+    SearchResults { messages: Vec<MessageInfo> },
+    ServerInfo {
+        name: String,
+        member_count: u32,
+        channels: Vec<ChannelInfo>,
+        categories: Vec<CategoryInfo>,
+        roles: Vec<RoleInfo>,
+    },
+    Members { members: Vec<MemberInfo> },
+    InviteCreated { code: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServerEvent {
+    NewMessage { message: MessageInfo },
+    MessageEdited { message_id: u64, channel_id: u64, new_content: String, edited_at: u64 },
+    MessageDeleted { message_id: u64, channel_id: u64 },
+    MessagePinned { message_id: u64, channel_id: u64 },
+    MessageUnpinned { message_id: u64, channel_id: u64 },
+    MemberJoined { public_key: PublicKey, display_name: String },
+    MemberLeft { public_key: PublicKey },
+    MemberBanned { public_key: PublicKey },
+    TypingStarted { channel_id: u64, public_key: PublicKey },
+    ChannelCreated { channel: ChannelInfo },
+    ChannelUpdated { channel: ChannelInfo },
+    ChannelDeleted { channel_id: u64 },
+    CategoryCreated { category: CategoryInfo },
+    CategoryUpdated { category: CategoryInfo },
+    CategoryDeleted { category_id: u64 },
+    RoleCreated { role: RoleInfo },
+    RoleUpdated { role: RoleInfo },
+    RoleDeleted { role_id: u64 },
+    PermissionsChanged,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec;
+    use farder_crypto::identity::Keypair;
+
+    #[test]
+    fn test_roundtrip_client_frame_authenticate() {
+        let kp = Keypair::generate();
+        let frame = ClientFrame::Authenticate {
+            public_key: kp.public_key(),
+            signed_challenge: vec![1, 2, 3],
+            invite_code: Some("abc123".to_string()),
+            setup_token: None,
+        };
+        let bytes = codec::encode(&frame).unwrap();
+        let decoded: ClientFrame = codec::decode(&bytes).unwrap();
+        match decoded {
+            ClientFrame::Authenticate { public_key, invite_code, .. } => {
+                assert_eq!(public_key, kp.public_key());
+                assert_eq!(invite_code, Some("abc123".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_client_frame_request() {
+        let frame = ClientFrame::Request {
+            id: 42,
+            body: ServerRequest::SendMessage {
+                channel_id: 1,
+                content: "hello".to_string(),
+                reply_to: None,
+            },
+        };
+        let bytes = codec::encode(&frame).unwrap();
+        let decoded: ClientFrame = codec::decode(&bytes).unwrap();
+        match decoded {
+            ClientFrame::Request { id, body } => {
+                assert_eq!(id, 42);
+                match body {
+                    ServerRequest::SendMessage { channel_id, content, reply_to } => {
+                        assert_eq!(channel_id, 1);
+                        assert_eq!(content, "hello");
+                        assert!(reply_to.is_none());
+                    }
+                    _ => panic!("wrong request variant"),
+                }
+            }
+            _ => panic!("wrong frame variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_server_frame_challenge() {
+        let nonce = [42u8; 32];
+        let frame = ServerFrame::Challenge { nonce };
+        let bytes = codec::encode(&frame).unwrap();
+        let decoded: ServerFrame = codec::decode(&bytes).unwrap();
+        match decoded {
+            ServerFrame::Challenge { nonce: n } => assert_eq!(n, nonce),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_server_frame_response() {
+        let kp = Keypair::generate();
+        let msg = MessageInfo {
+            id: 1,
+            channel_id: 5,
+            author: kp.public_key(),
+            content: "test message".to_string(),
+            timestamp: 1000,
+            edited_at: None,
+            reply_to: None,
+            pinned: false,
+        };
+        let frame = ServerFrame::Response {
+            request_id: 7,
+            body: ServerResponse::History { messages: vec![msg.clone()] },
+        };
+        let bytes = codec::encode(&frame).unwrap();
+        let decoded: ServerFrame = codec::decode(&bytes).unwrap();
+        match decoded {
+            ServerFrame::Response { request_id, body } => {
+                assert_eq!(request_id, 7);
+                match body {
+                    ServerResponse::History { messages } => {
+                        assert_eq!(messages.len(), 1);
+                        assert_eq!(messages[0].content, "test message");
+                    }
+                    _ => panic!("wrong response variant"),
+                }
+            }
+            _ => panic!("wrong frame variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_server_event() {
+        let kp = Keypair::generate();
+        let event = ServerEvent::NewMessage {
+            message: MessageInfo {
+                id: 99,
+                channel_id: 3,
+                author: kp.public_key(),
+                content: "event msg".to_string(),
+                timestamp: 2000,
+                edited_at: Some(2001),
+                reply_to: Some(50),
+                pinned: true,
+            },
+        };
+        let frame = ServerFrame::Event(event);
+        let bytes = codec::encode(&frame).unwrap();
+        let decoded: ServerFrame = codec::decode(&bytes).unwrap();
+        match decoded {
+            ServerFrame::Event(ServerEvent::NewMessage { message }) => {
+                assert_eq!(message.id, 99);
+                assert_eq!(message.edited_at, Some(2001));
+                assert_eq!(message.reply_to, Some(50));
+                assert!(message.pinned);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_all_request_variants() {
+        let kp = Keypair::generate();
+        let requests = vec![
+            ServerRequest::Subscribe { channel_ids: vec![1, 2, 3] },
+            ServerRequest::SendMessage { channel_id: 1, content: "hi".into(), reply_to: Some(5) },
+            ServerRequest::EditMessage { message_id: 10, new_content: "edited".into() },
+            ServerRequest::DeleteMessage { message_id: 10 },
+            ServerRequest::FetchHistory { channel_id: 1, before_id: Some(100), limit: 50 },
+            ServerRequest::PinMessage { message_id: 10 },
+            ServerRequest::UnpinMessage { message_id: 10 },
+            ServerRequest::Search { query: "hello".into(), channel_id: Some(1), limit: 20 },
+            ServerRequest::Typing { channel_id: 1 },
+            ServerRequest::CreateChannel { name: "general".into(), channel_type: ChannelType::Text, category_id: None, position: Some(0) },
+            ServerRequest::UpdateChannel { channel_id: 1, name: Some("renamed".into()), topic: None, nsfw: None, slow_mode_secs: None, retention_secs: None },
+            ServerRequest::DeleteChannel { channel_id: 1 },
+            ServerRequest::CreateCategory { name: "General".into(), position: Some(0) },
+            ServerRequest::UpdateCategory { category_id: 1, name: Some("Renamed".into()), position: None },
+            ServerRequest::DeleteCategory { category_id: 1 },
+            ServerRequest::CreateRole { name: "Mod".into(), permissions: 0xFF, color: Some("#00FF00".into()), position: Some(2) },
+            ServerRequest::UpdateRole { role_id: 1, name: None, permissions: Some(0xFFFF), color: None, position: None },
+            ServerRequest::DeleteRole { role_id: 1 },
+            ServerRequest::AssignRole { member_key: kp.public_key(), role_id: 1 },
+            ServerRequest::RemoveRole { member_key: kp.public_key(), role_id: 1 },
+            ServerRequest::KickMember { member_key: kp.public_key() },
+            ServerRequest::BanMember { member_key: kp.public_key() },
+            ServerRequest::CreateInvite { max_uses: Some(10), expires_in_secs: Some(3600), target_channel: Some(1) },
+            ServerRequest::GetServerInfo,
+            ServerRequest::GetMembers,
+            ServerRequest::SetChannelOverride { channel_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
+            ServerRequest::SetCategoryOverride { category_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
+        ];
+        for req in requests {
+            let frame = ClientFrame::Request { id: 1, body: req };
+            let bytes = codec::encode(&frame).unwrap();
+            let _decoded: ClientFrame = codec::decode(&bytes).unwrap();
+        }
+    }
+}

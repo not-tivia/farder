@@ -1,0 +1,42 @@
+[template]
+name = "Organization"
+description = "Team workspace with departments and announcements"
+
+[[roles]]
+name = "Admin"
+permissions = 16383
+color = "#FF0000"
+position = 3
+
+[[roles]]
+name = "Manager"
+permissions = 2191
+color = "#0066FF"
+position = 2
+
+[[roles]]
+name = "Member"
+permissions = 8199
+position = 1
+
+[[categories]]
+name = "General"
+
+[[categories.channels]]
+name = "announcements"
+type = "announcement"
+
+[[categories.channels]]
+name = "general"
+type = "text"
+
+[[categories]]
+name = "Projects"
+
+[[categories.channels]]
+name = "project-updates"
+type = "text"
+
+[[categories.channels]]
+name = "ideas"
+type = "text"

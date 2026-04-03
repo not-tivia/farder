@@ -1,0 +1,49 @@
+[template]
+name = "Gaming Community"
+description = "Voice lobbies, LFG, and game channels"
+
+[[roles]]
+name = "Admin"
+permissions = 16383
+color = "#FF0000"
+position = 3
+
+[[roles]]
+name = "Moderator"
+permissions = 2191
+color = "#00FF00"
+position = 2
+
+[[roles]]
+name = "Member"
+permissions = 8199
+position = 1
+
+[[categories]]
+name = "General"
+
+[[categories.channels]]
+name = "welcome"
+type = "announcement"
+
+[[categories.channels]]
+name = "chat"
+type = "text"
+
+[[categories]]
+name = "Gaming"
+
+[[categories.channels]]
+name = "looking-for-group"
+type = "text"
+
+[[categories.channels]]
+name = "game-night"
+type = "text"
+
+[[categories]]
+name = "Staff Only"
+
+[[categories.channels]]
+name = "mod-chat"
+type = "text"

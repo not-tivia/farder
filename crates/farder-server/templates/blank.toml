@@ -1,0 +1,10 @@
+[template]
+name = "Blank"
+description = "Minimal server with just a general channel"
+
+[[categories]]
+name = "General"
+
+[[categories.channels]]
+name = "general"
+type = "text"

@@ -1,0 +1,170 @@
+use anyhow::Result;
+use rusqlite::Connection;
+
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+pub fn init_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS members (
+            public_key   BLOB    PRIMARY KEY,
+            display_name TEXT    NOT NULL,
+            avatar       BLOB,
+            joined_at    INTEGER NOT NULL,
+            banned       INTEGER NOT NULL DEFAULT 0,
+            revoked      INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS roles (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT    NOT NULL,
+            permissions INTEGER NOT NULL,
+            color       TEXT,
+            position    INTEGER NOT NULL,
+            builtin     INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS member_roles (
+            member_key BLOB    NOT NULL,
+            role_id    INTEGER NOT NULL,
+            PRIMARY KEY (member_key, role_id),
+            FOREIGN KEY (member_key) REFERENCES members(public_key),
+            FOREIGN KEY (role_id)    REFERENCES roles(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS categories (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            name     TEXT    NOT NULL,
+            position INTEGER NOT NULL,
+            deleted  INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS channels (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            name           TEXT    NOT NULL,
+            channel_type   TEXT    NOT NULL DEFAULT 'text',
+            category_id    INTEGER,
+            position       INTEGER NOT NULL,
+            topic          TEXT,
+            nsfw           INTEGER NOT NULL DEFAULT 0,
+            slow_mode_secs INTEGER NOT NULL DEFAULT 0,
+            retention_secs INTEGER,
+            deleted        INTEGER NOT NULL DEFAULT 0,
+            deleted_at     INTEGER,
+            FOREIGN KEY (category_id) REFERENCES categories(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS channel_overrides (
+            channel_id INTEGER NOT NULL,
+            role_id    INTEGER NOT NULL,
+            allow_bits INTEGER NOT NULL DEFAULT 0,
+            deny_bits  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (channel_id, role_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS category_overrides (
+            category_id INTEGER NOT NULL,
+            role_id     INTEGER NOT NULL,
+            allow_bits  INTEGER NOT NULL DEFAULT 0,
+            deny_bits   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (category_id, role_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            author     BLOB    NOT NULL,
+            content    TEXT    NOT NULL,
+            timestamp  INTEGER NOT NULL,
+            edited_at  INTEGER,
+            reply_to   INTEGER,
+            pinned     INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(channel_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id, id);
+
+        CREATE TABLE IF NOT EXISTS invites (
+            code           TEXT    PRIMARY KEY,
+            created_by     BLOB    NOT NULL,
+            max_uses       INTEGER,
+            use_count      INTEGER NOT NULL DEFAULT 0,
+            expires_at     INTEGER,
+            target_channel INTEGER
+        );
+    ")?;
+
+    // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
+    // supported for virtual tables in older SQLite versions).
+    let fts_exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages_fts'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+
+    if !fts_exists {
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE messages_fts USING fts5(content, content_rowid='id', content='messages');",
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn open_in_memory() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+pub fn open_file(path: &str) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schema_init_succeeds() {
+        let conn = open_in_memory().expect("open_in_memory failed");
+
+        let expected_tables = [
+            "members",
+            "roles",
+            "member_roles",
+            "categories",
+            "channels",
+            "channel_overrides",
+            "category_overrides",
+            "messages",
+            "invites",
+            "messages_fts",
+        ];
+
+        for table in &expected_tables {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    rusqlite::params![table],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            assert_eq!(count, 1, "table '{}' not found in sqlite_master", table);
+        }
+    }
+
+    #[test]
+    fn test_schema_init_idempotent() {
+        let conn = Connection::open_in_memory().expect("open_in_memory failed");
+        init_schema(&conn).expect("first init_schema call failed");
+        init_schema(&conn).expect("second init_schema call failed");
+    }
+}
