@@ -1,0 +1,42 @@
+[template]
+name = "Public Community"
+description = "Open community with verified posting role"
+
+[[roles]]
+name = "Admin"
+permissions = 16383
+color = "#FF0000"
+position = 3
+
+[[roles]]
+name = "Moderator"
+permissions = 2191
+color = "#00FF00"
+position = 2
+
+[[roles]]
+name = "Verified"
+permissions = 8199
+position = 1
+
+[[categories]]
+name = "Information"
+
+[[categories.channels]]
+name = "rules"
+type = "announcement"
+
+[[categories.channels]]
+name = "introductions"
+type = "text"
+
+[[categories]]
+name = "Community"
+
+[[categories.channels]]
+name = "general"
+type = "text"
+
+[[categories.channels]]
+name = "off-topic"
+type = "text"

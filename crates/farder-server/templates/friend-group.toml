@@ -1,0 +1,14 @@
+[template]
+name = "Friend Group"
+description = "Casual hangout for a small group of friends"
+
+[[categories]]
+name = "General"
+
+[[categories.channels]]
+name = "general"
+type = "text"
+
+[[categories.channels]]
+name = "media"
+type = "text"
