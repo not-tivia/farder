@@ -45,11 +45,13 @@ export async function sendMessage(
   channelId: number,
   content: string,
   replyTo?: number,
+  attachmentIds?: number[],
 ): Promise<SendMessageResult> {
   return invoke<SendMessageResult>("send_message", {
     channelId,
     content,
     replyTo: replyTo ?? null,
+    attachmentIds: attachmentIds ?? [],
   });
 }
 
@@ -109,4 +111,12 @@ export async function createChannel(
 
 export async function createCategory(name: string): Promise<void> {
   return invoke<void>("create_category", { name });
+}
+
+export async function pickFile(): Promise<string | null> {
+  return invoke<string | null>("pick_file");
+}
+
+export async function uploadFile(channelId: number, filePath: string): Promise<number> {
+  return invoke<number>("upload_file", { channelId, filePath });
 }
