@@ -90,22 +90,29 @@ export default function ConnectDialog() {
   async function autoConnect(server: string, key: string) {
     setAutoConnecting(true);
     setError(null);
-    try {
-      // Ensure identity is loaded in Tauri state before connecting
-      await api.loadIdentity();
-      const result = await api.connectServer(server);
-      dispatch({ type: "CONNECTED", payload: result });
+    // Retry up to 3 times with increasing delay
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const members = await api.getMembers();
-        dispatch({ type: "SET_MEMBERS", payload: members });
+        // Wait a bit to let Tauri state settle
+        await new Promise((r) => setTimeout(r, 300 + attempt * 500));
+        await api.loadIdentity();
+        const result = await api.connectServer(server);
+        dispatch({ type: "CONNECTED", payload: result });
+        try {
+          const members = await api.getMembers();
+          dispatch({ type: "SET_MEMBERS", payload: members });
+        } catch {
+          // non-fatal
+        }
+        return; // success
       } catch {
-        // non-fatal
+        // retry
       }
-    } catch (e) {
-      setError(`Could not reconnect: ${String(e)}`);
-      setPubKey(key);
-      setAutoConnecting(false);
     }
+    // All retries failed
+    setError("Could not reconnect. Press Join to try manually.");
+    setPubKey(key);
+    setAutoConnecting(false);
   }
 
   useEffect(() => {
