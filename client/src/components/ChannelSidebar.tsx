@@ -19,6 +19,7 @@ export default function ChannelSidebar() {
   const { state, dispatch } = useServer();
   const [showInvite, setShowInvite] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
 
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
@@ -56,6 +57,10 @@ export default function ChannelSidebar() {
         key={ch.id}
         className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
         onClick={() => handleSelectChannel(ch)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({ x: e.clientX, y: e.clientY, channelId: ch.id, type: "channel" });
+        }}
       >
         <span className="channel-prefix">{prefix}</span>
         <span>{ch.name}</span>
@@ -70,7 +75,13 @@ export default function ChannelSidebar() {
     if (catChannels.length === 0) return null;
     return (
       <div key={cat.id}>
-        <div className="channel-category">{cat.name}</div>
+        <div
+          className="channel-category"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setContextMenu({ x: e.clientX, y: e.clientY, channelId: 0, type: "category", categoryId: cat.id });
+          }}
+        >{cat.name}</div>
         {catChannels.map(renderChannel)}
       </div>
     );
@@ -96,6 +107,25 @@ export default function ChannelSidebar() {
       </div>
       {showInvite && <InviteDialog onClose={() => setShowInvite(false)} />}
       {showSettings && <ServerSettingsDialog onClose={() => setShowSettings(false)} />}
+      {contextMenu && (
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setContextMenu(null)} />
+          <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+            {contextMenu.type === "channel" && (
+              <div className="context-menu-item delete" onClick={async () => {
+                try { await api.deleteChannel(contextMenu.channelId); } catch {}
+                setContextMenu(null);
+              }}>Delete Channel</div>
+            )}
+            {contextMenu.type === "category" && (
+              <div className="context-menu-item delete" onClick={async () => {
+                try { await api.deleteCategory(contextMenu.categoryId!); } catch {}
+                setContextMenu(null);
+              }}>Delete Category</div>
+            )}
+          </div>
+        </>
+      )}
     </>
   );
 }

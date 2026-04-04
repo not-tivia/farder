@@ -941,6 +941,37 @@ body {
   gap: 10px;
 }
 
+/* ── Context Menu ───────────────────────────────────────── */
+.context-menu {
+  position: fixed;
+  background: var(--xp-window-bg);
+  border: 1px solid var(--xp-border-dark);
+  box-shadow: 2px 2px 6px rgba(0,0,0,0.2);
+  padding: 2px;
+  z-index: 1000;
+  min-width: 140px;
+}
+
+.context-menu-item {
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: var(--xp-font-size);
+}
+
+.context-menu-item:hover {
+  background: var(--xp-blue);
+  color: white;
+}
+
+.context-menu-item.delete {
+  color: #cc0000;
+}
+
+.context-menu-item.delete:hover {
+  background: #cc0000;
+  color: white;
+}
+
 /* ── Reconnect Overlay ──────────────────────────────────── */
 .reconnect-overlay {
   position: absolute;

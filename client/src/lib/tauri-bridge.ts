@@ -113,6 +113,14 @@ export async function createCategory(name: string): Promise<void> {
   return invoke<void>("create_category", { name });
 }
 
+export async function deleteChannel(channelId: number): Promise<void> {
+  return invoke<void>("delete_channel", { channelId });
+}
+
+export async function deleteCategory(categoryId: number): Promise<void> {
+  return invoke<void>("delete_category", { categoryId });
+}
+
 export async function pickFile(): Promise<string | null> {
   return invoke<string | null>("pick_file");
 }

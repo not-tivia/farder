@@ -598,6 +598,34 @@ pub async fn create_category(
     }
 }
 
+/// Delete a channel on the server.
+#[tauri::command]
+pub async fn delete_channel(state: State<'_, Arc<AppState>>, channel_id: u64) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::DeleteChannel { channel_id },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Delete a category on the server.
+#[tauri::command]
+pub async fn delete_category(state: State<'_, Arc<AppState>>, category_id: u64) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::DeleteCategory { category_id },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Invite commands
 // ---------------------------------------------------------------------------

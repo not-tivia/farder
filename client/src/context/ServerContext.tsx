@@ -48,6 +48,7 @@ export type ServerAction =
   | { type: "CHANNEL_CREATED"; payload: ChannelInfo }
   | { type: "CHANNEL_DELETED"; payload: { channelId: number } }
   | { type: "CATEGORY_CREATED"; payload: CategoryInfo }
+  | { type: "CATEGORY_DELETED"; payload: { categoryId: number } }
   | { type: "VIEW_THREAD"; payload: number | null }
   | { type: "MARK_READ"; payload: { channelId: number; lastMessageId: number } };
 
@@ -186,6 +187,8 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
       };
     case "CATEGORY_CREATED":
       return { ...state, categories: [...state.categories, action.payload] };
+    case "CATEGORY_DELETED":
+      return { ...state, categories: state.categories.filter(c => c.id !== action.payload.categoryId) };
     case "VIEW_THREAD":
       return { ...state, threadChannelId: action.payload };
     case "MARK_READ": {

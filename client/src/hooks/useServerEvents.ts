@@ -93,6 +93,10 @@ export function useServerEvents(): void {
       dispatch({ type: "CATEGORY_CREATED", payload: e.payload });
     }).then((u) => unlisten.push(u));
 
+    listen<{ category_id: number }>("server:category_deleted", (e) => {
+      dispatch({ type: "CATEGORY_DELETED", payload: { categoryId: e.payload.category_id } });
+    }).then((u) => unlisten.push(u));
+
     listen<void>("server:disconnected", () => {
       dispatch({ type: "CONNECTION_LOST" });
     }).then((u) => unlisten.push(u));

@@ -35,6 +35,8 @@ fn main() {
             commands::create_invite,
             commands::create_channel,
             commands::create_category,
+            commands::delete_channel,
+            commands::delete_category,
             commands::pick_file,
             commands::upload_file,
             commands::download_file,
