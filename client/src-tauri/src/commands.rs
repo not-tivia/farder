@@ -14,9 +14,13 @@ use tauri::{AppHandle, State};
 // ---------------------------------------------------------------------------
 
 fn farder_data_dir() -> std::path::PathBuf {
-    let dir = dirs::home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        .join(".farder");
+    let dir = if let Ok(custom) = std::env::var("FARDER_DATA") {
+        std::path::PathBuf::from(custom)
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+            .join(".farder")
+    };
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
