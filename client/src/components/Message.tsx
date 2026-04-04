@@ -95,6 +95,9 @@ export default function Message({ message, memberNames, grouped = false }: Messa
 
   return (
     <div className={`message${grouped ? " grouped" : ""}`}>
+      {grouped && (
+        <span className="grouped-timestamp">{formatTimestamp(message.timestamp)}</span>
+      )}
       {!grouped && (
         <div className="message-header">
           <span className="message-author" style={{ color }}>
