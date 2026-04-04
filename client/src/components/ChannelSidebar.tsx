@@ -50,13 +50,14 @@ export default function ChannelSidebar() {
     const lastRead = state.readState?.[ch.id] ?? 0;
     const channelMsgs = state.messages[ch.id] ?? [];
     const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== state.currentChannelId;
+    const prefix = ch.channel_type === "Announcement" ? "📢" : "#";
     return (
       <div
         key={ch.id}
         className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
         onClick={() => handleSelectChannel(ch)}
       >
-        <span className="channel-prefix">#</span>
+        <span className="channel-prefix">{prefix}</span>
         <span>{ch.name}</span>
       </div>
     );

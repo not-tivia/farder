@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { MessageInfo } from "../lib/types";
+import { useState, useEffect } from "react";
+import type { MessageInfo, AttachmentInfo } from "../lib/types";
 import { publicKeyToString, isDeletedUser } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { useServer } from "../context/ServerContext";
@@ -116,12 +116,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
       {message.attachments.length > 0 && (
         <div className="message-attachments">
           {message.attachments.map((att) => (
-            <div key={att.id} className="attachment-item">
-              <span>📎</span>
-              <span>
-                {att.name} ({formatSize(att.size)})
-              </span>
-            </div>
+            <AttachmentDisplay key={att.id} attachment={att} />
           ))}
         </div>
       )}
@@ -157,6 +152,52 @@ export default function Message({ message, memberNames, grouped = false }: Messa
           💬 {message.thread_message_count > 0 ? `${message.thread_message_count} replies` : "View thread"}
         </div>
       )}
+    </div>
+  );
+}
+
+function AttachmentDisplay({ attachment }: { attachment: AttachmentInfo }) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const isImage = attachment.mime_type.startsWith("image/");
+
+  useEffect(() => {
+    if (isImage) {
+      api.downloadFile(attachment.file_id).then((r) => {
+        if (r.data_url) setImageUrl(r.data_url);
+      }).catch(() => {});
+    }
+  }, [attachment.file_id, isImage]);
+
+  async function handleDownload() {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      const result = await api.downloadFile(attachment.file_id);
+      if (result.saved_path) {
+        alert(`Saved to ${result.saved_path}`);
+      }
+    } catch (e) {
+      alert(`Download failed: ${e}`);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  if (isImage && imageUrl) {
+    return (
+      <div className="attachment-image">
+        <img src={imageUrl} alt={attachment.name} style={{ maxWidth: 400, maxHeight: 300, borderRadius: 3 }} />
+        <div className="attachment-name">{attachment.name} ({formatSize(attachment.size)})</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="attachment-item" onClick={handleDownload} style={{ cursor: "pointer" }}>
+      <span>📎</span>
+      <span>{attachment.name} ({formatSize(attachment.size)})</span>
+      {downloading && <span> downloading...</span>}
     </div>
   );
 }

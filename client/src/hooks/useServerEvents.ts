@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useServer } from "../context/ServerContext";
-import type { MessageInfo, MemberInfo, ChannelInfo } from "../lib/types";
+import type { MessageInfo, MemberInfo, ChannelInfo, CategoryInfo } from "../lib/types";
 
 interface ReactionAddedPayload {
   channel_id: number;
@@ -87,6 +87,10 @@ export function useServerEvents(): void {
 
     listen<ChannelDeletedPayload>("server:channel_deleted", (e) => {
       dispatch({ type: "CHANNEL_DELETED", payload: { channelId: e.payload.channel_id } });
+    }).then((u) => unlisten.push(u));
+
+    listen<CategoryInfo>("server:category_created", (e) => {
+      dispatch({ type: "CATEGORY_CREATED", payload: e.payload });
     }).then((u) => unlisten.push(u));
 
     listen<void>("server:disconnected", () => {

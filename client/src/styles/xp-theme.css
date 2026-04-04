@@ -385,6 +385,21 @@ body {
   text-decoration: underline;
 }
 
+.attachment-image {
+  margin-top: 4px;
+}
+
+.attachment-image img {
+  display: block;
+  border: 1px solid var(--xp-border);
+}
+
+.attachment-name {
+  font-size: 10px;
+  color: var(--xp-text-muted);
+  margin-top: 2px;
+}
+
 /* ── Reactions ──────────────────────────────────────────── */
 .reaction-bar {
   display: flex;

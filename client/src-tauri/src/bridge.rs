@@ -155,6 +155,15 @@ fn dispatch_event(app: &AppHandle, event: ServerEvent) {
                 serde_json::json!({ "channel_id": channel_id }),
             );
         }
+        ServerEvent::CategoryCreated { category } => {
+            let _ = app.emit("server:category_created", &category);
+        }
+        ServerEvent::CategoryUpdated { category } => {
+            let _ = app.emit("server:category_updated", &category);
+        }
+        ServerEvent::CategoryDeleted { category_id } => {
+            let _ = app.emit("server:category_deleted", serde_json::json!({ "category_id": category_id }));
+        }
         ServerEvent::TypingStarted { channel_id, public_key } => {
             let _ = app.emit(
                 "server:typing",

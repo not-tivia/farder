@@ -477,6 +477,77 @@ pub async fn upload_file(
 }
 
 // ---------------------------------------------------------------------------
+// File download commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct DownloadResult {
+    pub data_url: Option<String>,
+    pub file_name: String,
+    pub mime_type: String,
+    pub saved_path: Option<String>,
+}
+
+/// Download a file by file_id. Returns a base64 data URL for images, or saves to disk for other types.
+#[tauri::command]
+pub async fn download_file(
+    state: State<'_, Arc<AppState>>,
+    file_id: String,
+) -> Result<DownloadResult, String> {
+    let fid: u64 = file_id.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+
+    let conn = {
+        let c = state.connection.lock().map_err(|e| e.to_string())?;
+        c.as_ref().ok_or("not connected")?.clone()
+    };
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+
+    // Send DownloadRequest
+    let req = farder_protocol::server::DownloadRequest { file_id: fid };
+    let req_bytes = farder_protocol::codec::encode(&req).map_err(|e| e.to_string())?;
+    crate::connection::write_frame(&mut send, &req_bytes).await.map_err(|e| e.to_string())?;
+
+    // Read response
+    let resp_bytes = crate::connection::read_frame(&mut recv).await.map_err(|e| e.to_string())?;
+    let resp: farder_protocol::server::DownloadResponse =
+        farder_protocol::codec::decode(&resp_bytes).map_err(|e| e.to_string())?;
+
+    match resp {
+        farder_protocol::server::DownloadResponse::Start { file_name, file_size, hash: _, mime_type } => {
+            // Read all bytes
+            let mut data = Vec::with_capacity(file_size as usize);
+            let mut remaining = file_size;
+            while remaining > 0 {
+                let mut buf = vec![0u8; std::cmp::min(remaining as usize, 65536)];
+                match recv.read(&mut buf).await {
+                    Ok(Some(n)) if n > 0 => {
+                        data.extend_from_slice(&buf[..n]);
+                        remaining -= n as u64;
+                    }
+                    _ => break,
+                }
+            }
+
+            // For images, return as base64 data URL
+            let is_image = mime_type.starts_with("image/");
+            if is_image {
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                let data_url = format!("data:{};base64,{}", mime_type, b64);
+                Ok(DownloadResult { data_url: Some(data_url), file_name, mime_type, saved_path: None })
+            } else {
+                // Save to downloads directory
+                let downloads = dirs::download_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+                let save_path = downloads.join(&file_name);
+                std::fs::write(&save_path, &data).map_err(|e| e.to_string())?;
+                Ok(DownloadResult { data_url: None, file_name, mime_type, saved_path: Some(save_path.to_string_lossy().to_string()) })
+            }
+        }
+        farder_protocol::server::DownloadResponse::Error { reason } => Err(reason),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Admin commands
 // ---------------------------------------------------------------------------
 

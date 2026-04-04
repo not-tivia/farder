@@ -37,6 +37,7 @@ fn main() {
             commands::create_category,
             commands::pick_file,
             commands::upload_file,
+            commands::download_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

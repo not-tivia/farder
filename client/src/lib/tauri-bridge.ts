@@ -120,3 +120,14 @@ export async function pickFile(): Promise<string | null> {
 export async function uploadFile(channelId: number, filePath: string): Promise<number> {
   return invoke<number>("upload_file", { channelId, filePath });
 }
+
+export interface DownloadResult {
+  data_url: string | null;
+  file_name: string;
+  mime_type: string;
+  saved_path: string | null;
+}
+
+export async function downloadFile(fileId: string): Promise<DownloadResult> {
+  return invoke<DownloadResult>("download_file", { fileId });
+}

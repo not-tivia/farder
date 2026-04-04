@@ -47,6 +47,7 @@ export type ServerAction =
   | { type: "MEMBER_LEFT"; payload: { publicKeyBytes: number[] } }
   | { type: "CHANNEL_CREATED"; payload: ChannelInfo }
   | { type: "CHANNEL_DELETED"; payload: { channelId: number } }
+  | { type: "CATEGORY_CREATED"; payload: CategoryInfo }
   | { type: "VIEW_THREAD"; payload: number | null }
   | { type: "MARK_READ"; payload: { channelId: number; lastMessageId: number } };
 
@@ -183,6 +184,8 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
         ...state,
         channels: state.channels.filter((c) => c.id !== action.payload.channelId),
       };
+    case "CATEGORY_CREATED":
+      return { ...state, categories: [...state.categories, action.payload] };
     case "VIEW_THREAD":
       return { ...state, threadChannelId: action.payload };
     case "MARK_READ": {
