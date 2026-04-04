@@ -32,24 +32,50 @@ pub struct SendMessageResult {
 // Identity commands
 // ---------------------------------------------------------------------------
 
+const KEY_FILE: &str = "farder-identity.key";
+
+fn key_path() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_default().join(KEY_FILE)
+}
+
 #[tauri::command]
 pub fn generate_keypair(state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    let keypair = Keypair::generate();
+    // Check if saved key exists on disk first
+    let path = key_path();
+    let keypair = if path.exists() {
+        let bytes: [u8; 32] = std::fs::read(&path)
+            .map_err(|e| e.to_string())?
+            .try_into()
+            .map_err(|_| "invalid key file".to_string())?;
+        eprintln!("[identity] loaded existing key from {}", path.display());
+        Keypair::from_signing_key_bytes(&bytes)
+    } else {
+        let kp = Keypair::generate();
+        std::fs::write(&path, kp.signing_key_bytes()).map_err(|e| e.to_string())?;
+        eprintln!("[identity] generated and saved new key to {}", path.display());
+        kp
+    };
     let public_key = keypair.public_key().to_string();
-    let mut lock = state
-        .signing_key_bytes
-        .lock()
-        .map_err(|e| e.to_string())?;
+    let mut lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
     *lock = Some(*keypair.signing_key_bytes());
     Ok(public_key)
 }
 
 #[tauri::command]
 pub fn get_public_key(state: State<'_, Arc<AppState>>) -> Option<String> {
+    // Try state first, then disk
     let lock = state.signing_key_bytes.lock().ok()?;
-    lock.as_ref().map(|bytes| {
-        Keypair::from_signing_key_bytes(bytes).public_key().to_string()
-    })
+    if let Some(bytes) = lock.as_ref() {
+        return Some(Keypair::from_signing_key_bytes(bytes).public_key().to_string());
+    }
+    drop(lock);
+    let path = key_path();
+    if path.exists() {
+        let bytes: [u8; 32] = std::fs::read(&path).ok()?.try_into().ok()?;
+        Some(Keypair::from_signing_key_bytes(&bytes).public_key().to_string())
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

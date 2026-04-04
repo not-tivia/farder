@@ -48,6 +48,7 @@ pub fn spawn_event_reader(
     mut recv: RecvStream,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        eprintln!("[bridge] event reader started");
         loop {
             match recv_server_frame(&mut recv).await {
                 Err(e) => {
@@ -61,6 +62,7 @@ pub fn spawn_event_reader(
                 }
                 Ok(frame) => match frame {
                     ServerFrame::Response { request_id, body } => {
+                        eprintln!("[bridge] Response frame: id={} type={:?}", request_id, std::mem::discriminant(&body));
                         let sender = {
                             let mut pending = match state.pending_requests.lock() {
                                 Ok(p) => p,
@@ -87,7 +89,8 @@ pub fn spawn_event_reader(
 fn dispatch_event(app: &AppHandle, event: ServerEvent) {
     match event {
         ServerEvent::NewMessage { message } => {
-            let _ = app.emit("server:new_message", message);
+            eprintln!("[bridge] NewMessage event: id={} channel={} content={:?}", message.id, message.channel_id, &message.content);
+            let _ = app.emit("server:new_message", &message);
         }
         ServerEvent::MessageEdited { message_id, channel_id, new_content, edited_at } => {
             let _ = app.emit(

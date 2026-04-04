@@ -51,9 +51,12 @@ pub fn make_client_endpoint() -> Result<Endpoint> {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
-    let client_config = quinn::ClientConfig::new(Arc::new(
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
     ));
+    client_config.transport_config(Arc::new(transport));
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)

@@ -82,6 +82,10 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
     case "NEW_MESSAGE": {
       const channelId = action.payload.channel_id;
       const existing = state.messages[channelId] ?? [];
+      // Deduplicate — don't add if message ID already exists
+      if (existing.some((m) => m.id === action.payload.id)) {
+        return state;
+      }
       return {
         ...state,
         messages: { ...state.messages, [channelId]: [...existing, action.payload] },
