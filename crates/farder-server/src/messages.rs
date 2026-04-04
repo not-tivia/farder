@@ -84,13 +84,23 @@ pub fn insert_message_with_ts(
     Ok(id)
 }
 
-pub fn get_message(conn: &Connection, id: u64) -> Result<Option<MessageInfo>> {
+pub fn get_message(conn: &Connection, id: u64, requester: &PublicKey) -> Result<Option<MessageInfo>> {
     let sql = format!("SELECT {} FROM messages WHERE id = ?1", MSG_SELECT);
     let mut msg = match conn.query_row(&sql, params![id as i64], row_to_message_info).optional()? {
         Some(m) => m,
         None => return Ok(None),
     };
     msg.attachments = crate::attachments::get_attachments_for_message(conn, msg.id)?;
+    msg.reactions = crate::reactions::get_reactions_for_message(conn, msg.id, requester)?;
+    if let Some(thread) = crate::channels::get_thread_for_message(conn, msg.id)? {
+        msg.thread_id = Some(thread.id);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+            rusqlite::params![thread.id as i64],
+            |row| row.get(0),
+        )?;
+        msg.thread_message_count = Some(count as u32);
+    }
     Ok(Some(msg))
 }
 
@@ -99,6 +109,7 @@ pub fn fetch_history(
     channel_id: u64,
     before_id: Option<u64>,
     limit: u32,
+    requester: &PublicKey,
 ) -> Result<Vec<MessageInfo>> {
     let sql = match before_id {
         Some(_) => format!(
@@ -143,6 +154,25 @@ pub fn fetch_history(
                 msg.attachments = attachments.clone();
             }
         }
+        // Batch-load reactions
+        let reaction_map = crate::reactions::get_reactions_for_messages(conn, &msg_ids, requester)?;
+        for msg in &mut messages {
+            if let Some(reactions) = reaction_map.get(&msg.id) {
+                msg.reactions = reactions.clone();
+            }
+        }
+        // Load thread metadata
+        for msg in &mut messages {
+            if let Some(thread) = crate::channels::get_thread_for_message(conn, msg.id)? {
+                msg.thread_id = Some(thread.id);
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+                    rusqlite::params![thread.id as i64],
+                    |row| row.get(0),
+                )?;
+                msg.thread_message_count = Some(count as u32);
+            }
+        }
     }
 
     Ok(messages)
@@ -179,6 +209,8 @@ pub fn edit_message(conn: &Connection, id: u64, new_content: &str) -> Result<()>
 pub fn delete_message(conn: &Connection, id: u64) -> Result<Vec<u64>> {
     // Delete attachments and get orphaned file_ids
     let orphans = crate::attachments::delete_attachments_for_message(conn, id)?;
+
+    crate::reactions::delete_reactions_for_message(conn, id)?;
 
     // Fetch the content before deleting so we can remove it from FTS5.
     let content: Option<String> = conn
@@ -225,6 +257,7 @@ pub fn search_messages(
     query: &str,
     channel_id: Option<u64>,
     limit: u32,
+    requester: &PublicKey,
 ) -> Result<Vec<MessageInfo>> {
     let mut messages = Vec::new();
 
@@ -265,6 +298,25 @@ pub fn search_messages(
                 msg.attachments = attachments.clone();
             }
         }
+        // Batch-load reactions
+        let reaction_map = crate::reactions::get_reactions_for_messages(conn, &msg_ids, requester)?;
+        for msg in &mut messages {
+            if let Some(reactions) = reaction_map.get(&msg.id) {
+                msg.reactions = reactions.clone();
+            }
+        }
+        // Load thread metadata
+        for msg in &mut messages {
+            if let Some(thread) = crate::channels::get_thread_for_message(conn, msg.id)? {
+                msg.thread_id = Some(thread.id);
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+                    rusqlite::params![thread.id as i64],
+                    |row| row.get(0),
+                )?;
+                msg.thread_message_count = Some(count as u32);
+            }
+        }
     }
 
     Ok(messages)
@@ -293,6 +345,7 @@ pub fn delete_messages_before(
     // Delete attachments for each message before deleting the messages.
     for (rid, _) in &rows {
         let _ = crate::attachments::delete_attachments_for_message(conn, *rid as u64)?;
+        crate::reactions::delete_reactions_for_message(conn, *rid as u64)?;
     }
 
     for (rid, content) in &rows {
@@ -335,7 +388,7 @@ mod tests {
     fn test_insert_and_get_message() {
         let (conn, channel_id, pk) = setup();
         let id = insert_message_with_ts(&conn, channel_id, &pk, "Hello, world!", None, 1_000_000).unwrap();
-        let msg = get_message(&conn, id).unwrap().expect("message should exist");
+        let msg = get_message(&conn, id, &pk).unwrap().expect("message should exist");
         assert_eq!(msg.id, id);
         assert_eq!(msg.channel_id, channel_id);
         assert_eq!(msg.author, pk);
@@ -351,7 +404,7 @@ mod tests {
         let (conn, channel_id, pk) = setup();
         let parent_id = insert_message_with_ts(&conn, channel_id, &pk, "Parent message", None, 1_000).unwrap();
         let reply_id = insert_message_with_ts(&conn, channel_id, &pk, "Reply message", Some(parent_id), 2_000).unwrap();
-        let reply = get_message(&conn, reply_id).unwrap().expect("reply should exist");
+        let reply = get_message(&conn, reply_id, &pk).unwrap().expect("reply should exist");
         assert_eq!(reply.reply_to, Some(parent_id));
     }
 
@@ -375,7 +428,7 @@ mod tests {
         }
 
         // First page: 3 newest.
-        let page1 = fetch_history(&conn, channel_id, None, 3).unwrap();
+        let page1 = fetch_history(&conn, channel_id, None, 3, &pk).unwrap();
         assert_eq!(page1.len(), 3);
         // Newest first means ids[9], ids[8], ids[7].
         assert_eq!(page1[0].id, ids[9]);
@@ -383,7 +436,7 @@ mod tests {
         assert_eq!(page1[2].id, ids[7]);
 
         // Second page: 3 before ids[7].
-        let page2 = fetch_history(&conn, channel_id, Some(ids[7]), 3).unwrap();
+        let page2 = fetch_history(&conn, channel_id, Some(ids[7]), 3, &pk).unwrap();
         assert_eq!(page2.len(), 3);
         assert_eq!(page2[0].id, ids[6]);
         assert_eq!(page2[1].id, ids[5]);
@@ -397,7 +450,7 @@ mod tests {
 
         edit_message(&conn, id, "Edited content").unwrap();
 
-        let msg = get_message(&conn, id).unwrap().unwrap();
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
         assert_eq!(msg.content, "Edited content");
         assert!(msg.edited_at.is_some(), "edited_at should be set after edit");
     }
@@ -409,7 +462,7 @@ mod tests {
 
         delete_message(&conn, id).unwrap();
 
-        let result = get_message(&conn, id).unwrap();
+        let result = get_message(&conn, id, &pk).unwrap();
         assert!(result.is_none(), "message should not exist after deletion");
     }
 
@@ -419,17 +472,17 @@ mod tests {
         let id = insert_message_with_ts(&conn, channel_id, &pk, "Pinnable", None, 1_000).unwrap();
 
         // Initially not pinned.
-        let msg = get_message(&conn, id).unwrap().unwrap();
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
         assert!(!msg.pinned);
 
         // Pin it.
         pin_message(&conn, id).unwrap();
-        let msg = get_message(&conn, id).unwrap().unwrap();
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
         assert!(msg.pinned);
 
         // Unpin it.
         unpin_message(&conn, id).unwrap();
-        let msg = get_message(&conn, id).unwrap().unwrap();
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
         assert!(!msg.pinned);
     }
 
@@ -443,16 +496,16 @@ mod tests {
         insert_message_with_ts(&conn, channel_id, &pk, "rust and python are both popular languages", None, 3_000).unwrap();
 
         // Search for "rust" — should match messages 1 and 3.
-        let results = search_messages(&conn, "rust", None, 50).unwrap();
+        let results = search_messages(&conn, "rust", None, 50, &pk).unwrap();
         assert_eq!(results.len(), 2, "expected 2 results for 'rust'");
 
         // Search for "python" — should match messages 2 and 3.
-        let results = search_messages(&conn, "python", None, 50).unwrap();
+        let results = search_messages(&conn, "python", None, 50, &pk).unwrap();
         assert_eq!(results.len(), 2, "expected 2 results for 'python'");
 
         // Search with channel filter.
         let other_channel_id = create_channel(&conn, "other", ChannelType::Text, None, 1).unwrap();
-        let results = search_messages(&conn, "rust", Some(other_channel_id), 50).unwrap();
+        let results = search_messages(&conn, "rust", Some(other_channel_id), 50, &pk).unwrap();
         assert_eq!(results.len(), 0, "no results from other channel");
     }
 
@@ -471,11 +524,11 @@ mod tests {
         assert_eq!(deleted, 2, "should have deleted 2 old messages");
 
         // The newer messages should still exist.
-        assert!(get_message(&conn, id3).unwrap().is_some());
-        assert!(get_message(&conn, id4).unwrap().is_some());
+        assert!(get_message(&conn, id3, &pk).unwrap().is_some());
+        assert!(get_message(&conn, id4, &pk).unwrap().is_some());
 
         // The old messages should be gone.
-        let remaining = fetch_history(&conn, channel_id, None, 100).unwrap();
+        let remaining = fetch_history(&conn, channel_id, None, 100, &pk).unwrap();
         assert_eq!(remaining.len(), 2);
     }
 
@@ -490,7 +543,7 @@ mod tests {
             &conn, &dir.to_string_lossy(), &pk, "photo.jpg", b"file data", &hash, "image/jpeg", None, None, None
         ).unwrap();
         crate::attachments::create_message_attachment(&conn, msg_id, file_id, 0, "photo.jpg", Some(800), Some(600), None).unwrap();
-        let msg = get_message(&conn, msg_id).unwrap().unwrap();
+        let msg = get_message(&conn, msg_id, &pk).unwrap().unwrap();
         assert_eq!(msg.attachments.len(), 1);
         assert_eq!(msg.attachments[0].name, "photo.jpg");
         assert_eq!(msg.attachments[0].width, Some(800));
@@ -509,7 +562,7 @@ mod tests {
             &conn, &dir.to_string_lossy(), &pk, "doc.pdf", b"data", &hash, "application/pdf", None, None, None
         ).unwrap();
         crate::attachments::create_message_attachment(&conn, msg_id, file_id, 0, "doc.pdf", None, None, None).unwrap();
-        let history = fetch_history(&conn, ch_id, None, 50).unwrap();
+        let history = fetch_history(&conn, ch_id, None, 50, &pk).unwrap();
         assert_eq!(history.len(), 2);
         let with_attach = history.iter().find(|m| m.content == "with file").unwrap();
         let without = history.iter().find(|m| m.content == "no file").unwrap();
@@ -535,5 +588,37 @@ mod tests {
         assert!(orphans.contains(&file_id));
         assert_eq!(crate::attachments::get_file(&conn, file_id).unwrap().unwrap().ref_count, 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_get_message_includes_reactions() {
+        let (conn, ch_id, pk) = setup();
+        let msg_id = insert_message(&conn, ch_id, &pk, "react", None).unwrap();
+        crate::reactions::add_reaction(&conn, msg_id, &pk, "👍").unwrap();
+        let msg = get_message(&conn, msg_id, &pk).unwrap().unwrap();
+        assert_eq!(msg.reactions.len(), 1);
+        assert_eq!(msg.reactions[0].emoji, "👍");
+        assert!(msg.reactions[0].me);
+    }
+
+    #[test]
+    fn test_get_message_includes_thread_metadata() {
+        let (conn, ch_id, pk) = setup();
+        let msg_id = insert_message(&conn, ch_id, &pk, "thread parent", None).unwrap();
+        let thread_id = crate::channels::create_thread(&conn, "thread", ch_id, msg_id).unwrap();
+        insert_message(&conn, thread_id, &pk, "reply 1", None).unwrap();
+        insert_message(&conn, thread_id, &pk, "reply 2", None).unwrap();
+        let msg = get_message(&conn, msg_id, &pk).unwrap().unwrap();
+        assert_eq!(msg.thread_id, Some(thread_id));
+        assert_eq!(msg.thread_message_count, Some(2));
+    }
+
+    #[test]
+    fn test_fetch_history_includes_reactions() {
+        let (conn, ch_id, pk) = setup();
+        let msg_id = insert_message(&conn, ch_id, &pk, "msg", None).unwrap();
+        crate::reactions::add_reaction(&conn, msg_id, &pk, "❤️").unwrap();
+        let history = fetch_history(&conn, ch_id, None, 50, &pk).unwrap();
+        assert_eq!(history[0].reactions.len(), 1);
     }
 }
