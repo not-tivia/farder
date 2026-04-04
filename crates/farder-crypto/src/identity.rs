@@ -34,6 +34,10 @@ impl Keypair {
         self.signing_key.as_bytes()
     }
 
+    pub fn from_signing_key_bytes(bytes: &[u8; 32]) -> Self {
+        Self { signing_key: SigningKey::from_bytes(bytes) }
+    }
+
     pub fn export_encrypted(&self, passphrase: &str) -> Result<Vec<u8>> {
         let salt: [u8; 16] = rand::random();
         let nonce_bytes: [u8; 12] = rand::random();

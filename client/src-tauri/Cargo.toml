@@ -14,6 +14,9 @@ farder-node = { path = "../../crates/farder-node" }
 farder-protocol = { path = "../../crates/farder-protocol" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+hex = "0.4"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
