@@ -8,6 +8,7 @@ import ReactionPicker from "./ReactionPicker";
 interface MessageProps {
   message: MessageInfo;
   memberNames: Record<string, string>;
+  grouped?: boolean;
 }
 
 /** Derive a deterministic color from a string (public key or name). */
@@ -22,8 +23,18 @@ function authorColor(key: string): string {
 
 function formatTimestamp(ts: string): string {
   try {
-    const d = new Date(ts);
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const date = new Date(ts);
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const isYesterday = date.toDateString() === yesterday.toDateString();
+
+    const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+    if (isToday) return `Today at ${time}`;
+    if (isYesterday) return `Yesterday at ${time}`;
+    return `${date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })} at ${time}`;
   } catch {
     return ts;
   }
@@ -35,7 +46,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function Message({ message, memberNames }: MessageProps) {
+export default function Message({ message, memberNames, grouped = false }: MessageProps) {
   const { dispatch } = useServer();
   const [showPicker, setShowPicker] = useState(false);
 
@@ -74,14 +85,16 @@ export default function Message({ message, memberNames }: MessageProps) {
   }
 
   return (
-    <div className="message">
-      <div className="message-header">
-        <span className="message-author" style={{ color }}>
-          {displayName}
-        </span>
-        <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
-        {message.edited_at && <span className="message-edited">(edited)</span>}
-      </div>
+    <div className={`message${grouped ? " grouped" : ""}`}>
+      {!grouped && (
+        <div className="message-header">
+          <span className="message-author" style={{ color }}>
+            {displayName}
+          </span>
+          <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
+          {message.edited_at && <span className="message-edited">(edited)</span>}
+        </div>
+      )}
       <div className={`message-content${deleted ? " deleted-content" : ""}`}>
         {deleted ? <em>This message has been deleted.</em> : message.content}
       </div>

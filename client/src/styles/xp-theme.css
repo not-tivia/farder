@@ -283,6 +283,18 @@ body {
   background: rgba(0,0,0,0.04);
 }
 
+.message.grouped {
+  margin-top: 1px;
+  padding-top: 0;
+}
+
+.load-more-indicator {
+  text-align: center;
+  color: #999;
+  font-size: 11px;
+  padding: 4px 0;
+}
+
 .message-header {
   display: flex;
   align-items: baseline;
