@@ -804,6 +804,11 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::SEND_MESSAGES) {
                 return err("missing SEND_MESSAGES permission");
             }
+            let parent_channel = channels::get_channel(conn, msg.channel_id)?
+                .ok_or_else(|| anyhow::anyhow!("parent channel not found"))?;
+            if parent_channel.channel_type == ChannelType::Thread {
+                return err("cannot create threads inside threads");
+            }
             if crate::channels::get_thread_for_message(conn, message_id)?.is_some() {
                 return err("thread already exists for this message");
             }

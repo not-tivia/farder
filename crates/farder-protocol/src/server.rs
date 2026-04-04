@@ -388,6 +388,9 @@ mod tests {
             ServerRequest::GetMembers,
             ServerRequest::SetChannelOverride { channel_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
             ServerRequest::SetCategoryOverride { category_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
+            ServerRequest::CreateThread { message_id: 1, name: Some("thread".into()) },
+            ServerRequest::AddReaction { message_id: 1, emoji: "👍".into() },
+            ServerRequest::RemoveReaction { message_id: 1, emoji: "👍".into() },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };

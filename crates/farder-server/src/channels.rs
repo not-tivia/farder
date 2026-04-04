@@ -359,6 +359,7 @@ pub fn hard_delete_channel(conn: &Connection, id: u64) -> Result<()> {
 
     // Delete attachments for all messages in the channel.
     for (msg_id, _) in &rows {
+        crate::reactions::delete_reactions_for_message(conn, *msg_id as u64)?;
         let _ = crate::attachments::delete_attachments_for_message(conn, *msg_id as u64)?;
     }
 

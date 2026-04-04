@@ -199,6 +199,7 @@ mod tests {
             "messages_fts",
             "files",
             "message_attachments",
+            "reactions",
         ];
 
         for table in &expected_tables {

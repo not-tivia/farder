@@ -12,6 +12,12 @@ pub fn add_reaction(
     user_key: &PublicKey,
     emoji: &str,
 ) -> Result<()> {
+    if emoji.is_empty() {
+        bail!("emoji cannot be empty");
+    }
+    if emoji.len() > 32 {
+        bail!("emoji too long (max 32 bytes)");
+    }
     // Check if this emoji already exists for this message (regardless of user).
     let emoji_exists: bool = conn.query_row(
         "SELECT COUNT(*) FROM reactions WHERE message_id = ?1 AND emoji = ?2",
