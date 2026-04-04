@@ -40,42 +40,34 @@ fn key_path() -> std::path::PathBuf {
 
 #[tauri::command]
 pub fn generate_keypair(state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    // Check if saved key exists on disk first
+    // Always generate a fresh key, overwriting any saved one
+    let keypair = Keypair::generate();
     let path = key_path();
-    let keypair = if path.exists() {
-        let bytes: [u8; 32] = std::fs::read(&path)
-            .map_err(|e| e.to_string())?
-            .try_into()
-            .map_err(|_| "invalid key file".to_string())?;
-        eprintln!("[identity] loaded existing key from {}", path.display());
-        Keypair::from_signing_key_bytes(&bytes)
-    } else {
-        let kp = Keypair::generate();
-        std::fs::write(&path, kp.signing_key_bytes()).map_err(|e| e.to_string())?;
-        eprintln!("[identity] generated and saved new key to {}", path.display());
-        kp
-    };
+    std::fs::write(&path, keypair.signing_key_bytes()).map_err(|e| e.to_string())?;
     let public_key = keypair.public_key().to_string();
     let mut lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
     *lock = Some(*keypair.signing_key_bytes());
     Ok(public_key)
 }
 
+/// Load a previously saved identity from disk, or return null if none exists.
+#[tauri::command]
+pub fn load_identity(state: State<'_, Arc<AppState>>) -> Option<String> {
+    let path = key_path();
+    let bytes: [u8; 32] = std::fs::read(&path).ok()?.try_into().ok()?;
+    let keypair = Keypair::from_signing_key_bytes(&bytes);
+    let public_key = keypair.public_key().to_string();
+    let mut lock = state.signing_key_bytes.lock().ok()?;
+    *lock = Some(bytes);
+    Some(public_key)
+}
+
 #[tauri::command]
 pub fn get_public_key(state: State<'_, Arc<AppState>>) -> Option<String> {
-    // Try state first, then disk
     let lock = state.signing_key_bytes.lock().ok()?;
-    if let Some(bytes) = lock.as_ref() {
-        return Some(Keypair::from_signing_key_bytes(bytes).public_key().to_string());
-    }
-    drop(lock);
-    let path = key_path();
-    if path.exists() {
-        let bytes: [u8; 32] = std::fs::read(&path).ok()?.try_into().ok()?;
-        Some(Keypair::from_signing_key_bytes(&bytes).public_key().to_string())
-    } else {
-        None
-    }
+    lock.as_ref().map(|bytes| {
+        Keypair::from_signing_key_bytes(bytes).public_key().to_string()
+    })
 }
 
 // ---------------------------------------------------------------------------

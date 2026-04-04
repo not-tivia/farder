@@ -13,7 +13,8 @@ export default function ConnectDialog() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.getPublicKey().then((k) => setPubKey(k)).catch(() => {});
+    // Auto-load saved identity from disk on startup
+    api.loadIdentity().then((k) => { if (k) setPubKey(k); }).catch(() => {});
   }, []);
 
   async function handleGenerate() {

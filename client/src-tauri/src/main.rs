@@ -17,6 +17,7 @@ fn main() {
         .manage(Arc::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
             commands::generate_keypair,
+            commands::load_identity,
             commands::get_public_key,
             commands::connect_server,
             commands::disconnect_server,

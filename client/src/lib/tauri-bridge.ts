@@ -5,6 +5,10 @@ export async function generateKeypair(): Promise<string> {
   return invoke<string>("generate_keypair");
 }
 
+export async function loadIdentity(): Promise<string | null> {
+  return invoke<string | null>("load_identity");
+}
+
 export async function getPublicKey(): Promise<string | null> {
   return invoke<string | null>("get_public_key");
 }
