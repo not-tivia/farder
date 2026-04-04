@@ -6,9 +6,10 @@
   <title>Farder — Server Invite</title>
   <meta name="description" content="You've been invited to a Farder server. Click to open in the Farder app.">
   <!--
-    Invite URL format:  farder.gg/join/SERVER_ADDRESS/INVITE_CODE
-    Example:            farder.gg/join/play.farder.gg:4435/AbC123xY
+    Invite URL format:  farder.gg/join/ENCODED_TOKEN
+    Example:            farder.gg/join/cGxheS5mYXJkZXIuZ2c6NDQzNS9BYkMxMjN4WQ
 
+    ENCODED_TOKEN is URL-safe base64 of "server_address/invite_code".
     A static host (e.g. Netlify, Cloudflare Pages) should rewrite /join/* to this file,
     or you can use the ?server=...&code=... query string fallback.
   -->
@@ -46,6 +47,7 @@
           #invite-content is populated by invite.js based on the URL path.
           On a real host the /join/* path gets rewritten here by the CDN/server.
           For local testing: open as  invite/index.html?server=play.farder.gg:4435&code=AbC123xY
+          or use the encoded format: invite/index.html (with /join/ENCODED_TOKEN path rewrite)
         -->
         <div id="invite-content">
           <!-- Loading state (shown briefly before JS runs) -->

@@ -379,6 +379,7 @@ pub async fn create_thread(
 pub struct InviteResult {
     pub code: String,
     pub link: String,
+    pub deep_link: String,
 }
 
 #[tauri::command]
@@ -394,10 +395,14 @@ pub async fn create_invite(
     .map_err(|e| e.to_string())?;
     match response {
         ServerResponse::InviteCreated { code } => {
-            // Build the farder:// link using saved server address
+            // Build the https://farder.gg/join/ link using saved server address
             let address = get_last_server().unwrap_or_else(|| "localhost:4435".to_string());
-            let link = format!("farder://{}/{}", address, code);
-            Ok(InviteResult { code, link })
+            use base64::Engine;
+            let plain = format!("{}/{}", address, code);
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plain.as_bytes());
+            let link = format!("https://farder.gg/join/{}", encoded);
+            let deep_link = format!("farder://{}/{}", address, code);
+            Ok(InviteResult { code, link, deep_link })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),

@@ -88,6 +88,7 @@ export async function createThread(messageId: number, name?: string): Promise<vo
 export interface InviteResult {
   code: string;
   link: string;
+  deep_link: string;
 }
 
 export async function createInvite(maxUses?: number): Promise<InviteResult> {

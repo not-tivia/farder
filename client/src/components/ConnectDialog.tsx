@@ -19,6 +19,23 @@ function parseInviteLink(input: string): {
   const trimmed = input.trim();
   if (!trimmed) return {};
 
+  // farder.gg/join/ENCODED format
+  const joinMatch = trimmed.match(/(?:https?:\/\/)?farder\.gg\/join\/([A-Za-z0-9_-]+)/);
+  if (joinMatch) {
+    try {
+      const decoded = atob(joinMatch[1].replace(/-/g, '+').replace(/_/g, '/'));
+      const slashIdx = decoded.indexOf('/');
+      if (slashIdx > 0) {
+        const address = decoded.substring(0, slashIdx);
+        const token = decoded.substring(slashIdx + 1);
+        if (token.startsWith("setup:")) {
+          return { address, setupToken: token.slice(6) };
+        }
+        return { address, inviteCode: token };
+      }
+    } catch {}
+  }
+
   // farder:// protocol link
   const farderMatch = trimmed.match(/^farder:\/\/([^/]+)\/(.+)$/i);
   if (farderMatch) {

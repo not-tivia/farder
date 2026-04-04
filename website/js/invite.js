@@ -1,9 +1,10 @@
 /**
  * invite.js — Parse invite URL and handle deep link launch for Farder
  *
- * URL format:  farder.gg/join/SERVER_ADDRESS/INVITE_CODE
- * Example:     farder.gg/join/play.farder.gg:4435/AbC123xY
+ * URL format:  farder.gg/join/ENCODED_TOKEN
+ * Example:     farder.gg/join/cGxheS5mYXJkZXIuZ2c6NDQzNS9BYkMxMjN4WQ
  *
+ * ENCODED_TOKEN is URL-safe base64 of "server_address/invite_code".
  * Deep link:   farder://play.farder.gg:4435/AbC123xY
  */
 
@@ -11,29 +12,38 @@
   "use strict";
 
   /**
-   * Parse the pathname to extract server address and invite code.
+   * Parse the URL to extract server address and invite code.
    *
-   * Expected path shapes:
-   *   /join/SERVER_ADDRESS/INVITE_CODE        (canonical, via farder.gg)
-   *   /invite/index.html  (bare load — no code in path)
+   * Primary format: /join/ENCODED_TOKEN
+   *   where ENCODED_TOKEN is URL-safe base64 of "server_address/invite_code".
    *
-   * Returns { server, code } or null if the path doesn't match.
+   * Fallback: ?server=...&code=... query string form.
+   *
+   * Returns { server, code } or null if the URL doesn't match.
    */
-  function parseInvitePath(pathname) {
-    // Normalise: strip trailing slash
-    var path = pathname.replace(/\/$/, "");
+  function parseInviteUrl() {
+    var path = window.location.pathname;
 
-    // Match /join/<server>/<code>
-    // SERVER_ADDRESS may contain colons (host:port) and dots — capture greedily up to last /
-    var joinMatch = path.match(/\/join\/(.+)\/([^/]+)$/);
+    // /join/ENCODED_TOKEN
+    var joinMatch = path.match(/\/join\/([A-Za-z0-9_-]+)/);
     if (joinMatch) {
-      return { server: joinMatch[1], code: joinMatch[2] };
+      try {
+        var encoded = joinMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+        var decoded = atob(encoded);
+        var slashIdx = decoded.indexOf('/');
+        if (slashIdx > 0) {
+          return {
+            server: decoded.substring(0, slashIdx),
+            code: decoded.substring(slashIdx + 1)
+          };
+        }
+      } catch(e) {}
     }
 
-    // Also accept a legacy/fallback ?server=...&code=... query string form
+    // Fallback: query params ?server=&code=
     var params = new URLSearchParams(window.location.search);
-    var server = params.get("server");
-    var code = params.get("code");
+    var server = params.get('server');
+    var code = params.get('code');
     if (server && code) {
       return { server: server, code: code };
     }
@@ -177,7 +187,7 @@
     var container = document.getElementById("invite-content");
     if (!container) return;
 
-    var parsed = parseInvitePath(window.location.pathname);
+    var parsed = parseInviteUrl();
 
     if (parsed && parsed.server && parsed.code) {
       renderValidInvite(container, parsed.server, parsed.code);
