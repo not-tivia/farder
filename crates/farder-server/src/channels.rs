@@ -309,6 +309,12 @@ pub fn hard_delete_channel(conn: &Connection, id: u64) -> Result<()> {
     let rows: Vec<(i64, String)> = stmt
         .query_map(params![id as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Delete attachments for all messages in the channel.
+    for (msg_id, _) in &rows {
+        let _ = crate::attachments::delete_attachments_for_message(conn, *msg_id as u64)?;
+    }
+
     for (msg_id, content) in &rows {
         conn.execute(
             "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?1, ?2)",

@@ -173,7 +173,10 @@ pub fn edit_message(conn: &Connection, id: u64, new_content: &str) -> Result<()>
     Ok(())
 }
 
-pub fn delete_message(conn: &Connection, id: u64) -> Result<()> {
+pub fn delete_message(conn: &Connection, id: u64) -> Result<Vec<u64>> {
+    // Delete attachments and get orphaned file_ids
+    let orphans = crate::attachments::delete_attachments_for_message(conn, id)?;
+
     // Fetch the content before deleting so we can remove it from FTS5.
     let content: Option<String> = conn
         .query_row(
@@ -195,7 +198,7 @@ pub fn delete_message(conn: &Connection, id: u64) -> Result<()> {
         "DELETE FROM messages WHERE id = ?1",
         params![id as i64],
     )?;
-    Ok(())
+    Ok(orphans)
 }
 
 pub fn pin_message(conn: &Connection, id: u64) -> Result<()> {
@@ -283,6 +286,11 @@ pub fn delete_messages_before(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let count = rows.len() as u64;
+
+    // Delete attachments for each message before deleting the messages.
+    for (rid, _) in &rows {
+        let _ = crate::attachments::delete_attachments_for_message(conn, *rid as u64)?;
+    }
 
     for (rid, content) in &rows {
         conn.execute(
@@ -504,6 +512,25 @@ mod tests {
         let without = history.iter().find(|m| m.content == "no file").unwrap();
         assert_eq!(with_attach.attachments.len(), 1);
         assert!(without.attachments.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_message_cleans_up_attachments() {
+        let (conn, ch_id, pk) = setup();
+        let msg_id = insert_message(&conn, ch_id, &pk, "will delete", None).unwrap();
+        let dir = std::env::temp_dir().join(format!("farder-del-test-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hash = crate::attachments::compute_sha256(b"data");
+        let file_id = crate::attachments::store_file(
+            &conn, &dir.to_string_lossy(), &pk, "f.txt", b"data", &hash, "text/plain"
+        ).unwrap();
+        crate::attachments::create_message_attachment(&conn, msg_id, file_id, 0, "f.txt", None, None, None).unwrap();
+        assert_eq!(crate::attachments::get_file(&conn, file_id).unwrap().unwrap().ref_count, 1);
+
+        let orphans = delete_message(&conn, msg_id).unwrap();
+        assert!(orphans.contains(&file_id));
+        assert_eq!(crate::attachments::get_file(&conn, file_id).unwrap().unwrap().ref_count, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

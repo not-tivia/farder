@@ -294,7 +294,7 @@ pub fn handle_request(
                 }
             }
 
-            messages::delete_message(conn, message_id)?;
+            let _orphans = messages::delete_message(conn, message_id)?;
             let event = BroadcastEvent {
                 target: EventTarget::Subscribers(channel_id),
                 event: ServerEvent::MessageDeleted {
