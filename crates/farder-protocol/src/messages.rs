@@ -14,6 +14,9 @@ pub enum Message {
     NotifyFetch,
     NotifyMessages { messages: Vec<QueuedMessage> },
     NotifyDeliver { recipient: PublicKey, payload: Vec<u8> },
+    DmFileHeader { sender: PublicKey, encrypted_header: Vec<u8> },
+    DmFileChunk { sender: PublicKey, encrypted_chunk: Vec<u8> },
+    DmFileComplete { sender: PublicKey },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +66,24 @@ mod tests {
                 assert_eq!(timestamp, t);
             }
             _ => panic!("wrong variant after decode"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_dm_file_header() {
+        let kp = Keypair::generate();
+        let msg = Message::DmFileHeader {
+            sender: kp.public_key(),
+            encrypted_header: vec![1, 2, 3, 4],
+        };
+        let encoded = codec::encode(&msg).expect("encode failed");
+        let decoded: Message = codec::decode(&encoded).expect("decode failed");
+        match decoded {
+            Message::DmFileHeader { sender, encrypted_header } => {
+                assert_eq!(sender.as_bytes(), kp.public_key().as_bytes());
+                assert_eq!(encrypted_header, vec![1, 2, 3, 4]);
+            }
+            _ => panic!("wrong variant"),
         }
     }
 
