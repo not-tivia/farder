@@ -39,7 +39,7 @@ fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
     Ok(Endpoint::server(server_config, bind_addr)?)
 }
 
-fn init_server(args: &Args) -> Result<(ServerState, bool)> {
+async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
     let conn = db::open_file(&args.db)?;
     let member_count: i64 = conn.query_row("SELECT count(*) FROM members", [], |row| row.get(0))?;
     let first_run = member_count == 0;
@@ -68,7 +68,7 @@ fn init_server(args: &Args) -> Result<(ServerState, bool)> {
         if let Some(key_bytes) = owner_key {
             if let Ok(arr) = <[u8; 32]>::try_from(key_bytes.as_slice()) {
                 let pk = farder_crypto::identity::PublicKey::from_bytes(arr);
-                *state.owner.blocking_write() = Some(pk);
+                *state.owner.write().await = Some(pk);
             }
         }
     }
@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
         .expect("failed to install rustls crypto provider");
 
     let args = Args::parse();
-    let (server_state, first_run) = init_server(&args)?;
+    let (server_state, first_run) = init_server(&args).await?;
     std::fs::create_dir_all(&args.storage_dir)?;
     let state = Arc::new(server_state);
 
