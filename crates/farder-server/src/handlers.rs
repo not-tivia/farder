@@ -855,9 +855,36 @@ pub fn handle_request(
         // ----------------------------------------------------------------
         // Data deletion (Phase 3.3)
         // ----------------------------------------------------------------
-        ServerRequest::RequestDeletion => err("not yet implemented"),
-        ServerRequest::CancelDeletion => err("not yet implemented"),
-        ServerRequest::GetDeletionStatus => err("not yet implemented"),
+        ServerRequest::RequestDeletion => {
+            if is_owner {
+                return err("server owner cannot request deletion — transfer ownership first");
+            }
+            if members::get_deletion_request(conn, member)?.is_some() {
+                return err("deletion request already pending");
+            }
+            members::create_deletion_request(conn, member)?;
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::DeletionRequested { public_key: member.clone() },
+            }])
+        }
+        ServerRequest::CancelDeletion => {
+            if members::get_deletion_request(conn, member)?.is_none() {
+                return err("no pending deletion request");
+            }
+            members::cancel_deletion_request(conn, member)?;
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::DeletionCancelled { public_key: member.clone() },
+            }])
+        }
+        ServerRequest::GetDeletionStatus => {
+            let status = match members::get_deletion_request(conn, member)? {
+                Some(req) => DeletionStatus { pending: true, requested_at: Some(req.requested_at), expires_at: Some(req.expires_at) },
+                None => DeletionStatus { pending: false, requested_at: None, expires_at: None },
+            };
+            ok(ServerResponse::DeletionStatusResp { status })
+        }
     }
 }
 
@@ -1369,5 +1396,85 @@ mod tests {
             message_id: msg_id, emoji: "👍".to_string(),
         }).unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
+    }
+
+    #[test]
+    fn test_handle_request_deletion() {
+        let (conn, _owner_pk) = setup();
+        let member = add_member(&conn, "Alice");
+
+        let result = handle_request(&conn, &member, false, ServerRequest::RequestDeletion).unwrap();
+        match result.response {
+            ServerResponse::Ok => {}
+            other => panic!("expected Ok, got {:?}", other),
+        }
+        assert_eq!(result.events.len(), 1, "should broadcast DeletionRequested event");
+        match &result.events[0].event {
+            ServerEvent::DeletionRequested { public_key } => assert_eq!(public_key, &member),
+            other => panic!("expected DeletionRequested event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_request_deletion_owner_rejected() {
+        let (conn, owner_pk) = setup();
+
+        let result = handle_request(&conn, &owner_pk, true, ServerRequest::RequestDeletion).unwrap();
+        match result.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains("owner"), "error should mention owner: {}", reason);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_cancel_deletion() {
+        let (conn, _owner_pk) = setup();
+        let member = add_member(&conn, "Bob");
+
+        // Request deletion first
+        handle_request(&conn, &member, false, ServerRequest::RequestDeletion).unwrap();
+
+        // Cancel deletion
+        let result = handle_request(&conn, &member, false, ServerRequest::CancelDeletion).unwrap();
+        match result.response {
+            ServerResponse::Ok => {}
+            other => panic!("expected Ok for CancelDeletion, got {:?}", other),
+        }
+        assert_eq!(result.events.len(), 1, "should broadcast DeletionCancelled event");
+        match &result.events[0].event {
+            ServerEvent::DeletionCancelled { public_key } => assert_eq!(public_key, &member),
+            other => panic!("expected DeletionCancelled event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_get_deletion_status() {
+        let (conn, _owner_pk) = setup();
+        let member = add_member(&conn, "Carol");
+
+        // Before requesting deletion: not pending
+        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus).unwrap();
+        match result.response {
+            ServerResponse::DeletionStatusResp { status } => {
+                assert!(!status.pending);
+                assert!(status.requested_at.is_none());
+                assert!(status.expires_at.is_none());
+            }
+            other => panic!("expected DeletionStatusResp, got {:?}", other),
+        }
+
+        // After requesting deletion: pending
+        handle_request(&conn, &member, false, ServerRequest::RequestDeletion).unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus).unwrap();
+        match result.response {
+            ServerResponse::DeletionStatusResp { status } => {
+                assert!(status.pending);
+                assert!(status.requested_at.is_some());
+                assert!(status.expires_at.is_some());
+            }
+            other => panic!("expected DeletionStatusResp, got {:?}", other),
+        }
     }
 }
