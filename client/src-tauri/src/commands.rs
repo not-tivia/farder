@@ -10,6 +10,21 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 // ---------------------------------------------------------------------------
+// Profile helpers
+// ---------------------------------------------------------------------------
+
+const PROFILE_FILE: &str = "farder-profile.json";
+const SETTINGS_FILE: &str = "farder-settings.json";
+
+fn profile_path() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_default().join(PROFILE_FILE)
+}
+
+fn settings_path() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_default().join(SETTINGS_FILE)
+}
+
+// ---------------------------------------------------------------------------
 // IPC return types
 // ---------------------------------------------------------------------------
 
@@ -68,6 +83,44 @@ pub fn get_public_key(state: State<'_, Arc<AppState>>) -> Option<String> {
     lock.as_ref().map(|bytes| {
         Keypair::from_signing_key_bytes(bytes).public_key().to_string()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Display name commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn set_display_name(name: String) -> Result<(), String> {
+    let path = profile_path();
+    let json = serde_json::json!({ "display_name": name });
+    std::fs::write(&path, json.to_string()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_display_name() -> Option<String> {
+    let path = profile_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v["display_name"].as_str().map(|s| s.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Settings commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn save_last_server(address: String) -> Result<(), String> {
+    let path = settings_path();
+    let json = serde_json::json!({ "address": address });
+    std::fs::write(&path, json.to_string()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_last_server() -> Option<String> {
+    let path = settings_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v["address"].as_str().map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +183,9 @@ pub async fn connect_server(
         let mut h = state.event_reader_handle.lock().map_err(|e| e.to_string())?;
         *h = Some(handle);
     }
+
+    // Persist the server address for next launch (non-fatal).
+    let _ = save_last_server(address);
 
     // Fetch initial server info.
     let response = bridge::send_request(&state, ServerRequest::GetServerInfo)
