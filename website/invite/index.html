@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Farder — Server Invite</title>
+  <meta name="description" content="You've been invited to a Farder server. Click to open in the Farder app.">
+  <!--
+    Invite URL format:  farder.gg/join/SERVER_ADDRESS/INVITE_CODE
+    Example:            farder.gg/join/play.farder.gg:4435/AbC123xY
+
+    A static host (e.g. Netlify, Cloudflare Pages) should rewrite /join/* to this file,
+    or you can use the ?server=...&code=... query string fallback.
+  -->
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+
+  <!-- ── Navigation ──────────────────────────────────────── -->
+  <nav class="site-nav">
+    <a href="../index.html" class="nav-logo">
+      <span class="nav-logo-icon">F</span>
+      Farder
+    </a>
+    <ul class="nav-links">
+      <li><a href="../index.html#features">Features</a></li>
+      <li><a href="../index.html#download">Download</a></li>
+      <li><a href="https://github.com/farder/farder" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </nav>
+
+  <!-- ── Invite Dialog ──────────────────────────────────── -->
+  <main class="invite-page">
+    <div class="invite-window" role="dialog" aria-labelledby="invite-heading">
+
+      <div class="invite-titlebar">
+        <div class="invite-titlebar-left">
+          <span style="font-size: 12px;">&#x1F517;</span>
+          Farder — Server Invite
+        </div>
+        <a href="../index.html" class="invite-titlebar-btn" title="Close">&#x2715;</a>
+      </div>
+
+      <div class="invite-body">
+        <!--
+          #invite-content is populated by invite.js based on the URL path.
+          On a real host the /join/* path gets rewritten here by the CDN/server.
+          For local testing: open as  invite/index.html?server=play.farder.gg:4435&code=AbC123xY
+        -->
+        <div id="invite-content">
+          <!-- Loading state (shown briefly before JS runs) -->
+          <div class="invite-header">
+            <div class="invite-server-icon">&#x231B;</div>
+            <div class="invite-heading">Loading invite&hellip;</div>
+            <div class="invite-subheading">Please wait a moment.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <script src="../js/invite.js"></script>
+</body>
+</html>
