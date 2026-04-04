@@ -128,6 +128,6 @@ export interface DownloadResult {
   saved_path: string | null;
 }
 
-export async function downloadFile(fileId: string): Promise<DownloadResult> {
+export async function downloadFile(fileId: number): Promise<DownloadResult> {
   return invoke<DownloadResult>("download_file", { fileId });
 }

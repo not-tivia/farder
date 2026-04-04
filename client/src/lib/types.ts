@@ -34,7 +34,7 @@ export interface MemberInfo {
 
 export interface AttachmentInfo {
   id: number;
-  file_id: string;
+  file_id: number;
   name: string;
   size: number;
   mime_type: string;

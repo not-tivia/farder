@@ -492,9 +492,9 @@ pub struct DownloadResult {
 #[tauri::command]
 pub async fn download_file(
     state: State<'_, Arc<AppState>>,
-    file_id: String,
+    file_id: u64,
 ) -> Result<DownloadResult, String> {
-    let fid: u64 = file_id.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let fid = file_id;
 
     let conn = {
         let c = state.connection.lock().map_err(|e| e.to_string())?;
