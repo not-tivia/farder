@@ -19,6 +19,10 @@ struct Args {
     template: String,
     #[arg(long, default_value = "3600")]
     retention_interval: u64,
+    #[arg(long, default_value = "./files")]
+    storage_dir: String,
+    #[arg(long, default_value = "52428800")]
+    max_file_size: u64,
 }
 
 fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -52,7 +56,7 @@ fn init_server(args: &Args) -> Result<(ServerState, bool)> {
         }
     }
 
-    let state = ServerState::new(conn, args.name.clone());
+    let state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
     if !first_run {
         // Detect owner: first member by joined_at
         let db = state.db.lock().unwrap();
@@ -84,6 +88,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let (server_state, first_run) = init_server(&args)?;
+    std::fs::create_dir_all(&args.storage_dir)?;
     let state = Arc::new(server_state);
 
     if first_run {
@@ -111,11 +116,7 @@ async fn main() -> Result<()> {
                 Ok(conn) => {
                     let remote = conn.remote_address();
                     info!("New connection from {}", remote);
-                    let (send, recv) = match conn.open_bi().await {
-                        Ok(s) => s,
-                        Err(e) => { tracing::warn!("bi-stream error from {}: {}", remote, e); return; }
-                    };
-                    if let Err(e) = connection::handle_client(state, send, recv).await {
+                    if let Err(e) = connection::handle_connection(state, conn).await {
                         info!("Client {} disconnected: {}", remote, e);
                     }
                 }

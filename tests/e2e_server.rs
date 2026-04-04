@@ -1,7 +1,8 @@
 use farder_crypto::identity::Keypair;
 use farder_protocol::{codec, server::*};
-use quinn::{Endpoint, RecvStream, SendStream};
+use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use rustls::pki_types::ServerName;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -123,7 +124,7 @@ async fn connect_and_auth(
     keypair: &Keypair,
     invite_code: Option<&str>,
     setup_token: Option<&str>,
-) -> (SendStream, RecvStream) {
+) -> (Connection, SendStream, RecvStream) {
     let conn = endpoint
         .connect(server_addr, "farder-server")
         .unwrap()
@@ -158,7 +159,7 @@ async fn connect_and_auth(
         other => panic!("expected Authenticated, got {:?}", other),
     }
 
-    (send, recv)
+    (conn, send, recv)
 }
 
 // ---------------------------------------------------------------------------
@@ -216,9 +217,13 @@ async fn test_e2e_server_bootstrap_and_chat() {
         .unwrap();
     farder_server::templates::apply_template(&conn, blank).unwrap();
 
+    let tmp_dir = std::env::temp_dir().join(format!("farder-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
     let state = Arc::new(farder_server::state::ServerState::new(
         conn,
         "Test Server".to_string(),
+        tmp_dir.to_string_lossy().to_string(),
+        50 * 1024 * 1024,
     ));
     let setup_token = farder_server::auth::generate_setup_token();
     let setup_hex = hex::encode(&setup_token);
@@ -235,12 +240,8 @@ async fn test_e2e_server_bootstrap_and_chat() {
             let state = Arc::clone(&server_state);
             tokio::spawn(async move {
                 let conn = incoming.await.unwrap();
-                // The server opens the bi-directional stream so it can immediately send the
-                // Challenge frame. (In QUIC/quinn the accepting side only wakes when the opening
-                // side writes; since our protocol has the server send first, the server must be
-                // the stream opener.)
-                let (send, recv) = conn.open_bi().await.unwrap();
-                let _ = farder_server::connection::handle_client(state, send, recv).await;
+                // handle_connection opens the bi-stream and runs the full auth + main loop.
+                let _ = farder_server::connection::handle_connection(state, conn).await;
             });
         }
     });
@@ -250,7 +251,7 @@ async fn test_e2e_server_bootstrap_and_chat() {
 
     // 2. Owner connects with setup token
     let owner_kp = Keypair::generate();
-    let (mut owner_send, mut owner_recv) =
+    let (_owner_conn, mut owner_send, mut owner_recv) =
         connect_and_auth(&client_endpoint, actual_addr, &owner_kp, None, Some(&setup_hex)).await;
 
     // 3. Owner creates invite
@@ -294,7 +295,7 @@ async fn test_e2e_server_bootstrap_and_chat() {
 
     // 6. Second user joins with invite
     let user_kp = Keypair::generate();
-    let (mut user_send, mut user_recv) =
+    let (user_conn, mut user_send, mut user_recv) =
         connect_and_auth(&client_endpoint, actual_addr, &user_kp, Some(&invite_code), None).await;
 
     // User subscribes
@@ -316,6 +317,7 @@ async fn test_e2e_server_bootstrap_and_chat() {
             channel_id: general_channel_id,
             content: "Hello from the new member!".to_string(),
             reply_to: None,
+            attachment_ids: vec![],
         },
     )
     .await;
@@ -363,4 +365,102 @@ async fn test_e2e_server_bootstrap_and_chat() {
         ServerResponse::SearchResults { messages } => assert_eq!(messages.len(), 1),
         other => panic!("expected SearchResults, got {:?}", other),
     }
+
+    // ---- FILE ATTACHMENT FLOW ----
+
+    // 10. User uploads a file on a NEW bi-stream
+    let file_data = b"This is test file content for the e2e attachment test!";
+    let file_hash = {
+        let mut h = Sha256::new();
+        h.update(file_data);
+        format!("{:x}", h.finalize())
+    };
+
+    let (mut up_send, mut up_recv) = user_conn.open_bi().await.unwrap();
+    let upload_req = UploadRequest {
+        channel_id: general_channel_id,
+        file_name: "test-document.txt".to_string(),
+        file_size: file_data.len() as u64,
+        hash: file_hash.clone(),
+        mime_type: "text/plain".to_string(),
+        width: None,
+        height: None,
+        duration_secs: None,
+    };
+    send_frame(&mut up_send, &upload_req).await;
+
+    // Expect Ready response
+    let resp_bytes = read_frame(&mut up_recv).await;
+    let resp: UploadResponse = codec::decode(&resp_bytes).unwrap();
+    match resp {
+        UploadResponse::Ready => {}
+        other => panic!("expected Ready, got {:?}", other),
+    }
+
+    // Send file bytes
+    up_send.write_all(file_data).await.unwrap();
+    up_send.finish().unwrap();
+
+    // Expect Complete response
+    let resp_bytes = read_frame(&mut up_recv).await;
+    let resp: UploadResponse = codec::decode(&resp_bytes).unwrap();
+    let file_id = match resp {
+        UploadResponse::Complete { file_id } => file_id,
+        other => panic!("expected Complete, got {:?}", other),
+    };
+    assert!(file_id > 0);
+
+    // 11. User sends message with attachment on main bi-stream
+    send_request(&mut user_send, 3, ServerRequest::SendMessage {
+        channel_id: general_channel_id,
+        content: "here's a file for you".to_string(),
+        reply_to: None,
+        attachment_ids: vec![file_id],
+    }).await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    match resp {
+        ServerResponse::MessageSent { .. } => {}
+        other => panic!("expected MessageSent, got {:?}", other),
+    }
+
+    // 12. Owner fetches history and verifies attachment is present
+    send_request(&mut owner_send, 6, ServerRequest::FetchHistory {
+        channel_id: general_channel_id,
+        before_id: None,
+        limit: 50,
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::History { messages } => {
+            let with_attach = messages.iter().find(|m| m.content == "here's a file for you").unwrap();
+            assert_eq!(with_attach.attachments.len(), 1);
+            assert_eq!(with_attach.attachments[0].name, "test-document.txt");
+            assert_eq!(with_attach.attachments[0].size, file_data.len() as u64);
+            assert_eq!(with_attach.attachments[0].mime_type, "text/plain");
+        }
+        other => panic!("expected History, got {:?}", other),
+    }
+
+    // 13. Test dedup: upload the same file again, should get same file_id
+    let (mut up_send2, mut up_recv2) = user_conn.open_bi().await.unwrap();
+    let upload_req2 = UploadRequest {
+        channel_id: general_channel_id,
+        file_name: "test-document-copy.txt".to_string(),
+        file_size: file_data.len() as u64,
+        hash: file_hash.clone(),
+        mime_type: "text/plain".to_string(),
+        width: None,
+        height: None,
+        duration_secs: None,
+    };
+    send_frame(&mut up_send2, &upload_req2).await;
+
+    // Should get Complete immediately (no Ready, no bytes needed)
+    let resp_bytes = read_frame(&mut up_recv2).await;
+    let resp: UploadResponse = codec::decode(&resp_bytes).unwrap();
+    let file_id2 = match resp {
+        UploadResponse::Complete { file_id } => file_id,
+        other => panic!("expected Complete (dedup), got {:?}", other),
+    };
+    assert_eq!(file_id, file_id2); // same file reused
 }

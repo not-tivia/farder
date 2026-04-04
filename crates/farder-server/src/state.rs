@@ -22,10 +22,12 @@ pub struct ServerState {
     pub owner: RwLock<Option<PublicKey>>,
     pub setup_token: Mutex<Option<[u8; 32]>>,
     pub server_name: String,
+    pub storage_dir: String,
+    pub max_file_size: u64,
 }
 
 impl ServerState {
-    pub fn new(conn: Connection, server_name: String) -> Self {
+    pub fn new(conn: Connection, server_name: String, storage_dir: String, max_file_size: u64) -> Self {
         Self {
             db: Mutex::new(conn),
             sessions: RwLock::new(HashMap::new()),
@@ -34,11 +36,15 @@ impl ServerState {
             owner: RwLock::new(None),
             setup_token: Mutex::new(None),
             server_name,
+            storage_dir,
+            max_file_size,
         }
     }
 
     pub fn new_for_test() -> Result<Self> {
         let conn = db::open_in_memory()?;
-        Ok(Self::new(conn, "Test Server".to_string()))
+        let tmp = std::env::temp_dir().join(format!("farder-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp)?;
+        Ok(Self::new(conn, "Test Server".to_string(), tmp.to_string_lossy().to_string(), 50 * 1024 * 1024))
     }
 }

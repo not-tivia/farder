@@ -96,6 +96,36 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             expires_at     INTEGER,
             target_channel INTEGER
         );
+
+        CREATE TABLE IF NOT EXISTS files (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash          TEXT    UNIQUE NOT NULL,
+            size          INTEGER NOT NULL,
+            mime_type     TEXT    NOT NULL,
+            original_name TEXT    NOT NULL,
+            uploaded_by   BLOB    NOT NULL,
+            uploaded_at   INTEGER NOT NULL,
+            ref_count     INTEGER NOT NULL DEFAULT 0,
+            width         INTEGER,
+            height        INTEGER,
+            duration_secs REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS message_attachments (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id    INTEGER NOT NULL,
+            file_id       INTEGER NOT NULL,
+            position      INTEGER NOT NULL,
+            original_name TEXT    NOT NULL,
+            width         INTEGER,
+            height        INTEGER,
+            duration_secs REAL,
+            FOREIGN KEY (message_id) REFERENCES messages(id),
+            FOREIGN KEY (file_id)    REFERENCES files(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments(message_id);
+        CREATE INDEX IF NOT EXISTS idx_message_attachments_file ON message_attachments(file_id);
     ")?;
 
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
@@ -147,6 +177,8 @@ mod tests {
             "messages",
             "invites",
             "messages_fts",
+            "files",
+            "message_attachments",
         ];
 
         for table in &expected_tables {

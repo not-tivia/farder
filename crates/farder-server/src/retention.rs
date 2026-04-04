@@ -7,9 +7,9 @@ use std::time::Duration;
 use tracing::info;
 
 /// Purges messages in channels that have a `retention_secs` set, deleting
-/// any messages older than the retention window. Returns the total number of
-/// messages deleted across all channels.
-pub fn purge_expired_messages(conn: &Connection) -> Result<u64> {
+/// any messages older than the retention window. Also cleans up orphaned files
+/// older than 1 hour. Returns `(messages_purged, files_cleaned)`.
+pub fn purge_expired_messages(conn: &Connection, storage_dir: &str) -> Result<(u64, u64)> {
     let all_channels = channels::list_channels(conn)?;
     let mut total_purged: u64 = 0;
 
@@ -29,7 +29,9 @@ pub fn purge_expired_messages(conn: &Connection) -> Result<u64> {
         }
     }
 
-    Ok(total_purged)
+    let files_cleaned = crate::attachments::cleanup_all_orphans(conn, storage_dir, 3600)?;
+
+    Ok((total_purged, files_cleaned))
 }
 
 /// Spawns a background Tokio task that periodically runs `purge_expired_messages`.
@@ -43,18 +45,18 @@ pub fn spawn_retention_task(
             tokio::time::interval(Duration::from_secs(interval_secs));
         loop {
             interval.tick().await;
-            let total = {
+            let (messages_purged, files_cleaned) = {
                 let conn = state.db.lock().unwrap();
-                match purge_expired_messages(&conn) {
-                    Ok(n) => n,
+                match purge_expired_messages(&conn, &state.storage_dir) {
+                    Ok(counts) => counts,
                     Err(e) => {
                         tracing::warn!(error = %e, "retention task error");
-                        0
+                        (0, 0)
                     }
                 }
             };
-            if total > 0 {
-                info!(total, "retention task purged expired messages");
+            if messages_purged > 0 || files_cleaned > 0 {
+                info!(messages_purged, files_cleaned, "retention task completed");
             }
         }
     })
@@ -97,7 +99,7 @@ mod tests {
         // Insert a recent message (far-future timestamp — will never be purged).
         messages::insert_message_with_ts(&conn, ch_id, &pk, "recent", None, u64::MAX / 2).unwrap();
 
-        let purged = purge_expired_messages(&conn).unwrap();
+        let (purged, _files_cleaned) = purge_expired_messages(&conn, "/tmp").unwrap();
         assert_eq!(purged, 2);
 
         let history = messages::fetch_history(&conn, ch_id, None, 10).unwrap();
