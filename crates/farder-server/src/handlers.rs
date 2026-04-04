@@ -211,16 +211,29 @@ pub fn handle_request(
             channel_id,
             content,
             reply_to,
-            attachment_ids: _,
+            attachment_ids,
         } => {
             if content.len() > 8000 {
                 return err("message content too long (max 8000 characters)");
+            }
+            if attachment_ids.len() > 10 {
+                return err("too many attachments (max 10)");
             }
             let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
             if !permissions::has(perms, permissions::SEND_MESSAGES) {
                 return err("missing SEND_MESSAGES permission");
             }
             let id = messages::insert_message(conn, channel_id, member, &content, reply_to)?;
+
+            // Create attachment records
+            for (pos, file_id) in attachment_ids.iter().enumerate() {
+                let file = crate::attachments::get_file(conn, *file_id)?
+                    .ok_or_else(|| anyhow::anyhow!("attachment file_id {} not found", file_id))?;
+                crate::attachments::create_message_attachment(
+                    conn, id, *file_id, pos as u32, &file.original_name, None, None, None,
+                )?;
+            }
+
             let msg = match messages::get_message(conn, id)? {
                 Some(m) => m,
                 None => return err("failed to retrieve sent message"),
@@ -1183,6 +1196,53 @@ mod tests {
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_send_message_with_attachments() {
+        let (conn, owner) = setup();
+        let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let dir = std::env::temp_dir().join(format!("farder-handler-test-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = b"image bytes here";
+        let hash = crate::attachments::compute_sha256(data);
+        let file_id = crate::attachments::store_file(
+            &conn, &dir.to_string_lossy(), &owner, "pic.png", data, &hash, "image/png"
+        ).unwrap();
+
+        let result = handle_request(&conn, &owner, true, ServerRequest::SendMessage {
+            channel_id: ch_id,
+            content: "check this".to_string(),
+            reply_to: None,
+            attachment_ids: vec![file_id],
+        }).unwrap();
+        match result.response {
+            ServerResponse::MessageSent { id, .. } => {
+                let msg = messages::get_message(&conn, id).unwrap().unwrap();
+                assert_eq!(msg.attachments.len(), 1);
+                assert_eq!(msg.attachments[0].name, "pic.png");
+                let file = crate::attachments::get_file(&conn, file_id).unwrap().unwrap();
+                assert_eq!(file.ref_count, 1);
+            }
+            other => panic!("expected MessageSent, got {:?}", other),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_handle_send_message_too_many_attachments() {
+        let (conn, owner) = setup();
+        let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let result = handle_request(&conn, &owner, true, ServerRequest::SendMessage {
+            channel_id: ch_id,
+            content: "too many".to_string(),
+            reply_to: None,
+            attachment_ids: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        }).unwrap();
+        match result.response {
+            ServerResponse::Error { .. } => {}
+            other => panic!("expected Error, got {:?}", other),
         }
     }
 }
