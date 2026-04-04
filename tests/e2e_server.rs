@@ -463,4 +463,71 @@ async fn test_e2e_server_bootstrap_and_chat() {
         other => panic!("expected Complete (dedup), got {:?}", other),
     };
     assert_eq!(file_id, file_id2); // same file reused
+
+    // ---- THREAD & REACTION FLOW ----
+
+    // 14. User adds a reaction to their message
+    send_request(&mut user_send, 4, ServerRequest::AddReaction {
+        message_id: msg_id,
+        emoji: "👍".to_string(),
+    }).await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    match resp {
+        ServerResponse::Ok => {}
+        other => panic!("expected Ok for AddReaction, got {:?}", other),
+    }
+
+    // 15. Owner adds a different reaction to the same message
+    send_request(&mut owner_send, 7, ServerRequest::AddReaction {
+        message_id: msg_id,
+        emoji: "❤️".to_string(),
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::Ok => {}
+        other => panic!("expected Ok for AddReaction, got {:?}", other),
+    }
+
+    // 16. Owner fetches history and verifies reactions are present
+    send_request(&mut owner_send, 8, ServerRequest::FetchHistory {
+        channel_id: general_channel_id,
+        before_id: None,
+        limit: 50,
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::History { messages } => {
+            // Find the message that was reacted to
+            let reacted_msg = messages.iter().find(|m| m.id == msg_id).unwrap();
+            assert!(reacted_msg.reactions.len() >= 2, "expected at least 2 reaction groups, got {}", reacted_msg.reactions.len());
+        }
+        other => panic!("expected History, got {:?}", other),
+    }
+
+    // 17. Owner creates a thread on the message
+    send_request(&mut owner_send, 9, ServerRequest::CreateThread {
+        message_id: msg_id,
+        name: Some("discussion thread".to_string()),
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::Ok => {}
+        other => panic!("expected Ok for CreateThread, got {:?}", other),
+    }
+
+    // 18. Owner fetches history again and verifies thread metadata
+    send_request(&mut owner_send, 10, ServerRequest::FetchHistory {
+        channel_id: general_channel_id,
+        before_id: None,
+        limit: 50,
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::History { messages } => {
+            let threaded_msg = messages.iter().find(|m| m.id == msg_id).unwrap();
+            assert!(threaded_msg.thread_id.is_some(), "expected thread_id to be set");
+            assert_eq!(threaded_msg.thread_message_count, Some(0)); // no replies yet
+        }
+        other => panic!("expected History, got {:?}", other),
+    }
 }

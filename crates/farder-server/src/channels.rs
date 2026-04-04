@@ -9,18 +9,20 @@ pub fn channel_type_to_str(ct: &ChannelType) -> &'static str {
     match ct {
         ChannelType::Text => "text",
         ChannelType::Announcement => "announcement",
+        ChannelType::Thread => "thread",
     }
 }
 
 pub fn str_to_channel_type(s: &str) -> ChannelType {
     match s {
         "announcement" => ChannelType::Announcement,
+        "thread" => ChannelType::Thread,
         _ => ChannelType::Text,
     }
 }
 
 pub const CHANNEL_SELECT: &str =
-    "id, name, channel_type, category_id, position, topic, nsfw, slow_mode_secs, retention_secs";
+    "id, name, channel_type, category_id, position, topic, nsfw, slow_mode_secs, retention_secs, thread_parent_message_id";
 
 pub fn row_to_channel_info(row: &rusqlite::Row) -> rusqlite::Result<ChannelInfo> {
     let id: i64 = row.get(0)?;
@@ -32,6 +34,7 @@ pub fn row_to_channel_info(row: &rusqlite::Row) -> rusqlite::Result<ChannelInfo>
     let nsfw: i64 = row.get(6)?;
     let slow_mode_secs: i64 = row.get(7)?;
     let retention_secs: Option<i64> = row.get(8)?;
+    let thread_parent_message_id: Option<i64> = row.get(9)?;
 
     Ok(ChannelInfo {
         id: id as u64,
@@ -43,6 +46,7 @@ pub fn row_to_channel_info(row: &rusqlite::Row) -> rusqlite::Result<ChannelInfo>
         nsfw: nsfw != 0,
         slow_mode_secs: slow_mode_secs as u32,
         retention_secs: retention_secs.map(|v| v as u64),
+        thread_parent_message_id: thread_parent_message_id.map(|v| v as u64),
     })
 }
 
@@ -183,6 +187,49 @@ pub fn create_channel(
     Ok(conn.last_insert_rowid() as u64)
 }
 
+/// Create a thread channel linked to a specific parent message.
+/// The thread inherits the parent channel's category_id and gets position=0.
+pub fn create_thread(
+    conn: &Connection,
+    name: &str,
+    parent_channel_id: u64,
+    parent_message_id: u64,
+) -> Result<u64> {
+    // Retrieve the parent channel to inherit category_id.
+    let category_id: Option<i64> = conn
+        .query_row(
+            "SELECT category_id FROM channels WHERE id = ?1",
+            params![parent_channel_id as i64],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+
+    conn.execute(
+        "INSERT INTO channels \
+         (name, channel_type, category_id, position, thread_parent_message_id) \
+         VALUES (?1, 'thread', ?2, 0, ?3)",
+        params![name, category_id, parent_message_id as i64],
+    )?;
+    Ok(conn.last_insert_rowid() as u64)
+}
+
+/// Get the thread channel for a given parent message, if one exists.
+pub fn get_thread_for_message(
+    conn: &Connection,
+    message_id: u64,
+) -> Result<Option<ChannelInfo>> {
+    let sql = format!(
+        "SELECT {} FROM channels \
+         WHERE thread_parent_message_id = ?1 AND deleted = 0",
+        CHANNEL_SELECT
+    );
+    let row = conn
+        .query_row(&sql, params![message_id as i64], row_to_channel_info)
+        .optional()?;
+    Ok(row)
+}
+
 pub fn get_channel(conn: &Connection, id: u64) -> Result<Option<ChannelInfo>> {
     let sql = format!(
         "SELECT {} FROM channels WHERE id = ?1 AND deleted = 0",
@@ -204,7 +251,7 @@ pub fn get_channel_including_deleted(conn: &Connection, id: u64) -> Result<Optio
 
 pub fn list_channels(conn: &Connection) -> Result<Vec<ChannelInfo>> {
     let sql = format!(
-        "SELECT {} FROM channels WHERE deleted = 0 ORDER BY position ASC",
+        "SELECT {} FROM channels WHERE deleted = 0 AND channel_type != 'thread' ORDER BY position ASC",
         CHANNEL_SELECT
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -312,6 +359,7 @@ pub fn hard_delete_channel(conn: &Connection, id: u64) -> Result<()> {
 
     // Delete attachments for all messages in the channel.
     for (msg_id, _) in &rows {
+        crate::reactions::delete_reactions_for_message(conn, *msg_id as u64)?;
         let _ = crate::attachments::delete_attachments_for_message(conn, *msg_id as u64)?;
     }
 
@@ -776,5 +824,82 @@ mod tests {
         // Empty role_ids returns empty vec.
         let empty = get_category_overrides_for_roles(&conn, cat_id, &[]).unwrap();
         assert!(empty.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Thread channel tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_thread_channel() {
+        use crate::messages::insert_message;
+        use crate::members::register_member;
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk = Keypair::generate().public_key();
+        register_member(&conn, &pk, "Alice").unwrap();
+
+        let cat_id = create_category(&conn, "General", 0).unwrap();
+        let parent_id = create_channel(&conn, "chat", ChannelType::Text, Some(cat_id), 0).unwrap();
+        let msg_id = insert_message(&conn, parent_id, &pk, "start a thread", None).unwrap();
+
+        let thread_id = create_thread(&conn, "my thread", parent_id, msg_id).unwrap();
+
+        let thread = get_channel(&conn, thread_id).unwrap().expect("thread channel should exist");
+        assert_eq!(thread.id, thread_id);
+        assert_eq!(thread.name, "my thread");
+        assert_eq!(thread.channel_type, ChannelType::Thread);
+        assert_eq!(thread.category_id, Some(cat_id));
+        assert_eq!(thread.thread_parent_message_id, Some(msg_id));
+    }
+
+    #[test]
+    fn test_get_thread_for_message() {
+        use crate::messages::insert_message;
+        use crate::members::register_member;
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk = Keypair::generate().public_key();
+        register_member(&conn, &pk, "Alice").unwrap();
+
+        let parent_id = create_channel(&conn, "chat", ChannelType::Text, None, 0).unwrap();
+        let msg_id = insert_message(&conn, parent_id, &pk, "start a thread", None).unwrap();
+        let other_msg_id = insert_message(&conn, parent_id, &pk, "another", None).unwrap();
+
+        // No thread yet.
+        assert!(get_thread_for_message(&conn, msg_id).unwrap().is_none());
+
+        create_thread(&conn, "thread-1", parent_id, msg_id).unwrap();
+
+        // Now found.
+        let thread = get_thread_for_message(&conn, msg_id)
+            .unwrap()
+            .expect("should find thread");
+        assert_eq!(thread.thread_parent_message_id, Some(msg_id));
+        assert_eq!(thread.channel_type, ChannelType::Thread);
+
+        // Other message still has no thread.
+        assert!(get_thread_for_message(&conn, other_msg_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_list_channels_excludes_threads() {
+        use crate::messages::insert_message;
+        use crate::members::register_member;
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk = Keypair::generate().public_key();
+        register_member(&conn, &pk, "Alice").unwrap();
+
+        let ch_id = create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let msg_id = insert_message(&conn, ch_id, &pk, "hello", None).unwrap();
+        create_thread(&conn, "my-thread", ch_id, msg_id).unwrap();
+
+        let channels = list_channels(&conn).unwrap();
+        assert_eq!(channels.len(), 1, "list_channels should exclude thread channels");
+        assert_eq!(channels[0].name, "general");
     }
 }

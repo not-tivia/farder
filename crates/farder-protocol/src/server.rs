@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum ChannelType {
     Text,
     Announcement,
+    Thread,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -17,6 +18,13 @@ pub struct AttachmentInfo {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub duration_secs: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReactionGroup {
+    pub emoji: String,
+    pub count: u32,
+    pub me: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,6 +68,9 @@ pub struct MessageInfo {
     pub reply_to: Option<u64>,
     pub pinned: bool,
     pub attachments: Vec<AttachmentInfo>,
+    pub reactions: Vec<ReactionGroup>,
+    pub thread_id: Option<u64>,
+    pub thread_message_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -73,6 +84,7 @@ pub struct ChannelInfo {
     pub nsfw: bool,
     pub slow_mode_secs: u32,
     pub retention_secs: Option<u64>,
+    pub thread_parent_message_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -149,6 +161,9 @@ pub enum ServerRequest {
     GetMembers,
     SetChannelOverride { channel_id: u64, role_id: u64, allow: u64, deny: u64 },
     SetCategoryOverride { category_id: u64, role_id: u64, allow: u64, deny: u64 },
+    CreateThread { message_id: u64, name: Option<String> },
+    AddReaction { message_id: u64, emoji: String },
+    RemoveReaction { message_id: u64, emoji: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,6 +214,8 @@ pub enum ServerEvent {
     RoleUpdated { role: RoleInfo },
     RoleDeleted { role_id: u64 },
     PermissionsChanged,
+    ReactionAdded { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey },
+    ReactionRemoved { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey },
 }
 
 #[cfg(test)]
@@ -282,6 +299,9 @@ mod tests {
             reply_to: None,
             pinned: false,
             attachments: vec![],
+            reactions: vec![],
+            thread_id: None,
+            thread_message_count: None,
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -318,6 +338,9 @@ mod tests {
                 reply_to: Some(50),
                 pinned: true,
                 attachments: vec![],
+                reactions: vec![],
+                thread_id: None,
+                thread_message_count: None,
             },
         };
         let frame = ServerFrame::Event(event);
@@ -365,6 +388,9 @@ mod tests {
             ServerRequest::GetMembers,
             ServerRequest::SetChannelOverride { channel_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
             ServerRequest::SetCategoryOverride { category_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
+            ServerRequest::CreateThread { message_id: 1, name: Some("thread".into()) },
+            ServerRequest::AddReaction { message_id: 1, emoji: "👍".into() },
+            ServerRequest::RemoveReaction { message_id: 1, emoji: "👍".into() },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };
@@ -422,6 +448,46 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_reaction_group() {
+        let rg = ReactionGroup {
+            emoji: "👍".to_string(),
+            count: 5,
+            me: true,
+        };
+        let bytes = codec::encode(&rg).unwrap();
+        let decoded: ReactionGroup = codec::decode(&bytes).unwrap();
+        assert_eq!(decoded.emoji, "👍");
+        assert_eq!(decoded.count, 5);
+        assert!(decoded.me);
+    }
+
+    #[test]
+    fn test_roundtrip_create_thread() {
+        let frame = ClientFrame::Request {
+            id: 99,
+            body: ServerRequest::CreateThread {
+                message_id: 42,
+                name: Some("my thread".to_string()),
+            },
+        };
+        let bytes = codec::encode(&frame).unwrap();
+        let decoded: ClientFrame = codec::decode(&bytes).unwrap();
+        match decoded {
+            ClientFrame::Request { id, body } => {
+                assert_eq!(id, 99);
+                match body {
+                    ServerRequest::CreateThread { message_id, name } => {
+                        assert_eq!(message_id, 42);
+                        assert_eq!(name, Some("my thread".to_string()));
+                    }
+                    _ => panic!("wrong request variant"),
+                }
+            }
+            _ => panic!("wrong frame variant"),
+        }
+    }
+
+    #[test]
     fn test_roundtrip_message_info_with_attachments() {
         let kp = Keypair::generate();
         let msg = MessageInfo {
@@ -445,6 +511,9 @@ mod tests {
                     duration_secs: None,
                 },
             ],
+            reactions: vec![],
+            thread_id: None,
+            thread_message_count: None,
         };
         let bytes = codec::encode(&msg).unwrap();
         let decoded: MessageInfo = codec::decode(&bytes).unwrap();

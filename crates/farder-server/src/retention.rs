@@ -102,11 +102,11 @@ mod tests {
         let (purged, _files_cleaned) = purge_expired_messages(&conn, "/tmp").unwrap();
         assert_eq!(purged, 2);
 
-        let history = messages::fetch_history(&conn, ch_id, None, 10).unwrap();
+        let history = messages::fetch_history(&conn, ch_id, None, 10, &pk).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content, "recent");
 
-        let history2 = messages::fetch_history(&conn, ch_id2, None, 10).unwrap();
+        let history2 = messages::fetch_history(&conn, ch_id2, None, 10, &pk).unwrap();
         assert_eq!(history2.len(), 1);
     }
 }
