@@ -96,7 +96,9 @@ export default function Message({ message, memberNames, grouped = false }: Messa
   return (
     <div className={`message${grouped ? " grouped" : ""}`}>
       {grouped && (
-        <span className="grouped-timestamp">{formatTimestamp(message.timestamp)}</span>
+        <span className="grouped-timestamp">
+          {new Date(message.timestamp * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+        </span>
       )}
       {!grouped && (
         <div className="message-header">

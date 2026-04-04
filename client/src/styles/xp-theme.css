@@ -283,17 +283,22 @@ body {
   background: rgba(0,0,0,0.04);
 }
 
+.message {
+  padding-left: 42px;
+  position: relative;
+}
+
 .message.grouped {
   margin-top: 1px;
   padding-top: 0;
-  padding-left: 52px;
-  position: relative;
 }
 
 .grouped-timestamp {
   position: absolute;
-  left: 4px;
+  left: 0;
   top: 2px;
+  width: 38px;
+  text-align: right;
   font-size: 9px;
   color: var(--xp-text-muted);
   opacity: 0;
