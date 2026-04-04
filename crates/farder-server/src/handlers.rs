@@ -851,6 +851,13 @@ pub fn handle_request(
                 },
             }])
         }
+
+        // ----------------------------------------------------------------
+        // Data deletion (Phase 3.3)
+        // ----------------------------------------------------------------
+        ServerRequest::RequestDeletion => err("not yet implemented"),
+        ServerRequest::CancelDeletion => err("not yet implemented"),
+        ServerRequest::GetDeletionStatus => err("not yet implemented"),
     }
 }
 
