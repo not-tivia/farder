@@ -9,7 +9,6 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "title": "Farder",
     "windows": [{ "title": "Farder", "width": 1200, "height": 800 }],
     "security": { "csp": null }
   }
