@@ -164,9 +164,7 @@ pub async fn connect_server(
     let (conn, send, recv, _session_token) =
         connect_and_authenticate(endpoint.clone(), addr, &keypair, invite_code, setup_token)
             .await
-            .map_err(|e| format!("auth failed: {}", e))?;
-
-    eprintln!("[connect] auth succeeded, storing state...");
+            .map_err(|e| e.to_string())?;
 
     // Store endpoint + connection (both must stay alive or QUIC closes).
     {
@@ -196,11 +194,10 @@ pub async fn connect_server(
     // Persist the server address for next launch (non-fatal).
     let _ = save_last_server(address);
 
-    eprintln!("[connect] fetching server info...");
     // Fetch initial server info.
     let response = bridge::send_request(&state, ServerRequest::GetServerInfo)
         .await
-        .map_err(|e| format!("server info failed: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
     match response {
         ServerResponse::ServerInfo { name, member_count, channels, categories, roles } => {
