@@ -1,4 +1,4 @@
-use crate::{attachments, auth, events::EventTarget, handlers, members, state::ServerState};
+use crate::{attachments, auth, events::EventTarget, handlers, members, permissions, state::ServerState};
 use anyhow::{Context, Result};
 use farder_crypto::identity::PublicKey;
 use farder_protocol::{codec, server::*};
@@ -280,6 +280,88 @@ async fn handle_download_stream(
     send.finish()?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// URL fetch handler (async — runs outside DB lock)
+// ---------------------------------------------------------------------------
+
+async fn handle_fetch_url(
+    state: &Arc<ServerState>,
+    member: &PublicKey,
+    is_owner: bool,
+    url: &str,
+    channel_id: u64,
+) -> Result<u64, String> {
+    // Permission check
+    {
+        let db = state.db.lock().unwrap();
+        let perms = handlers::resolve_member_perms_pub(&db, member, channel_id, is_owner)
+            .map_err(|e| e.to_string())?;
+        if !permissions::has(perms, permissions::SEND_MESSAGES) {
+            return Err("missing SEND_MESSAGES permission".to_string());
+        }
+    }
+
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("invalid URL".to_string());
+    }
+    if url.len() > 2048 {
+        return Err("URL too long".to_string());
+    }
+
+    // Async HTTP fetch (no DB lock held)
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("http client error: {}", e))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("fetch failed: HTTP {}", response.status()));
+    }
+
+    let content_type = response.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .split(';').next()
+        .unwrap_or("application/octet-stream")
+        .trim()
+        .to_string();
+
+    let file_name = url.rsplit('/').next()
+        .unwrap_or("download")
+        .split('?').next()
+        .unwrap_or("download")
+        .to_string();
+
+    let data = response.bytes().await
+        .map_err(|e| format!("failed to read response: {}", e))?;
+
+    if data.len() > 10 * 1024 * 1024 {
+        return Err("fetched file too large (max 10MB)".to_string());
+    }
+
+    let hash = attachments::compute_sha256(&data);
+
+    // Now lock DB briefly to store
+    let db = state.db.lock().unwrap();
+    let file_id = attachments::store_or_reuse(
+        &db,
+        &state.storage_dir,
+        member,
+        &file_name,
+        &data,
+        &hash,
+        &content_type,
+        None, None, None,
+    ).map_err(|e| e.to_string())?;
+
+    Ok(file_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +652,26 @@ async fn main_loop(
                                     body: ServerResponse::Ok,
                                 };
                                 send_server_frame(send, &response).await?;
+                            }
+                            ServerRequest::FetchUrl { url, channel_id } => {
+                                // Handle URL fetch async — can't hold DB lock during HTTP request
+                                let result = handle_fetch_url(&state, &member_key, is_owner, &url, channel_id).await;
+                                match result {
+                                    Ok(file_id) => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::UrlFetched { file_id },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                    }
+                                    Err(reason) => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error { reason },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                    }
+                                }
                             }
                             request => {
                                 // Lock db, call handler, drop lock before await

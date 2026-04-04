@@ -887,78 +887,9 @@ pub fn handle_request(
             ok(ServerResponse::DeletionStatusResp { status })
         }
 
-        // ----------------------------------------------------------------
-        // URL fetch proxy
-        // ----------------------------------------------------------------
-        ServerRequest::FetchUrl { url, channel_id } => {
-            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
-            if !permissions::has(perms, permissions::SEND_MESSAGES) {
-                return err("missing SEND_MESSAGES permission");
-            }
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                return err("invalid URL");
-            }
-            if url.len() > 2048 {
-                return err("URL too long");
-            }
-
-            let response = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .map_err(|e| anyhow::anyhow!("http client error: {}", e))?
-                .get(&url)
-                .send()
-                .map_err(|e| anyhow::anyhow!("fetch failed: {}", e))?;
-
-            let status = response.status();
-            if !status.is_success() {
-                return err(&format!("fetch failed: HTTP {}", status));
-            }
-
-            let content_type = response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .split(';')
-                .next()
-                .unwrap_or("application/octet-stream")
-                .trim()
-                .to_string();
-
-            let file_name = url
-                .rsplit('/')
-                .next()
-                .unwrap_or("download")
-                .split('?')
-                .next()
-                .unwrap_or("download")
-                .to_string();
-            let file_name = if file_name.is_empty() { "download".to_string() } else { file_name };
-
-            let data = response
-                .bytes()
-                .map_err(|e| anyhow::anyhow!("failed to read response: {}", e))?;
-
-            if data.len() > 10 * 1024 * 1024 {
-                return err("fetched file too large (max 10MB)");
-            }
-
-            let hash = crate::attachments::compute_sha256(&data);
-            let file_id = crate::attachments::store_or_reuse(
-                conn,
-                storage_dir,
-                member,
-                &file_name,
-                &data,
-                &hash,
-                &content_type,
-                None,
-                None,
-                None,
-            )?;
-
-            ok(ServerResponse::UrlFetched { file_id })
+        // FetchUrl is handled async in connection.rs, not here
+        ServerRequest::FetchUrl { .. } => {
+            err("FetchUrl must be handled at the connection level")
         }
     }
 }

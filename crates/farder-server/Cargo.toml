@@ -30,6 +30,6 @@ toml = "0.8"
 rand = "0.8"
 hex = "0.4"
 sha2 = "0.10"
-reqwest = { version = "0.12", features = ["rustls-tls", "blocking"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 
 [dev-dependencies]
