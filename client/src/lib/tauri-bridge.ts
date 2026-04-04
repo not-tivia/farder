@@ -13,6 +13,18 @@ export async function getPublicKey(): Promise<string | null> {
   return invoke<string | null>("get_public_key");
 }
 
+export async function setDisplayName(name: string): Promise<void> {
+  return invoke<void>("set_display_name", { name });
+}
+
+export async function getDisplayName(): Promise<string | null> {
+  return invoke<string | null>("get_display_name");
+}
+
+export async function getLastServer(): Promise<string | null> {
+  return invoke<string | null>("get_last_server");
+}
+
 export async function connectServer(
   address: string,
   inviteCode?: string,

@@ -4,13 +4,13 @@ import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo } from "../lib/types";
 
 function UserFooter() {
-  const [key, setKey] = useState<string | null>(null);
+  const [name, setName] = useState<string | null>(null);
 
   useEffect(() => {
-    api.getPublicKey().then((k) => setKey(k)).catch(() => {});
+    api.getDisplayName().then((n) => setName(n)).catch(() => {});
   }, []);
 
-  return <span>{key ?? "No identity"}</span>;
+  return <span>● {name ?? "Unknown"}</span>;
 }
 
 export default function ChannelSidebar() {
