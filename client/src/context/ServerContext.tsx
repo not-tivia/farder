@@ -120,12 +120,15 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
           [channelId]: msgs.map((m) => {
             if (m.id !== messageId) return m;
             const existing = m.reactions.find((r) => r.emoji === emoji);
-            const reactions = existing
-              ? m.reactions.map((r) =>
-                  r.emoji === emoji ? { ...r, count: r.count + 1, me: me || r.me } : r,
-                )
-              : [...m.reactions, { emoji, count: 1, me }];
-            return { ...m, reactions };
+            if (existing) {
+              // If "me" is true and I already reacted, don't increment (idempotent)
+              if (me && existing.me) return m;
+              const reactions = m.reactions.map((r) =>
+                r.emoji === emoji ? { ...r, count: r.count + 1, me: me || r.me } : r,
+              );
+              return { ...m, reactions };
+            }
+            return { ...m, reactions: [...m.reactions, { emoji, count: 1, me }] };
           }),
         },
       };
