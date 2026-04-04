@@ -6,10 +6,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
-    "devWatcher": {
-      "ignore": ["farder-*.json", "farder-*.key"]
-    }
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [{ "title": "Farder", "width": 1200, "height": 800 }],

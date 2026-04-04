@@ -13,15 +13,20 @@ use tauri::{AppHandle, State};
 // Profile helpers
 // ---------------------------------------------------------------------------
 
-const PROFILE_FILE: &str = "farder-profile.json";
-const SETTINGS_FILE: &str = "farder-settings.json";
+fn farder_data_dir() -> std::path::PathBuf {
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join(".farder");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
 
 fn profile_path() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_default().join(PROFILE_FILE)
+    farder_data_dir().join("profile.json")
 }
 
 fn settings_path() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_default().join(SETTINGS_FILE)
+    farder_data_dir().join("settings.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -47,10 +52,8 @@ pub struct SendMessageResult {
 // Identity commands
 // ---------------------------------------------------------------------------
 
-const KEY_FILE: &str = "farder-identity.key";
-
 fn key_path() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_default().join(KEY_FILE)
+    farder_data_dir().join("identity.key")
 }
 
 #[tauri::command]
