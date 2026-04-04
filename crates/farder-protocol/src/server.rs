@@ -176,6 +176,7 @@ pub enum ServerRequest {
     RequestDeletion,
     CancelDeletion,
     GetDeletionStatus,
+    FetchUrl { url: String, channel_id: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -204,6 +205,7 @@ pub enum ServerResponse {
     Members { members: Vec<MemberInfo> },
     InviteCreated { code: String },
     DeletionStatusResp { status: DeletionStatus },
+    UrlFetched { file_id: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -410,6 +412,7 @@ mod tests {
             ServerRequest::RequestDeletion,
             ServerRequest::CancelDeletion,
             ServerRequest::GetDeletionStatus,
+            ServerRequest::FetchUrl { url: "https://example.com/img.png".into(), channel_id: 1 },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };

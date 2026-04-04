@@ -139,3 +139,7 @@ export interface DownloadResult {
 export async function downloadFile(fileId: number): Promise<DownloadResult> {
   return invoke<DownloadResult>("download_file", { fileId });
 }
+
+export async function fetchUrl(url: string, channelId: number): Promise<number> {
+  return invoke<number>("fetch_url", { url, channelId });
+}

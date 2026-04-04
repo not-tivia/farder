@@ -548,6 +548,27 @@ pub async fn download_file(
 }
 
 // ---------------------------------------------------------------------------
+// URL fetch proxy command
+// ---------------------------------------------------------------------------
+
+/// Ask the server to fetch a URL and store it as an attachment, returning the file_id.
+#[tauri::command]
+pub async fn fetch_url(
+    state: State<'_, Arc<AppState>>,
+    url: String,
+    channel_id: u64,
+) -> Result<u64, String> {
+    let response = bridge::send_request(&state, ServerRequest::FetchUrl { url, channel_id })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::UrlFetched { file_id } => Ok(file_id),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Admin commands
 // ---------------------------------------------------------------------------
 

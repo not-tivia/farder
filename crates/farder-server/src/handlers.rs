@@ -217,6 +217,7 @@ pub fn handle_request(
     member: &PublicKey,
     is_owner: bool,
     request: ServerRequest,
+    storage_dir: &str,
 ) -> Result<HandleResult> {
     match request {
         // ----------------------------------------------------------------
@@ -885,6 +886,80 @@ pub fn handle_request(
             };
             ok(ServerResponse::DeletionStatusResp { status })
         }
+
+        // ----------------------------------------------------------------
+        // URL fetch proxy
+        // ----------------------------------------------------------------
+        ServerRequest::FetchUrl { url, channel_id } => {
+            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::SEND_MESSAGES) {
+                return err("missing SEND_MESSAGES permission");
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return err("invalid URL");
+            }
+            if url.len() > 2048 {
+                return err("URL too long");
+            }
+
+            let response = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| anyhow::anyhow!("http client error: {}", e))?
+                .get(&url)
+                .send()
+                .map_err(|e| anyhow::anyhow!("fetch failed: {}", e))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return err(&format!("fetch failed: HTTP {}", status));
+            }
+
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .split(';')
+                .next()
+                .unwrap_or("application/octet-stream")
+                .trim()
+                .to_string();
+
+            let file_name = url
+                .rsplit('/')
+                .next()
+                .unwrap_or("download")
+                .split('?')
+                .next()
+                .unwrap_or("download")
+                .to_string();
+            let file_name = if file_name.is_empty() { "download".to_string() } else { file_name };
+
+            let data = response
+                .bytes()
+                .map_err(|e| anyhow::anyhow!("failed to read response: {}", e))?;
+
+            if data.len() > 10 * 1024 * 1024 {
+                return err("fetched file too large (max 10MB)");
+            }
+
+            let hash = crate::attachments::compute_sha256(&data);
+            let file_id = crate::attachments::store_or_reuse(
+                conn,
+                storage_dir,
+                member,
+                &file_name,
+                &data,
+                &hash,
+                &content_type,
+                None,
+                None,
+                None,
+            )?;
+
+            ok(ServerResponse::UrlFetched { file_id })
+        }
     }
 }
 
@@ -952,6 +1027,7 @@ mod tests {
                 reply_to: None,
                 attachment_ids: vec![],
             },
+            "",
         )
         .unwrap();
 
@@ -989,6 +1065,7 @@ mod tests {
                 reply_to: None,
                 attachment_ids: vec![],
             },
+            "",
         )
         .unwrap();
 
@@ -1022,6 +1099,7 @@ mod tests {
                 before_id: None,
                 limit: 50,
             },
+            "",
         )
         .unwrap();
 
@@ -1047,6 +1125,7 @@ mod tests {
                 category_id: None,
                 position: Some(0),
             },
+            "",
         )
         .unwrap();
 
@@ -1077,6 +1156,7 @@ mod tests {
                 color: Some("#FF0000".to_string()),
                 position: Some(1),
             },
+            "",
         )
         .unwrap();
 
@@ -1105,6 +1185,7 @@ mod tests {
                 expires_in_secs: None,
                 target_channel: None,
             },
+            "",
         )
         .unwrap();
 
@@ -1126,6 +1207,7 @@ mod tests {
             &owner_pk,
             true,
             ServerRequest::GetServerInfo,
+            "",
         )
         .unwrap();
 
@@ -1160,6 +1242,7 @@ mod tests {
                 reply_to: None,
                 attachment_ids: vec![],
             },
+            "",
         )
         .unwrap();
 
@@ -1177,6 +1260,7 @@ mod tests {
                 message_id: msg_id,
                 new_content: "Edited content".to_string(),
             },
+            "",
         )
         .unwrap();
 
@@ -1207,6 +1291,7 @@ mod tests {
                 channel_id: Some(channel_id),
                 limit: 50,
             },
+            "",
         )
         .unwrap();
 
@@ -1231,6 +1316,7 @@ mod tests {
             ServerRequest::BanMember {
                 member_key: victim.clone(),
             },
+            "",
         )
         .unwrap();
 
@@ -1258,7 +1344,7 @@ mod tests {
             permissions: permissions::ALL_PERMISSIONS,
             color: None,
             position: Some(3),
-        }).unwrap();
+        }, "").unwrap();
         match result.response {
             ServerResponse::Error { .. } => {}
             other => panic!("expected Error, got {:?}", other),
@@ -1281,7 +1367,7 @@ mod tests {
         // Mod tries to kick Admin — should fail (admin position 3 > mod position 2)
         let result = handle_request(&conn, &moderator, false, ServerRequest::KickMember {
             member_key: admin.clone(),
-        }).unwrap();
+        }, "").unwrap();
         match result.response {
             ServerResponse::Error { .. } => {}
             other => panic!("expected Error, got {:?}", other),
@@ -1291,7 +1377,7 @@ mod tests {
         let regular = add_member(&conn, "Regular");
         let result = handle_request(&conn, &moderator, false, ServerRequest::KickMember {
             member_key: regular.clone(),
-        }).unwrap();
+        }, "").unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
@@ -1307,7 +1393,7 @@ mod tests {
             permissions: 0xFF,
             color: None,
             position: Some(999),
-        }).unwrap();
+        }, "").unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
@@ -1331,7 +1417,7 @@ mod tests {
             content: "check this".to_string(),
             reply_to: None,
             attachment_ids: vec![file_id],
-        }).unwrap();
+        }, "").unwrap();
         match result.response {
             ServerResponse::MessageSent { id, .. } => {
                 let msg = messages::get_message(&conn, id, &owner).unwrap().unwrap();
@@ -1354,7 +1440,7 @@ mod tests {
             content: "too many".to_string(),
             reply_to: None,
             attachment_ids: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-        }).unwrap();
+        }, "").unwrap();
         match result.response {
             ServerResponse::Error { .. } => {}
             other => panic!("expected Error, got {:?}", other),
@@ -1368,7 +1454,7 @@ mod tests {
         let msg_id = messages::insert_message(&conn, ch_id, &owner, "thread me", None).unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::CreateThread {
             message_id: msg_id, name: Some("discussion".to_string()),
-        }).unwrap();
+        }, "").unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
         assert!(!result.events.is_empty());
     }
@@ -1380,7 +1466,7 @@ mod tests {
         let msg_id = messages::insert_message(&conn, ch_id, &owner, "react", None).unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::AddReaction {
             message_id: msg_id, emoji: "👍".to_string(),
-        }).unwrap();
+        }, "").unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
         let msg = messages::get_message(&conn, msg_id, &owner).unwrap().unwrap();
         assert_eq!(msg.reactions.len(), 1);
@@ -1394,7 +1480,7 @@ mod tests {
         crate::reactions::add_reaction(&conn, msg_id, &owner, "👍").unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::RemoveReaction {
             message_id: msg_id, emoji: "👍".to_string(),
-        }).unwrap();
+        }, "").unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
     }
 
@@ -1403,7 +1489,7 @@ mod tests {
         let (conn, _owner_pk) = setup();
         let member = add_member(&conn, "Alice");
 
-        let result = handle_request(&conn, &member, false, ServerRequest::RequestDeletion).unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "").unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
@@ -1419,7 +1505,7 @@ mod tests {
     fn test_handle_request_deletion_owner_rejected() {
         let (conn, owner_pk) = setup();
 
-        let result = handle_request(&conn, &owner_pk, true, ServerRequest::RequestDeletion).unwrap();
+        let result = handle_request(&conn, &owner_pk, true, ServerRequest::RequestDeletion, "").unwrap();
         match result.response {
             ServerResponse::Error { reason } => {
                 assert!(reason.contains("owner"), "error should mention owner: {}", reason);
@@ -1434,10 +1520,10 @@ mod tests {
         let member = add_member(&conn, "Bob");
 
         // Request deletion first
-        handle_request(&conn, &member, false, ServerRequest::RequestDeletion).unwrap();
+        handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "").unwrap();
 
         // Cancel deletion
-        let result = handle_request(&conn, &member, false, ServerRequest::CancelDeletion).unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::CancelDeletion, "").unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok for CancelDeletion, got {:?}", other),
@@ -1455,7 +1541,7 @@ mod tests {
         let member = add_member(&conn, "Carol");
 
         // Before requesting deletion: not pending
-        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus).unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus, "").unwrap();
         match result.response {
             ServerResponse::DeletionStatusResp { status } => {
                 assert!(!status.pending);
@@ -1466,8 +1552,8 @@ mod tests {
         }
 
         // After requesting deletion: pending
-        handle_request(&conn, &member, false, ServerRequest::RequestDeletion).unwrap();
-        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus).unwrap();
+        handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "").unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus, "").unwrap();
         match result.response {
             ServerResponse::DeletionStatusResp { status } => {
                 assert!(status.pending);

@@ -40,6 +40,7 @@ fn main() {
             commands::pick_file,
             commands::upload_file,
             commands::download_file,
+            commands::fetch_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

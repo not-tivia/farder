@@ -39,17 +39,32 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
     setError(null);
   }
 
+  const imageUrlRegex = /https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi;
+
   async function handleSend() {
     const text = content.trim();
     if ((!text && !attachedFileId) || sending) return;
     setSending(true);
     setError(null);
     try {
+      const attachments: number[] = attachedFileId ? [attachedFileId] : [];
+
+      // Auto-fetch image URLs found in the message text
+      const urls = text.match(imageUrlRegex) || [];
+      for (const url of urls) {
+        try {
+          const fileId = await api.fetchUrl(url, channelId);
+          attachments.push(fileId);
+        } catch {
+          // Failed to fetch — leave the URL as plain text
+        }
+      }
+
       await api.sendMessage(
         channelId,
         text,
         replyTo,
-        attachedFileId ? [attachedFileId] : undefined,
+        attachments.length > 0 ? attachments : undefined,
       );
       setContent("");
       setAttachedFileId(null);
