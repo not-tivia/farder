@@ -90,7 +90,7 @@ export function useServerEvents(): void {
     }).then((u) => unlisten.push(u));
 
     listen<void>("server:disconnected", () => {
-      dispatch({ type: "DISCONNECTED" });
+      dispatch({ type: "CONNECTION_LOST" });
     }).then((u) => unlisten.push(u));
 
     return () => {

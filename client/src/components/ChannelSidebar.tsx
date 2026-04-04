@@ -3,6 +3,7 @@ import { useServer } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo } from "../lib/types";
 import InviteDialog from "./InviteDialog";
+import ServerSettingsDialog from "./ServerSettingsDialog";
 
 function UserFooter() {
   const [name, setName] = useState<string | null>(null);
@@ -17,6 +18,7 @@ function UserFooter() {
 export default function ChannelSidebar() {
   const { state, dispatch } = useServer();
   const [showInvite, setShowInvite] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
@@ -24,7 +26,13 @@ export default function ChannelSidebar() {
       await api.subscribeChannels([channel.id]);
       const msgs = await api.fetchHistory(channel.id);
       // Server returns newest-first; reverse for chronological display
-      dispatch({ type: "SET_MESSAGES", payload: { channelId: channel.id, messages: msgs.reverse() } });
+      const reversed = msgs.reverse();
+      dispatch({ type: "SET_MESSAGES", payload: { channelId: channel.id, messages: reversed } });
+      // Mark channel as read with latest message id
+      if (reversed.length > 0) {
+        const latestId = Math.max(...reversed.map((m) => m.id));
+        dispatch({ type: "MARK_READ", payload: { channelId: channel.id, lastMessageId: latestId } });
+      }
     } catch {
       // ignore fetch errors
     }
@@ -39,10 +47,13 @@ export default function ChannelSidebar() {
 
   function renderChannel(ch: ChannelInfo) {
     const isActive = ch.id === state.currentChannelId;
+    const lastRead = state.readState?.[ch.id] ?? 0;
+    const channelMsgs = state.messages[ch.id] ?? [];
+    const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== state.currentChannelId;
     return (
       <div
         key={ch.id}
-        className={`channel-item${isActive ? " active" : ""}`}
+        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
         onClick={() => handleSelectChannel(ch)}
       >
         <span className="channel-prefix">#</span>
@@ -69,7 +80,10 @@ export default function ChannelSidebar() {
       <div className="channel-sidebar">
         <div className="server-header">
           <div className="server-name">{state.serverName}</div>
-          <button className="server-invite-btn" onClick={() => setShowInvite(true)} title="Create Invite">+</button>
+          <div style={{ display: "flex", gap: "4px" }}>
+            <button className="server-invite-btn" onClick={() => setShowSettings(true)} title="Server Settings">&#9881;</button>
+            <button className="server-invite-btn" onClick={() => setShowInvite(true)} title="Create Invite">+</button>
+          </div>
         </div>
         <div className="channel-list">
           {uncategorized.map(renderChannel)}
@@ -80,6 +94,7 @@ export default function ChannelSidebar() {
         </div>
       </div>
       {showInvite && <InviteDialog onClose={() => setShowInvite(false)} />}
+      {showSettings && <ServerSettingsDialog onClose={() => setShowSettings(false)} />}
     </>
   );
 }

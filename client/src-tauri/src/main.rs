@@ -33,6 +33,10 @@ fn main() {
             commands::remove_reaction,
             commands::create_thread,
             commands::create_invite,
+            commands::create_channel,
+            commands::create_category,
+            commands::pick_file,
+            commands::upload_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

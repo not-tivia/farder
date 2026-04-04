@@ -245,6 +245,7 @@ pub async fn send_message(
     channel_id: u64,
     content: String,
     reply_to: Option<u64>,
+    attachment_ids: Vec<u64>,
 ) -> Result<SendMessageResult, String> {
     let response = bridge::send_request(
         &state,
@@ -252,7 +253,7 @@ pub async fn send_message(
             channel_id,
             content,
             reply_to,
-            attachment_ids: vec![],
+            attachment_ids,
         },
     )
     .await
@@ -370,6 +371,154 @@ pub async fn create_thread(
         bridge::send_request(&state, ServerRequest::CreateThread { message_id, name })
             .await
             .map_err(|e| e.to_string())?;
+
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File upload commands
+// ---------------------------------------------------------------------------
+
+/// Open a native file picker dialog and return the selected file path.
+#[tauri::command]
+pub async fn pick_file() -> Result<Option<String>, String> {
+    let path = tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new().pick_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(path.map(|p| p.to_string_lossy().to_string()))
+}
+
+/// Upload a file via a new QUIC bi-stream and return the file_id.
+#[tauri::command]
+pub async fn upload_file(
+    state: State<'_, Arc<AppState>>,
+    channel_id: u64,
+    file_path: String,
+) -> Result<u64, String> {
+    use sha2::{Digest, Sha256};
+
+    // Read file from disk
+    let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+
+    // Compute SHA-256
+    let hash = format!("{:x}", Sha256::digest(&data));
+
+    let mime_type = match file_name.rsplit('.').next() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string();
+
+    // Open a new bi-stream on the existing connection
+    let conn = {
+        let c = state.connection.lock().map_err(|e| e.to_string())?;
+        c.as_ref().ok_or("not connected")?.clone()
+    };
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+
+    // Send UploadRequest
+    let req = farder_protocol::server::UploadRequest {
+        channel_id,
+        file_name,
+        file_size: data.len() as u64,
+        hash,
+        mime_type,
+        width: None,
+        height: None,
+        duration_secs: None,
+    };
+    let req_bytes = farder_protocol::codec::encode(&req).map_err(|e| e.to_string())?;
+    crate::connection::write_frame(&mut send, &req_bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Read response
+    let resp_bytes = crate::connection::read_frame(&mut recv)
+        .await
+        .map_err(|e| e.to_string())?;
+    let resp: farder_protocol::server::UploadResponse =
+        farder_protocol::codec::decode(&resp_bytes).map_err(|e| e.to_string())?;
+
+    match resp {
+        farder_protocol::server::UploadResponse::Ready => {
+            // Send file bytes
+            send.write_all(&data).await.map_err(|e| e.to_string())?;
+            send.finish().map_err(|e| e.to_string())?;
+
+            // Read Complete response
+            let resp2_bytes = crate::connection::read_frame(&mut recv)
+                .await
+                .map_err(|e| e.to_string())?;
+            let resp2: farder_protocol::server::UploadResponse =
+                farder_protocol::codec::decode(&resp2_bytes).map_err(|e| e.to_string())?;
+            match resp2 {
+                farder_protocol::server::UploadResponse::Complete { file_id } => Ok(file_id),
+                farder_protocol::server::UploadResponse::Error { reason } => Err(reason),
+                _ => Err("unexpected upload response".to_string()),
+            }
+        }
+        farder_protocol::server::UploadResponse::Complete { file_id } => Ok(file_id), // dedup
+        farder_protocol::server::UploadResponse::Error { reason } => Err(reason),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Admin commands
+// ---------------------------------------------------------------------------
+
+/// Create a new channel on the server.
+#[tauri::command]
+pub async fn create_channel(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    channel_type: String,
+    category_id: Option<u64>,
+) -> Result<(), String> {
+    use farder_protocol::server::ChannelType;
+    let ch_type = match channel_type.as_str() {
+        "Announcement" => ChannelType::Announcement,
+        _ => ChannelType::Text,
+    };
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::CreateChannel { name, channel_type: ch_type, category_id, position: None },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Create a new category on the server.
+#[tauri::command]
+pub async fn create_category(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::CreateCategory { name, position: None },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     match response {
         ServerResponse::Ok => Ok(()),

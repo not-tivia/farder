@@ -207,6 +207,20 @@ body {
   color: rgba(255,255,255,0.8);
 }
 
+.channel-item.unread {
+  font-weight: bold;
+  color: white;
+}
+
+.channel-item.unread::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: white;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
 .user-footer {
   padding: 8px 10px;
   background: rgba(0,0,0,0.25);
@@ -819,3 +833,109 @@ body {
   flex-shrink: 0;
 }
 .server-invite-btn:hover { background: rgba(255,255,255,0.3); }
+
+/* ── File Attachment UI ─────────────────────────────────── */
+.message-input-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.message-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.attach-btn {
+  padding: 4px 8px;
+  font-size: 14px;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.attachment-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--xp-panel-bg);
+  border: 1px solid var(--xp-border);
+  border-radius: 2px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--xp-blue-dark);
+}
+
+.attachment-preview-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-remove-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  font-size: 11px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.attachment-remove-btn:hover {
+  color: #cc0000;
+}
+
+/* ── Success Text ───────────────────────────────────────── */
+.success-text {
+  color: #007700;
+  font-size: 11px;
+}
+
+/* ── Settings Tabs ──────────────────────────────────────── */
+.settings-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--xp-border);
+}
+
+.settings-tab {
+  padding: 4px 10px;
+  background: var(--xp-window-bg);
+  border: 1px solid var(--xp-border);
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  cursor: pointer;
+  font-family: var(--xp-font);
+  font-size: var(--xp-font-size);
+  color: #444;
+}
+
+.settings-tab.active {
+  background: #fff;
+  color: var(--xp-blue-dark);
+  font-weight: bold;
+}
+
+.settings-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Reconnect Overlay ──────────────────────────────────── */
+.reconnect-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  color: white;
+  font-size: 14px;
+  font-weight: bold;
+}
