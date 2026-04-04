@@ -216,9 +216,13 @@ async fn test_e2e_server_bootstrap_and_chat() {
         .unwrap();
     farder_server::templates::apply_template(&conn, blank).unwrap();
 
+    let tmp_dir = std::env::temp_dir().join(format!("farder-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
     let state = Arc::new(farder_server::state::ServerState::new(
         conn,
         "Test Server".to_string(),
+        tmp_dir.to_string_lossy().to_string(),
+        50 * 1024 * 1024,
     ));
     let setup_token = farder_server::auth::generate_setup_token();
     let setup_hex = hex::encode(&setup_token);

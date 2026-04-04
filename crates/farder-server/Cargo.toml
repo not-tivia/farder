@@ -29,5 +29,6 @@ clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 rand = "0.8"
 hex = "0.4"
+sha2 = "0.10"
 
 [dev-dependencies]
