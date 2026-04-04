@@ -24,7 +24,13 @@ export default function ChannelSidebar() {
       await api.subscribeChannels([channel.id]);
       const msgs = await api.fetchHistory(channel.id);
       // Server returns newest-first; reverse for chronological display
-      dispatch({ type: "SET_MESSAGES", payload: { channelId: channel.id, messages: msgs.reverse() } });
+      const reversed = msgs.reverse();
+      dispatch({ type: "SET_MESSAGES", payload: { channelId: channel.id, messages: reversed } });
+      // Mark channel as read with latest message id
+      if (reversed.length > 0) {
+        const latestId = Math.max(...reversed.map((m) => m.id));
+        dispatch({ type: "MARK_READ", payload: { channelId: channel.id, lastMessageId: latestId } });
+      }
     } catch {
       // ignore fetch errors
     }
@@ -39,10 +45,13 @@ export default function ChannelSidebar() {
 
   function renderChannel(ch: ChannelInfo) {
     const isActive = ch.id === state.currentChannelId;
+    const lastRead = state.readState?.[ch.id] ?? 0;
+    const channelMsgs = state.messages[ch.id] ?? [];
+    const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== state.currentChannelId;
     return (
       <div
         key={ch.id}
-        className={`channel-item${isActive ? " active" : ""}`}
+        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
         onClick={() => handleSelectChannel(ch)}
       >
         <span className="channel-prefix">#</span>

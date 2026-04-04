@@ -207,6 +207,20 @@ body {
   color: rgba(255,255,255,0.8);
 }
 
+.channel-item.unread {
+  font-weight: bold;
+  color: white;
+}
+
+.channel-item.unread::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: white;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
 .user-footer {
   padding: 8px 10px;
   background: rgba(0,0,0,0.25);
