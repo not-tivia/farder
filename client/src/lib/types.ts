@@ -28,7 +28,7 @@ export interface RoleInfo {
 export interface MemberInfo {
   public_key: { bytes: number[] };
   display_name: string;
-  joined_at: string;
+  joined_at: number;
   role_ids: number[];
 }
 
@@ -54,8 +54,8 @@ export interface MessageInfo {
   channel_id: number;
   author: { bytes: number[] };
   content: string;
-  timestamp: string;
-  edited_at: string | null;
+  timestamp: number;
+  edited_at: number | null;
   reply_to: number | null;
   pinned: boolean;
   attachments: AttachmentInfo[];
@@ -74,7 +74,7 @@ export interface ConnectResult {
 
 export interface SendMessageResult {
   id: number;
-  timestamp: string;
+  timestamp: number;
 }
 
 export const DELETED_USER_KEY: number[] = new Array(32).fill(0);

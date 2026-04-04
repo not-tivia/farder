@@ -36,7 +36,7 @@ function formatTimestamp(ts: number): string {
     if (isYesterday) return `Yesterday at ${time}`;
     return `${date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })} at ${time}`;
   } catch {
-    return ts;
+    return String(ts);
   }
 }
 
