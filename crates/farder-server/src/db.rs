@@ -136,6 +136,13 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             FOREIGN KEY (message_id) REFERENCES messages(id)
         );
         CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
+
+        CREATE TABLE IF NOT EXISTS deletion_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_key BLOB UNIQUE NOT NULL,
+            requested_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
     ")?;
 
     // Migration: add thread_parent_message_id column to channels if missing.
@@ -200,6 +207,7 @@ mod tests {
             "files",
             "message_attachments",
             "reactions",
+            "deletion_requests",
         ];
 
         for table in &expected_tables {

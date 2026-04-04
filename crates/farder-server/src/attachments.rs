@@ -525,6 +525,32 @@ pub fn delete_attachments_for_message(
     Ok(zero_refs)
 }
 
+/// Remove all attachments for messages authored by `author`.
+/// Returns accumulated orphan file_ids (those whose ref_count reached 0).
+pub fn remove_attachments_for_author_messages(
+    conn: &Connection,
+    author: &PublicKey,
+) -> Result<Vec<u64>> {
+    // Get all message IDs authored by this user.
+    let mut stmt = conn.prepare(
+        "SELECT id FROM messages WHERE author = ?1",
+    )?;
+    let message_ids: Vec<u64> = stmt
+        .query_map(params![author.as_bytes().as_slice()], |row| {
+            let id: i64 = row.get(0)?;
+            Ok(id as u64)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut all_orphans = Vec::new();
+    for msg_id in message_ids {
+        let orphans = delete_attachments_for_message(conn, msg_id)?;
+        all_orphans.extend(orphans);
+    }
+
+    Ok(all_orphans)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -761,6 +787,44 @@ mod tests {
         // Empty slice returns empty map.
         let empty = get_attachments_for_messages(&conn, &[]).unwrap();
         assert!(empty.is_empty());
+
+        std::fs::remove_dir_all(&storage).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: remove_attachments_for_author_messages
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_remove_attachments_for_author_messages() {
+        let conn = db::open_in_memory().unwrap();
+        let channel_id = create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let alice = gen_pk();
+        register_member(&conn, &alice, "Alice").unwrap();
+        let storage = make_temp_dir();
+
+        // Create a message with an attachment by alice.
+        let msg_id = insert_message(&conn, channel_id, &alice, "alice's message", None).unwrap();
+        let data = b"attachment data";
+        let hash = compute_sha256(data);
+        let file_id = store_file(
+            &conn, &storage, &alice, "file.txt", data, &hash, "text/plain", None, None, None,
+        ).unwrap();
+        create_message_attachment(&conn, msg_id, file_id, 0, "file.txt", None, None, None).unwrap();
+
+        // Verify ref_count=1 before removal.
+        assert_eq!(get_file(&conn, file_id).unwrap().unwrap().ref_count, 1);
+
+        // Remove attachments for alice's messages.
+        let orphans = remove_attachments_for_author_messages(&conn, &alice).unwrap();
+        assert!(orphans.contains(&file_id), "file_id should be an orphan after removal");
+
+        // The attachment should be gone.
+        let attachments = get_attachments_for_message(&conn, msg_id).unwrap();
+        assert!(attachments.is_empty(), "attachments should be gone after removal");
+
+        // ref_count should now be 0.
+        assert_eq!(get_file(&conn, file_id).unwrap().unwrap().ref_count, 0);
 
         std::fs::remove_dir_all(&storage).ok();
     }

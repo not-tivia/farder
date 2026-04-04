@@ -76,6 +76,14 @@ pub fn delete_reactions_for_message(conn: &Connection, message_id: u64) -> Resul
     Ok(())
 }
 
+pub fn delete_reactions_by_user(conn: &Connection, user_key: &PublicKey) -> Result<u64> {
+    let count = conn.execute(
+        "DELETE FROM reactions WHERE user_key = ?1",
+        params![user_key.as_bytes().as_slice()],
+    )?;
+    Ok(count as u64)
+}
+
 pub fn get_reactions_for_message(
     conn: &Connection,
     message_id: u64,
@@ -286,6 +294,25 @@ mod tests {
 
         let groups = get_reactions_for_message(&conn, msg_id, &user1).unwrap();
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_delete_reactions_by_user() {
+        let (conn, msg_id, user1, user2) = setup();
+
+        add_reaction(&conn, msg_id, &user1, "👍").unwrap();
+        add_reaction(&conn, msg_id, &user1, "❤️").unwrap();
+        add_reaction(&conn, msg_id, &user2, "👍").unwrap();
+
+        let deleted = delete_reactions_by_user(&conn, &user1).unwrap();
+        assert_eq!(deleted, 2, "should have deleted 2 reactions for user1");
+
+        // user2's reaction should remain.
+        let groups = get_reactions_for_message(&conn, msg_id, &user2).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].emoji, "👍");
+        assert_eq!(groups[0].count, 1);
+        assert!(groups[0].me, "user2 still has their reaction");
     }
 
     #[test]

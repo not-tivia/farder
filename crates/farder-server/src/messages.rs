@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use farder_crypto::identity::PublicKey;
-use farder_protocol::server::MessageInfo;
+use farder_protocol::server::{MessageInfo, DELETED_USER_KEY};
 
 use crate::db::now;
 
@@ -363,6 +363,44 @@ pub fn delete_messages_before(
     Ok(count)
 }
 
+/// Anonymize all messages by the given author:
+/// - Removes old content from the FTS5 index and inserts "[deleted]"
+/// - Sets author = DELETED_USER_KEY, content = '[deleted]' in the messages table
+/// Returns the count of messages updated.
+pub fn anonymize_messages_by_author(conn: &Connection, author: &PublicKey) -> Result<u64> {
+    // Collect all (id, content) for this author.
+    let mut stmt = conn.prepare(
+        "SELECT id, content FROM messages WHERE author = ?1",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map(params![author.as_bytes().as_slice()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let count = rows.len() as u64;
+
+    // Update FTS5 for each message: delete old content, insert "[deleted]".
+    for (id, old_content) in &rows {
+        conn.execute(
+            "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?1, ?2)",
+            params![id, old_content],
+        )?;
+        conn.execute(
+            "INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)",
+            params![id, "[deleted]"],
+        )?;
+    }
+
+    // Bulk UPDATE: set author sentinel and content.
+    conn.execute(
+        "UPDATE messages SET author = ?1, content = '[deleted]' WHERE author = ?2",
+        params![DELETED_USER_KEY.as_slice(), author.as_bytes().as_slice()],
+    )?;
+
+    Ok(count)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -620,5 +658,49 @@ mod tests {
         crate::reactions::add_reaction(&conn, msg_id, &pk, "❤️").unwrap();
         let history = fetch_history(&conn, ch_id, None, 50, &pk).unwrap();
         assert_eq!(history[0].reactions.len(), 1);
+    }
+
+    #[test]
+    fn test_anonymize_messages_by_author() {
+        let conn = db::open_in_memory().unwrap();
+        let channel_id = create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let alice = Keypair::generate().public_key();
+        let bob = Keypair::generate().public_key();
+        register_member(&conn, &alice, "Alice").unwrap();
+        register_member(&conn, &bob, "Bob").unwrap();
+
+        let a1 = insert_message_with_ts(&conn, channel_id, &alice, "Hello from Alice", None, 1000).unwrap();
+        let a2 = insert_message_with_ts(&conn, channel_id, &alice, "Another Alice message", None, 2000).unwrap();
+        let b1 = insert_message_with_ts(&conn, channel_id, &bob, "Bob says hi", None, 3000).unwrap();
+
+        let count = anonymize_messages_by_author(&conn, &alice).unwrap();
+        assert_eq!(count, 2, "should have anonymized 2 alice messages");
+
+        // Alice's messages should have sentinel author and [deleted] content.
+        let sentinel = farder_protocol::server::DELETED_USER_KEY;
+        let check_a1: (Vec<u8>, String) = conn.query_row(
+            "SELECT author, content FROM messages WHERE id = ?1",
+            params![a1 as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(check_a1.0.as_slice(), sentinel.as_slice());
+        assert_eq!(check_a1.1, "[deleted]");
+
+        let check_a2: (Vec<u8>, String) = conn.query_row(
+            "SELECT author, content FROM messages WHERE id = ?1",
+            params![a2 as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(check_a2.0.as_slice(), sentinel.as_slice());
+        assert_eq!(check_a2.1, "[deleted]");
+
+        // Bob's message should be untouched.
+        let check_b1: (Vec<u8>, String) = conn.query_row(
+            "SELECT author, content FROM messages WHERE id = ?1",
+            params![b1 as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(check_b1.0.as_slice(), bob.as_bytes().as_slice());
+        assert_eq!(check_b1.1, "Bob says hi");
     }
 }

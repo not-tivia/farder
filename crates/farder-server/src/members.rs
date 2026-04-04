@@ -374,6 +374,114 @@ pub fn get_member_role_permissions(conn: &Connection, pk: &PublicKey) -> Result<
 }
 
 // ---------------------------------------------------------------------------
+// Deletion request operations
+// ---------------------------------------------------------------------------
+
+pub struct DeletionRequest {
+    pub member_key: PublicKey,
+    pub requested_at: u64,
+    pub expires_at: u64,
+}
+
+const DELETION_GRACE_PERIOD_SECS: u64 = 72 * 3600;
+
+pub fn create_deletion_request(conn: &Connection, pk: &PublicKey) -> Result<DeletionRequest> {
+    let requested_at = now();
+    let expires_at = requested_at + DELETION_GRACE_PERIOD_SECS;
+    create_deletion_request_with_expires(conn, pk, requested_at, expires_at)
+}
+
+pub fn create_deletion_request_with_expires(
+    conn: &Connection,
+    pk: &PublicKey,
+    requested_at: u64,
+    expires_at: u64,
+) -> Result<DeletionRequest> {
+    conn.execute(
+        "INSERT INTO deletion_requests (member_key, requested_at, expires_at) VALUES (?1, ?2, ?3)",
+        params![pk.as_bytes().as_slice(), requested_at as i64, expires_at as i64],
+    )?;
+    Ok(DeletionRequest {
+        member_key: pk.clone(),
+        requested_at,
+        expires_at,
+    })
+}
+
+pub fn get_deletion_request(conn: &Connection, pk: &PublicKey) -> Result<Option<DeletionRequest>> {
+    let row = conn
+        .query_row(
+            "SELECT member_key, requested_at, expires_at FROM deletion_requests WHERE member_key = ?1",
+            params![pk.as_bytes().as_slice()],
+            |row| {
+                let key_bytes: Vec<u8> = row.get(0)?;
+                let requested_at: i64 = row.get(1)?;
+                let expires_at: i64 = row.get(2)?;
+                Ok((key_bytes, requested_at, expires_at))
+            },
+        )
+        .optional()?;
+
+    match row {
+        None => Ok(None),
+        Some((key_bytes, requested_at, expires_at)) => {
+            let arr: [u8; 32] = key_bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("member_key blob wrong length"))?;
+            Ok(Some(DeletionRequest {
+                member_key: PublicKey::from_bytes(arr),
+                requested_at: requested_at as u64,
+                expires_at: expires_at as u64,
+            }))
+        }
+    }
+}
+
+pub fn cancel_deletion_request(conn: &Connection, pk: &PublicKey) -> Result<()> {
+    conn.execute(
+        "DELETE FROM deletion_requests WHERE member_key = ?1",
+        params![pk.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+pub fn list_expired_deletion_requests(conn: &Connection) -> Result<Vec<DeletionRequest>> {
+    let now_ts = now();
+    let mut stmt = conn.prepare(
+        "SELECT member_key, requested_at, expires_at FROM deletion_requests WHERE expires_at < ?1",
+    )?;
+
+    let rows = stmt.query_map(params![now_ts as i64], |row| {
+        let key_bytes: Vec<u8> = row.get(0)?;
+        let requested_at: i64 = row.get(1)?;
+        let expires_at: i64 = row.get(2)?;
+        Ok((key_bytes, requested_at, expires_at))
+    })?;
+
+    let mut requests = Vec::new();
+    for row in rows {
+        let (key_bytes, requested_at, expires_at) = row?;
+        let arr: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidColumnType(0, "member_key".into(), rusqlite::types::Type::Blob))?;
+        requests.push(DeletionRequest {
+            member_key: PublicKey::from_bytes(arr),
+            requested_at: requested_at as u64,
+            expires_at: expires_at as u64,
+        });
+    }
+    Ok(requests)
+}
+
+pub fn delete_deletion_request(conn: &Connection, pk: &PublicKey) -> Result<()> {
+    conn.execute(
+        "DELETE FROM deletion_requests WHERE member_key = ?1",
+        params![pk.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -589,5 +697,77 @@ mod tests {
         let mut perms = get_member_role_permissions(&conn, &pk).unwrap();
         perms.sort();
         assert_eq!(perms, vec![0x01, 0x02]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Deletion request tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_and_get_deletion_request() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = gen_pk();
+        register_member(&conn, &pk, "Alice").unwrap();
+
+        let req = create_deletion_request(&conn, &pk).unwrap();
+        assert_eq!(req.member_key, pk);
+        assert!(req.requested_at > 0);
+        assert_eq!(req.expires_at, req.requested_at + 72 * 3600);
+
+        let fetched = get_deletion_request(&conn, &pk).unwrap().expect("deletion request should exist");
+        assert_eq!(fetched.member_key, pk);
+        assert_eq!(fetched.requested_at, req.requested_at);
+        assert_eq!(fetched.expires_at, req.expires_at);
+    }
+
+    #[test]
+    fn test_duplicate_deletion_request_fails() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = gen_pk();
+        register_member(&conn, &pk, "Bob").unwrap();
+
+        create_deletion_request(&conn, &pk).unwrap();
+        let result = create_deletion_request(&conn, &pk);
+        assert!(result.is_err(), "duplicate deletion request should fail (UNIQUE constraint)");
+    }
+
+    #[test]
+    fn test_cancel_deletion_request() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = gen_pk();
+        register_member(&conn, &pk, "Carol").unwrap();
+
+        create_deletion_request(&conn, &pk).unwrap();
+        cancel_deletion_request(&conn, &pk).unwrap();
+
+        let result = get_deletion_request(&conn, &pk).unwrap();
+        assert!(result.is_none(), "deletion request should be gone after cancel");
+    }
+
+    #[test]
+    fn test_list_expired_deletion_requests() {
+        let conn = db::open_in_memory().unwrap();
+        let pk1 = gen_pk();
+        let pk2 = gen_pk();
+        let pk3 = gen_pk();
+        register_member(&conn, &pk1, "Dave").unwrap();
+        register_member(&conn, &pk2, "Eve").unwrap();
+        register_member(&conn, &pk3, "Frank").unwrap();
+
+        // pk1 and pk2: already expired (timestamps in the past).
+        create_deletion_request_with_expires(&conn, &pk1, 1000, 2000).unwrap();
+        create_deletion_request_with_expires(&conn, &pk2, 1000, 3000).unwrap();
+
+        // pk3: far in the future (not expired).
+        let future = crate::db::now() + 100_000;
+        create_deletion_request_with_expires(&conn, &pk3, crate::db::now(), future).unwrap();
+
+        let expired = list_expired_deletion_requests(&conn).unwrap();
+        assert_eq!(expired.len(), 2, "only the two past-expired requests should appear");
+
+        let expired_keys: Vec<PublicKey> = expired.into_iter().map(|r| r.member_key).collect();
+        assert!(expired_keys.contains(&pk1));
+        assert!(expired_keys.contains(&pk2));
+        assert!(!expired_keys.contains(&pk3));
     }
 }

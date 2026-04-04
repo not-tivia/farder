@@ -1,6 +1,15 @@
 use farder_crypto::identity::PublicKey;
 use serde::{Deserialize, Serialize};
 
+pub const DELETED_USER_KEY: [u8; 32] = [0u8; 32];
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DeletionStatus {
+    pub pending: bool,
+    pub requested_at: Option<u64>,
+    pub expires_at: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChannelType {
     Text,
@@ -164,6 +173,9 @@ pub enum ServerRequest {
     CreateThread { message_id: u64, name: Option<String> },
     AddReaction { message_id: u64, emoji: String },
     RemoveReaction { message_id: u64, emoji: String },
+    RequestDeletion,
+    CancelDeletion,
+    GetDeletionStatus,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -191,6 +203,7 @@ pub enum ServerResponse {
     },
     Members { members: Vec<MemberInfo> },
     InviteCreated { code: String },
+    DeletionStatusResp { status: DeletionStatus },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,6 +229,9 @@ pub enum ServerEvent {
     PermissionsChanged,
     ReactionAdded { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey },
     ReactionRemoved { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey },
+    DeletionRequested { public_key: PublicKey },
+    DeletionCancelled { public_key: PublicKey },
+    DeletionExecuted { public_key: PublicKey },
 }
 
 #[cfg(test)]
@@ -391,6 +407,9 @@ mod tests {
             ServerRequest::CreateThread { message_id: 1, name: Some("thread".into()) },
             ServerRequest::AddReaction { message_id: 1, emoji: "👍".into() },
             ServerRequest::RemoveReaction { message_id: 1, emoji: "👍".into() },
+            ServerRequest::RequestDeletion,
+            ServerRequest::CancelDeletion,
+            ServerRequest::GetDeletionStatus,
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };
@@ -485,6 +504,28 @@ mod tests {
             }
             _ => panic!("wrong frame variant"),
         }
+    }
+
+    #[test]
+    fn test_roundtrip_deletion_status() {
+        let status = DeletionStatus {
+            pending: true,
+            requested_at: Some(1_000_000),
+            expires_at: Some(1_000_000 + 72 * 3600),
+        };
+        let bytes = codec::encode(&status).unwrap();
+        let decoded: DeletionStatus = codec::decode(&bytes).unwrap();
+        assert_eq!(decoded, status);
+
+        // Also test the non-pending variant.
+        let status_none = DeletionStatus {
+            pending: false,
+            requested_at: None,
+            expires_at: None,
+        };
+        let bytes2 = codec::encode(&status_none).unwrap();
+        let decoded2: DeletionStatus = codec::decode(&bytes2).unwrap();
+        assert_eq!(decoded2, status_none);
     }
 
     #[test]

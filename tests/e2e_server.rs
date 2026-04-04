@@ -530,4 +530,42 @@ async fn test_e2e_server_bootstrap_and_chat() {
         }
         other => panic!("expected History, got {:?}", other),
     }
+
+    // ---- DATA DELETION FLOW ----
+
+    // 19. User requests deletion
+    send_request(&mut user_send, 5, ServerRequest::RequestDeletion).await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    match resp {
+        ServerResponse::Ok => {}
+        other => panic!("expected Ok for RequestDeletion, got {:?}", other),
+    }
+
+    // 20. User checks deletion status
+    send_request(&mut user_send, 6, ServerRequest::GetDeletionStatus).await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    match resp {
+        ServerResponse::DeletionStatusResp { status } => {
+            assert!(status.pending);
+            assert!(status.requested_at.is_some());
+            assert!(status.expires_at.is_some());
+        }
+        other => panic!("expected DeletionStatusResp, got {:?}", other),
+    }
+
+    // 21. User cancels deletion
+    send_request(&mut user_send, 7, ServerRequest::CancelDeletion).await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    match resp {
+        ServerResponse::Ok => {}
+        other => panic!("expected Ok for CancelDeletion, got {:?}", other),
+    }
+
+    // 22. Verify no longer pending
+    send_request(&mut user_send, 8, ServerRequest::GetDeletionStatus).await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    match resp {
+        ServerResponse::DeletionStatusResp { status } => assert!(!status.pending),
+        other => panic!("expected DeletionStatusResp, got {:?}", other),
+    }
 }
