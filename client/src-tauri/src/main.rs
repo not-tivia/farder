@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod commands;
+mod connection;
 mod state;
+mod tls;
 use state::AppState;
 
 fn main() {
