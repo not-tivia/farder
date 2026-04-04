@@ -3,6 +3,7 @@ import { useServer } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo } from "../lib/types";
 import InviteDialog from "./InviteDialog";
+import ServerSettingsDialog from "./ServerSettingsDialog";
 
 function UserFooter() {
   const [name, setName] = useState<string | null>(null);
@@ -17,6 +18,7 @@ function UserFooter() {
 export default function ChannelSidebar() {
   const { state, dispatch } = useServer();
   const [showInvite, setShowInvite] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
@@ -78,7 +80,10 @@ export default function ChannelSidebar() {
       <div className="channel-sidebar">
         <div className="server-header">
           <div className="server-name">{state.serverName}</div>
-          <button className="server-invite-btn" onClick={() => setShowInvite(true)} title="Create Invite">+</button>
+          <div style={{ display: "flex", gap: "4px" }}>
+            <button className="server-invite-btn" onClick={() => setShowSettings(true)} title="Server Settings">&#9881;</button>
+            <button className="server-invite-btn" onClick={() => setShowInvite(true)} title="Create Invite">+</button>
+          </div>
         </div>
         <div className="channel-list">
           {uncategorized.map(renderChannel)}
@@ -89,6 +94,7 @@ export default function ChannelSidebar() {
         </div>
       </div>
       {showInvite && <InviteDialog onClose={() => setShowInvite(false)} />}
+      {showSettings && <ServerSettingsDialog onClose={() => setShowSettings(false)} />}
     </>
   );
 }

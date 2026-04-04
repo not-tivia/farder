@@ -379,6 +379,57 @@ pub async fn create_thread(
 }
 
 // ---------------------------------------------------------------------------
+// Admin commands
+// ---------------------------------------------------------------------------
+
+/// Create a new channel on the server.
+#[tauri::command]
+pub async fn create_channel(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    channel_type: String,
+    category_id: Option<u64>,
+) -> Result<(), String> {
+    use farder_protocol::server::ChannelType;
+    let ch_type = match channel_type.as_str() {
+        "Announcement" => ChannelType::Announcement,
+        _ => ChannelType::Text,
+    };
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::CreateChannel { name, channel_type: ch_type, category_id, position: None },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Create a new category on the server.
+#[tauri::command]
+pub async fn create_category(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::CreateCategory { name, position: None },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Invite commands
 // ---------------------------------------------------------------------------
 

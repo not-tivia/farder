@@ -834,6 +834,44 @@ body {
 }
 .server-invite-btn:hover { background: rgba(255,255,255,0.3); }
 
+/* ── Success Text ───────────────────────────────────────── */
+.success-text {
+  color: #007700;
+  font-size: 11px;
+}
+
+/* ── Settings Tabs ──────────────────────────────────────── */
+.settings-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--xp-border);
+}
+
+.settings-tab {
+  padding: 4px 10px;
+  background: var(--xp-window-bg);
+  border: 1px solid var(--xp-border);
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  cursor: pointer;
+  font-family: var(--xp-font);
+  font-size: var(--xp-font-size);
+  color: #444;
+}
+
+.settings-tab.active {
+  background: #fff;
+  color: var(--xp-blue-dark);
+  font-weight: bold;
+}
+
+.settings-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 /* ── Reconnect Overlay ──────────────────────────────────── */
 .reconnect-overlay {
   position: absolute;
