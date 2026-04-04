@@ -84,11 +84,15 @@ pub async fn connect_server(
     let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
 
     let (conn, send, recv, _session_token) =
-        connect_and_authenticate(endpoint, addr, &keypair, invite_code, setup_token)
+        connect_and_authenticate(endpoint.clone(), addr, &keypair, invite_code, setup_token)
             .await
             .map_err(|e| e.to_string())?;
 
-    // Store connection (keeps QUIC alive) and send stream.
+    // Store endpoint + connection (both must stay alive or QUIC closes).
+    {
+        let mut ep = state.endpoint.lock().map_err(|e| e.to_string())?;
+        *ep = Some(endpoint);
+    }
     {
         let mut c = state.connection.lock().map_err(|e| e.to_string())?;
         *c = Some(conn);
@@ -126,7 +130,11 @@ pub async fn connect_server(
 /// Disconnect from the current server.
 #[tauri::command]
 pub async fn disconnect_server(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    // Clear connection and send stream.
+    // Clear endpoint, connection, and send stream.
+    {
+        let mut ep = state.endpoint.lock().map_err(|e| e.to_string())?;
+        *ep = None;
+    }
     {
         let mut c = state.connection.lock().map_err(|e| e.to_string())?;
         *c = None;

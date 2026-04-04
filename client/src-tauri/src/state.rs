@@ -1,5 +1,5 @@
 use farder_protocol::server::ServerResponse;
-use quinn::{Connection, SendStream};
+use quinn::{Connection, Endpoint, SendStream};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -8,6 +8,8 @@ use tokio::task::JoinHandle;
 pub struct AppState {
     /// Raw signing key bytes for the stored identity keypair.
     pub signing_key_bytes: Mutex<Option<[u8; 32]>>,
+    /// The QUIC endpoint (must be kept alive or connections close).
+    pub endpoint: Mutex<Option<Endpoint>>,
     /// The active QUIC connection (must be kept alive or streams die).
     pub connection: Mutex<Option<Connection>>,
     /// The active QUIC send stream to the server.
@@ -26,6 +28,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             signing_key_bytes: Mutex::new(None),
+            endpoint: Mutex::new(None),
             connection: Mutex::new(None),
             send_stream: tokio::sync::Mutex::new(None),
             next_request_id: AtomicU32::new(1),

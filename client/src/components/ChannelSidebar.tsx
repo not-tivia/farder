@@ -21,7 +21,8 @@ export default function ChannelSidebar() {
     try {
       await api.subscribeChannels([channel.id]);
       const msgs = await api.fetchHistory(channel.id);
-      dispatch({ type: "SET_MESSAGES", payload: { channelId: channel.id, messages: msgs } });
+      // Server returns newest-first; reverse for chronological display
+      dispatch({ type: "SET_MESSAGES", payload: { channelId: channel.id, messages: msgs.reverse() } });
     } catch {
       // ignore fetch errors
     }
