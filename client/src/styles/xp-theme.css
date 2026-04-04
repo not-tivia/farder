@@ -650,6 +650,13 @@ body {
   border-radius: 2px;
 }
 
+.connect-hint {
+  font-size: var(--xp-font-size-small);
+  color: var(--xp-text-muted);
+  min-height: 14px;
+  margin-top: 2px;
+}
+
 .connect-actions {
   display: flex;
   justify-content: flex-end;
