@@ -253,7 +253,7 @@ pub fn handle_request(
                 )?;
             }
 
-            let msg = match messages::get_message(conn, id)? {
+            let msg = match messages::get_message(conn, id, member)? {
                 Some(m) => m,
                 None => return err("failed to retrieve sent message"),
             };
@@ -275,7 +275,7 @@ pub fn handle_request(
             if new_content.len() > 8000 {
                 return err("message content too long (max 8000 characters)");
             }
-            let msg = match messages::get_message(conn, message_id)? {
+            let msg = match messages::get_message(conn, message_id, member)? {
                 Some(m) => m,
                 None => return err("message not found"),
             };
@@ -283,7 +283,7 @@ pub fn handle_request(
                 return err("can only edit own messages");
             }
             messages::edit_message(conn, message_id, &new_content)?;
-            let updated = messages::get_message(conn, message_id)?.unwrap();
+            let updated = messages::get_message(conn, message_id, member)?.unwrap();
             let edited_at = updated.edited_at.unwrap_or(0);
             let channel_id = msg.channel_id;
             let event = BroadcastEvent {
@@ -299,7 +299,7 @@ pub fn handle_request(
         }
 
         ServerRequest::DeleteMessage { message_id } => {
-            let msg = match messages::get_message(conn, message_id)? {
+            let msg = match messages::get_message(conn, message_id, member)? {
                 Some(m) => m,
                 None => return err("message not found"),
             };
@@ -338,12 +338,12 @@ pub fn handle_request(
                 return err("missing READ_MESSAGES permission");
             }
             let limit = limit.min(500);
-            let msgs = messages::fetch_history(conn, channel_id, before_id, limit)?;
+            let msgs = messages::fetch_history(conn, channel_id, before_id, limit, member)?;
             ok(ServerResponse::History { messages: msgs })
         }
 
         ServerRequest::PinMessage { message_id } => {
-            let msg = match messages::get_message(conn, message_id)? {
+            let msg = match messages::get_message(conn, message_id, member)? {
                 Some(m) => m,
                 None => return err("message not found"),
             };
@@ -364,7 +364,7 @@ pub fn handle_request(
         }
 
         ServerRequest::UnpinMessage { message_id } => {
-            let msg = match messages::get_message(conn, message_id)? {
+            let msg = match messages::get_message(conn, message_id, member)? {
                 Some(m) => m,
                 None => return err("message not found"),
             };
@@ -396,7 +396,7 @@ pub fn handle_request(
                     return err("missing READ_MESSAGES permission");
                 }
             }
-            let mut msgs = messages::search_messages(conn, &query, channel_id, limit)?;
+            let mut msgs = messages::search_messages(conn, &query, channel_id, limit, member)?;
             if channel_id.is_none() && !is_owner {
                 // Filter results to channels the member can read.
                 msgs.retain(|msg| {
@@ -795,11 +795,57 @@ pub fn handle_request(
         ServerRequest::Subscribe { .. } => ok(ServerResponse::Ok),
 
         // ----------------------------------------------------------------
-        // Threads and reactions (not yet implemented)
+        // Threads and reactions
         // ----------------------------------------------------------------
-        ServerRequest::CreateThread { .. } => err("not yet implemented"),
-        ServerRequest::AddReaction { .. } => err("not yet implemented"),
-        ServerRequest::RemoveReaction { .. } => err("not yet implemented"),
+        ServerRequest::CreateThread { message_id, name } => {
+            let msg = messages::get_message(conn, message_id, member)?
+                .ok_or_else(|| anyhow::anyhow!("message not found"))?;
+            let perms = resolve_member_perms(conn, member, msg.channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::SEND_MESSAGES) {
+                return err("missing SEND_MESSAGES permission");
+            }
+            if crate::channels::get_thread_for_message(conn, message_id)?.is_some() {
+                return err("thread already exists for this message");
+            }
+            let thread_name = name.unwrap_or_else(|| {
+                let t: String = msg.content.chars().take(50).collect();
+                if t.is_empty() { "Thread".to_string() } else { t }
+            });
+            let thread_id = channels::create_thread(conn, &thread_name, msg.channel_id, message_id)?;
+            let thread = channels::get_channel(conn, thread_id)?.unwrap();
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::ChannelCreated { channel: thread },
+            }])
+        }
+
+        ServerRequest::AddReaction { message_id, emoji } => {
+            let msg = messages::get_message(conn, message_id, member)?
+                .ok_or_else(|| anyhow::anyhow!("message not found"))?;
+            let perms = resolve_member_perms(conn, member, msg.channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::READ_MESSAGES) {
+                return err("missing READ_MESSAGES permission");
+            }
+            crate::reactions::add_reaction(conn, message_id, member, &emoji)?;
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::Subscribers(msg.channel_id),
+                event: ServerEvent::ReactionAdded {
+                    message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(),
+                },
+            }])
+        }
+
+        ServerRequest::RemoveReaction { message_id, emoji } => {
+            let msg = messages::get_message(conn, message_id, member)?
+                .ok_or_else(|| anyhow::anyhow!("message not found"))?;
+            crate::reactions::remove_reaction(conn, message_id, member, &emoji)?;
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::Subscribers(msg.channel_id),
+                event: ServerEvent::ReactionRemoved {
+                    message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(),
+                },
+            }])
+        }
     }
 }
 
@@ -1101,7 +1147,7 @@ mod tests {
         );
 
         // Verify content changed.
-        let msg = messages::get_message(&conn, msg_id).unwrap().unwrap();
+        let msg = messages::get_message(&conn, msg_id, &owner_pk).unwrap().unwrap();
         assert_eq!(msg.content, "Edited content");
     }
 
@@ -1249,7 +1295,7 @@ mod tests {
         }).unwrap();
         match result.response {
             ServerResponse::MessageSent { id, .. } => {
-                let msg = messages::get_message(&conn, id).unwrap().unwrap();
+                let msg = messages::get_message(&conn, id, &owner).unwrap().unwrap();
                 assert_eq!(msg.attachments.len(), 1);
                 assert_eq!(msg.attachments[0].name, "pic.png");
                 let file = crate::attachments::get_file(&conn, file_id).unwrap().unwrap();
@@ -1274,5 +1320,42 @@ mod tests {
             ServerResponse::Error { .. } => {}
             other => panic!("expected Error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_handle_create_thread() {
+        let (conn, owner) = setup();
+        let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let msg_id = messages::insert_message(&conn, ch_id, &owner, "thread me", None).unwrap();
+        let result = handle_request(&conn, &owner, true, ServerRequest::CreateThread {
+            message_id: msg_id, name: Some("discussion".to_string()),
+        }).unwrap();
+        match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
+        assert!(!result.events.is_empty());
+    }
+
+    #[test]
+    fn test_handle_add_reaction() {
+        let (conn, owner) = setup();
+        let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let msg_id = messages::insert_message(&conn, ch_id, &owner, "react", None).unwrap();
+        let result = handle_request(&conn, &owner, true, ServerRequest::AddReaction {
+            message_id: msg_id, emoji: "👍".to_string(),
+        }).unwrap();
+        match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
+        let msg = messages::get_message(&conn, msg_id, &owner).unwrap().unwrap();
+        assert_eq!(msg.reactions.len(), 1);
+    }
+
+    #[test]
+    fn test_handle_remove_reaction() {
+        let (conn, owner) = setup();
+        let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let msg_id = messages::insert_message(&conn, ch_id, &owner, "react", None).unwrap();
+        crate::reactions::add_reaction(&conn, msg_id, &owner, "👍").unwrap();
+        let result = handle_request(&conn, &owner, true, ServerRequest::RemoveReaction {
+            message_id: msg_id, emoji: "👍".to_string(),
+        }).unwrap();
+        match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
     }
 }
