@@ -35,10 +35,8 @@ export function useServerEvents(): void {
   useEffect(() => {
     const unlisten: Array<() => void> = [];
 
-    listen("server:new_message", (e) => {
-      console.log("[useServerEvents] new_message raw event:", JSON.stringify(e));
-      const msg = e.payload as MessageInfo;
-      dispatch({ type: "NEW_MESSAGE", payload: msg });
+    listen<MessageInfo>("server:new_message", (e) => {
+      dispatch({ type: "NEW_MESSAGE", payload: e.payload });
     }).then((u) => unlisten.push(u));
 
     listen<MessageInfo>("server:message_edited", (e) => {
