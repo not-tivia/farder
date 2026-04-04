@@ -50,7 +50,7 @@ export default function ChannelSidebar() {
     const lastRead = state.readState?.[ch.id] ?? 0;
     const channelMsgs = state.messages[ch.id] ?? [];
     const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== state.currentChannelId;
-    const prefix = ch.channel_type === "Announcement" ? "📢" : "#";
+    const prefix = ch.channel_type === "Announcement" ? "!" : "#";
     return (
       <div
         key={ch.id}

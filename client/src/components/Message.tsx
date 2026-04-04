@@ -149,7 +149,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
 
       {message.thread_id !== null && (
         <div className="thread-link" onClick={handleThreadClick}>
-          💬 {message.thread_message_count > 0 ? `${message.thread_message_count} replies` : "View thread"}
+          &gt; {message.thread_message_count > 0 ? `${message.thread_message_count} replies` : "View thread"}
         </div>
       )}
     </div>
@@ -195,7 +195,7 @@ function AttachmentDisplay({ attachment }: { attachment: AttachmentInfo }) {
 
   return (
     <div className="attachment-item" onClick={handleDownload} style={{ cursor: "pointer" }}>
-      <span>📎</span>
+      <span>[file]</span>
       <span>{attachment.name} ({formatSize(attachment.size)})</span>
       {downloading && <span> downloading...</span>}
     </div>
