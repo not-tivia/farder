@@ -3,6 +3,7 @@ import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, Conn
 
 export interface ServerState {
   connected: boolean;
+  connectionLost: boolean;
   serverName: string;
   channels: ChannelInfo[];
   categories: CategoryInfo[];
@@ -11,10 +12,12 @@ export interface ServerState {
   currentChannelId: number | null;
   messages: Record<number, MessageInfo[]>;
   threadChannelId: number | null;
+  readState: Record<number, number>;
 }
 
 const initialState: ServerState = {
   connected: false,
+  connectionLost: false,
   serverName: "",
   channels: [],
   categories: [],
@@ -23,11 +26,14 @@ const initialState: ServerState = {
   currentChannelId: null,
   messages: {},
   threadChannelId: null,
+  readState: {},
 };
 
 export type ServerAction =
   | { type: "CONNECTED"; payload: ConnectResult }
   | { type: "DISCONNECTED" }
+  | { type: "CONNECTION_LOST" }
+  | { type: "RECONNECTED" }
   | { type: "SET_MEMBERS"; payload: MemberInfo[] }
   | { type: "SELECT_CHANNEL"; payload: number }
   | { type: "SET_MESSAGES"; payload: { channelId: number; messages: MessageInfo[] } }
@@ -41,7 +47,8 @@ export type ServerAction =
   | { type: "MEMBER_LEFT"; payload: { publicKeyBytes: number[] } }
   | { type: "CHANNEL_CREATED"; payload: ChannelInfo }
   | { type: "CHANNEL_DELETED"; payload: { channelId: number } }
-  | { type: "VIEW_THREAD"; payload: number | null };
+  | { type: "VIEW_THREAD"; payload: number | null }
+  | { type: "MARK_READ"; payload: { channelId: number; lastMessageId: number } };
 
 function reducer(state: ServerState, action: ServerAction): ServerState {
   switch (action.type) {
@@ -60,10 +67,20 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
       };
     case "DISCONNECTED":
       return { ...initialState };
+    case "CONNECTION_LOST":
+      return { ...state, connected: false, connectionLost: true };
+    case "RECONNECTED":
+      return { ...state, connected: true, connectionLost: false };
     case "SET_MEMBERS":
       return { ...state, members: action.payload };
-    case "SELECT_CHANNEL":
-      return { ...state, currentChannelId: action.payload, threadChannelId: null };
+    case "SELECT_CHANNEL": {
+      const chMsgs = state.messages[action.payload] ?? [];
+      const latestId = chMsgs.length > 0 ? Math.max(...chMsgs.map((m) => m.id)) : 0;
+      const newReadState = latestId > 0
+        ? { ...state.readState, [action.payload]: latestId }
+        : state.readState;
+      return { ...state, currentChannelId: action.payload, threadChannelId: null, readState: newReadState };
+    }
     case "SET_MESSAGES":
       return {
         ...state,
@@ -168,6 +185,10 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
       };
     case "VIEW_THREAD":
       return { ...state, threadChannelId: action.payload };
+    case "MARK_READ": {
+      const { channelId, lastMessageId } = action.payload;
+      return { ...state, readState: { ...state.readState, [channelId]: lastMessageId } };
+    }
     default:
       return state;
   }
