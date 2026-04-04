@@ -126,7 +126,27 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments(message_id);
         CREATE INDEX IF NOT EXISTS idx_message_attachments_file ON message_attachments(file_id);
+
+        CREATE TABLE IF NOT EXISTS reactions (
+            message_id INTEGER NOT NULL,
+            user_key BLOB NOT NULL,
+            emoji TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (message_id, user_key, emoji),
+            FOREIGN KEY (message_id) REFERENCES messages(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
     ")?;
+
+    // Migration: add thread_parent_message_id column to channels if missing.
+    let has_thread_col: bool = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('channels') WHERE name = 'thread_parent_message_id'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_thread_col {
+        conn.execute("ALTER TABLE channels ADD COLUMN thread_parent_message_id INTEGER", [])?;
+    }
 
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
     // supported for virtual tables in older SQLite versions).
