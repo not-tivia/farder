@@ -45,6 +45,15 @@ fn err(reason: &str) -> Result<HandleResult> {
 // Permission resolution helper
 // ---------------------------------------------------------------------------
 
+pub fn resolve_member_perms_pub(
+    conn: &Connection,
+    member: &PublicKey,
+    channel_id: u64,
+    is_owner: bool,
+) -> Result<u64> {
+    resolve_member_perms(conn, member, channel_id, is_owner)
+}
+
 fn resolve_member_perms(
     conn: &Connection,
     member: &PublicKey,

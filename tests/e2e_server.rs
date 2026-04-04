@@ -239,12 +239,8 @@ async fn test_e2e_server_bootstrap_and_chat() {
             let state = Arc::clone(&server_state);
             tokio::spawn(async move {
                 let conn = incoming.await.unwrap();
-                // The server opens the bi-directional stream so it can immediately send the
-                // Challenge frame. (In QUIC/quinn the accepting side only wakes when the opening
-                // side writes; since our protocol has the server send first, the server must be
-                // the stream opener.)
-                let (send, recv) = conn.open_bi().await.unwrap();
-                let _ = farder_server::connection::handle_client(state, send, recv).await;
+                // handle_connection opens the bi-stream and runs the full auth + main loop.
+                let _ = farder_server::connection::handle_connection(state, conn).await;
             });
         }
     });

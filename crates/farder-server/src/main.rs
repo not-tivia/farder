@@ -116,11 +116,7 @@ async fn main() -> Result<()> {
                 Ok(conn) => {
                     let remote = conn.remote_address();
                     info!("New connection from {}", remote);
-                    let (send, recv) = match conn.open_bi().await {
-                        Ok(s) => s,
-                        Err(e) => { tracing::warn!("bi-stream error from {}: {}", remote, e); return; }
-                    };
-                    if let Err(e) = connection::handle_client(state, send, recv).await {
+                    if let Err(e) = connection::handle_connection(state, conn).await {
                         info!("Client {} disconnected: {}", remote, e);
                     }
                 }
