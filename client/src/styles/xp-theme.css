@@ -358,6 +358,15 @@ body {
   flex-wrap: wrap;
 }
 
+.reaction-bar.hover-only {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.message:hover .reaction-bar.hover-only {
+  opacity: 1;
+}
+
 .reaction {
   display: flex;
   align-items: center;

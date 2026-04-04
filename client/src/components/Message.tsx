@@ -21,9 +21,9 @@ function authorColor(key: string): string {
   return `hsl(${hue}, 65%, 38%)`;
 }
 
-function formatTimestamp(ts: string): string {
+function formatTimestamp(ts: number): string {
   try {
-    const date = new Date(ts);
+    const date = new Date(ts * 1000); // Unix seconds → JS milliseconds
     const now = new Date();
     const isToday = date.toDateString() === now.toDateString();
     const yesterday = new Date(now);
@@ -112,33 +112,31 @@ export default function Message({ message, memberNames, grouped = false }: Messa
         </div>
       )}
 
-      {(message.reactions.length > 0 || true) && (
-        <div className="reaction-bar">
-          {message.reactions.map((r) => (
-            <button
-              key={r.emoji}
-              className={`reaction${r.me ? " me" : ""}`}
-              onClick={() => handleReactionClick(r.emoji, r.me)}
-              title={`${r.emoji} ${r.count}`}
-            >
-              {r.emoji}
-              <span className="reaction-count">{r.count}</span>
-            </button>
-          ))}
-          <div style={{ position: "relative" }}>
-            <button
-              className="reaction-add-btn"
-              onClick={() => setShowPicker((p) => !p)}
-              title="Add reaction"
-            >
-              +
-            </button>
-            {showPicker && (
-              <ReactionPicker onSelect={handlePickerSelect} />
-            )}
-          </div>
+      <div className={`reaction-bar${message.reactions.length === 0 ? " hover-only" : ""}`}>
+        {message.reactions.map((r) => (
+          <button
+            key={r.emoji}
+            className={`reaction${r.me ? " me" : ""}`}
+            onClick={() => handleReactionClick(r.emoji, r.me)}
+            title={`${r.emoji} ${r.count}`}
+          >
+            {r.emoji}
+            <span className="reaction-count">{r.count}</span>
+          </button>
+        ))}
+        <div style={{ position: "relative" }}>
+          <button
+            className="reaction-add-btn"
+            onClick={() => setShowPicker((p) => !p)}
+            title="Add reaction"
+          >
+            +
+          </button>
+          {showPicker && (
+            <ReactionPicker onSelect={handlePickerSelect} />
+          )}
         </div>
-      )}
+      </div>
 
       {message.thread_id !== null && (
         <div className="thread-link" onClick={handleThreadClick}>

@@ -83,7 +83,7 @@ export default function ChatPanel() {
           const sameAuthor = prev &&
             JSON.stringify(prev.author.bytes) === JSON.stringify(msg.author.bytes);
           const withinWindow = prev &&
-            (new Date(msg.timestamp).getTime() - new Date(prev.timestamp).getTime()) < 300_000;
+            (msg.timestamp - prev.timestamp) < 300; // 5 minutes in seconds
           const grouped = !!(sameAuthor && withinWindow);
           return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} />;
         })}
