@@ -24,6 +24,7 @@ pub fn compute_sha256(data: &[u8]) -> String {
 
 /// Returns `{storage_dir}/{hash[0:2]}/{hash[2:4]}/{hash}`
 pub fn content_path(storage_dir: &str, hash: &str) -> PathBuf {
+    assert!(hash.len() >= 4, "hash must be at least 4 characters");
     PathBuf::from(storage_dir)
         .join(&hash[0..2])
         .join(&hash[2..4])
@@ -40,7 +41,11 @@ pub struct FileRecord {
     pub size: u64,
     pub mime_type: String,
     pub original_name: String,
+    pub uploaded_by: PublicKey,
     pub ref_count: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_secs: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +62,9 @@ pub fn store_file(
     data: &[u8],
     declared_hash: &str,
     mime_type: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    duration_secs: Option<f64>,
 ) -> Result<u64> {
     // Verify hash.
     let actual_hash = compute_sha256(data);
@@ -77,8 +85,8 @@ pub fn store_file(
 
     // Insert DB record.
     conn.execute(
-        "INSERT INTO files (hash, size, mime_type, original_name, uploaded_by, uploaded_at, ref_count) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        "INSERT INTO files (hash, size, mime_type, original_name, uploaded_by, uploaded_at, ref_count, width, height, duration_secs) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9)",
         params![
             actual_hash,
             data.len() as i64,
@@ -86,6 +94,85 @@ pub fn store_file(
             original_name,
             uploaded_by.as_bytes().as_slice(),
             now() as i64,
+            width.map(|v| v as i64),
+            height.map(|v| v as i64),
+            duration_secs,
+        ],
+    )?;
+
+    Ok(conn.last_insert_rowid() as u64)
+}
+
+/// Store a file from an already-written temp file. Computes SHA-256, verifies
+/// against `declared_hash`, moves to content-addressed path, inserts DB record.
+/// If a file with the same hash already exists, deletes the temp file and returns
+/// the existing file_id.
+pub fn store_or_reuse_from_temp_file(
+    conn: &Connection,
+    storage_dir: &str,
+    uploaded_by: &PublicKey,
+    original_name: &str,
+    temp_path: &std::path::Path,
+    declared_hash: &str,
+    mime_type: &str,
+    file_size: u64,
+    width: Option<u32>,
+    height: Option<u32>,
+    duration_secs: Option<f64>,
+) -> Result<u64> {
+    // Check for existing file first (dedup — inside the same DB lock).
+    if let Some(rec) = get_file_by_hash(conn, declared_hash)? {
+        // Temp file is no longer needed.
+        let _ = std::fs::remove_file(temp_path);
+        return Ok(rec.id);
+    }
+
+    // Compute SHA-256 of the temp file and verify.
+    let actual_hash = {
+        use std::io::Read;
+        let mut hasher = Sha256::new();
+        let mut f = std::fs::File::open(temp_path)?;
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hex::encode(hasher.finalize())
+    };
+
+    if actual_hash != declared_hash {
+        let _ = std::fs::remove_file(temp_path);
+        bail!(
+            "hash mismatch: declared {} but computed {}",
+            declared_hash,
+            actual_hash
+        );
+    }
+
+    // Move temp file to content-addressed path.
+    let dest = content_path(storage_dir, &actual_hash);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(temp_path, &dest)?;
+
+    // Insert DB record.
+    conn.execute(
+        "INSERT INTO files (hash, size, mime_type, original_name, uploaded_by, uploaded_at, ref_count, width, height, duration_secs) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9)",
+        params![
+            actual_hash,
+            file_size as i64,
+            mime_type,
+            original_name,
+            uploaded_by.as_bytes().as_slice(),
+            now() as i64,
+            width.map(|v| v as i64),
+            height.map(|v| v as i64),
+            duration_secs,
         ],
     )?;
 
@@ -102,11 +189,14 @@ pub fn store_or_reuse(
     data: &[u8],
     declared_hash: &str,
     mime_type: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    duration_secs: Option<f64>,
 ) -> Result<u64> {
     if let Some(rec) = get_file_by_hash(conn, declared_hash)? {
         return Ok(rec.id);
     }
-    store_file(conn, storage_dir, uploaded_by, original_name, data, declared_hash, mime_type)
+    store_file(conn, storage_dir, uploaded_by, original_name, data, declared_hash, mime_type, width, height, duration_secs)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,21 +209,35 @@ fn row_to_file_record(row: &rusqlite::Row) -> rusqlite::Result<FileRecord> {
     let size: i64 = row.get(2)?;
     let mime_type: String = row.get(3)?;
     let original_name: String = row.get(4)?;
-    let ref_count: i64 = row.get(5)?;
+    let uploaded_by_bytes: Vec<u8> = row.get(5)?;
+    let ref_count: i64 = row.get(6)?;
+    let width: Option<i64> = row.get(7)?;
+    let height: Option<i64> = row.get(8)?;
+    let duration_secs: Option<f64> = row.get(9)?;
+    let uploaded_by = PublicKey::from_bytes(
+        uploaded_by_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidColumnType(5, "uploaded_by".to_string(), rusqlite::types::Type::Blob))?,
+    );
     Ok(FileRecord {
         id: id as u64,
         hash,
         size: size as u64,
         mime_type,
         original_name,
+        uploaded_by,
         ref_count: ref_count as u64,
+        width: width.map(|v| v as u32),
+        height: height.map(|v| v as u32),
+        duration_secs,
     })
 }
 
 pub fn get_file(conn: &Connection, id: u64) -> Result<Option<FileRecord>> {
     let row = conn
         .query_row(
-            "SELECT id, hash, size, mime_type, original_name, ref_count \
+            "SELECT id, hash, size, mime_type, original_name, uploaded_by, ref_count, width, height, duration_secs \
              FROM files WHERE id = ?1",
             params![id as i64],
             row_to_file_record,
@@ -145,7 +249,7 @@ pub fn get_file(conn: &Connection, id: u64) -> Result<Option<FileRecord>> {
 pub fn get_file_by_hash(conn: &Connection, hash: &str) -> Result<Option<FileRecord>> {
     let row = conn
         .query_row(
-            "SELECT id, hash, size, mime_type, original_name, ref_count \
+            "SELECT id, hash, size, mime_type, original_name, uploaded_by, ref_count, width, height, duration_secs \
              FROM files WHERE hash = ?1",
             params![hash],
             row_to_file_record,
@@ -483,7 +587,7 @@ mod tests {
         let data = b"hello world";
         let hash = compute_sha256(data);
 
-        let file_id = store_file(&conn, &storage, &pk, "hello.txt", data, &hash, "text/plain").unwrap();
+        let file_id = store_file(&conn, &storage, &pk, "hello.txt", data, &hash, "text/plain", None, None, None).unwrap();
 
         // File exists on disk.
         let path = content_path(&storage, &hash);
@@ -514,8 +618,8 @@ mod tests {
         let data = b"deduplicated content";
         let hash = compute_sha256(data);
 
-        let id1 = store_or_reuse(&conn, &storage, &pk, "file.bin", data, &hash, "application/octet-stream").unwrap();
-        let id2 = store_or_reuse(&conn, &storage, &pk, "file.bin", data, &hash, "application/octet-stream").unwrap();
+        let id1 = store_or_reuse(&conn, &storage, &pk, "file.bin", data, &hash, "application/octet-stream", None, None, None).unwrap();
+        let id2 = store_or_reuse(&conn, &storage, &pk, "file.bin", data, &hash, "application/octet-stream", None, None, None).unwrap();
 
         assert_eq!(id1, id2, "duplicate uploads must return the same file id");
 
@@ -534,7 +638,7 @@ mod tests {
         let data = b"real content";
         let bad_hash = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        let result = store_file(&conn, &storage, &pk, "file.txt", data, bad_hash, "text/plain");
+        let result = store_file(&conn, &storage, &pk, "file.txt", data, bad_hash, "text/plain", None, None, None);
         assert!(result.is_err(), "store_file must fail on hash mismatch");
 
         std::fs::remove_dir_all(&storage).ok();
@@ -552,7 +656,7 @@ mod tests {
         let data = b"ref count test";
         let hash = compute_sha256(data);
 
-        let file_id = store_file(&conn, &storage, &pk, "rc.bin", data, &hash, "application/octet-stream").unwrap();
+        let file_id = store_file(&conn, &storage, &pk, "rc.bin", data, &hash, "application/octet-stream", None, None, None).unwrap();
 
         // Increment twice → ref_count = 2.
         increment_ref_count(&conn, file_id).unwrap();
@@ -589,7 +693,7 @@ mod tests {
 
         let data = b"image data";
         let hash = compute_sha256(data);
-        let file_id = store_file(&conn, &storage, &pk, "img.png", data, &hash, "image/png").unwrap();
+        let file_id = store_file(&conn, &storage, &pk, "img.png", data, &hash, "image/png", None, None, None).unwrap();
 
         let message_id = insert_message(&conn, channel_id, &pk, "check this out", None).unwrap();
         let att_id = create_message_attachment(
@@ -628,11 +732,11 @@ mod tests {
         // Create two files.
         let data1 = b"file one";
         let hash1 = compute_sha256(data1);
-        let fid1 = store_file(&conn, &storage, &pk, "one.txt", data1, &hash1, "text/plain").unwrap();
+        let fid1 = store_file(&conn, &storage, &pk, "one.txt", data1, &hash1, "text/plain", None, None, None).unwrap();
 
         let data2 = b"file two";
         let hash2 = compute_sha256(data2);
-        let fid2 = store_file(&conn, &storage, &pk, "two.txt", data2, &hash2, "text/plain").unwrap();
+        let fid2 = store_file(&conn, &storage, &pk, "two.txt", data2, &hash2, "text/plain", None, None, None).unwrap();
 
         // Create two messages, each with one attachment.
         let msg1 = insert_message(&conn, channel_id, &pk, "msg1", None).unwrap();

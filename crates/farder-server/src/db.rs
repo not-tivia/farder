@@ -105,7 +105,10 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             original_name TEXT    NOT NULL,
             uploaded_by   BLOB    NOT NULL,
             uploaded_at   INTEGER NOT NULL,
-            ref_count     INTEGER NOT NULL DEFAULT 0
+            ref_count     INTEGER NOT NULL DEFAULT 0,
+            width         INTEGER,
+            height        INTEGER,
+            duration_secs REAL
         );
 
         CREATE TABLE IF NOT EXISTS message_attachments (

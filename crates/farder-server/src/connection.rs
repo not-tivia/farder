@@ -5,7 +5,8 @@ use farder_protocol::{codec, server::*};
 use quinn::{RecvStream, SendStream};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
+use tokio::time::Duration;
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -108,30 +109,74 @@ async fn handle_upload_stream(
     let resp = codec::encode(&UploadResponse::Ready)?;
     write_frame(&mut send, &resp).await?;
 
-    // 5. Read file bytes
-    let mut file_data: Vec<u8> = Vec::with_capacity(req.file_size as usize);
-    let mut remaining = req.file_size;
-    while remaining > 0 {
-        let chunk_size = std::cmp::min(remaining as usize, 65536);
-        let mut buf = vec![0u8; chunk_size];
-        recv.read_exact(&mut buf[..chunk_size])
-            .await
-            .context("stream closed before all bytes received")?;
-        file_data.extend_from_slice(&buf[..chunk_size]);
-        remaining -= chunk_size as u64;
+    // 5. Stream bytes to a temp file, computing SHA-256 as we go.
+    //    Wrap the entire read loop in a 5-minute timeout.
+    let tmp_name = format!(".tmp_{}", rand::random::<u64>());
+    let tmp_path = std::path::PathBuf::from(&state.storage_dir).join(&tmp_name);
+
+    let read_result = tokio::time::timeout(
+        Duration::from_secs(300),
+        async {
+            use tokio::io::AsyncWriteExt;
+            let mut tmp_file = tokio::fs::File::create(&tmp_path)
+                .await
+                .context("failed to create temp file")?;
+            let mut remaining = req.file_size;
+            while remaining > 0 {
+                let chunk_size = std::cmp::min(remaining as usize, 65536);
+                let mut buf = vec![0u8; chunk_size];
+                recv.read_exact(&mut buf[..chunk_size])
+                    .await
+                    .context("stream closed before all bytes received")?;
+                tmp_file
+                    .write_all(&buf[..chunk_size])
+                    .await
+                    .context("failed to write to temp file")?;
+                remaining -= chunk_size as u64;
+            }
+            tmp_file.flush().await.context("failed to flush temp file")?;
+            Ok::<(), anyhow::Error>(())
+        },
+    )
+    .await;
+
+    let read_result = match read_result {
+        Ok(r) => r,
+        Err(_elapsed) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            let resp = codec::encode(&UploadResponse::Error {
+                reason: "upload timed out".to_string(),
+            })?;
+            write_frame(&mut send, &resp).await?;
+            return Ok(());
+        }
+    };
+
+    if let Err(e) = read_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        let resp = codec::encode(&UploadResponse::Error {
+            reason: e.to_string(),
+        })?;
+        write_frame(&mut send, &resp).await?;
+        return Ok(());
     }
 
-    // 6. Store file — release the db lock before any await.
+    // 6. Atomically check-dedup + verify hash + move to content-addressed path + insert DB record.
+    //    All done inside a single DB lock to guard against concurrent uploads of the same hash.
     let store_result: Result<u64> = {
         let db = state.db.lock().unwrap();
-        attachments::store_file(
+        attachments::store_or_reuse_from_temp_file(
             &db,
             &state.storage_dir,
             member_key,
             &req.file_name,
-            &file_data,
+            &tmp_path,
             &req.hash,
             &req.mime_type,
+            req.file_size,
+            req.width,
+            req.height,
+            req.duration_secs,
         )
     };
     match store_result {
@@ -140,6 +185,8 @@ async fn handle_upload_stream(
             write_frame(&mut send, &resp).await?;
         }
         Err(e) => {
+            // temp file was already cleaned up by store_or_reuse_from_temp_file on error
+            let _ = tokio::fs::remove_file(&tmp_path).await;
             let resp = codec::encode(&UploadResponse::Error {
                 reason: e.to_string(),
             })?;
@@ -406,13 +453,23 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     let conn_clone = conn.clone();
     let state_clone = Arc::clone(&state);
     let member_clone = public_key.clone();
+    let semaphore = Arc::new(Semaphore::new(10)); // max 10 concurrent uploads/downloads
     let stream_acceptor = tokio::spawn(async move {
         loop {
             match conn_clone.accept_bi().await {
                 Ok((s, r)) => {
+                    let permit = match semaphore.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            // At capacity; drop this stream.
+                            tracing::debug!("auxiliary stream rejected: at capacity");
+                            continue;
+                        }
+                    };
                     let st = Arc::clone(&state_clone);
                     let mk = member_clone.clone();
                     tokio::spawn(async move {
+                        let _permit = permit; // held until task completes
                         if let Err(e) = handle_auxiliary_stream(&st, &mk, is_owner, s, r).await {
                             tracing::debug!("auxiliary stream error: {}", e);
                         }
@@ -546,6 +603,12 @@ async fn main_loop(
                                         // Broadcast events
                                         for broadcast in result.events {
                                             broadcast_event(&state, broadcast.target, broadcast.event).await;
+                                        }
+
+                                        // Clean up orphaned files from disk
+                                        for fid in &result.orphaned_file_ids {
+                                            let db = state.db.lock().unwrap();
+                                            let _ = attachments::cleanup_orphaned_file(&db, &state.storage_dir, *fid);
                                         }
                                     }
                                 }

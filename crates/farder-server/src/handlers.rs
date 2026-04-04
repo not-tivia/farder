@@ -15,6 +15,7 @@ use rusqlite::Connection;
 pub struct HandleResult {
     pub response: ServerResponse,
     pub events: Vec<BroadcastEvent>,
+    pub orphaned_file_ids: Vec<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -25,11 +26,12 @@ fn ok(response: ServerResponse) -> Result<HandleResult> {
     Ok(HandleResult {
         response,
         events: vec![],
+        orphaned_file_ids: vec![],
     })
 }
 
 fn ok_with(response: ServerResponse, events: Vec<BroadcastEvent>) -> Result<HandleResult> {
-    Ok(HandleResult { response, events })
+    Ok(HandleResult { response, events, orphaned_file_ids: vec![] })
 }
 
 fn err(reason: &str) -> Result<HandleResult> {
@@ -38,6 +40,7 @@ fn err(reason: &str) -> Result<HandleResult> {
             reason: reason.to_string(),
         },
         events: vec![],
+        orphaned_file_ids: vec![],
     })
 }
 
@@ -151,6 +154,7 @@ fn require_base_perm(
                 reason: format!("missing {} permission", perm_name),
             },
             events: Vec::new(),
+            orphaned_file_ids: vec![],
         }));
     }
     Ok(None)
@@ -174,6 +178,7 @@ fn require_role_hierarchy(
                 reason: "cannot manage roles at or above your own position".to_string(),
             },
             events: Vec::new(),
+            orphaned_file_ids: vec![],
         }));
     }
     Ok(None)
@@ -197,6 +202,7 @@ fn require_member_hierarchy(
                 reason: "cannot manage members at or above your own role level".to_string(),
             },
             events: Vec::new(),
+            orphaned_file_ids: vec![],
         }));
     }
     Ok(None)
@@ -238,8 +244,12 @@ pub fn handle_request(
             for (pos, file_id) in attachment_ids.iter().enumerate() {
                 let file = crate::attachments::get_file(conn, *file_id)?
                     .ok_or_else(|| anyhow::anyhow!("attachment file_id {} not found", file_id))?;
+                if file.uploaded_by != *member && !is_owner {
+                    return err("cannot attach files uploaded by another member");
+                }
                 crate::attachments::create_message_attachment(
-                    conn, id, *file_id, pos as u32, &file.original_name, None, None, None,
+                    conn, id, *file_id, pos as u32, &file.original_name,
+                    file.width, file.height, file.duration_secs,
                 )?;
             }
 
@@ -303,7 +313,7 @@ pub fn handle_request(
                 }
             }
 
-            let _orphans = messages::delete_message(conn, message_id)?;
+            let orphans = messages::delete_message(conn, message_id)?;
             let event = BroadcastEvent {
                 target: EventTarget::Subscribers(channel_id),
                 event: ServerEvent::MessageDeleted {
@@ -311,7 +321,11 @@ pub fn handle_request(
                     channel_id,
                 },
             };
-            ok_with(ServerResponse::Ok, vec![event])
+            Ok(HandleResult {
+                response: ServerResponse::Ok,
+                events: vec![event],
+                orphaned_file_ids: orphans,
+            })
         }
 
         ServerRequest::FetchHistory {
@@ -1217,7 +1231,7 @@ mod tests {
         let data = b"image bytes here";
         let hash = crate::attachments::compute_sha256(data);
         let file_id = crate::attachments::store_file(
-            &conn, &dir.to_string_lossy(), &owner, "pic.png", data, &hash, "image/png"
+            &conn, &dir.to_string_lossy(), &owner, "pic.png", data, &hash, "image/png", None, None, None
         ).unwrap();
 
         let result = handle_request(&conn, &owner, true, ServerRequest::SendMessage {
