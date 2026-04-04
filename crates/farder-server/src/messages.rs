@@ -83,10 +83,12 @@ pub fn insert_message_with_ts(
 
 pub fn get_message(conn: &Connection, id: u64) -> Result<Option<MessageInfo>> {
     let sql = format!("SELECT {} FROM messages WHERE id = ?1", MSG_SELECT);
-    let row = conn
-        .query_row(&sql, params![id as i64], row_to_message_info)
-        .optional()?;
-    Ok(row)
+    let mut msg = match conn.query_row(&sql, params![id as i64], row_to_message_info).optional()? {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    msg.attachments = crate::attachments::get_attachments_for_message(conn, msg.id)?;
+    Ok(Some(msg))
 }
 
 pub fn fetch_history(
@@ -127,6 +129,16 @@ pub fn fetch_history(
         )?;
         for row in rows {
             messages.push(row?);
+        }
+    }
+
+    let msg_ids: Vec<u64> = messages.iter().map(|m| m.id).collect();
+    if !msg_ids.is_empty() {
+        let attach_map = crate::attachments::get_attachments_for_messages(conn, &msg_ids)?;
+        for msg in &mut messages {
+            if let Some(attachments) = attach_map.get(&msg.id) {
+                msg.attachments = attachments.clone();
+            }
         }
     }
 
@@ -236,6 +248,16 @@ pub fn search_messages(
         let rows = stmt.query_map(params![query, limit as i64], row_to_message_info)?;
         for row in rows {
             messages.push(row?);
+        }
+    }
+
+    let msg_ids: Vec<u64> = messages.iter().map(|m| m.id).collect();
+    if !msg_ids.is_empty() {
+        let attach_map = crate::attachments::get_attachments_for_messages(conn, &msg_ids)?;
+        for msg in &mut messages {
+            if let Some(attachments) = attach_map.get(&msg.id) {
+                msg.attachments = attachments.clone();
+            }
         }
     }
 
@@ -444,5 +466,44 @@ mod tests {
         // The old messages should be gone.
         let remaining = fetch_history(&conn, channel_id, None, 100).unwrap();
         assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn test_get_message_includes_attachments() {
+        let (conn, ch_id, pk) = setup();
+        let msg_id = insert_message(&conn, ch_id, &pk, "with attachment", None).unwrap();
+        let hash = crate::attachments::compute_sha256(b"file data");
+        let dir = std::env::temp_dir().join(format!("farder-msg-test-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_id = crate::attachments::store_file(
+            &conn, &dir.to_string_lossy(), &pk, "photo.jpg", b"file data", &hash, "image/jpeg"
+        ).unwrap();
+        crate::attachments::create_message_attachment(&conn, msg_id, file_id, 0, "photo.jpg", Some(800), Some(600), None).unwrap();
+        let msg = get_message(&conn, msg_id).unwrap().unwrap();
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].name, "photo.jpg");
+        assert_eq!(msg.attachments[0].width, Some(800));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_fetch_history_includes_attachments() {
+        let (conn, ch_id, pk) = setup();
+        let msg_id = insert_message(&conn, ch_id, &pk, "with file", None).unwrap();
+        insert_message(&conn, ch_id, &pk, "no file", None).unwrap();
+        let hash = crate::attachments::compute_sha256(b"data");
+        let dir = std::env::temp_dir().join(format!("farder-hist-test-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_id = crate::attachments::store_file(
+            &conn, &dir.to_string_lossy(), &pk, "doc.pdf", b"data", &hash, "application/pdf"
+        ).unwrap();
+        crate::attachments::create_message_attachment(&conn, msg_id, file_id, 0, "doc.pdf", None, None, None).unwrap();
+        let history = fetch_history(&conn, ch_id, None, 50).unwrap();
+        assert_eq!(history.len(), 2);
+        let with_attach = history.iter().find(|m| m.content == "with file").unwrap();
+        let without = history.iter().find(|m| m.content == "no file").unwrap();
+        assert_eq!(with_attach.attachments.len(), 1);
+        assert!(without.attachments.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
