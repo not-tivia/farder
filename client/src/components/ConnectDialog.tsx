@@ -85,6 +85,28 @@ export default function ConnectDialog() {
   const [pubKey, setPubKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [autoConnecting, setAutoConnecting] = useState(false);
+
+  async function autoConnect(server: string, key: string) {
+    setAutoConnecting(true);
+    setError(null);
+    try {
+      const result = await api.connectServer(server);
+      dispatch({ type: "CONNECTED", payload: result });
+      try {
+        const members = await api.getMembers();
+        dispatch({ type: "SET_MEMBERS", payload: members });
+      } catch {
+        // non-fatal
+      }
+    } catch (e) {
+      // Fall through to normal join screen with error
+      setError(`Could not reconnect: ${String(e)}`);
+      setPubKey(key);
+    } finally {
+      setAutoConnecting(false);
+    }
+  }
 
   useEffect(() => {
     async function init() {
@@ -107,6 +129,9 @@ export default function ConnectDialog() {
       if (key && name) {
         setSavedName(name);
         setStep("join");
+        if (server) {
+          autoConnect(server, key);
+        }
       }
     }
     init().catch(() => {});
@@ -212,6 +237,21 @@ export default function ConnectDialog() {
               <button className="xp-button" onClick={handleContinue} disabled={loading}>
                 {loading ? "Setting up..." : "Continue"}
               </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (autoConnecting) {
+    return (
+      <div className="connect-screen">
+        <div className="connect-dialog">
+          <div className="connect-dialog-titlebar">Farder</div>
+          <div className="connect-dialog-body">
+            <div className="connect-section">
+              <div className="connect-section-title">Reconnecting...</div>
             </div>
           </div>
         </div>
