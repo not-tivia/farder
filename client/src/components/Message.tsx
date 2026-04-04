@@ -49,6 +49,7 @@ function formatSize(bytes: number): string {
 export default function Message({ message, memberNames, grouped = false }: MessageProps) {
   const { dispatch } = useServer();
   const [showPicker, setShowPicker] = useState(false);
+  const [reacting, setReacting] = useState(false);
 
   const deleted = isDeletedUser(message.author);
   const pkStr = publicKeyToString(message.author);
@@ -58,6 +59,8 @@ export default function Message({ message, memberNames, grouped = false }: Messa
   const color = deleted ? "#999" : authorColor(pkStr);
 
   async function handleReactionClick(emoji: string, alreadyMe: boolean) {
+    if (reacting) return;
+    setReacting(true);
     try {
       if (alreadyMe) {
         await api.removeReaction(message.id, emoji);
@@ -66,15 +69,21 @@ export default function Message({ message, memberNames, grouped = false }: Messa
       }
     } catch {
       // ignore
+    } finally {
+      setReacting(false);
     }
   }
 
   async function handlePickerSelect(emoji: string) {
+    if (reacting) return;
     setShowPicker(false);
+    setReacting(true);
     try {
       await api.addReaction(message.id, emoji);
     } catch {
       // ignore
+    } finally {
+      setReacting(false);
     }
   }
 
