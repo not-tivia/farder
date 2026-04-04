@@ -34,6 +34,9 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
         reply_to: reply_to.map(|v| v as u64),
         pinned: pinned != 0,
         attachments: vec![],
+        reactions: vec![],
+        thread_id: None,
+        thread_message_count: None,
     })
 }
 

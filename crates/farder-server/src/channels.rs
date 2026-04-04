@@ -9,12 +9,14 @@ pub fn channel_type_to_str(ct: &ChannelType) -> &'static str {
     match ct {
         ChannelType::Text => "text",
         ChannelType::Announcement => "announcement",
+        ChannelType::Thread => "thread",
     }
 }
 
 pub fn str_to_channel_type(s: &str) -> ChannelType {
     match s {
         "announcement" => ChannelType::Announcement,
+        "thread" => ChannelType::Thread,
         _ => ChannelType::Text,
     }
 }
@@ -43,6 +45,7 @@ pub fn row_to_channel_info(row: &rusqlite::Row) -> rusqlite::Result<ChannelInfo>
         nsfw: nsfw != 0,
         slow_mode_secs: slow_mode_secs as u32,
         retention_secs: retention_secs.map(|v| v as u64),
+        thread_parent_message_id: None,
     })
 }
 

@@ -793,6 +793,13 @@ pub fn handle_request(
         // Subscribe (connection-level, handler just acks)
         // ----------------------------------------------------------------
         ServerRequest::Subscribe { .. } => ok(ServerResponse::Ok),
+
+        // ----------------------------------------------------------------
+        // Threads and reactions (not yet implemented)
+        // ----------------------------------------------------------------
+        ServerRequest::CreateThread { .. } => err("not yet implemented"),
+        ServerRequest::AddReaction { .. } => err("not yet implemented"),
+        ServerRequest::RemoveReaction { .. } => err("not yet implemented"),
     }
 }
 
