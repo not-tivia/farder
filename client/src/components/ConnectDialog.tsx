@@ -135,9 +135,11 @@ export default function ConnectDialog() {
       const parsed = parseInviteLink(inviteInput);
 
       // Use parsed address, or manual override, or saved address
-      const address = parsed.address || (showAdvanced && manualAddress.trim()) || savedAddress;
+      const address = parsed.address || manualAddress.trim() || savedAddress;
       if (!address) {
-        setError("Paste an invite link, or enter a server address under Advanced.");
+        // No address found anywhere — need user to provide one
+        setShowAdvanced(true);
+        setError("Include the server address in the link (e.g. farder://host:port/code) or enter it below.");
         setLoading(false);
         return;
       }
