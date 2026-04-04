@@ -316,6 +316,7 @@ async fn test_e2e_server_bootstrap_and_chat() {
             channel_id: general_channel_id,
             content: "Hello from the new member!".to_string(),
             reply_to: None,
+            attachment_ids: vec![],
         },
     )
     .await;

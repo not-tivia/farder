@@ -33,6 +33,7 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
         edited_at: edited_at.map(|v| v as u64),
         reply_to: reply_to.map(|v| v as u64),
         pinned: pinned != 0,
+        attachments: vec![],
     })
 }
 

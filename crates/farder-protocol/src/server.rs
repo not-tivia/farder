@@ -8,6 +8,48 @@ pub enum ChannelType {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AttachmentInfo {
+    pub id: u64,
+    pub file_id: u64,
+    pub name: String,
+    pub size: u64,
+    pub mime_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_secs: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UploadRequest {
+    pub channel_id: u64,
+    pub file_name: String,
+    pub file_size: u64,
+    pub hash: String,
+    pub mime_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_secs: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum UploadResponse {
+    Ready,
+    Complete { file_id: u64 },
+    Error { reason: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DownloadRequest {
+    pub file_id: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DownloadResponse {
+    Start { file_name: String, file_size: u64, hash: String, mime_type: String },
+    Error { reason: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MessageInfo {
     pub id: u64,
     pub channel_id: u64,
@@ -17,6 +59,7 @@ pub struct MessageInfo {
     pub edited_at: Option<u64>,
     pub reply_to: Option<u64>,
     pub pinned: bool,
+    pub attachments: Vec<AttachmentInfo>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -80,7 +123,7 @@ pub enum ClientFrame {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerRequest {
     Subscribe { channel_ids: Vec<u64> },
-    SendMessage { channel_id: u64, content: String, reply_to: Option<u64> },
+    SendMessage { channel_id: u64, content: String, reply_to: Option<u64>, attachment_ids: Vec<u64> },
     EditMessage { message_id: u64, new_content: String },
     DeleteMessage { message_id: u64 },
     FetchHistory { channel_id: u64, before_id: Option<u64>, limit: u32 },
@@ -192,6 +235,7 @@ mod tests {
                 channel_id: 1,
                 content: "hello".to_string(),
                 reply_to: None,
+                attachment_ids: vec![],
             },
         };
         let bytes = codec::encode(&frame).unwrap();
@@ -200,10 +244,11 @@ mod tests {
             ClientFrame::Request { id, body } => {
                 assert_eq!(id, 42);
                 match body {
-                    ServerRequest::SendMessage { channel_id, content, reply_to } => {
+                    ServerRequest::SendMessage { channel_id, content, reply_to, attachment_ids } => {
                         assert_eq!(channel_id, 1);
                         assert_eq!(content, "hello");
                         assert!(reply_to.is_none());
+                        assert!(attachment_ids.is_empty());
                     }
                     _ => panic!("wrong request variant"),
                 }
@@ -236,6 +281,7 @@ mod tests {
             edited_at: None,
             reply_to: None,
             pinned: false,
+            attachments: vec![],
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -271,6 +317,7 @@ mod tests {
                 edited_at: Some(2001),
                 reply_to: Some(50),
                 pinned: true,
+                attachments: vec![],
             },
         };
         let frame = ServerFrame::Event(event);
@@ -292,7 +339,7 @@ mod tests {
         let kp = Keypair::generate();
         let requests = vec![
             ServerRequest::Subscribe { channel_ids: vec![1, 2, 3] },
-            ServerRequest::SendMessage { channel_id: 1, content: "hi".into(), reply_to: Some(5) },
+            ServerRequest::SendMessage { channel_id: 1, content: "hi".into(), reply_to: Some(5), attachment_ids: vec![] },
             ServerRequest::EditMessage { message_id: 10, new_content: "edited".into() },
             ServerRequest::DeleteMessage { message_id: 10 },
             ServerRequest::FetchHistory { channel_id: 1, before_id: Some(100), limit: 50 },
@@ -324,5 +371,86 @@ mod tests {
             let bytes = codec::encode(&frame).unwrap();
             let _decoded: ClientFrame = codec::decode(&bytes).unwrap();
         }
+    }
+
+    #[test]
+    fn test_roundtrip_upload_request() {
+        let req = UploadRequest {
+            channel_id: 42,
+            file_name: "photo.png".to_string(),
+            file_size: 1024,
+            hash: "abc123".to_string(),
+            mime_type: "image/png".to_string(),
+            width: Some(800),
+            height: Some(600),
+            duration_secs: None,
+        };
+        let bytes = codec::encode(&req).unwrap();
+        let decoded: UploadRequest = codec::decode(&bytes).unwrap();
+        assert_eq!(decoded.channel_id, 42);
+        assert_eq!(decoded.file_name, "photo.png");
+        assert_eq!(decoded.width, Some(800));
+        assert!(decoded.duration_secs.is_none());
+    }
+
+    #[test]
+    fn test_roundtrip_upload_response() {
+        let variants = vec![
+            UploadResponse::Ready,
+            UploadResponse::Complete { file_id: 99 },
+            UploadResponse::Error { reason: "too large".to_string() },
+        ];
+        for variant in variants {
+            let bytes = codec::encode(&variant).unwrap();
+            let _decoded: UploadResponse = codec::decode(&bytes).unwrap();
+        }
+        let complete = UploadResponse::Complete { file_id: 99 };
+        let bytes = codec::encode(&complete).unwrap();
+        let decoded: UploadResponse = codec::decode(&bytes).unwrap();
+        match decoded {
+            UploadResponse::Complete { file_id } => assert_eq!(file_id, 99),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_download_request() {
+        let req = DownloadRequest { file_id: 7 };
+        let bytes = codec::encode(&req).unwrap();
+        let decoded: DownloadRequest = codec::decode(&bytes).unwrap();
+        assert_eq!(decoded.file_id, 7);
+    }
+
+    #[test]
+    fn test_roundtrip_message_info_with_attachments() {
+        let kp = Keypair::generate();
+        let msg = MessageInfo {
+            id: 10,
+            channel_id: 1,
+            author: kp.public_key(),
+            content: "check out this file".to_string(),
+            timestamp: 5000,
+            edited_at: None,
+            reply_to: None,
+            pinned: false,
+            attachments: vec![
+                AttachmentInfo {
+                    id: 1,
+                    file_id: 42,
+                    name: "document.pdf".to_string(),
+                    size: 2048,
+                    mime_type: "application/pdf".to_string(),
+                    width: None,
+                    height: None,
+                    duration_secs: None,
+                },
+            ],
+        };
+        let bytes = codec::encode(&msg).unwrap();
+        let decoded: MessageInfo = codec::decode(&bytes).unwrap();
+        assert_eq!(decoded.id, 10);
+        assert_eq!(decoded.attachments.len(), 1);
+        assert_eq!(decoded.attachments[0].file_id, 42);
+        assert_eq!(decoded.attachments[0].name, "document.pdf");
     }
 }

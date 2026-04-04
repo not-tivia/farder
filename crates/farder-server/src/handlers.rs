@@ -211,6 +211,7 @@ pub fn handle_request(
             channel_id,
             content,
             reply_to,
+            attachment_ids: _,
         } => {
             if content.len() > 8000 {
                 return err("message content too long (max 8000 characters)");
@@ -821,6 +822,7 @@ mod tests {
                 channel_id,
                 content: "Hello, world!".to_string(),
                 reply_to: None,
+                attachment_ids: vec![],
             },
         )
         .unwrap();
@@ -857,6 +859,7 @@ mod tests {
                 channel_id,
                 content: "Should fail".to_string(),
                 reply_to: None,
+                attachment_ids: vec![],
             },
         )
         .unwrap();
@@ -1027,6 +1030,7 @@ mod tests {
                 channel_id,
                 content: "Original content".to_string(),
                 reply_to: None,
+                attachment_ids: vec![],
             },
         )
         .unwrap();
