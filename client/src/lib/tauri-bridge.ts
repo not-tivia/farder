@@ -84,3 +84,12 @@ export async function removeReaction(messageId: number, emoji: string): Promise<
 export async function createThread(messageId: number, name?: string): Promise<void> {
   return invoke<void>("create_thread", { messageId, name: name ?? null });
 }
+
+export interface InviteResult {
+  code: string;
+  link: string;
+}
+
+export async function createInvite(maxUses?: number): Promise<InviteResult> {
+  return invoke<InviteResult>("create_invite", { maxUses: maxUses ?? null });
+}

@@ -370,3 +370,36 @@ pub async fn create_thread(
         other => Err(format!("unexpected response: {:?}", other)),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Invite commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct InviteResult {
+    pub code: String,
+    pub link: String,
+}
+
+#[tauri::command]
+pub async fn create_invite(
+    state: State<'_, Arc<AppState>>,
+    max_uses: Option<u32>,
+) -> Result<InviteResult, String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::CreateInvite { max_uses, expires_in_secs: None, target_channel: None },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::InviteCreated { code } => {
+            // Build the farder:// link using saved server address
+            let address = get_last_server().unwrap_or_else(|| "localhost:4435".to_string());
+            let link = format!("farder://{}/{}", address, code);
+            Ok(InviteResult { code, link })
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}

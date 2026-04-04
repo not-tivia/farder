@@ -687,3 +687,90 @@ body {
 .thread-back-btn:hover {
   background: #ddd;
 }
+
+/* ── Modal Overlay ──────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-dialog {
+  background: var(--xp-window-bg);
+  border: 2px solid var(--xp-blue);
+  border-radius: 4px;
+  min-width: 360px;
+  max-width: 460px;
+  box-shadow: 4px 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.modal-titlebar {
+  background: linear-gradient(180deg, var(--xp-blue-light) 0%, var(--xp-blue) 45%, var(--xp-blue-dark) 100%);
+  color: white;
+  font-weight: bold;
+  font-size: 12px;
+  padding: 4px 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-close {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 3px;
+  color: white;
+  cursor: pointer;
+  font-size: 10px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-close:hover { background: rgba(255,255,255,0.2); }
+
+.modal-body {
+  padding: 16px;
+}
+
+/* ── Invite Link Display ─────────────────────────────────── */
+.invite-link-display {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.invite-link-display input {
+  flex: 1;
+}
+
+/* ── Server Header Invite Button ────────────────────────── */
+.server-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.server-invite-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 3px;
+  color: white;
+  cursor: pointer;
+  font-size: 14px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.server-invite-btn:hover { background: rgba(255,255,255,0.2); }

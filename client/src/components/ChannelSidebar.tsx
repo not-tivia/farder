@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useServer } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo } from "../lib/types";
+import InviteDialog from "./InviteDialog";
 
 function UserFooter() {
   const [name, setName] = useState<string | null>(null);
@@ -15,6 +16,7 @@ function UserFooter() {
 
 export default function ChannelSidebar() {
   const { state, dispatch } = useServer();
+  const [showInvite, setShowInvite] = useState(false);
 
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
@@ -63,17 +65,21 @@ export default function ChannelSidebar() {
   }
 
   return (
-    <div className="channel-sidebar">
-      <div className="server-header">
-        <div className="server-name">{state.serverName}</div>
+    <>
+      <div className="channel-sidebar">
+        <div className="server-header">
+          <div className="server-name">{state.serverName}</div>
+          <button className="server-invite-btn" onClick={() => setShowInvite(true)} title="Create Invite">+</button>
+        </div>
+        <div className="channel-list">
+          {uncategorized.map(renderChannel)}
+          {sortedCategories.map(renderCategory)}
+        </div>
+        <div className="user-footer">
+          <UserFooter />
+        </div>
       </div>
-      <div className="channel-list">
-        {uncategorized.map(renderChannel)}
-        {sortedCategories.map(renderCategory)}
-      </div>
-      <div className="user-footer">
-        <UserFooter />
-      </div>
-    </div>
+      {showInvite && <InviteDialog onClose={() => setShowInvite(false)} />}
+    </>
   );
 }
