@@ -1158,6 +1158,24 @@ body {
   font-size: 11px;
 }
 
+.favorites-search {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--xp-border);
+}
+
+.favorites-search-input {
+  width: 100%;
+  font-size: 10px;
+  padding: 2px 4px;
+  border: 1px solid var(--xp-border);
+  font-family: var(--xp-font);
+  outline: none;
+}
+
+.favorites-search-input:focus {
+  border-color: var(--xp-blue);
+}
+
 .favorites-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
