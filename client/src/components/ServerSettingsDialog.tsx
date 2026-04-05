@@ -12,6 +12,8 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newChType, setNewChType] = useState("Text");
   const [newChCatId, setNewChCatId] = useState<number | undefined>(undefined);
   const [newCatName, setNewCatName] = useState("");
+  const [newRoleName, setNewRoleName] = useState("");
+  const [newRoleColor, setNewRoleColor] = useState("#3169C6");
   const [error, setError] = useState<string | null>(null);
 
   const categories = activeServer?.categories ?? [];
@@ -75,6 +77,14 @@ export default function ServerSettingsDialog({ onClose }: Props) {
     try {
       await api.createCategory(serverId, newCatName.trim());
       setNewCatName("");
+    } catch (e) { setError(String(e)); }
+  }
+
+  async function handleCreateRole() {
+    if (!newRoleName.trim() || !serverId) return;
+    try {
+      await api.createRole(serverId, newRoleName.trim(), 0x2007, newRoleColor);
+      setNewRoleName("");
     } catch (e) { setError(String(e)); }
   }
 
@@ -167,6 +177,40 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                 <input className="connect-input" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} placeholder="Category name" />
               </div>
               <button className="xp-button" onClick={handleCreateCategory} disabled={!newCatName.trim()}>Add</button>
+            </div>
+          </div>
+
+          {/* Roles Section */}
+          <div className="organizer-create" style={{ marginTop: 16, borderTop: "1px solid var(--xp-border)", paddingTop: 12 }}>
+            <div className="connect-section-title" style={{ marginBottom: 8 }}>Roles</div>
+
+            {/* Existing roles */}
+            {(activeServer?.roles ?? []).filter(r => r.name !== "@everyone").map(r => (
+              <div key={r.id} className="organizer-row">
+                <span className="organizer-name" style={{
+                  color: typeof r.color === "number" && r.color > 0 ? `#${r.color.toString(16).padStart(6, '0')}` : undefined
+                }}>
+                  {r.name}
+                </span>
+                <div className="organizer-actions">
+                  <button className="organizer-btn organizer-delete" onClick={async () => {
+                    if (serverId) try { await api.deleteRole(serverId, r.id); } catch {}
+                  }} title="Delete">x</button>
+                </div>
+              </div>
+            ))}
+
+            {/* Create new role */}
+            <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: 1 }}>
+                <label className="connect-label">New Role</label>
+                <input className="connect-input" value={newRoleName} onChange={(e) => setNewRoleName(e.target.value)} placeholder="Role name" />
+              </div>
+              <div>
+                <label className="connect-label">Color</label>
+                <input type="color" value={newRoleColor} onChange={(e) => setNewRoleColor(e.target.value)} style={{ width: 30, height: 24, padding: 0, border: "1px solid var(--xp-border)" }} />
+              </div>
+              <button className="xp-button" onClick={handleCreateRole} disabled={!newRoleName.trim()}>Add</button>
             </div>
           </div>
         </div>

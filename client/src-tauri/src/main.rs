@@ -67,6 +67,8 @@ fn main() {
             commands::delete_message,
             commands::assign_role,
             commands::remove_role,
+            commands::create_role,
+            commands::delete_role,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

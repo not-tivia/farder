@@ -92,6 +92,12 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:category_deleted", serde_json::json!({ "server_id": sid, "category_id": category_id })),
         ServerEvent::DmCreated { channel, participant } =>
             app.emit("server:dm_created", serde_json::json!({ "server_id": sid, "channel": channel, "participant": participant })),
+        ServerEvent::RoleCreated { role } =>
+            app.emit("server:role_created", serde_json::json!({ "server_id": sid, "role": role })),
+        ServerEvent::RoleDeleted { role_id } =>
+            app.emit("server:role_deleted", serde_json::json!({ "server_id": sid, "role_id": role_id })),
+        ServerEvent::RoleUpdated { role } =>
+            app.emit("server:role_updated", serde_json::json!({ "server_id": sid, "role": role })),
         _ => Ok(()),
     };
 }

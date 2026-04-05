@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
-import type { MessageInfo, MemberInfo, ChannelInfo, CategoryInfo } from "../lib/types";
+import type { MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo } from "../lib/types";
 
 interface ReactionAddedPayload {
   server_id: string;
@@ -171,6 +171,20 @@ export function useServerEvents(): void {
       if (serverId !== activeRef.current) return;
       dispatch({ type: "DM_CREATED", serverId, payload: { channel: data.channel, participant: data.participant } });
     }).then((u) => unlisten.push(u));
+
+    listen("server:role_created", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "ROLE_CREATED", serverId, payload: data.role as RoleInfo });
+    }).then(u => unlisten.push(u));
+
+    listen("server:role_deleted", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "ROLE_DELETED", serverId, payload: { roleId: data.role_id as number } });
+    }).then(u => unlisten.push(u));
 
     listen("server:typing", (e) => {
       const data = e.payload as any;

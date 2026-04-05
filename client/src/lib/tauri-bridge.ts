@@ -236,6 +236,14 @@ export async function assignRole(serverId: string, memberKey: string, roleId: nu
   return invoke<void>("assign_role", { serverId, memberKey, roleId });
 }
 
+export async function createRole(serverId: string, name: string, permissions: number, color?: string): Promise<void> {
+  return invoke("create_role", { serverId, name, permissions, color: color ?? null });
+}
+
+export async function deleteRole(serverId: string, roleId: number): Promise<void> {
+  return invoke("delete_role", { serverId, roleId });
+}
+
 export async function removeRole(serverId: string, memberKey: string, roleId: number): Promise<void> {
   return invoke<void>("remove_role", { serverId, memberKey, roleId });
 }

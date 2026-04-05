@@ -92,7 +92,9 @@ export type AppAction =
   | { type: "OPEN_DM_PANEL"; serverId: string; payload: number }
   | { type: "CLOSE_DM_PANEL"; serverId: string }
   | { type: "TYPING_STARTED"; serverId: string; payload: { channelId: number; publicKey: string; displayName: string } }
-  | { type: "TYPING_EXPIRED"; serverId: string; payload: { channelId: number; publicKey: string } };
+  | { type: "TYPING_EXPIRED"; serverId: string; payload: { channelId: number; publicKey: string } }
+  | { type: "ROLE_CREATED"; serverId: string; payload: RoleInfo }
+  | { type: "ROLE_DELETED"; serverId: string; payload: { roleId: number } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -266,6 +268,10 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       const filtered = existing.filter(t => t.publicKey !== publicKey);
       return { ...state, typingUsers: { ...state.typingUsers, [channelId]: filtered } };
     }
+    case "ROLE_CREATED":
+      return { ...state, roles: [...state.roles, action.payload] };
+    case "ROLE_DELETED":
+      return { ...state, roles: state.roles.filter(r => r.id !== action.payload.roleId) };
     default:
       return state;
   }
