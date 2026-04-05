@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useServer } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo } from "../lib/types";
@@ -67,6 +67,151 @@ export default function ChannelSidebar() {
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
 
+  // ── Drag state ────────────────────────────────────────────
+  const dragRef = useRef<{ type: "channel" | "category"; id: number; startY: number } | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const isDraggingRef = useRef(false);
+  const dragOverIdRef = useRef<number | null>(null);
+
+  // Keep refs in sync with state so stable callbacks read current values
+  useEffect(() => { isDraggingRef.current = isDragging; }, [isDragging]);
+  useEffect(() => { dragOverIdRef.current = dragOverId; }, [dragOverId]);
+
+  // Stable refs for latest channels/categories (avoids stale closures in callbacks)
+  const channelsRef = useRef(state.channels);
+  channelsRef.current = state.channels;
+  const categoriesRef = useRef(state.categories);
+  categoriesRef.current = state.categories;
+
+  // ── Swap helpers ──────────────────────────────────────────
+  async function performChannelSwap(draggedId: number, targetId: number) {
+    const allChannels = channelsRef.current;
+    const dragged = allChannels.find((c) => c.id === draggedId);
+    const target = allChannels.find((c) => c.id === targetId);
+    if (!dragged || !target) return;
+
+    // Dragged over a category header → move channel into that category
+    const targetIsCategory = categoriesRef.current.some((cat) => cat.id === targetId);
+    if (targetIsCategory) {
+      try {
+        await api.updateChannel(draggedId, { categoryId: targetId, position: 0 });
+      } catch {}
+      return;
+    }
+
+    // Different categories → move dragged channel to target's category at target's position
+    if (dragged.category_id !== target.category_id) {
+      try {
+        await api.updateChannel(draggedId, { categoryId: target.category_id, position: target.position });
+      } catch {}
+      return;
+    }
+
+    // Same category → swap positions
+    const siblings = allChannels
+      .filter((c) => c.category_id === dragged.category_id)
+      .sort((a, b) => a.position - b.position);
+
+    try {
+      // Normalize positions first
+      for (let i = 0; i < siblings.length; i++) {
+        if (siblings[i].position !== i) {
+          await api.updateChannel(siblings[i].id, { position: i });
+        }
+      }
+      const dragIdx = siblings.findIndex((c) => c.id === draggedId);
+      const targetIdx = siblings.findIndex((c) => c.id === targetId);
+      if (dragIdx !== -1 && targetIdx !== -1) {
+        await api.updateChannel(draggedId, { position: targetIdx });
+        await api.updateChannel(targetId, { position: dragIdx });
+      }
+    } catch {}
+  }
+
+  async function performCategorySwap(draggedId: number, targetId: number) {
+    const allCategories = categoriesRef.current;
+    const sorted = [...allCategories].sort((a, b) => a.position - b.position);
+
+    try {
+      // Normalize positions first
+      for (let i = 0; i < sorted.length; i++) {
+        if (sorted[i].position !== i) {
+          await api.updateCategory(sorted[i].id, { position: i });
+        }
+      }
+      const dragIdx = sorted.findIndex((c) => c.id === draggedId);
+      const targetIdx = sorted.findIndex((c) => c.id === targetId);
+      if (dragIdx !== -1 && targetIdx !== -1) {
+        await api.updateCategory(draggedId, { position: targetIdx });
+        await api.updateCategory(sorted[targetIdx].id, { position: dragIdx });
+      }
+    } catch {}
+  }
+
+  // ── Global mousemove handler (stable reference) ───────────
+  const onMouseMove = useCallback((e: MouseEvent) => {
+    if (!dragRef.current) return;
+
+    // Require 5px movement before starting visual drag
+    if (!isDraggingRef.current && Math.abs(e.clientY - dragRef.current.startY) < 5) return;
+    if (!isDraggingRef.current) setIsDragging(true);
+
+    const elements = document.querySelectorAll("[data-drag-id]");
+    let hoveredId: number | null = null;
+    for (const el of elements) {
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        hoveredId = Number(el.getAttribute("data-drag-id"));
+        break;
+      }
+    }
+    if (hoveredId !== dragOverIdRef.current) setDragOverId(hoveredId);
+  }, []);
+
+  // ── Global mouseup handler (stable reference) ─────────────
+  const onMouseUp = useCallback(() => {
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+
+    const drag = dragRef.current;
+    const overId = dragOverIdRef.current;
+    const wasDragging = isDraggingRef.current;
+
+    dragRef.current = null;
+    setIsDragging(false);
+    setDragOverId(null);
+
+    if (!drag || !wasDragging || overId === null || overId === drag.id) return;
+
+    if (drag.type === "channel") {
+      performChannelSwap(drag.id, overId);
+    } else {
+      // Category dragged over another category header
+      const targetIsCategory = categoriesRef.current.some((cat) => cat.id === overId);
+      if (targetIsCategory) {
+        performCategorySwap(drag.id, overId);
+      }
+    }
+  }, [onMouseMove]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Cleanup on unmount ────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [onMouseMove, onMouseUp]);
+
+  // ── Start drag ────────────────────────────────────────────
+  function startDrag(e: React.MouseEvent, type: "channel" | "category", id: number) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragRef.current = { type, id, startY: e.clientY };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }
+
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
     try {
@@ -108,8 +253,11 @@ export default function ChannelSidebar() {
     return (
       <div
         key={ch.id}
-        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
+        data-drag-id={ch.id}
+        data-drag-type="channel"
+        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}${dragOverId === ch.id ? " drag-over" : ""}`}
         onClick={() => handleSelectChannel(ch)}
+        onMouseDown={(e) => startDrag(e, "channel", ch.id)}
         onContextMenu={(e) => {
           e.preventDefault();
           setContextMenu({ x: e.clientX, y: e.clientY, channelId: ch.id, type: "channel" });
@@ -129,7 +277,10 @@ export default function ChannelSidebar() {
     return (
       <div key={cat.id}>
         <div
-          className="channel-category"
+          data-drag-id={cat.id}
+          data-drag-type="category"
+          className={`channel-category${dragOverId === cat.id ? " drag-over" : ""}`}
+          onMouseDown={(e) => startDrag(e, "category", cat.id)}
           onContextMenu={(e) => {
             e.preventDefault();
             setContextMenu({ x: e.clientX, y: e.clientY, channelId: 0, type: "category", categoryId: cat.id });
@@ -142,7 +293,7 @@ export default function ChannelSidebar() {
 
   return (
     <>
-      <div className="channel-sidebar">
+      <div className={`channel-sidebar${isDragging ? " dragging" : ""}`}>
         <div className="server-header">
           <div className="server-name">{state.serverName}</div>
           <div style={{ display: "flex", gap: "4px" }}>

@@ -229,22 +229,32 @@ body {
   background: rgba(255, 255, 255, 0.2);
 }
 
-.channel-item[draggable="true"] {
+/* ── Mouse-based drag-and-drop ──────────────────────────── */
+.channel-item {
   cursor: grab;
 }
 
-.channel-item[draggable="true"]:active {
-  cursor: grabbing;
-  opacity: 0.6;
+.channel-item.drag-over {
+  border-top: 2px solid white;
+  padding-top: 2px;
 }
 
-.channel-category[draggable="true"] {
+.channel-category {
   cursor: grab;
 }
 
-.channel-category[draggable="true"]:active {
+.channel-category.drag-over {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.channel-sidebar.dragging {
   cursor: grabbing;
-  opacity: 0.6;
+  user-select: none;
+}
+
+.channel-sidebar.dragging .channel-item,
+.channel-sidebar.dragging .channel-category {
+  cursor: grabbing;
 }
 
 .user-footer {
