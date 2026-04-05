@@ -275,3 +275,7 @@ export async function cancelDeletion(serverId: string): Promise<void> {
 export async function getDeletionStatus(serverId: string): Promise<any> {
   return invoke("get_deletion_status", { serverId });
 }
+
+export async function saveTempAudio(data: string): Promise<string> {
+  return invoke<string>("save_temp_audio", { data });
+}

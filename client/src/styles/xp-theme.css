@@ -505,6 +505,39 @@ body {
   margin-top: 4px;
 }
 
+.attachment-audio {
+  margin-top: 4px;
+}
+
+/* ── Voice recorder ─────────────────────────────────────── */
+.voice-recorder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: var(--xp-window-bg);
+  border-top: 1px solid var(--xp-border);
+}
+
+.voice-recording-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #cc0000;
+  animation: voice-pulse 1s infinite;
+}
+
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.voice-timer {
+  font-size: 12px;
+  font-family: monospace;
+  min-width: 40px;
+}
+
 /* ── Reactions ──────────────────────────────────────────── */
 .reaction-bar {
   display: flex;

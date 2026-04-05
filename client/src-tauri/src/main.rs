@@ -73,6 +73,7 @@ fn main() {
             commands::get_avatar,
             commands::set_server_avatar,
             commands::get_server_avatar,
+            commands::save_temp_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

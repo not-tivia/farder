@@ -1392,3 +1392,20 @@ pub async fn remove_role(
         other => Err(format!("unexpected: {:?}", other)),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Voice message helper
+// ---------------------------------------------------------------------------
+
+/// Decode base64 audio data and write it to a temp file; returns the file path.
+#[tauri::command]
+pub fn save_temp_audio(data: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&data).map_err(|e| e.to_string())?;
+    let tmp_dir = std::env::temp_dir();
+    let filename = format!("farder_voice_{}.webm", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+    let path = tmp_dir.join(&filename);
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}

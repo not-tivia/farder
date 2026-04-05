@@ -5,6 +5,7 @@ import type { MemberInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import { useActiveServer } from "../context/ServerContext";
 import FavoritesPanel from "./FavoritesPanel";
+import VoiceRecorder from "./VoiceRecorder";
 
 interface MessageInputProps {
   channelId: number;
@@ -22,6 +23,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showFavorites, setShowFavorites] = useState(false);
+  const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -67,6 +69,36 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         const fileId = await api.fetchUrl(serverId, fav.original_url, channelId);
         await api.sendMessage(serverId, channelId, "", undefined, [fileId]);
       }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function handleVoiceRecorded(blob: Blob, _duration: number) {
+    setShowVoiceRecorder(false);
+    setSending(true);
+    try {
+      // Convert blob to base64
+      const reader = new FileReader();
+      const base64 = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result.split(",")[1]); // strip data:...;base64, prefix
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      // Save to temp file
+      const tempPath = await api.saveTempAudio(base64);
+
+      // Upload via existing system
+      const fileId = await api.uploadFile(serverId, channelId, tempPath);
+
+      // Send message with attachment
+      await api.sendMessage(serverId, channelId, "", undefined, [fileId]);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -211,41 +243,56 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
           </div>
         )}
         {error && <div className="error-text" style={{ padding: "2px 4px" }}>{error}</div>}
-        <div className="message-input-row">
-          <button
-            className="xp-button attach-btn"
-            onClick={() => setShowFavorites(!showFavorites)}
-            disabled={sending}
-            title="Favorites"
-          >
-            *
-          </button>
-          <button
-            className="xp-button attach-btn"
-            onClick={handleAttach}
-            disabled={sending || uploading}
-            title="Attach file"
-          >
-            +
-          </button>
-          <textarea
-            ref={textareaRef}
-            className="message-input"
-            value={content}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
-            rows={1}
-            disabled={sending}
+        {showVoiceRecorder ? (
+          <VoiceRecorder
+            onRecorded={handleVoiceRecorded}
+            onCancel={() => setShowVoiceRecorder(false)}
           />
-          <button
-            className="xp-button"
-            onClick={handleSend}
-            disabled={sending || uploading || (!content.trim() && !attachedFileId)}
-          >
-            Send
-          </button>
-        </div>
+        ) : (
+          <div className="message-input-row">
+            <button
+              className="xp-button attach-btn"
+              onClick={() => setShowFavorites(!showFavorites)}
+              disabled={sending}
+              title="Favorites"
+            >
+              *
+            </button>
+            <button
+              className="xp-button attach-btn"
+              onClick={handleAttach}
+              disabled={sending || uploading}
+              title="Attach file"
+            >
+              +
+            </button>
+            <button
+              className="xp-button attach-btn"
+              onClick={() => setShowVoiceRecorder(true)}
+              disabled={sending}
+              title="Voice Message"
+            >
+              Mic
+            </button>
+            <textarea
+              ref={textareaRef}
+              className="message-input"
+              value={content}
+              onChange={handleChange}
+              onKeyDown={handleKeyDown}
+              placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+              rows={1}
+              disabled={sending}
+            />
+            <button
+              className="xp-button"
+              onClick={handleSend}
+              disabled={sending || uploading || (!content.trim() && !attachedFileId)}
+            >
+              Send
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

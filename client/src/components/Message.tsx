@@ -311,9 +311,10 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
   const [downloading, setDownloading] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const isImage = attachment.mime_type.startsWith("image/");
+  const isAudio = attachment.mime_type.startsWith("audio/");
 
   useEffect(() => {
-    if (!isImage) return;
+    if (!isImage && !isAudio) return;
     const cached = imageCache.get(attachment.file_id);
     if (cached) {
       setImageUrl(cached);
@@ -326,7 +327,7 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
         setImageUrl(r.data_url);
       }
     }).catch(() => {}).finally(() => setLoading(false));
-  }, [attachment.file_id, isImage, serverId]);
+  }, [attachment.file_id, isImage, isAudio, serverId]);
 
   async function handleSave() {
     setDownloading(true);
@@ -347,8 +348,17 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
     setMenu(null);
   }
 
-  if (isImage && loading) {
-    return <div className="attachment-loading">Loading image...</div>;
+  if ((isImage || isAudio) && loading) {
+    return <div className="attachment-loading">Loading {isAudio ? "audio" : "image"}...</div>;
+  }
+
+  if (isAudio && imageUrl) {
+    return (
+      <div className="attachment-audio">
+        <audio src={imageUrl} controls style={{ width: "100%", maxWidth: 300, height: 32 }} />
+        <div className="attachment-name">{attachment.name} ({formatSize(attachment.size)})</div>
+      </div>
+    );
   }
 
   if (isImage && imageUrl) {
