@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
-import type { MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo } from "../lib/types";
+import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs } from "../lib/tauri-bridge";
