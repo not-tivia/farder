@@ -2,7 +2,51 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
 import type { MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo } from "../lib/types";
+import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
+import type { NotificationPrefs } from "../lib/tauri-bridge";
+
+// Module-level cache for notification prefs
+let notifPrefs: NotificationPrefs | null = null;
+api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
+
+function checkMentionsOrKeywords(content: string, prefs: NotificationPrefs): boolean {
+  if (prefs.keywords.length > 0) {
+    const lower = content.toLowerCase();
+    if (prefs.keywords.some(k => lower.includes(k.toLowerCase()))) return true;
+  }
+  if (prefs.mentionNotifications && content.includes("@")) return true;
+  return false;
+}
+
+function shouldNotify(serverId: string, message: MessageInfo, prefs: NotificationPrefs): boolean {
+  // Check if user is muted
+  const authorPk = publicKeyToString(message.author);
+  if (prefs.mutedUsers.includes(authorPk)) return false;
+
+  // Check server-specific mode
+  const serverPref = prefs.servers[serverId];
+  if (serverPref) {
+    if (serverPref.mode === "none") return false;
+    if (serverPref.mode === "mentions") {
+      // Only notify if message contains a mention of us or a keyword
+      return checkMentionsOrKeywords(message.content, prefs);
+    }
+    // "all" — fall through to notify
+  }
+
+  // Check keywords
+  if (prefs.keywords.length > 0) {
+    const lower = message.content.toLowerCase();
+    if (prefs.keywords.some(k => lower.includes(k.toLowerCase()))) return true;
+  }
+
+  return true; // default: notify
+}
+
+export function refreshNotifPrefsCache(): void {
+  api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
+}
 
 interface ReactionAddedPayload {
   server_id: string;
@@ -48,7 +92,11 @@ export function useServerEvents(): void {
         dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
       } else {
         dispatch({ type: "INCREMENT_UNREAD", serverId });
-        if (message.content) {
+
+        if (message.content && notifPrefs && shouldNotify(serverId, message, notifPrefs)) {
+          api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
+        } else if (message.content && !notifPrefs) {
+          // Prefs not yet loaded — fall back to always notify
           api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
         }
       }

@@ -96,6 +96,8 @@ fn main() {
             commands::start_recording,
             commands::stop_recording,
             commands::show_notification,
+            commands::get_notification_prefs,
+            commands::save_notification_prefs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

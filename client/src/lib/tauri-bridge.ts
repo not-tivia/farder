@@ -291,3 +291,20 @@ export async function stopRecording(): Promise<string> {
 export async function showNotification(title: string, body: string): Promise<void> {
   return invoke<void>("show_notification", { title, body });
 }
+
+export interface NotificationPrefs {
+  dmNotifications: "all" | "specific" | "none";
+  dmAllowedUsers: string[];
+  servers: Record<string, { mode: "all" | "mentions" | "none" }>;
+  mentionNotifications: boolean;
+  keywords: string[];
+  mutedUsers: string[];
+}
+
+export async function getNotificationPrefs(): Promise<NotificationPrefs> {
+  return invoke<NotificationPrefs>("get_notification_prefs");
+}
+
+export async function saveNotificationPrefs(prefs: NotificationPrefs): Promise<void> {
+  return invoke<void>("save_notification_prefs", { prefs });
+}

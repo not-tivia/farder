@@ -1578,3 +1578,31 @@ pub fn show_notification(title: String, body: String) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Notification preferences commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn get_notification_prefs() -> Result<serde_json::Value, String> {
+    let path = farder_data_dir().join("notifications.json");
+    let data = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        // Default prefs
+        serde_json::json!({
+            "dmNotifications": "all",
+            "dmAllowedUsers": [],
+            "servers": {},
+            "mentionNotifications": true,
+            "keywords": [],
+            "mutedUsers": []
+        }).to_string()
+    });
+    let v: serde_json::Value = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    Ok(v)
+}
+
+#[tauri::command]
+pub fn save_notification_prefs(prefs: serde_json::Value) -> Result<(), String> {
+    let path = farder_data_dir().join("notifications.json");
+    std::fs::write(&path, prefs.to_string()).map_err(|e| e.to_string())
+}
