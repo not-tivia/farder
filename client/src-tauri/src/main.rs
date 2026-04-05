@@ -98,6 +98,8 @@ fn main() {
             commands::show_notification,
             commands::get_notification_prefs,
             commands::save_notification_prefs,
+            commands::dm_encrypt,
+            commands::dm_decrypt,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

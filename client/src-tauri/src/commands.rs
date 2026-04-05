@@ -1606,3 +1606,50 @@ pub fn save_notification_prefs(prefs: serde_json::Value) -> Result<(), String> {
     let path = farder_data_dir().join("notifications.json");
     std::fs::write(&path, prefs.to_string()).map_err(|e| e.to_string())
 }
+
+// ---------------------------------------------------------------------------
+// DM E2EE commands
+// ---------------------------------------------------------------------------
+
+/// Encrypt a plaintext string for a DM peer, returning hex-encoded ciphertext.
+///
+/// The shared secret is derived from our Ed25519 signing key and the peer's
+/// Ed25519 verifying key via X25519 ECDH.  The resulting 32-byte secret is
+/// used directly as the AES-256-GCM key.
+#[tauri::command]
+pub fn dm_encrypt(
+    state: State<'_, Arc<AppState>>,
+    their_public_key: String,
+    plaintext: String,
+) -> Result<String, String> {
+    let our_sk = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        lock.ok_or_else(|| "no identity — call generate_keypair or load_identity first".to_string())?
+    };
+    let their_pk = parse_public_key(&their_public_key)?;
+    let shared = farder_crypto::key_exchange::derive_dm_shared_secret(&our_sk, their_pk.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let ciphertext = farder_crypto::encryption::encrypt(&shared, plaintext.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(hex::encode(ciphertext))
+}
+
+/// Decrypt a hex-encoded ciphertext from a DM peer, returning the plaintext string.
+#[tauri::command]
+pub fn dm_decrypt(
+    state: State<'_, Arc<AppState>>,
+    their_public_key: String,
+    ciphertext_hex: String,
+) -> Result<String, String> {
+    let our_sk = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        lock.ok_or_else(|| "no identity — call generate_keypair or load_identity first".to_string())?
+    };
+    let their_pk = parse_public_key(&their_public_key)?;
+    let shared = farder_crypto::key_exchange::derive_dm_shared_secret(&our_sk, their_pk.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let ciphertext = hex::decode(&ciphertext_hex).map_err(|e| e.to_string())?;
+    let plaintext_bytes = farder_crypto::encryption::decrypt(&shared, &ciphertext)
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(plaintext_bytes).map_err(|e| e.to_string())
+}
