@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { AppProvider, useApp } from "./context/ServerContext";
 import { useServerEvents } from "./hooks/useServerEvents";
 import ConnectDialog from "./components/ConnectDialog";
@@ -8,6 +9,22 @@ import * as api from "./lib/tauri-bridge";
 function AppInner() {
   const { state, dispatch } = useApp();
   useServerEvents();
+
+  // Handle farder:// deep links passed via CLI argument at launch.
+  // URL format: farder://<host:port>/<invite_code>
+  useEffect(() => {
+    const unlisten = listen<string>("deep-link", (e) => {
+      const url = e.payload;
+      const match = url.match(/^farder:\/\/([^/]+)\/(.+)$/);
+      if (!match) return;
+      const address = match[1];
+      const inviteCode = match[2];
+      // Pre-fill the connect dialog with the invite details by dispatching a
+      // pending invite action that ConnectDialog can read from state.
+      dispatch({ type: "SET_PENDING_INVITE", payload: { address, inviteCode } });
+    });
+    return () => { unlisten.then((u) => u()); };
+  }, [dispatch]);
 
   useEffect(() => {
     async function init() {

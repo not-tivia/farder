@@ -13,8 +13,27 @@ fn main() {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
+    // Capture any farder:// deep link URL passed as a CLI argument (how most
+    // desktop OS deep link handlers work — the OS re-launches the app with the
+    // URL as argv[1]).
+    let deep_link_url: Option<String> = std::env::args()
+        .skip(1)
+        .find(|a| a.starts_with("farder://"));
+
     tauri::Builder::default()
         .manage(Arc::new(AppState::new()))
+        .setup(move |app| {
+            if let Some(url) = deep_link_url {
+                // Emit after a short delay so the frontend has time to mount
+                // its event listener before the event fires.
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let _ = tauri::Emitter::emit(&app_handle, "deep-link", url);
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::generate_keypair,
             commands::load_identity,

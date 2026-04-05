@@ -1,0 +1,19 @@
+[Desktop Entry]
+Name=Farder
+Comment=Privacy-first end-to-end encrypted chat
+Exec=/usr/local/bin/farder-client %u
+Terminal=false
+Type=Application
+MimeType=x-scheme-handler/farder;
+Categories=Network;Chat;
+StartupNotify=true
+
+# To register this file so the OS routes farder:// URLs to this app:
+#
+#   sudo cp farder.desktop /usr/share/applications/
+#   xdg-mime default farder.desktop x-scheme-handler/farder
+#   update-desktop-database
+#
+# After registration, clicking a farder://<host>/<invite_code> link will
+# re-launch the client with the URL as the first CLI argument and the
+# deep-link event will fire in the frontend.
