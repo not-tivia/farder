@@ -45,14 +45,6 @@ export default function ServerStrip() {
             className={`server-icon${isActive ? " active" : ""}`}
             onClick={() => handleSelectServer(s.id)}
             title={s.name}
-            onContextMenu={async (e) => {
-              e.preventDefault();
-              const path = await api.pickFile();
-              if (path) {
-                const url = await api.setServerAvatar(s.id, path);
-                setAvatars(prev => ({ ...prev, [s.id]: url }));
-              }
-            }}
           >
             {avatars[s.id] ? (
               <img src={avatars[s.id]} alt={s.name} style={{ width: "100%", height: "100%", borderRadius: "inherit", objectFit: "cover" }} />

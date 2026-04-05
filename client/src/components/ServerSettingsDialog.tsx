@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { ChannelInfo } from "../lib/types";
@@ -15,6 +15,29 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleColor, setNewRoleColor] = useState("#3169C6");
   const [error, setError] = useState<string | null>(null);
+  const [serverAvatarUrl, setServerAvatarUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (serverId) {
+      api.getServerAvatar(serverId).then(url => setServerAvatarUrl(url));
+    }
+  }, [serverId]);
+
+  async function handleChangeServerIcon() {
+    if (!serverId) return;
+    const path = await api.pickFile();
+    if (path) {
+      try {
+        const url = await api.setServerAvatar(serverId, path);
+        setServerAvatarUrl(url);
+      } catch (e) { setError(String(e)); }
+    }
+  }
+
+  async function handleRemoveServerIcon() {
+    if (!serverId) return;
+    setServerAvatarUrl(null);
+  }
 
   const categories = activeServer?.categories ?? [];
   const channels = activeServer?.channels ?? [];
@@ -123,6 +146,26 @@ export default function ServerSettingsDialog({ onClose }: Props) {
         </div>
         <div className="modal-body" style={{ overflowY: "auto", flex: 1 }}>
           {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
+
+          {/* Server Icon */}
+          <div className="organizer-create" style={{ marginBottom: 12 }}>
+            <div className="connect-section-title">Server Icon</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+              <div className="server-avatar-preview">
+                {serverAvatarUrl ? (
+                  <img src={serverAvatarUrl} alt="Server icon" style={{ width: "100%", height: "100%", borderRadius: 6, objectFit: "cover" }} />
+                ) : (
+                  <span>{activeServer?.serverName?.charAt(0)?.toUpperCase() ?? "?"}</span>
+                )}
+              </div>
+              <div>
+                <button className="xp-button" onClick={handleChangeServerIcon}>Change Icon</button>
+                {serverAvatarUrl && (
+                  <button className="xp-button" onClick={handleRemoveServerIcon} style={{ marginLeft: 4 }}>Remove</button>
+                )}
+              </div>
+            </div>
+          </div>
 
           <div className="organizer-section">
             {uncategorized.length > 0 && (
