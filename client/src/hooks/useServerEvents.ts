@@ -18,10 +18,7 @@ interface ReactionRemovedPayload {
   emoji: string;
 }
 
-interface MemberLeftPayload {
-  server_id: string;
-  public_key_bytes: number[];
-}
+
 
 interface ChannelDeletedPayload {
   server_id: string;
