@@ -129,6 +129,31 @@ export default function UserProfilePopup({ member, roles, position, onClose, isS
             </div>
           )}
           {!isSelf && (
+            <div className="profile-card-section">
+              <div className="profile-card-label">MANAGE ROLES</div>
+              <div className="profile-card-roles">
+                {roles.filter(r => r.name !== "@everyone").map(r => {
+                  const hasRole = member.role_ids.includes(r.id);
+                  return (
+                    <span
+                      key={r.id}
+                      className={`profile-card-role ${hasRole ? "active" : ""}`}
+                      style={{ cursor: "pointer" }}
+                      onClick={async () => {
+                        try {
+                          if (hasRole) await api.removeRole(serverId, pkStr, r.id);
+                          else await api.assignRole(serverId, pkStr, r.id);
+                        } catch {}
+                      }}
+                    >
+                      {hasRole ? "- " : "+ "}{r.name}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {!isSelf && (
             <div className="profile-card-actions">
               <button className="xp-button profile-action-btn" onClick={async () => {
                 try {
