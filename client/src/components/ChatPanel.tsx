@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useServer } from "../context/ServerContext";
+import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { publicKeyToString } from "../lib/types";
 import type { MessageInfo } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
@@ -8,8 +8,9 @@ import MessageInput from "./MessageInput";
 import ThreadPanel from "./ThreadPanel";
 
 export default function ChatPanel() {
-  const { state, dispatch } = useServer();
-  const { currentChannelId, threadChannelId, messages, channels, members } = state;
+  const { dispatch } = useApp();
+  const activeServer = useActiveServer();
+  const serverId = useActiveServerId();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -18,6 +19,13 @@ export default function ChatPanel() {
   const [searchResults, setSearchResults] = useState<MessageInfo[] | null>(null);
   const [searching, setSearching] = useState(false);
 
+  const members = activeServer?.members ?? [];
+  const channels = activeServer?.channels ?? [];
+  const messages = activeServer?.messages ?? {};
+  const dms = activeServer?.dms ?? [];
+  const currentChannelId = activeServer?.currentChannelId ?? null;
+  const threadChannelId = activeServer?.threadChannelId ?? null;
+
   const memberNames: Record<string, string> = {};
   for (const m of members) {
     memberNames[publicKeyToString(m.public_key)] = m.display_name;
@@ -25,18 +33,16 @@ export default function ChatPanel() {
 
   const currentChannel = currentChannelId !== null
     ? channels.find((c) => c.id === currentChannelId)
-      ?? state.dms.find((d) => d.channel.id === currentChannelId)?.channel
+      ?? dms.find((d) => d.channel.id === currentChannelId)?.channel
       ?? null
     : null;
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
 
-  // Auto-scroll to bottom when new messages arrive in the current channel
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [channelMessages.length]);
 
-  // Reset hasMore and search when switching channels
   useEffect(() => {
     setHasMore(true);
     setShowSearch(false);
@@ -45,35 +51,39 @@ export default function ChatPanel() {
   }, [currentChannelId]);
 
   async function handleSearch() {
-    if (!searchQuery.trim() || !currentChannelId) return;
+    if (!searchQuery.trim() || !currentChannelId || !serverId) return;
     setSearching(true);
     try {
-      const results = await api.searchMessages(searchQuery.trim(), currentChannelId);
+      const results = await api.searchMessages(serverId, searchQuery.trim(), currentChannelId);
       setSearchResults(results);
-    } catch {
-      // ignore
-    }
+    } catch {}
     setSearching(false);
   }
 
   async function handleScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget;
-    if (el.scrollTop === 0 && !loadingMore && hasMore && currentChannelId) {
+    if (el.scrollTop === 0 && !loadingMore && hasMore && currentChannelId && serverId) {
       const oldest = channelMessages[0];
       if (!oldest) return;
       setLoadingMore(true);
       try {
-        const older = await api.fetchHistory(currentChannelId, oldest.id, 50);
+        const older = await api.fetchHistory(serverId, currentChannelId, oldest.id, 50);
         if (older.length === 0) {
           setHasMore(false);
         } else {
-          dispatch({ type: "PREPEND_MESSAGES", payload: { channelId: currentChannelId, messages: older.reverse() } });
+          dispatch({ type: "PREPEND_MESSAGES", serverId, payload: { channelId: currentChannelId, messages: older.reverse() } });
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
       setLoadingMore(false);
     }
+  }
+
+  if (!activeServer || !serverId) {
+    return (
+      <div className="chat-panel">
+        <div className="message-list-placeholder">Select a server to start chatting.</div>
+      </div>
+    );
   }
 
   if (threadChannelId !== null) {
@@ -95,7 +105,7 @@ export default function ChatPanel() {
       <div className="channel-header">
         <span className="channel-header-name">
           {currentChannel?.channel_type === "Dm"
-            ? state.dms.find(d => d.channel.id === currentChannelId)?.participant.display_name ?? "DM"
+            ? dms.find(d => d.channel.id === currentChannelId)?.participant.display_name ?? "DM"
             : `# ${currentChannel?.name ?? "unknown"}`}
         </span>
         {currentChannel?.topic && (
@@ -104,10 +114,10 @@ export default function ChatPanel() {
         {currentChannel?.channel_type === "Dm" && (
           <button className="xp-button" style={{ fontSize: 10, marginLeft: 8, padding: "2px 8px" }}
             onClick={() => {
-              dispatch({ type: "OPEN_DM_PANEL", payload: currentChannelId! });
-              const firstServerCh = state.channels.find(c => c.channel_type !== "Dm" && c.channel_type !== "Thread");
+              dispatch({ type: "OPEN_DM_PANEL", serverId, payload: currentChannelId! });
+              const firstServerCh = channels.find(c => c.channel_type !== "Dm" && c.channel_type !== "Thread");
               if (firstServerCh) {
-                dispatch({ type: "SELECT_CHANNEL", payload: firstServerCh.id });
+                dispatch({ type: "SELECT_CHANNEL", serverId, payload: firstServerCh.id });
               }
             }}
           >Pop Out</button>
@@ -145,9 +155,9 @@ export default function ChatPanel() {
           const sameAuthor = prev &&
             JSON.stringify(prev.author.bytes) === JSON.stringify(msg.author.bytes);
           const withinWindow = prev &&
-            (msg.timestamp - prev.timestamp) < 300; // 5 minutes in seconds
+            (msg.timestamp - prev.timestamp) < 300;
           const grouped = !!(sameAuthor && withinWindow);
-          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} />;
+          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} />;
         })}
         <div ref={bottomRef} />
       </div>
@@ -159,13 +169,13 @@ export default function ChatPanel() {
           </div>
           <div className="search-results-list">
             {searchResults.map((msg) => (
-              <Message key={msg.id} message={msg} memberNames={memberNames} grouped={false} />
+              <Message key={msg.id} message={msg} memberNames={memberNames} grouped={false} serverId={serverId} />
             ))}
             {searchResults.length === 0 && <div className="search-no-results">No messages found.</div>}
           </div>
         </div>
       )}
-      <MessageInput channelId={currentChannelId} />
+      <MessageInput channelId={currentChannelId} serverId={serverId} />
     </div>
   );
 }

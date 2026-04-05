@@ -1,74 +1,79 @@
 import { useState } from "react";
 import * as api from "../lib/tauri-bridge";
-import { useServer } from "../context/ServerContext";
+import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { ChannelInfo } from "../lib/types";
 
 interface Props { onClose: () => void; }
 
 export default function ServerSettingsDialog({ onClose }: Props) {
-  const { state } = useServer();
+  const activeServer = useActiveServer();
+  const serverId = useActiveServerId();
   const [newChName, setNewChName] = useState("");
   const [newChType, setNewChType] = useState("Text");
   const [newChCatId, setNewChCatId] = useState<number | undefined>(undefined);
   const [newCatName, setNewCatName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const sortedCategories = [...state.categories].sort((a, b) => a.position - b.position);
-  const allChannels = state.channels.filter(c => c.channel_type !== "Thread");
+  const categories = activeServer?.categories ?? [];
+  const channels = activeServer?.channels ?? [];
+
+  const sortedCategories = [...categories].sort((a, b) => a.position - b.position);
+  const allChannels = channels.filter(c => c.channel_type !== "Thread");
   const uncategorized = allChannels.filter(c => c.category_id === null).sort((a, b) => a.position - b.position);
 
   function channelsInCategory(catId: number) {
     return allChannels.filter(c => c.category_id === catId).sort((a, b) => a.position - b.position);
   }
 
-  // Normalize and swap positions for channels within a group
-  async function swapChannels(channels: ChannelInfo[], index: number, direction: -1 | 1) {
+  async function swapChannels(chList: ChannelInfo[], index: number, direction: -1 | 1) {
+    if (!serverId) return;
     const target = index + direction;
-    if (target < 0 || target >= channels.length) return;
+    if (target < 0 || target >= chList.length) return;
     try {
-      // Normalize first
-      for (let i = 0; i < channels.length; i++) {
-        if (channels[i].position !== i) {
-          await api.updateChannel(channels[i].id, { position: i });
+      for (let i = 0; i < chList.length; i++) {
+        if (chList[i].position !== i) {
+          await api.updateChannel(serverId, chList[i].id, { position: i });
         }
       }
-      await api.updateChannel(channels[index].id, { position: target });
-      await api.updateChannel(channels[target].id, { position: index });
+      await api.updateChannel(serverId, chList[index].id, { position: target });
+      await api.updateChannel(serverId, chList[target].id, { position: index });
     } catch (e) { setError(String(e)); }
   }
 
   async function swapCategories(index: number, direction: -1 | 1) {
+    if (!serverId) return;
     const target = index + direction;
     if (target < 0 || target >= sortedCategories.length) return;
     try {
       for (let i = 0; i < sortedCategories.length; i++) {
         if (sortedCategories[i].position !== i) {
-          await api.updateCategory(sortedCategories[i].id, { position: i });
+          await api.updateCategory(serverId, sortedCategories[i].id, { position: i });
         }
       }
-      await api.updateCategory(sortedCategories[index].id, { position: target });
-      await api.updateCategory(sortedCategories[target].id, { position: index });
+      await api.updateCategory(serverId, sortedCategories[index].id, { position: target });
+      await api.updateCategory(serverId, sortedCategories[target].id, { position: index });
     } catch (e) { setError(String(e)); }
   }
 
   async function moveChannelToCategory(channelId: number, categoryId: number | null) {
+    if (!serverId) return;
     try {
-      await api.updateChannel(channelId, { categoryId, position: 0 });
+      await api.updateChannel(serverId, channelId, { categoryId, position: 0 });
     } catch (e) { setError(String(e)); }
   }
 
   async function handleCreateChannel() {
-    if (!newChName.trim()) return;
+    if (!newChName.trim() || !serverId) return;
     try {
-      await api.createChannel(newChName.trim(), newChType, newChCatId);
+      await api.createChannel(serverId, newChName.trim(), newChType, newChCatId);
       setNewChName("");
     } catch (e) { setError(String(e)); }
   }
 
   async function handleCreateCategory() {
-    if (!newCatName.trim()) return;
+    if (!newCatName.trim() || !serverId) return;
     try {
-      await api.createCategory(newCatName.trim());
+      await api.createCategory(serverId, newCatName.trim());
       setNewCatName("");
     } catch (e) { setError(String(e)); }
   }
@@ -92,7 +97,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
             ))}
           </select>
           <button className="organizer-btn organizer-delete" onClick={async () => {
-            try { await api.deleteChannel(ch.id); } catch {}
+            if (serverId) try { await api.deleteChannel(serverId, ch.id); } catch {}
           }} title="Delete">x</button>
         </div>
       </div>
@@ -110,7 +115,6 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
 
           <div className="organizer-section">
-            {/* Uncategorized channels */}
             {uncategorized.length > 0 && (
               <div className="organizer-group">
                 <div className="organizer-group-header">Uncategorized</div>
@@ -118,7 +122,6 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               </div>
             )}
 
-            {/* Categories with their channels */}
             {sortedCategories.map((cat, catIdx) => {
               const catChannels = channelsInCategory(cat.id);
               return (
@@ -129,7 +132,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                       <button className="organizer-btn" disabled={catIdx === 0} onClick={() => swapCategories(catIdx, -1)} title="Move up">^</button>
                       <button className="organizer-btn" disabled={catIdx === sortedCategories.length - 1} onClick={() => swapCategories(catIdx, 1)} title="Move down">v</button>
                       <button className="organizer-btn organizer-delete" onClick={async () => {
-                        try { await api.deleteCategory(cat.id); } catch {}
+                        if (serverId) try { await api.deleteCategory(serverId, cat.id); } catch {}
                       }} title="Delete">x</button>
                     </div>
                   </div>
@@ -142,7 +145,6 @@ export default function ServerSettingsDialog({ onClose }: Props) {
             })}
           </div>
 
-          {/* Create new */}
           <div className="organizer-create" style={{ marginTop: 16, borderTop: "1px solid var(--xp-border)", paddingTop: 12 }}>
             <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "flex-end" }}>
               <div style={{ flex: 1 }}>

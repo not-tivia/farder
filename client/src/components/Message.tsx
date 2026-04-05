@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import type { MessageInfo, AttachmentInfo } from "../lib/types";
 import { publicKeyToString, isDeletedUser } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
-import { useServer } from "../context/ServerContext";
+import { useApp, useActiveServer } from "../context/ServerContext";
 import ReactionPicker from "./ReactionPicker";
 import UserProfilePopup from "./UserProfilePopup";
 
@@ -10,6 +10,7 @@ interface MessageProps {
   message: MessageInfo;
   memberNames: Record<string, string>;
   grouped?: boolean;
+  serverId: string;
 }
 
 /** Derive a deterministic color from a string (public key or name). */
@@ -24,7 +25,7 @@ function authorColor(key: string): string {
 
 function formatTimestamp(ts: number): string {
   try {
-    const date = new Date(ts * 1000); // Unix seconds → JS milliseconds
+    const date = new Date(ts * 1000);
     const now = new Date();
     const isToday = date.toDateString() === now.toDateString();
     const yesterday = new Date(now);
@@ -53,8 +54,9 @@ const imageCache = new Map<number, string>();
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
 
-export default function Message({ message, memberNames, grouped = false }: MessageProps) {
-  const { state, dispatch } = useServer();
+export default function Message({ message, memberNames, grouped = false, serverId }: MessageProps) {
+  const { dispatch } = useApp();
+  const activeServer = useActiveServer();
   const [showPicker, setShowPicker] = useState(false);
   const [reacting, setReacting] = useState(false);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
@@ -72,7 +74,8 @@ export default function Message({ message, memberNames, grouped = false }: Messa
     ? "Deleted User"
     : (memberNames[pkStr] ?? pkStr.slice(0, 16) + "…");
   const color = deleted ? "#999" : authorColor(pkStr);
-  const member = deleted ? null : state.members.find(m => publicKeyToString(m.public_key) === pkStr) ?? null;
+  const member = deleted ? null : (activeServer?.members.find(m => publicKeyToString(m.public_key) === pkStr) ?? null);
+  const roles = activeServer?.roles ?? [];
 
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
@@ -86,9 +89,9 @@ export default function Message({ message, memberNames, grouped = false }: Messa
     setReacting(true);
     try {
       if (alreadyMe) {
-        await api.removeReaction(message.id, emoji);
+        await api.removeReaction(serverId, message.id, emoji);
       } else {
-        await api.addReaction(message.id, emoji);
+        await api.addReaction(serverId, message.id, emoji);
       }
     } catch {
       // ignore
@@ -102,7 +105,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
     setShowPicker(false);
     setReacting(true);
     try {
-      await api.addReaction(message.id, emoji);
+      await api.addReaction(serverId, message.id, emoji);
     } catch {
       // ignore
     } finally {
@@ -112,7 +115,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
 
   function handleThreadClick() {
     if (message.thread_id !== null) {
-      dispatch({ type: "VIEW_THREAD", payload: message.thread_id });
+      dispatch({ type: "VIEW_THREAD", serverId, payload: message.thread_id });
     }
   }
 
@@ -139,10 +142,11 @@ export default function Message({ message, memberNames, grouped = false }: Messa
       {profilePopup && member && (
         <UserProfilePopup
           member={member}
-          roles={state.roles}
+          roles={roles}
           position={profilePopup}
           onClose={() => setProfilePopup(null)}
           isSelf={ownPk === pkStr}
+          serverId={serverId}
         />
       )}
       {(deleted || displayContent) && (
@@ -154,7 +158,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
       {message.attachments.length > 0 && (
         <div className="message-attachments">
           {message.attachments.map((att) => (
-            <AttachmentDisplay key={att.id} attachment={att} messageContent={message.content} />
+            <AttachmentDisplay key={att.id} attachment={att} messageContent={message.content} serverId={serverId} />
           ))}
         </div>
       )}
@@ -194,7 +198,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
   );
 }
 
-function AttachmentDisplay({ attachment, messageContent }: { attachment: AttachmentInfo; messageContent: string }) {
+function AttachmentDisplay({ attachment, messageContent, serverId }: { attachment: AttachmentInfo; messageContent: string; serverId: string }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -209,18 +213,18 @@ function AttachmentDisplay({ attachment, messageContent }: { attachment: Attachm
       return;
     }
     setLoading(true);
-    api.downloadFile(attachment.file_id).then((r) => {
+    api.downloadFile(serverId, attachment.file_id).then((r) => {
       if (r.data_url) {
         imageCache.set(attachment.file_id, r.data_url);
         setImageUrl(r.data_url);
       }
     }).catch(() => {}).finally(() => setLoading(false));
-  }, [attachment.file_id, isImage]);
+  }, [attachment.file_id, isImage, serverId]);
 
   async function handleSave() {
     setDownloading(true);
     try {
-      const result = await api.downloadFile(attachment.file_id);
+      const result = await api.downloadFile(serverId, attachment.file_id);
       if (result.saved_path) alert(`Saved to ${result.saved_path}`);
     } catch (e) {
       alert(`Download failed: ${e}`);
@@ -258,7 +262,7 @@ function AttachmentDisplay({ attachment, messageContent }: { attachment: Attachm
               <div className="context-menu-item" onClick={async () => {
                 try {
                   const urlMatch = messageContent.match(/https?:\/\/[^\s]+/);
-                  await api.addFavorite(attachment.file_id, urlMatch?.[0]);
+                  await api.addFavorite(serverId, attachment.file_id, urlMatch?.[0]);
                 } catch {}
                 setMenu(null);
               }}>Favorite</div>

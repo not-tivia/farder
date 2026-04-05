@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useServer } from "../context/ServerContext";
+import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo, MemberInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
@@ -9,6 +9,7 @@ import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import UserProfilePopup from "./UserProfilePopup";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
+  const serverId = useActiveServerId();
   const [name, setName] = useState<string | null>(null);
   const [ownPk, setOwnPk] = useState<string | null>(null);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
@@ -29,20 +30,21 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
       >
         ● {name ?? "Unknown"}
       </span>
-      {profilePopup && ownMember && (
+      {profilePopup && ownMember && serverId && (
         <UserProfilePopup
           member={ownMember}
           roles={roles}
           position={profilePopup}
           onClose={() => setProfilePopup(null)}
           isSelf={true}
+          serverId={serverId}
         />
       )}
     </>
   );
 }
 
-function CategoryEditForm({ category, onClose }: { category: CategoryInfo; onClose: () => void }) {
+function CategoryEditForm({ category, onClose, serverId }: { category: CategoryInfo; onClose: () => void; serverId: string }) {
   const [name, setName] = useState(category.name);
   const [position, setPosition] = useState(String(category.position));
   const [saving, setSaving] = useState(false);
@@ -53,7 +55,7 @@ function CategoryEditForm({ category, onClose }: { category: CategoryInfo; onClo
     setError(null);
     try {
       const pos = parseInt(position, 10);
-      await api.updateCategory(category.id, {
+      await api.updateCategory(serverId, category.id, {
         name: name !== category.name ? name : undefined,
         position: !isNaN(pos) && pos !== category.position ? pos : undefined,
       });
@@ -86,12 +88,23 @@ function CategoryEditForm({ category, onClose }: { category: CategoryInfo; onClo
 }
 
 export default function ChannelSidebar() {
-  const { state, dispatch } = useServer();
+  const { dispatch } = useApp();
+  const activeServer = useActiveServer();
+  const serverId = useActiveServerId();
   const [showInvite, setShowInvite] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
+
+  const channels = activeServer?.channels ?? [];
+  const categories = activeServer?.categories ?? [];
+  const currentChannelId = activeServer?.currentChannelId ?? null;
+  const readState = activeServer?.readState ?? {};
+  const messages = activeServer?.messages ?? {};
+  const dms = activeServer?.dms ?? [];
+  const members = activeServer?.members ?? [];
+  const roles = activeServer?.roles ?? [];
 
   // ── Drag state ────────────────────────────────────────────
   const dragRef = useRef<{ type: "channel" | "category"; id: number; startY: number } | null>(null);
@@ -100,86 +113,75 @@ export default function ChannelSidebar() {
   const isDraggingRef = useRef(false);
   const dragOverIdRef = useRef<number | null>(null);
 
-  // Keep refs in sync with state so stable callbacks read current values
   useEffect(() => { isDraggingRef.current = isDragging; }, [isDragging]);
   useEffect(() => { dragOverIdRef.current = dragOverId; }, [dragOverId]);
 
-  // Stable refs for latest channels/categories (avoids stale closures in callbacks)
-  const channelsRef = useRef(state.channels);
-  channelsRef.current = state.channels;
-  const categoriesRef = useRef(state.categories);
-  categoriesRef.current = state.categories;
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
+  const categoriesRef = useRef(categories);
+  categoriesRef.current = categories;
 
   // ── Swap helpers ──────────────────────────────────────────
   async function performChannelSwap(draggedId: number, targetId: number) {
+    if (!serverId) return;
     const allChannels = channelsRef.current;
     const dragged = allChannels.find((c) => c.id === draggedId);
     const target = allChannels.find((c) => c.id === targetId);
     if (!dragged || !target) return;
 
-    // Dragged over a category header → move channel into that category
     const targetIsCategory = categoriesRef.current.some((cat) => cat.id === targetId);
     if (targetIsCategory) {
-      try {
-        await api.updateChannel(draggedId, { categoryId: targetId, position: 0 });
-      } catch {}
+      try { await api.updateChannel(serverId, draggedId, { categoryId: targetId, position: 0 }); } catch {}
       return;
     }
 
-    // Different categories → move dragged channel to target's category at target's position
     if (dragged.category_id !== target.category_id) {
-      try {
-        await api.updateChannel(draggedId, { categoryId: target.category_id, position: target.position });
-      } catch {}
+      try { await api.updateChannel(serverId, draggedId, { categoryId: target.category_id, position: target.position }); } catch {}
       return;
     }
 
-    // Same category → swap positions
     const siblings = allChannels
       .filter((c) => c.category_id === dragged.category_id)
       .sort((a, b) => a.position - b.position);
 
     try {
-      // Normalize positions first
       for (let i = 0; i < siblings.length; i++) {
         if (siblings[i].position !== i) {
-          await api.updateChannel(siblings[i].id, { position: i });
+          await api.updateChannel(serverId, siblings[i].id, { position: i });
         }
       }
       const dragIdx = siblings.findIndex((c) => c.id === draggedId);
       const targetIdx = siblings.findIndex((c) => c.id === targetId);
       if (dragIdx !== -1 && targetIdx !== -1) {
-        await api.updateChannel(draggedId, { position: targetIdx });
-        await api.updateChannel(targetId, { position: dragIdx });
+        await api.updateChannel(serverId, draggedId, { position: targetIdx });
+        await api.updateChannel(serverId, targetId, { position: dragIdx });
       }
     } catch {}
   }
 
   async function performCategorySwap(draggedId: number, targetId: number) {
+    if (!serverId) return;
     const allCategories = categoriesRef.current;
     const sorted = [...allCategories].sort((a, b) => a.position - b.position);
 
     try {
-      // Normalize positions first
       for (let i = 0; i < sorted.length; i++) {
         if (sorted[i].position !== i) {
-          await api.updateCategory(sorted[i].id, { position: i });
+          await api.updateCategory(serverId, sorted[i].id, { position: i });
         }
       }
       const dragIdx = sorted.findIndex((c) => c.id === draggedId);
       const targetIdx = sorted.findIndex((c) => c.id === targetId);
       if (dragIdx !== -1 && targetIdx !== -1) {
-        await api.updateCategory(draggedId, { position: targetIdx });
-        await api.updateCategory(sorted[targetIdx].id, { position: dragIdx });
+        await api.updateCategory(serverId, draggedId, { position: targetIdx });
+        await api.updateCategory(serverId, sorted[targetIdx].id, { position: dragIdx });
       }
     } catch {}
   }
 
-  // ── Global mousemove handler (stable reference) ───────────
+  // ── Global mousemove handler ───────────────────────────────
   const onMouseMove = useCallback((e: MouseEvent) => {
     if (!dragRef.current) return;
-
-    // Require 5px movement before starting visual drag
     if (!isDraggingRef.current && Math.abs(e.clientY - dragRef.current.startY) < 5) return;
     if (!isDraggingRef.current) setIsDragging(true);
 
@@ -195,7 +197,7 @@ export default function ChannelSidebar() {
     if (hoveredId !== dragOverIdRef.current) setDragOverId(hoveredId);
   }, []);
 
-  // ── Global mouseup handler (stable reference) ─────────────
+  // ── Global mouseup handler ─────────────────────────────────
   const onMouseUp = useCallback(() => {
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
@@ -213,7 +215,6 @@ export default function ChannelSidebar() {
     if (drag.type === "channel") {
       performChannelSwap(drag.id, overId);
     } else {
-      // Category dragged over another category header
       const targetIsCategory = categoriesRef.current.some((cat) => cat.id === overId);
       if (targetIsCategory) {
         performCategorySwap(drag.id, overId);
@@ -221,7 +222,6 @@ export default function ChannelSidebar() {
     }
   }, [onMouseMove]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Cleanup on unmount ────────────────────────────────────
   useEffect(() => {
     return () => {
       document.removeEventListener("mousemove", onMouseMove);
@@ -229,7 +229,6 @@ export default function ChannelSidebar() {
     };
   }, [onMouseMove, onMouseUp]);
 
-  // ── Start drag ────────────────────────────────────────────
   function startDrag(e: React.MouseEvent, type: "channel" | "category", id: number) {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -239,42 +238,39 @@ export default function ChannelSidebar() {
   }
 
   async function handleSelectChannel(channel: ChannelInfo) {
-    dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
+    if (!serverId) return;
+    dispatch({ type: "SELECT_CHANNEL", serverId, payload: channel.id });
     try {
-      // subscribeChannels is handled centrally by AppShell
-      const msgs = await api.fetchHistory(channel.id);
-      // Server returns newest-first; reverse for chronological display
+      const msgs = await api.fetchHistory(serverId, channel.id);
       const reversed = msgs.reverse();
-      dispatch({ type: "SET_MESSAGES", payload: { channelId: channel.id, messages: reversed } });
-      // Mark channel as read with latest message id
+      dispatch({ type: "SET_MESSAGES", serverId, payload: { channelId: channel.id, messages: reversed } });
       if (reversed.length > 0) {
         const latestId = Math.max(...reversed.map((m) => m.id));
-        dispatch({ type: "MARK_READ", payload: { channelId: channel.id, lastMessageId: latestId } });
+        dispatch({ type: "MARK_READ", serverId, payload: { channelId: channel.id, lastMessageId: latestId } });
       }
-    } catch {
-      // ignore fetch errors
-    }
-  }
-
-  async function handleMoveChannel(channelId: number, targetCategoryId: number | null, targetPosition: number) {
-    try {
-      await api.updateChannel(channelId, { categoryId: targetCategoryId, position: targetPosition });
     } catch {}
   }
 
+  async function handleMoveChannel(channelId: number, targetCategoryId: number | null, targetPosition: number) {
+    if (!serverId) return;
+    try { await api.updateChannel(serverId, channelId, { categoryId: targetCategoryId, position: targetPosition }); } catch {}
+  }
 
-  // Exclude Thread and Dm channels from the main channel list (DMs get their own section)
-  const visibleChannels = state.channels.filter((c) => c.channel_type !== "Thread" && c.channel_type !== "Dm");
-  const sortedCategories = [...state.categories].sort((a, b) => a.position - b.position);
+  if (!activeServer || !serverId) {
+    return <div className="channel-sidebar" />;
+  }
+
+  const visibleChannels = channels.filter((c) => c.channel_type !== "Thread" && c.channel_type !== "Dm");
+  const sortedCategories = [...categories].sort((a, b) => a.position - b.position);
   const uncategorized = visibleChannels
     .filter((c) => c.category_id === null)
     .sort((a, b) => a.position - b.position);
 
   function renderChannel(ch: ChannelInfo) {
-    const isActive = ch.id === state.currentChannelId;
-    const lastRead = state.readState?.[ch.id] ?? 0;
-    const channelMsgs = state.messages[ch.id] ?? [];
-    const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== state.currentChannelId;
+    const isActive = ch.id === currentChannelId;
+    const lastRead = readState?.[ch.id] ?? 0;
+    const channelMsgs = messages[ch.id] ?? [];
+    const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== currentChannelId;
     const prefix = ch.channel_type === "Announcement" ? "!" : "#";
     return (
       <div
@@ -299,7 +295,6 @@ export default function ChannelSidebar() {
     const catChannels = visibleChannels
       .filter((c) => c.category_id === cat.id)
       .sort((a, b) => a.position - b.position);
-    // Show empty categories so users can drag channels into them or see newly created ones
     return (
       <div key={cat.id}>
         <div
@@ -321,7 +316,7 @@ export default function ChannelSidebar() {
     <>
       <div className={`channel-sidebar${isDragging ? " dragging" : ""}`}>
         <div className="server-header">
-          <div className="server-name">{state.serverName}</div>
+          <div className="server-name">{activeServer.serverName}</div>
           <div style={{ display: "flex", gap: "4px" }}>
             <button className="server-invite-btn" onClick={() => setShowSettings(true)} title="Server Settings">&#9881;</button>
             <button className="server-invite-btn" onClick={() => setShowInvite(true)} title="Create Invite">+</button>
@@ -331,13 +326,13 @@ export default function ChannelSidebar() {
           {uncategorized.map(renderChannel)}
           {sortedCategories.map(renderCategory)}
           {/* Direct Messages */}
-          {state.dms.length > 0 && (
+          {dms.length > 0 && (
             <>
               <div className="channel-category" style={{ marginTop: 8 }}>DIRECT MESSAGES</div>
-              {state.dms.map(dm => {
-                const isActive = state.currentChannelId === dm.channel.id;
-                const lastRead = state.readState?.[dm.channel.id] ?? 0;
-                const dmMsgs = state.messages[dm.channel.id] ?? [];
+              {dms.map(dm => {
+                const isActive = currentChannelId === dm.channel.id;
+                const lastRead = readState?.[dm.channel.id] ?? 0;
+                const dmMsgs = messages[dm.channel.id] ?? [];
                 const hasUnread = dmMsgs.some(m => m.id > lastRead) && !isActive;
                 return (
                   <div
@@ -354,13 +349,13 @@ export default function ChannelSidebar() {
           )}
         </div>
         <div className="user-footer">
-          <UserFooter members={state.members} roles={state.roles} />
+          <UserFooter members={members} roles={roles} />
         </div>
       </div>
       {showInvite && <InviteDialog onClose={() => setShowInvite(false)} />}
       {showSettings && <ServerSettingsDialog onClose={() => setShowSettings(false)} />}
       {editChannel && <ChannelSettingsDialog channel={editChannel} onClose={() => setEditChannel(null)} />}
-      {editCategory && (
+      {editCategory && serverId && (
         <div className="modal-overlay" onClick={() => setEditCategory(null)}>
           <div className="modal-dialog" onClick={(e) => e.stopPropagation()} style={{ minWidth: 300 }}>
             <div className="modal-titlebar">
@@ -368,7 +363,7 @@ export default function ChannelSidebar() {
               <button className="modal-close" onClick={() => setEditCategory(null)}>X</button>
             </div>
             <div className="modal-body">
-              <CategoryEditForm category={editCategory} onClose={() => setEditCategory(null)} />
+              <CategoryEditForm category={editCategory} onClose={() => setEditCategory(null)} serverId={serverId} />
             </div>
           </div>
         </div>
@@ -378,7 +373,7 @@ export default function ChannelSidebar() {
           <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setContextMenu(null)} />
           <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
             {contextMenu.type === "channel" && (() => {
-              const ch = state.channels.find(c => c.id === contextMenu.channelId);
+              const ch = channels.find(c => c.id === contextMenu.channelId);
               const siblingsInCategory = visibleChannels
                 .filter(c => c.category_id === (ch?.category_id ?? null))
                 .sort((a, b) => a.position - b.position);
@@ -388,38 +383,38 @@ export default function ChannelSidebar() {
                   <div className="context-menu-item" onClick={() => { if (ch) setEditChannel(ch); setContextMenu(null); }}>Edit Channel</div>
                   {currentIndex > 0 && (
                     <div className="context-menu-item" onClick={async () => {
-                      // Re-assign sequential positions, then swap the two
+                      if (!serverId) return;
                       try {
                         for (let i = 0; i < siblingsInCategory.length; i++) {
                           if (siblingsInCategory[i].position !== i) {
-                            await api.updateChannel(siblingsInCategory[i].id, { position: i });
+                            await api.updateChannel(serverId, siblingsInCategory[i].id, { position: i });
                           }
                         }
-                        // Now swap current with above
-                        await api.updateChannel(contextMenu.channelId, { position: currentIndex - 1 });
-                        await api.updateChannel(siblingsInCategory[currentIndex - 1].id, { position: currentIndex });
+                        await api.updateChannel(serverId, contextMenu.channelId, { position: currentIndex - 1 });
+                        await api.updateChannel(serverId, siblingsInCategory[currentIndex - 1].id, { position: currentIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Up</div>
                   )}
                   {currentIndex < siblingsInCategory.length - 1 && (
                     <div className="context-menu-item" onClick={async () => {
+                      if (!serverId) return;
                       try {
                         for (let i = 0; i < siblingsInCategory.length; i++) {
                           if (siblingsInCategory[i].position !== i) {
-                            await api.updateChannel(siblingsInCategory[i].id, { position: i });
+                            await api.updateChannel(serverId, siblingsInCategory[i].id, { position: i });
                           }
                         }
-                        await api.updateChannel(contextMenu.channelId, { position: currentIndex + 1 });
-                        await api.updateChannel(siblingsInCategory[currentIndex + 1].id, { position: currentIndex });
+                        await api.updateChannel(serverId, contextMenu.channelId, { position: currentIndex + 1 });
+                        await api.updateChannel(serverId, siblingsInCategory[currentIndex + 1].id, { position: currentIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Down</div>
                   )}
-                  {state.categories.length > 0 && (
+                  {categories.length > 0 && (
                     <>
                       <div className="context-menu-separator" />
-                      {state.categories
+                      {categories
                         .filter(cat => cat.id !== ch?.category_id)
                         .map(cat => (
                           <div key={cat.id} className="context-menu-item" onClick={async () => {
@@ -438,7 +433,7 @@ export default function ChannelSidebar() {
                   )}
                   <div className="context-menu-separator" />
                   <div className="context-menu-item delete" onClick={async () => {
-                    try { await api.deleteChannel(contextMenu.channelId); } catch {}
+                    if (serverId) try { await api.deleteChannel(serverId, contextMenu.channelId); } catch {}
                     setContextMenu(null);
                   }}>Delete Channel</div>
                 </>
@@ -449,41 +444,43 @@ export default function ChannelSidebar() {
               return (
                 <>
                   <div className="context-menu-item" onClick={() => {
-                    const cat = state.categories.find(c => c.id === contextMenu.categoryId);
+                    const cat = categories.find(c => c.id === contextMenu.categoryId);
                     if (cat) setEditCategory(cat);
                     setContextMenu(null);
                   }}>Edit Category</div>
                   {catIndex > 0 && (
                     <div className="context-menu-item" onClick={async () => {
+                      if (!serverId) return;
                       try {
                         for (let i = 0; i < sortedCategories.length; i++) {
                           if (sortedCategories[i].position !== i) {
-                            await api.updateCategory(sortedCategories[i].id, { position: i });
+                            await api.updateCategory(serverId, sortedCategories[i].id, { position: i });
                           }
                         }
-                        await api.updateCategory(contextMenu.categoryId!, { position: catIndex - 1 });
-                        await api.updateCategory(sortedCategories[catIndex - 1].id, { position: catIndex });
+                        await api.updateCategory(serverId, contextMenu.categoryId!, { position: catIndex - 1 });
+                        await api.updateCategory(serverId, sortedCategories[catIndex - 1].id, { position: catIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Up</div>
                   )}
                   {catIndex < sortedCategories.length - 1 && (
                     <div className="context-menu-item" onClick={async () => {
+                      if (!serverId) return;
                       try {
                         for (let i = 0; i < sortedCategories.length; i++) {
                           if (sortedCategories[i].position !== i) {
-                            await api.updateCategory(sortedCategories[i].id, { position: i });
+                            await api.updateCategory(serverId, sortedCategories[i].id, { position: i });
                           }
                         }
-                        await api.updateCategory(contextMenu.categoryId!, { position: catIndex + 1 });
-                        await api.updateCategory(sortedCategories[catIndex + 1].id, { position: catIndex });
+                        await api.updateCategory(serverId, contextMenu.categoryId!, { position: catIndex + 1 });
+                        await api.updateCategory(serverId, sortedCategories[catIndex + 1].id, { position: catIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Down</div>
                   )}
                   <div className="context-menu-separator" />
                   <div className="context-menu-item delete" onClick={async () => {
-                    try { await api.deleteCategory(contextMenu.categoryId!); } catch {}
+                    if (serverId) try { await api.deleteCategory(serverId, contextMenu.categoryId!); } catch {}
                     setContextMenu(null);
                   }}>Delete Category</div>
                 </>

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
-import { useServer } from "../context/ServerContext";
+import { useApp } from "../context/ServerContext";
 
 type Step = "setup" | "join";
 
@@ -23,8 +23,8 @@ function parseInviteLink(input: string): {
   const joinMatch = trimmed.match(/(?:https?:\/\/)?farder\.gg\/join\/([A-Za-z0-9_-]+)/);
   if (joinMatch) {
     try {
-      const decoded = atob(joinMatch[1].replace(/-/g, '+').replace(/_/g, '/'));
-      const slashIdx = decoded.indexOf('/');
+      const decoded = atob(joinMatch[1].replace(/-/g, "+").replace(/_/g, "/"));
+      const slashIdx = decoded.indexOf("/");
       if (slashIdx > 0) {
         const address = decoded.substring(0, slashIdx);
         const token = decoded.substring(slashIdx + 1);
@@ -73,76 +73,33 @@ function parseInviteLink(input: string): {
 }
 
 export default function ConnectDialog() {
-  const { dispatch } = useServer();
+  const { dispatch } = useApp();
 
   const [step, setStep] = useState<Step>("setup");
   const [displayName, setDisplayName] = useState("");
   const [savedName, setSavedName] = useState<string | null>(null);
   const [inviteInput, setInviteInput] = useState("");
-  const [savedAddress, setSavedAddress] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [manualAddress, setManualAddress] = useState("");
   const [pubKey, setPubKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [autoConnecting, setAutoConnecting] = useState(false);
-
-  async function autoConnect(server: string, key: string) {
-    setAutoConnecting(true);
-    setError(null);
-    // Retry up to 3 times with increasing delay
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        // Wait a bit to let Tauri state settle
-        await new Promise((r) => setTimeout(r, 300 + attempt * 500));
-        await api.loadIdentity();
-        const result = await api.connectServer(server);
-        dispatch({ type: "CONNECTED", payload: result });
-        try {
-          const members = await api.getMembers();
-          dispatch({ type: "SET_MEMBERS", payload: members });
-        } catch {
-          // non-fatal
-        }
-        try {
-          const dms = await api.listDms();
-          dispatch({ type: "SET_DMS", payload: dms });
-        } catch {}
-        return; // success
-      } catch {
-        // retry
-      }
-    }
-    // All retries failed
-    setError("Could not reconnect. Press Join to try manually.");
-    setPubKey(key);
-    setAutoConnecting(false);
-  }
 
   useEffect(() => {
     async function init() {
-      const [existingKey, existingName, lastServer] = await Promise.allSettled([
+      const [existingKey, existingName] = await Promise.allSettled([
         api.loadIdentity(),
         api.getDisplayName(),
-        api.getLastServer(),
       ]);
 
       const key = existingKey.status === "fulfilled" ? existingKey.value : null;
       const name = existingName.status === "fulfilled" ? existingName.value : null;
-      const server = lastServer.status === "fulfilled" ? lastServer.value : null;
 
       if (key) setPubKey(key);
-      if (server) {
-        setSavedAddress(server);
-        setManualAddress(server);
-      }
 
       if (key && name) {
         setSavedName(name);
         setStep("join");
-        if (server) {
-          autoConnect(server, key);
-        }
       }
     }
     init().catch(() => {});
@@ -161,6 +118,7 @@ export default function ConnectDialog() {
       await api.setDisplayName(trimmed);
       setPubKey(key);
       setSavedName(trimmed);
+      dispatch({ type: "SET_IDENTITY" });
       setStep("join");
     } catch (e) {
       setError(String(e));
@@ -177,6 +135,7 @@ export default function ConnectDialog() {
       try {
         const key = await api.generateKeypair();
         setPubKey(key);
+        dispatch({ type: "SET_IDENTITY" });
       } catch (e) {
         setError(String(e));
         setLoading(false);
@@ -187,31 +146,27 @@ export default function ConnectDialog() {
     try {
       const parsed = parseInviteLink(inviteInput);
 
-      // Use parsed address, or manual override, or saved address
-      const address = parsed.address || manualAddress.trim() || savedAddress;
+      // Use parsed address, or manual override
+      const address = parsed.address || manualAddress.trim();
       if (!address) {
-        // No address found anywhere — need user to provide one
         setShowAdvanced(true);
         setError("Include the server address in the link (e.g. farder://host:port/code) or enter it below.");
         setLoading(false);
         return;
       }
 
-      const result = await api.connectServer(
-        address,
-        parsed.inviteCode,
-        parsed.setupToken,
-      );
-      dispatch({ type: "CONNECTED", payload: result });
+      const result = await api.connectServer(address, parsed.inviteCode, parsed.setupToken);
+      dispatch({ type: "SERVER_ADDED", serverId: address, payload: result });
+      dispatch({ type: "SET_ACTIVE_SERVER", serverId: address });
       try {
-        const members = await api.getMembers();
-        dispatch({ type: "SET_MEMBERS", payload: members });
+        const members = await api.getMembers(address);
+        dispatch({ type: "SET_MEMBERS", serverId: address, payload: members });
       } catch {
         // non-fatal
       }
       try {
-        const dms = await api.listDms();
-        dispatch({ type: "SET_DMS", payload: dms });
+        const dms = await api.listDms(address);
+        dispatch({ type: "SET_DMS", serverId: address, payload: dms });
       } catch {}
     } catch (e) {
       setError(String(e));
@@ -259,21 +214,6 @@ export default function ConnectDialog() {
     );
   }
 
-  if (autoConnecting) {
-    return (
-      <div className="connect-screen">
-        <div className="connect-dialog">
-          <div className="connect-dialog-titlebar">Farder</div>
-          <div className="connect-dialog-body">
-            <div className="connect-section">
-              <div className="connect-section-title">Reconnecting...</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="connect-screen">
       <div className="connect-dialog">
@@ -294,11 +234,6 @@ export default function ConnectDialog() {
               onKeyDown={(e) => { if (e.key === "Enter") handleConnect(); }}
               autoFocus
             />
-            <div className="connect-hint">
-              {savedAddress && !inviteInput.trim()
-                ? `Will reconnect to ${savedAddress}`
-                : ""}
-            </div>
           </div>
 
           {error && <div className="error-text">{error}</div>}

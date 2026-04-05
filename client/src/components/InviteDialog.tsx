@@ -1,11 +1,13 @@
 import { useState } from "react";
 import * as api from "../lib/tauri-bridge";
+import { useActiveServerId } from "../context/ServerContext";
 
 interface Props {
   onClose: () => void;
 }
 
 export default function InviteDialog({ onClose }: Props) {
+  const serverId = useActiveServerId();
   const [link, setLink] = useState<string | null>(null);
   const [maxUses, setMaxUses] = useState<number | undefined>(undefined);
   const [loading, setLoading] = useState(false);
@@ -13,10 +15,11 @@ export default function InviteDialog({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   async function handleCreate() {
+    if (!serverId) return;
     setLoading(true);
     setError(null);
     try {
-      const result = await api.createInvite(maxUses);
+      const result = await api.createInvite(serverId, maxUses);
       setLink(result.link);
     } catch (e) {
       setError(String(e));
@@ -62,7 +65,7 @@ export default function InviteDialog({ onClose }: Props) {
               </div>
               {error && <div className="error-text">{error}</div>}
               <div className="connect-actions">
-                <button className="xp-button" onClick={handleCreate} disabled={loading}>
+                <button className="xp-button" onClick={handleCreate} disabled={loading || !serverId}>
                   {loading ? "Creating..." : "Create Invite Link"}
                 </button>
               </div>
