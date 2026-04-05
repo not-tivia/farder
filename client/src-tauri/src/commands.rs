@@ -922,6 +922,83 @@ pub async fn set_channel_override(
 }
 
 // ---------------------------------------------------------------------------
+// DM commands
+// ---------------------------------------------------------------------------
+
+fn parse_public_key(key_str: &str) -> Result<farder_crypto::identity::PublicKey, String> {
+    let hex_str = key_str.strip_prefix("vk_").unwrap_or(key_str);
+    let bytes = hex::decode(hex_str).map_err(|e| e.to_string())?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| "invalid key length".to_string())?;
+    Ok(farder_crypto::identity::PublicKey::from_bytes(arr))
+}
+
+#[tauri::command]
+pub async fn open_dm(
+    state: State<'_, Arc<AppState>>,
+    target_key: String,
+) -> Result<serde_json::Value, String> {
+    let pk = parse_public_key(&target_key)?;
+    let response = bridge::send_request(&state, ServerRequest::OpenDm { target_key: pk })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::DmOpened { channel, participant } => {
+            Ok(serde_json::json!({ "channel": channel, "participant": participant }))
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_dms(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let response = bridge::send_request(&state, ServerRequest::ListDms)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::DmList { dms } => {
+            Ok(dms.into_iter().map(|d| serde_json::to_value(d).unwrap()).collect())
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn block_user(
+    state: State<'_, Arc<AppState>>,
+    target_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&target_key)?;
+    let response = bridge::send_request(&state, ServerRequest::BlockUser { target_key: pk })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn unblock_user(
+    state: State<'_, Arc<AppState>>,
+    target_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&target_key)?;
+    let response = bridge::send_request(&state, ServerRequest::UnblockUser { target_key: pk })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Invite commands
 // ---------------------------------------------------------------------------
 

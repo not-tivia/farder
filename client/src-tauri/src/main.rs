@@ -52,6 +52,10 @@ fn main() {
             commands::add_favorite,
             commands::list_favorites,
             commands::remove_favorite,
+            commands::open_dm,
+            commands::list_dms,
+            commands::block_user,
+            commands::unblock_user,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

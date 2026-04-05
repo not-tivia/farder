@@ -173,6 +173,12 @@ fn dispatch_event(app: &AppHandle, event: ServerEvent) {
                 }),
             );
         }
+        ServerEvent::DmCreated { channel, participant } => {
+            let _ = app.emit("server:dm_created", serde_json::json!({
+                "channel": &channel,
+                "participant": &participant,
+            }));
+        }
         // All other events are intentionally ignored by the client.
         _ => {}
     }
