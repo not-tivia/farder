@@ -109,6 +109,11 @@ export function useServerEvents(): void {
       dispatch({ type: "CONNECTION_LOST" });
     }).then((u) => unlisten.push(u));
 
+    listen("server:dm_created", (e) => {
+      const p = e.payload as any;
+      dispatch({ type: "DM_CREATED", payload: { channel: p.channel, participant: p.participant } });
+    }).then((u) => unlisten.push(u));
+
     return () => {
       unlisten.forEach((u) => u());
     };
