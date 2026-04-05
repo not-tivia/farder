@@ -235,10 +235,29 @@ pub fn handle_request(
             if attachment_ids.len() > 10 {
                 return err("too many attachments (max 10)");
             }
-            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
-            if !permissions::has(perms, permissions::SEND_MESSAGES) {
-                return err("missing SEND_MESSAGES permission");
+
+            let channel = channels::get_channel(conn, channel_id)?
+                .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+
+            if channel.channel_type == ChannelType::Dm {
+                // DM: check participation and blocks.
+                if !channels::is_dm_participant(conn, channel_id, member)? {
+                    return err("not a participant in this DM");
+                }
+                let others = channels::list_dm_channels(conn, member)?;
+                if let Some((_, other_key)) = others.iter().find(|(ch, _)| ch.id == channel_id) {
+                    if members::is_blocked(conn, member, other_key)? {
+                        return err("this user is blocked");
+                    }
+                }
+            } else {
+                // Normal channel: check permissions.
+                let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+                if !permissions::has(perms, permissions::SEND_MESSAGES) {
+                    return err("missing SEND_MESSAGES permission");
+                }
             }
+
             let id = messages::insert_message(conn, channel_id, member, &content, reply_to)?;
 
             // Create attachment records
@@ -897,12 +916,100 @@ pub fn handle_request(
         }
 
         // ----------------------------------------------------------------
-        // DM and block operations (stub handlers — implemented in Task 3)
+        // DM and block operations
         // ----------------------------------------------------------------
-        ServerRequest::OpenDm { .. } => err("not yet implemented"),
-        ServerRequest::ListDms => err("not yet implemented"),
-        ServerRequest::BlockUser { .. } => err("not yet implemented"),
-        ServerRequest::UnblockUser { .. } => err("not yet implemented"),
+        ServerRequest::OpenDm { target_key } => {
+            // Cannot DM yourself.
+            if *member == target_key {
+                return err("cannot open a DM with yourself");
+            }
+
+            // Target must be a member.
+            if members::get_member(conn, &target_key)?.is_none() {
+                return err("target user is not a member");
+            }
+
+            // Check not blocked (bidirectional).
+            if members::is_blocked(conn, member, &target_key)? {
+                return err("this user is blocked");
+            }
+
+            // Find or create DM channel.
+            let (channel_id, was_created) = channels::open_dm_channel(conn, member, &target_key)?;
+            let channel = channels::get_channel(conn, channel_id)?
+                .ok_or_else(|| anyhow::anyhow!("DM channel not found after creation"))?;
+
+            // Build MemberInfo for participant.
+            let target_record = members::get_member(conn, &target_key)?
+                .ok_or_else(|| anyhow::anyhow!("target member disappeared"))?;
+            let role_ids = members::get_member_role_ids(conn, &target_key)?;
+            let participant = MemberInfo {
+                public_key: target_key.clone(),
+                display_name: target_record.display_name,
+                joined_at: target_record.joined_at,
+                role_ids,
+            };
+
+            let mut events = Vec::new();
+            if was_created {
+                events.push(BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::DmCreated {
+                        channel: channel.clone(),
+                        participant: participant.clone(),
+                    },
+                });
+            }
+
+            ok_with(ServerResponse::DmOpened { channel, participant }, events)
+        }
+
+        ServerRequest::ListDms => {
+            let dm_list = channels::list_dm_channels(conn, member)?;
+
+            let mut entries = Vec::new();
+            for (ch, other_key) in dm_list {
+                let other_record = match members::get_member(conn, &other_key)? {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let role_ids = members::get_member_role_ids(conn, &other_key)?;
+                let participant = MemberInfo {
+                    public_key: other_key,
+                    display_name: other_record.display_name,
+                    joined_at: other_record.joined_at,
+                    role_ids,
+                };
+                let ch_id = ch.id;
+                let last_msgs = messages::fetch_history(conn, ch_id, None, 1, member)?;
+                let last_message = last_msgs.into_iter().next();
+                entries.push(DmEntry {
+                    channel: ch,
+                    participant,
+                    last_message,
+                });
+            }
+
+            // Sort by last message timestamp (most recent first). DMs with no
+            // messages go last.
+            entries.sort_by(|a, b| {
+                let ts_a = a.last_message.as_ref().map(|m| m.timestamp).unwrap_or(0);
+                let ts_b = b.last_message.as_ref().map(|m| m.timestamp).unwrap_or(0);
+                ts_b.cmp(&ts_a)
+            });
+
+            ok(ServerResponse::DmList { dms: entries })
+        }
+
+        ServerRequest::BlockUser { target_key } => {
+            members::block_user(conn, member, &target_key)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::UnblockUser { target_key } => {
+            members::unblock_user(conn, member, &target_key)?;
+            ok(ServerResponse::Ok)
+        }
     }
 }
 
@@ -1504,6 +1611,200 @@ mod tests {
                 assert!(status.expires_at.is_some());
             }
             other => panic!("expected DeletionStatusResp, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // DM handler tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_handle_open_dm() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::OpenDm { target_key: alice.clone() },
+            "",
+        )
+        .unwrap();
+
+        match result.response {
+            ServerResponse::DmOpened { channel, participant } => {
+                assert_eq!(channel.channel_type, ChannelType::Dm);
+                assert_eq!(participant.public_key, alice);
+            }
+            other => panic!("expected DmOpened, got {:?}", other),
+        }
+        // DmCreated event should be emitted.
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0].event {
+            ServerEvent::DmCreated { .. } => {}
+            other => panic!("expected DmCreated event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_open_dm_idempotent() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+
+        let r1 = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::OpenDm { target_key: alice.clone() },
+            "",
+        )
+        .unwrap();
+        let r2 = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::OpenDm { target_key: alice.clone() },
+            "",
+        )
+        .unwrap();
+
+        let ch1 = match r1.response {
+            ServerResponse::DmOpened { channel, .. } => channel.id,
+            other => panic!("expected DmOpened, got {:?}", other),
+        };
+        let ch2 = match r2.response {
+            ServerResponse::DmOpened { channel, .. } => channel.id,
+            other => panic!("expected DmOpened, got {:?}", other),
+        };
+        assert_eq!(ch1, ch2, "should return the same channel");
+        // Second open should not emit DmCreated.
+        assert!(r2.events.is_empty(), "no events on second open");
+    }
+
+    #[test]
+    fn test_handle_list_dms() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+
+        // Open two DMs.
+        handle_request(&conn, &owner_pk, true, ServerRequest::OpenDm { target_key: alice }, "").unwrap();
+        handle_request(&conn, &owner_pk, true, ServerRequest::OpenDm { target_key: bob }, "").unwrap();
+
+        let result = handle_request(&conn, &owner_pk, true, ServerRequest::ListDms, "").unwrap();
+        match result.response {
+            ServerResponse::DmList { dms } => {
+                assert_eq!(dms.len(), 2);
+            }
+            other => panic!("expected DmList, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_block_prevents_dm() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+
+        // First open the DM channel.
+        let open_result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::OpenDm { target_key: alice.clone() },
+            "",
+        )
+        .unwrap();
+        let dm_channel_id = match open_result.response {
+            ServerResponse::DmOpened { channel, .. } => channel.id,
+            other => panic!("expected DmOpened, got {:?}", other),
+        };
+
+        // Block alice.
+        handle_request(&conn, &owner_pk, true, ServerRequest::BlockUser { target_key: alice.clone() }, "").unwrap();
+
+        // Sending a message in that DM should now fail.
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::SendMessage {
+                channel_id: dm_channel_id,
+                content: "hello".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "",
+        )
+        .unwrap();
+        match result.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains("blocked"), "expected blocked error, got: {}", reason);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_message_in_dm() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+
+        // Open DM.
+        let open_result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::OpenDm { target_key: alice.clone() },
+            "",
+        )
+        .unwrap();
+        let dm_channel_id = match open_result.response {
+            ServerResponse::DmOpened { channel, .. } => channel.id,
+            other => panic!("expected DmOpened, got {:?}", other),
+        };
+
+        // Owner sends a message — should succeed without permission checks.
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::SendMessage {
+                channel_id: dm_channel_id,
+                content: "Hey Alice!".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "",
+        )
+        .unwrap();
+        match result.response {
+            ServerResponse::MessageSent { id, .. } => {
+                assert!(id > 0);
+            }
+            other => panic!("expected MessageSent, got {:?}", other),
+        }
+
+        // Non-participant should not be able to send.
+        let bob = add_member(&conn, "Bob");
+        let result2 = handle_request(
+            &conn,
+            &bob,
+            false,
+            ServerRequest::SendMessage {
+                channel_id: dm_channel_id,
+                content: "Sneaky Bob".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "",
+        )
+        .unwrap();
+        match result2.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains("participant"), "expected participant error, got: {}", reason);
+            }
+            other => panic!("expected Error, got {:?}", other),
         }
     }
 }
