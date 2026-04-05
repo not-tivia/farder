@@ -273,7 +273,7 @@ export default function ChannelSidebar() {
     const catChannels = visibleChannels
       .filter((c) => c.category_id === cat.id)
       .sort((a, b) => a.position - b.position);
-    if (catChannels.length === 0) return null;
+    // Show empty categories so users can drag channels into them or see newly created ones
     return (
       <div key={cat.id}>
         <div
