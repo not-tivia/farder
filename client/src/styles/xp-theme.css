@@ -1703,3 +1703,90 @@ body {
   overflow-y: auto;
   padding: 8px;
 }
+
+/* ── Server Strip ───────────────────────────────────────── */
+.server-strip {
+  width: 48px;
+  min-width: 48px;
+  background: linear-gradient(to bottom, #1a3a7a, #0f2460);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 0;
+  gap: 4px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex-shrink: 0;
+  border-right: 2px solid #0a1840;
+}
+
+.server-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.12);
+  color: rgba(255,255,255,0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  position: relative;
+  border: 2px solid transparent;
+  transition: background 0.1s, border-color 0.1s, border-radius 0.15s;
+  flex-shrink: 0;
+}
+
+.server-icon:hover {
+  background: rgba(255,255,255,0.22);
+  border-radius: 30%;
+}
+
+.server-icon.active {
+  background: var(--xp-blue);
+  border-color: rgba(255,255,255,0.5);
+  border-radius: 30%;
+}
+
+.server-icon.add-server {
+  font-size: 20px;
+  font-weight: 300;
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.5);
+}
+
+.server-icon.add-server:hover {
+  background: rgba(255,255,255,0.18);
+  color: rgba(255,255,255,0.9);
+  border-radius: 30%;
+}
+
+.server-strip-separator {
+  width: 24px;
+  height: 1px;
+  background: rgba(255,255,255,0.15);
+  margin: 2px 0;
+}
+
+.server-unread-dot {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-radius: 50%;
+  border: 2px solid #0f2460;
+}
+
+.server-mention-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 12px;
+  height: 12px;
+  background: #e04040;
+  border-radius: 50%;
+  border: 2px solid #0f2460;
+}
