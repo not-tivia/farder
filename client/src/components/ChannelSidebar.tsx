@@ -189,26 +189,30 @@ export default function ChannelSidebar() {
                   <div className="context-menu-item" onClick={() => { if (ch) setEditChannel(ch); setContextMenu(null); }}>Edit Channel</div>
                   {currentIndex > 0 && (
                     <div className="context-menu-item" onClick={async () => {
-                      const above = siblingsInCategory[currentIndex - 1];
-                      const myPos = ch!.position;
-                      const theirPos = above.position;
-                      // Swap positions
+                      // Re-assign sequential positions, then swap the two
                       try {
-                        await api.updateChannel(contextMenu.channelId, { position: theirPos });
-                        await api.updateChannel(above.id, { position: myPos });
+                        for (let i = 0; i < siblingsInCategory.length; i++) {
+                          if (siblingsInCategory[i].position !== i) {
+                            await api.updateChannel(siblingsInCategory[i].id, { position: i });
+                          }
+                        }
+                        // Now swap current with above
+                        await api.updateChannel(contextMenu.channelId, { position: currentIndex - 1 });
+                        await api.updateChannel(siblingsInCategory[currentIndex - 1].id, { position: currentIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Up</div>
                   )}
                   {currentIndex < siblingsInCategory.length - 1 && (
                     <div className="context-menu-item" onClick={async () => {
-                      const below = siblingsInCategory[currentIndex + 1];
-                      const myPos = ch!.position;
-                      const theirPos = below.position;
-                      // Swap positions
                       try {
-                        await api.updateChannel(contextMenu.channelId, { position: theirPos });
-                        await api.updateChannel(below.id, { position: myPos });
+                        for (let i = 0; i < siblingsInCategory.length; i++) {
+                          if (siblingsInCategory[i].position !== i) {
+                            await api.updateChannel(siblingsInCategory[i].id, { position: i });
+                          }
+                        }
+                        await api.updateChannel(contextMenu.channelId, { position: currentIndex + 1 });
+                        await api.updateChannel(siblingsInCategory[currentIndex + 1].id, { position: currentIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Down</div>
@@ -252,22 +256,28 @@ export default function ChannelSidebar() {
                   }}>Edit Category</div>
                   {catIndex > 0 && (
                     <div className="context-menu-item" onClick={async () => {
-                      const myCat = sortedCategories[catIndex];
-                      const above = sortedCategories[catIndex - 1];
                       try {
-                        await api.updateCategory(contextMenu.categoryId!, { position: above.position });
-                        await api.updateCategory(above.id, { position: myCat.position });
+                        for (let i = 0; i < sortedCategories.length; i++) {
+                          if (sortedCategories[i].position !== i) {
+                            await api.updateCategory(sortedCategories[i].id, { position: i });
+                          }
+                        }
+                        await api.updateCategory(contextMenu.categoryId!, { position: catIndex - 1 });
+                        await api.updateCategory(sortedCategories[catIndex - 1].id, { position: catIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Up</div>
                   )}
                   {catIndex < sortedCategories.length - 1 && (
                     <div className="context-menu-item" onClick={async () => {
-                      const myCat = sortedCategories[catIndex];
-                      const below = sortedCategories[catIndex + 1];
                       try {
-                        await api.updateCategory(contextMenu.categoryId!, { position: below.position });
-                        await api.updateCategory(below.id, { position: myCat.position });
+                        for (let i = 0; i < sortedCategories.length; i++) {
+                          if (sortedCategories[i].position !== i) {
+                            await api.updateCategory(sortedCategories[i].id, { position: i });
+                          }
+                        }
+                        await api.updateCategory(contextMenu.categoryId!, { position: catIndex + 1 });
+                        await api.updateCategory(sortedCategories[catIndex + 1].id, { position: catIndex });
                       } catch {}
                       setContextMenu(null);
                     }}>Move Down</div>
