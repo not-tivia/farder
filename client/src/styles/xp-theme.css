@@ -993,6 +993,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  position: relative;
 }
 
 .message-input-row {
@@ -1855,4 +1856,47 @@ body {
   padding-left: 42px;
   margin-bottom: 2px;
   font-style: italic;
+}
+
+/* ── Mention Autocomplete ────────────────────────────────── */
+.mention-autocomplete {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: var(--xp-window-bg);
+  border: 1px solid var(--xp-border-dark);
+  border-bottom: none;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.mention-autocomplete-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mention-autocomplete-item:hover,
+.mention-autocomplete-item.active {
+  background: var(--xp-blue);
+  color: white;
+}
+
+.mention-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--xp-sidebar);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: bold;
+  flex-shrink: 0;
 }
