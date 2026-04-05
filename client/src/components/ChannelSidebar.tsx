@@ -3,6 +3,7 @@ import { useApp, useActiveServer, useActiveServerId } from "../context/ServerCon
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo, MemberInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
+import type { VoiceMember } from "../lib/tauri-bridge";
 import InviteDialog from "./InviteDialog";
 import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";
@@ -277,7 +278,61 @@ export default function ChannelSidebar() {
     .filter((c) => c.category_id === null)
     .sort((a, b) => a.position - b.position);
 
+  function renderVoiceChannel(ch: ChannelInfo) {
+    const isInThisChannel = activeServer?.currentVoiceChannelId === ch.id;
+    const participants = activeServer?.voiceStates[ch.id] ?? [];
+    return (
+      <div key={ch.id}>
+        <div
+          data-drag-id={ch.id}
+          data-drag-type="channel"
+          className={`channel-item voice-channel${isInThisChannel ? " active" : ""}${dragOverId === ch.id ? " drag-over" : ""}`}
+          onClick={async () => {
+            if (!serverId) return;
+            if (isInThisChannel) {
+              await api.leaveVoice(serverId, ch.id);
+              dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
+            } else {
+              await api.joinVoice(serverId, ch.id);
+              dispatch({ type: "JOIN_VOICE_CHANNEL", serverId, payload: ch.id });
+              try {
+                const vs = await api.getVoiceState(serverId, ch.id);
+                const simplified = vs.map((v: VoiceMember) => ({
+                  publicKey: publicKeyToString(v.public_key),
+                  displayName: v.display_name,
+                }));
+                dispatch({ type: "SET_VOICE_STATE", serverId, payload: { channelId: ch.id, participants: simplified } });
+              } catch {}
+            }
+          }}
+          onMouseDown={(e) => startDrag(e, "channel", ch.id)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setContextMenu({ x: e.clientX, y: e.clientY, channelId: ch.id, type: "channel" });
+          }}
+        >
+          <span className="channel-prefix">~</span>
+          <span>{ch.name}</span>
+          {participants.length > 0 && (
+            <span className="voice-count">({participants.length})</span>
+          )}
+        </div>
+        {participants.length > 0 && (
+          <div className="voice-participants">
+            {participants.map(p => (
+              <div key={p.publicKey} className="voice-participant">
+                <span className="voice-participant-dot">*</span>
+                <span>{p.displayName}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function renderChannel(ch: ChannelInfo) {
+    if (ch.channel_type === "Voice") return renderVoiceChannel(ch);
     const isActive = ch.id === currentChannelId;
     const lastRead = readState?.[ch.id] ?? 0;
     const channelMsgs = messages[ch.id] ?? [];
@@ -359,6 +414,17 @@ export default function ChannelSidebar() {
             </>
           )}
         </div>
+        {activeServer?.currentVoiceChannelId != null && (
+          <div className="voice-status-bar">
+            <span>~ {channels.find(c => c.id === activeServer.currentVoiceChannelId)?.name ?? "Voice"}</span>
+            <button className="voice-disconnect-btn" onClick={async () => {
+              if (serverId && activeServer.currentVoiceChannelId != null) {
+                await api.leaveVoice(serverId, activeServer.currentVoiceChannelId);
+                dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
+              }
+            }}>Disconnect</button>
+          </div>
+        )}
         <div className="user-footer">
           <UserFooter members={members} roles={roles} />
         </div>

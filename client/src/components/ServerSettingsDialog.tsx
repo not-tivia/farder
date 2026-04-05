@@ -112,7 +112,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   }
 
   function renderChannelRow(ch: ChannelInfo, siblings: ChannelInfo[], index: number) {
-    const prefix = ch.channel_type === "Announcement" ? "!" : "#";
+    const prefix = ch.channel_type === "Announcement" ? "!" : ch.channel_type === "Voice" ? "~" : "#";
     return (
       <div key={ch.id} className="organizer-row organizer-channel">
         <span className="organizer-name">{prefix} {ch.name}</span>
@@ -207,6 +207,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               <select className="connect-input" style={{ width: 100 }} value={newChType} onChange={(e) => setNewChType(e.target.value)}>
                 <option value="Text">Text</option>
                 <option value="Announcement">Announce</option>
+                <option value="Voice">Voice</option>
               </select>
               <select className="connect-input" style={{ width: 120 }} value={newChCatId ?? ""} onChange={(e) => setNewChCatId(e.target.value ? Number(e.target.value) : undefined)}>
                 <option value="">No category</option>

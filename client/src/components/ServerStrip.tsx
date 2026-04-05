@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
+import type { VoiceMember } from "../lib/tauri-bridge";
+import { publicKeyToString } from "../lib/types";
 import AddServerModal from "./AddServerModal";
 
 export default function ServerStrip() {
@@ -32,6 +34,18 @@ export default function ServerStrip() {
       dispatch({ type: "SET_MEMBERS", serverId, payload: members });
       const dms = await api.listDms(serverId);
       dispatch({ type: "SET_DMS", serverId, payload: dms });
+      // Load voice states for all voice channels
+      const voiceChannels = info.channels.filter(c => c.channel_type === "Voice");
+      for (const vc of voiceChannels) {
+        try {
+          const vs = await api.getVoiceState(serverId, vc.id);
+          const simplified = vs.map((v: VoiceMember) => ({
+            publicKey: publicKeyToString(v.public_key),
+            displayName: v.display_name,
+          }));
+          dispatch({ type: "SET_VOICE_STATE", serverId, payload: { channelId: vc.id, participants: simplified } });
+        } catch {}
+      }
     } catch {}
   }
 
