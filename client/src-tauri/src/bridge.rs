@@ -1,81 +1,56 @@
-use crate::connection::{recv_server_frame, send_client_frame};
-use crate::state::AppState;
-use anyhow::{bail, Context, Result};
-use farder_protocol::server::{ClientFrame, ServerEvent, ServerFrame, ServerRequest, ServerResponse};
+use crate::state::{AppState, ServerConnection};
+use anyhow::{Context, Result};
+use farder_protocol::{
+    codec,
+    server::{ClientFrame, ServerEvent, ServerFrame, ServerRequest, ServerResponse},
+};
 use quinn::RecvStream;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::task::JoinHandle;
 
-/// Send a request to the server and await the response via a oneshot channel.
-pub async fn send_request(state: &AppState, request: ServerRequest) -> Result<ServerResponse> {
-    let id = state.next_id();
-    let (tx, rx) = tokio::sync::oneshot::channel::<ServerResponse>();
+/// Send a request to the server identified by `server_id` and await the response.
+pub async fn send_request(state: &AppState, server_id: &str, request: ServerRequest) -> Result<ServerResponse> {
+    let conn = state.get_server(server_id).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let id = conn.next_id();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    conn.pending_requests.lock().unwrap().insert(id, tx);
 
+    let frame = ClientFrame::Request { id, body: request };
+    let data = codec::encode(&frame)?;
     {
-        let mut pending = state
-            .pending_requests
-            .lock()
-            .map_err(|e| anyhow::anyhow!("pending_requests lock poisoned: {}", e))?;
-        pending.insert(id, tx);
+        let mut send = conn.send_stream.lock().await;
+        crate::connection::write_frame(&mut send, &data).await.context("failed to write request frame")?;
     }
 
-    // Lock the async send stream and write the frame.
-    {
-        let mut guard = state.send_stream.lock().await;
-        let send = guard
-            .as_mut()
-            .context("not connected to a server")?;
-        let frame = ClientFrame::Request { id, body: request };
-        send_client_frame(send, &frame)
-            .await
-            .context("failed to write request frame")?;
-    }
-
-    // Await the response from the event reader task.
-    let response = rx.await.context("response channel closed (disconnected?)")?;
-    Ok(response)
+    rx.await.context("response channel closed")
 }
 
 /// Spawn the background task that reads `ServerFrame`s and dispatches them.
 ///
 /// - `Response` frames are routed to the matching pending oneshot sender.
-/// - `Event` frames are emitted as Tauri frontend events.
+/// - `Event` frames are emitted as Tauri frontend events (with `server_id`).
 /// - On connection error the `server:disconnected` event is emitted.
 pub fn spawn_event_reader(
     app: AppHandle,
-    state: Arc<AppState>,
+    server_id: String,
+    conn: Arc<ServerConnection>,
     mut recv: RecvStream,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match recv_server_frame(&mut recv).await {
-                Err(e) => {
-                    eprintln!("[bridge] connection error: {}", e);
-                    let _ = app.emit("server:disconnected", ());
-                    // Mark as disconnected.
-                    if let Ok(mut c) = state.connected.lock() {
-                        *c = false;
-                    }
+            match crate::connection::recv_server_frame(&mut recv).await {
+                Err(_) => {
+                    let _ = app.emit("server:disconnected", serde_json::json!({ "server_id": &server_id }));
                     break;
                 }
                 Ok(frame) => match frame {
                     ServerFrame::Response { request_id, body } => {
-                        let sender = {
-                            let mut pending = match state.pending_requests.lock() {
-                                Ok(p) => p,
-                                Err(_) => break,
-                            };
-                            pending.remove(&request_id)
-                        };
-                        if let Some(tx) = sender {
+                        if let Some(tx) = conn.pending_requests.lock().unwrap().remove(&request_id) {
                             let _ = tx.send(body);
                         }
                     }
-                    ServerFrame::Event(event) => {
-                        dispatch_event(&app, event);
-                    }
-                    // Challenge / Authenticated / AuthError only arrive during connect_and_authenticate.
+                    ServerFrame::Event(event) => dispatch_event(&app, &server_id, event),
                     _ => {}
                 },
             }
@@ -83,103 +58,40 @@ pub fn spawn_event_reader(
     })
 }
 
-/// Emit a Tauri frontend event for the given `ServerEvent`.
-fn dispatch_event(app: &AppHandle, event: ServerEvent) {
-    match event {
-        ServerEvent::NewMessage { message } => {
-            let _ = app.emit("server:new_message", &message);
-        }
-        ServerEvent::MessageEdited { message_id, channel_id, new_content, edited_at } => {
-            let _ = app.emit(
-                "server:message_edited",
-                serde_json::json!({
-                    "message_id": message_id,
-                    "channel_id": channel_id,
-                    "new_content": new_content,
-                    "edited_at": edited_at,
-                }),
-            );
-        }
-        ServerEvent::MessageDeleted { message_id, channel_id } => {
-            let _ = app.emit(
-                "server:message_deleted",
-                serde_json::json!({ "message_id": message_id, "channel_id": channel_id }),
-            );
-        }
-        ServerEvent::ReactionAdded { message_id, channel_id, emoji, public_key } => {
-            let _ = app.emit(
-                "server:reaction_added",
-                serde_json::json!({
-                    "message_id": message_id,
-                    "channel_id": channel_id,
-                    "emoji": emoji,
-                    "public_key": public_key.to_string(),
-                }),
-            );
-        }
-        ServerEvent::ReactionRemoved { message_id, channel_id, emoji, public_key } => {
-            let _ = app.emit(
-                "server:reaction_removed",
-                serde_json::json!({
-                    "message_id": message_id,
-                    "channel_id": channel_id,
-                    "emoji": emoji,
-                    "public_key": public_key.to_string(),
-                }),
-            );
-        }
-        ServerEvent::MemberJoined { public_key, display_name } => {
-            let _ = app.emit(
-                "server:member_joined",
-                serde_json::json!({
-                    "public_key": public_key.to_string(),
-                    "display_name": display_name,
-                }),
-            );
-        }
-        ServerEvent::MemberLeft { public_key } => {
-            let _ = app.emit(
-                "server:member_left",
-                serde_json::json!({ "public_key": public_key.to_string() }),
-            );
-        }
-        ServerEvent::ChannelCreated { channel } => {
-            let _ = app.emit("server:channel_created", channel);
-        }
-        ServerEvent::ChannelUpdated { channel } => {
-            let _ = app.emit("server:channel_updated", channel);
-        }
-        ServerEvent::ChannelDeleted { channel_id } => {
-            let _ = app.emit(
-                "server:channel_deleted",
-                serde_json::json!({ "channel_id": channel_id }),
-            );
-        }
-        ServerEvent::CategoryCreated { category } => {
-            let _ = app.emit("server:category_created", &category);
-        }
-        ServerEvent::CategoryUpdated { category } => {
-            let _ = app.emit("server:category_updated", &category);
-        }
-        ServerEvent::CategoryDeleted { category_id } => {
-            let _ = app.emit("server:category_deleted", serde_json::json!({ "category_id": category_id }));
-        }
-        ServerEvent::TypingStarted { channel_id, public_key } => {
-            let _ = app.emit(
-                "server:typing",
-                serde_json::json!({
-                    "channel_id": channel_id,
-                    "public_key": public_key.to_string(),
-                }),
-            );
-        }
-        ServerEvent::DmCreated { channel, participant } => {
-            let _ = app.emit("server:dm_created", serde_json::json!({
-                "channel": &channel,
-                "participant": &participant,
-            }));
-        }
-        // All other events are intentionally ignored by the client.
-        _ => {}
-    }
+/// Emit a Tauri frontend event for the given `ServerEvent`, including `server_id`.
+fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
+    let sid = server_id;
+    let _ = match event {
+        ServerEvent::NewMessage { message } =>
+            app.emit("server:new_message", serde_json::json!({ "server_id": sid, "message": message })),
+        ServerEvent::MessageEdited { message_id, channel_id, new_content, edited_at } =>
+            app.emit("server:message_edited", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "new_content": new_content, "edited_at": edited_at })),
+        ServerEvent::MessageDeleted { message_id, channel_id } =>
+            app.emit("server:message_deleted", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id })),
+        ServerEvent::ReactionAdded { message_id, channel_id, emoji, public_key } =>
+            app.emit("server:reaction_added", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "emoji": emoji, "public_key": public_key.to_string() })),
+        ServerEvent::ReactionRemoved { message_id, channel_id, emoji, public_key } =>
+            app.emit("server:reaction_removed", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "emoji": emoji, "public_key": public_key.to_string() })),
+        ServerEvent::MemberJoined { public_key, display_name } =>
+            app.emit("server:member_joined", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string(), "display_name": display_name })),
+        ServerEvent::MemberLeft { public_key } =>
+            app.emit("server:member_left", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string() })),
+        ServerEvent::ChannelCreated { channel } =>
+            app.emit("server:channel_created", serde_json::json!({ "server_id": sid, "channel": channel })),
+        ServerEvent::ChannelUpdated { channel } =>
+            app.emit("server:channel_updated", serde_json::json!({ "server_id": sid, "channel": channel })),
+        ServerEvent::ChannelDeleted { channel_id } =>
+            app.emit("server:channel_deleted", serde_json::json!({ "server_id": sid, "channel_id": channel_id })),
+        ServerEvent::TypingStarted { channel_id, public_key } =>
+            app.emit("server:typing", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string() })),
+        ServerEvent::CategoryCreated { category } =>
+            app.emit("server:category_created", serde_json::json!({ "server_id": sid, "category": category })),
+        ServerEvent::CategoryUpdated { category } =>
+            app.emit("server:category_updated", serde_json::json!({ "server_id": sid, "category": category })),
+        ServerEvent::CategoryDeleted { category_id } =>
+            app.emit("server:category_deleted", serde_json::json!({ "server_id": sid, "category_id": category_id })),
+        ServerEvent::DmCreated { channel, participant } =>
+            app.emit("server:dm_created", serde_json::json!({ "server_id": sid, "channel": channel, "participant": participant })),
+        _ => Ok(()),
+    };
 }
