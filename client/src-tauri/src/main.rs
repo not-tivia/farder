@@ -71,6 +71,8 @@ fn main() {
             commands::delete_role,
             commands::set_avatar,
             commands::get_avatar,
+            commands::set_server_avatar,
+            commands::get_server_avatar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

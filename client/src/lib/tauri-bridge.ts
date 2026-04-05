@@ -77,6 +77,14 @@ export async function getAvatar(): Promise<string | null> {
   return invoke<string | null>("get_avatar");
 }
 
+export async function setServerAvatar(serverId: string, filePath: string): Promise<string> {
+  return invoke<string>("set_server_avatar", { serverId, filePath });
+}
+
+export async function getServerAvatar(serverId: string): Promise<string | null> {
+  return invoke<string | null>("get_server_avatar", { serverId });
+}
+
 export async function listFavorites(): Promise<FavoriteEntry[]> {
   return invoke<FavoriteEntry[]>("list_favorites");
 }

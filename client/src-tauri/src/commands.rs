@@ -190,6 +190,39 @@ pub fn get_avatar() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Server avatar commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn set_server_avatar(server_id: String, file_path: String) -> Result<String, String> {
+    let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    let dir = farder_data_dir().join("server_avatars");
+    let _ = std::fs::create_dir_all(&dir);
+    let safe_name = server_id.replace([':', '.', '/'], "_");
+    let avatar_path = dir.join(format!("{}.png", safe_name));
+    std::fs::write(&avatar_path, &data).map_err(|e| e.to_string())?;
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(format!("data:image/png;base64,{}", b64))
+}
+
+#[tauri::command]
+pub fn get_server_avatar(server_id: String) -> Option<String> {
+    let safe_name = server_id.replace([':', '.', '/'], "_");
+    let avatar_path = farder_data_dir()
+        .join("server_avatars")
+        .join(format!("{}.png", safe_name));
+    if !avatar_path.exists() {
+        return None;
+    }
+    let data = std::fs::read(&avatar_path).ok()?;
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Some(format!("data:image/png;base64,{}", b64))
+}
+
+// ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------
 
