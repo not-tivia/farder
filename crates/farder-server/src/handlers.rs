@@ -1014,9 +1014,54 @@ pub fn handle_request(
         // ----------------------------------------------------------------
         // Voice (Phase 4)
         // ----------------------------------------------------------------
-        ServerRequest::JoinVoice { .. } => err("not yet implemented"),
-        ServerRequest::LeaveVoice { .. } => err("not yet implemented"),
-        ServerRequest::GetVoiceState { .. } => err("not yet implemented"),
+        ServerRequest::JoinVoice { channel_id } => {
+            let channel = channels::get_channel(conn, channel_id)?
+                .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+            if channel.channel_type != ChannelType::Voice {
+                return err("not a voice channel");
+            }
+            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::CONNECT) {
+                return err("missing CONNECT permission");
+            }
+            // Leave any existing voice channel first
+            let left_channels = channels::leave_all_voice(conn, member)?;
+            let mut events: Vec<BroadcastEvent> = Vec::new();
+            for left_ch in left_channels {
+                events.push(BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::VoiceLeft { channel_id: left_ch, public_key: member.clone() },
+                });
+            }
+            // Join the new channel
+            channels::join_voice(conn, channel_id, member)?;
+            let display_name = members::get_member(conn, member)?
+                .map(|m| m.display_name).unwrap_or_default();
+            events.push(BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::VoiceJoined { channel_id, public_key: member.clone(), display_name },
+            });
+            ok_with(ServerResponse::Ok, events)
+        }
+
+        ServerRequest::LeaveVoice { channel_id } => {
+            channels::leave_voice(conn, channel_id, member)?;
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::VoiceLeft { channel_id, public_key: member.clone() },
+            }])
+        }
+
+        ServerRequest::GetVoiceState { channel_id } => {
+            let participants = channels::get_voice_participants(conn, channel_id)?;
+            let mut voice_members = Vec::new();
+            for (pk, joined_at) in participants {
+                let name = members::get_member(conn, &pk)?
+                    .map(|m| m.display_name).unwrap_or_default();
+                voice_members.push(VoiceMember { public_key: pk, display_name: name, joined_at });
+            }
+            ok(ServerResponse::VoiceStateResp { participants: voice_members })
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{attachments, auth, events::EventTarget, handlers, members, permissions, state::ServerState};
+use crate::{attachments, auth, channels, events::EventTarget, handlers, members, permissions, state::ServerState};
 use anyhow::{Context, Result};
 use farder_crypto::identity::PublicKey;
 use farder_protocol::{codec, server::*};
@@ -587,6 +587,18 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
             subscribers.remove(&pk_bytes);
         }
     }
+    // Leave voice channels on disconnect
+    let left_voice_channels = {
+        let db = state.db.lock().unwrap();
+        channels::leave_all_voice(&db, &public_key).unwrap_or_default()
+    };
+    for ch_id in left_voice_channels {
+        broadcast_event(&state, EventTarget::All, ServerEvent::VoiceLeft {
+            channel_id: ch_id,
+            public_key: public_key.clone(),
+        }).await;
+    }
+
     broadcast_event(
         &state,
         EventTarget::All,

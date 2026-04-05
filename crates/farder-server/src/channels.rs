@@ -675,6 +675,60 @@ pub fn get_category_overrides_for_roles(
 }
 
 // ---------------------------------------------------------------------------
+// Voice state operations
+// ---------------------------------------------------------------------------
+
+pub fn join_voice(conn: &Connection, channel_id: u64, user_key: &farder_crypto::identity::PublicKey) -> Result<()> {
+    // First, leave any existing voice channel
+    leave_all_voice(conn, user_key)?;
+    // Then join
+    conn.execute(
+        "INSERT OR REPLACE INTO voice_state (channel_id, user_key, joined_at) VALUES (?1, ?2, ?3)",
+        params![channel_id as i64, user_key.as_bytes().as_slice(), crate::db::now() as i64],
+    )?;
+    Ok(())
+}
+
+pub fn leave_voice(conn: &Connection, channel_id: u64, user_key: &farder_crypto::identity::PublicKey) -> Result<()> {
+    conn.execute(
+        "DELETE FROM voice_state WHERE channel_id = ?1 AND user_key = ?2",
+        params![channel_id as i64, user_key.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+pub fn leave_all_voice(conn: &Connection, user_key: &farder_crypto::identity::PublicKey) -> Result<Vec<u64>> {
+    // Returns channel_ids the user was in (for broadcasting VoiceLeft)
+    let mut stmt = conn.prepare("SELECT channel_id FROM voice_state WHERE user_key = ?1")?;
+    let ids: Vec<u64> = stmt.query_map(params![user_key.as_bytes().as_slice()], |row| {
+        Ok(row.get::<_, i64>(0)? as u64)
+    })?.filter_map(|r| r.ok()).collect();
+    conn.execute(
+        "DELETE FROM voice_state WHERE user_key = ?1",
+        params![user_key.as_bytes().as_slice()],
+    )?;
+    Ok(ids)
+}
+
+pub fn get_voice_participants(conn: &Connection, channel_id: u64) -> Result<Vec<(farder_crypto::identity::PublicKey, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT user_key, joined_at FROM voice_state WHERE channel_id = ?1 ORDER BY joined_at ASC"
+    )?;
+    let rows = stmt.query_map(params![channel_id as i64], |row| {
+        let key_bytes: Vec<u8> = row.get(0)?;
+        let joined_at: i64 = row.get(1)?;
+        Ok((key_bytes, joined_at as u64))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let (key_bytes, joined_at) = row?;
+        let arr: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow::anyhow!("bad key"))?;
+        result.push((farder_crypto::identity::PublicKey::from_bytes(arr), joined_at));
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
