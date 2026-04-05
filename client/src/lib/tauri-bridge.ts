@@ -331,3 +331,23 @@ export async function dmEncrypt(theirPublicKey: string, plaintext: string): Prom
 export async function dmDecrypt(theirPublicKey: string, ciphertextHex: string): Promise<string> {
   return invoke<string>("dm_decrypt", { theirPublicKey, ciphertextHex });
 }
+
+// ── Voice channel commands ────────────────────────────────────────────────────
+
+export interface VoiceMember {
+  public_key: { bytes: number[] };
+  display_name: string;
+  joined_at: number;
+}
+
+export async function joinVoice(serverId: string, channelId: number): Promise<void> {
+  return invoke("join_voice", { serverId, channelId });
+}
+
+export async function leaveVoice(serverId: string, channelId: number): Promise<void> {
+  return invoke("leave_voice", { serverId, channelId });
+}
+
+export async function getVoiceState(serverId: string, channelId: number): Promise<VoiceMember[]> {
+  return invoke("get_voice_state", { serverId, channelId });
+}

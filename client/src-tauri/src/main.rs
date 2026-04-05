@@ -100,6 +100,9 @@ fn main() {
             commands::save_notification_prefs,
             commands::dm_encrypt,
             commands::dm_decrypt,
+            commands::join_voice,
+            commands::leave_voice,
+            commands::get_voice_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

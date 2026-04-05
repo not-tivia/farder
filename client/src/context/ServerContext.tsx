@@ -17,6 +17,8 @@ export interface PerServerState {
   dms: DmEntry[];
   dmPanelChannelId: number | null;
   typingUsers: Record<number, { publicKey: string; displayName: string; expiresAt: number }[]>;
+  voiceStates: Record<number, { publicKey: string; displayName: string }[]>;
+  currentVoiceChannelId: number | null;
 }
 
 export interface AppState {
@@ -44,6 +46,8 @@ const initialPerServerState: PerServerState = {
   dms: [],
   dmPanelChannelId: null,
   typingUsers: {},
+  voiceStates: {},
+  currentVoiceChannelId: null,
 };
 
 const initialAppState: AppState = {
@@ -94,7 +98,12 @@ export type AppAction =
   | { type: "TYPING_STARTED"; serverId: string; payload: { channelId: number; publicKey: string; displayName: string } }
   | { type: "TYPING_EXPIRED"; serverId: string; payload: { channelId: number; publicKey: string } }
   | { type: "ROLE_CREATED"; serverId: string; payload: RoleInfo }
-  | { type: "ROLE_DELETED"; serverId: string; payload: { roleId: number } };
+  | { type: "ROLE_DELETED"; serverId: string; payload: { roleId: number } }
+  | { type: "VOICE_JOINED"; serverId: string; payload: { channelId: number; publicKey: string; displayName: string } }
+  | { type: "VOICE_LEFT"; serverId: string; payload: { channelId: number; publicKey: string } }
+  | { type: "SET_VOICE_STATE"; serverId: string; payload: { channelId: number; participants: { publicKey: string; displayName: string }[] } }
+  | { type: "JOIN_VOICE_CHANNEL"; serverId: string; payload: number }
+  | { type: "LEAVE_VOICE_CHANNEL"; serverId: string };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -272,6 +281,23 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       return { ...state, roles: [...state.roles, action.payload] };
     case "ROLE_DELETED":
       return { ...state, roles: state.roles.filter(r => r.id !== action.payload.roleId) };
+    case "VOICE_JOINED": {
+      const { channelId, publicKey, displayName } = action.payload;
+      const existing = state.voiceStates[channelId] ?? [];
+      if (existing.some(v => v.publicKey === publicKey)) return state;
+      return { ...state, voiceStates: { ...state.voiceStates, [channelId]: [...existing, { publicKey, displayName }] } };
+    }
+    case "VOICE_LEFT": {
+      const { channelId, publicKey } = action.payload;
+      const existing = state.voiceStates[channelId] ?? [];
+      return { ...state, voiceStates: { ...state.voiceStates, [channelId]: existing.filter(v => v.publicKey !== publicKey) } };
+    }
+    case "SET_VOICE_STATE":
+      return { ...state, voiceStates: { ...state.voiceStates, [action.payload.channelId]: action.payload.participants } };
+    case "JOIN_VOICE_CHANNEL":
+      return { ...state, currentVoiceChannelId: action.payload };
+    case "LEAVE_VOICE_CHANNEL":
+      return { ...state, currentVoiceChannelId: null };
     default:
       return state;
   }

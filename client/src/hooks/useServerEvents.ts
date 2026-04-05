@@ -293,6 +293,26 @@ export function useServerEvents(): void {
       }, 8000);
     }).then((u) => unlisten.push(u));
 
+    // Voice events — dispatched for ALL servers so voice activity is visible across servers
+    listen("server:voice_joined", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      dispatch({ type: "VOICE_JOINED", serverId, payload: {
+        channelId: data.channel_id as number,
+        publicKey: data.public_key as string,
+        displayName: data.display_name as string,
+      }});
+    }).then(u => unlisten.push(u));
+
+    listen("server:voice_left", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      dispatch({ type: "VOICE_LEFT", serverId, payload: {
+        channelId: data.channel_id as number,
+        publicKey: data.public_key as string,
+      }});
+    }).then(u => unlisten.push(u));
+
     return () => {
       unlisten.forEach((u) => u());
     };

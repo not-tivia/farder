@@ -779,6 +779,7 @@ pub async fn create_channel(
     use farder_protocol::server::ChannelType;
     let ch_type = match channel_type.as_str() {
         "Announcement" => ChannelType::Announcement,
+        "Voice" => ChannelType::Voice,
         _ => ChannelType::Text,
     };
     let response = bridge::send_request(
@@ -1652,4 +1653,43 @@ pub fn dm_decrypt(
     let plaintext_bytes = farder_crypto::encryption::decrypt(&shared, &ciphertext)
         .map_err(|e| e.to_string())?;
     String::from_utf8(plaintext_bytes).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Voice channel commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn join_voice(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::JoinVoice { channel_id })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn leave_voice(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::LeaveVoice { channel_id })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_voice_state(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<serde_json::Value, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetVoiceState { channel_id })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::VoiceStateResp { participants } => {
+            Ok(serde_json::to_value(participants).unwrap())
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
 }
