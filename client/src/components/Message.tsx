@@ -179,6 +179,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
       )}
       {!grouped && (
         <div className="message-header">
+          <span className="message-avatar">{displayName.charAt(0).toUpperCase()}</span>
           <span
             className="message-author"
             style={{ color, cursor: member ? "pointer" : undefined }}

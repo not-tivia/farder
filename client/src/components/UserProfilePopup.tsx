@@ -33,11 +33,13 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   const [bannerColor, setBannerColor] = useState(defaultBannerColor);
   const [editingBio, setEditingBio] = useState(false);
   const [bioInput, setBioInput] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (isSelf) {
       api.getBio().then(b => { if (b) setBio(b); });
       api.getProfileColor().then(c => { if (c) setBannerColor(c); });
+      api.getAvatar().then(url => { if (url) setAvatarUrl(url); });
     }
   }, [isSelf]);
 
@@ -64,9 +66,22 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
 
         {/* Avatar */}
         <div className="profile-card-avatar-row">
-          <div className="profile-card-avatar" style={{ background: bannerColor }}>
-            {initial}
+          <div className="profile-card-avatar" style={{ background: avatarUrl ? "none" : bannerColor }}>
+            {avatarUrl ? (
+              <img src={avatarUrl} alt="avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
+            ) : (
+              initial
+            )}
           </div>
+          {isSelf && (
+            <button className="avatar-change-btn" onClick={async () => {
+              const path = await api.pickFile();
+              if (path) {
+                const url = await api.setAvatar(path);
+                setAvatarUrl(url);
+              }
+            }}>Change</button>
+          )}
         </div>
 
         {/* Info */}

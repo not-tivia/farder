@@ -51,6 +51,7 @@ export default function MemberSidebar() {
             className="member-item"
             onClick={(e) => setProfilePopup({ member, x: e.clientX, y: e.clientY })}
           >
+            <span className="member-avatar-mini">{member.display_name.charAt(0).toUpperCase()}</span>
             <span className="online-dot" />
             <span className="member-name">{member.display_name}</span>
           </div>

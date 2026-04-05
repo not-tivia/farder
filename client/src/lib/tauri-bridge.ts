@@ -69,6 +69,14 @@ export async function pickFile(): Promise<string | null> {
   return invoke<string | null>("pick_file");
 }
 
+export async function setAvatar(filePath: string): Promise<string> {
+  return invoke<string>("set_avatar", { filePath });
+}
+
+export async function getAvatar(): Promise<string | null> {
+  return invoke<string | null>("get_avatar");
+}
+
 export async function listFavorites(): Promise<FavoriteEntry[]> {
   return invoke<FavoriteEntry[]>("list_favorites");
 }

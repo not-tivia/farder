@@ -422,7 +422,7 @@ body {
 
 .message-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
 }
 
@@ -1897,6 +1897,56 @@ body {
   align-items: center;
   justify-content: center;
   font-size: 10px;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+/* ── User Avatars ────────────────────────────────────────── */
+.avatar-change-btn {
+  font-size: 9px;
+  background: rgba(0,0,0,0.5);
+  color: white;
+  border: none;
+  padding: 1px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  margin-top: 2px;
+  display: block;
+}
+
+.avatar-change-btn:hover {
+  background: rgba(0,0,0,0.7);
+}
+
+.message-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--xp-sidebar);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  flex-shrink: 0;
+  margin-right: 8px;
+}
+
+.message.grouped {
+  padding-left: 52px;
+}
+
+.member-avatar-mini {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--xp-sidebar);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
   font-weight: bold;
   flex-shrink: 0;
 }

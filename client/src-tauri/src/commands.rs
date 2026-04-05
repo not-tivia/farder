@@ -156,6 +156,40 @@ pub fn get_profile_color() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Avatar commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn set_avatar(file_path: String) -> Result<String, String> {
+    let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    let avatar_path = farder_data_dir().join("avatar.png");
+    std::fs::write(&avatar_path, &data).map_err(|e| e.to_string())?;
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    let mime = if file_path.ends_with(".png") {
+        "image/png"
+    } else if file_path.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
+    };
+    Ok(format!("data:{};base64,{}", mime, b64))
+}
+
+#[tauri::command]
+pub fn get_avatar() -> Option<String> {
+    let avatar_path = farder_data_dir().join("avatar.png");
+    if !avatar_path.exists() {
+        return None;
+    }
+    let data = std::fs::read(&avatar_path).ok()?;
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Some(format!("data:image/png;base64,{}", b64))
+}
+
+// ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------
 
