@@ -63,6 +63,10 @@ fn main() {
             commands::cancel_deletion,
             commands::get_deletion_status,
             commands::send_typing,
+            commands::edit_message,
+            commands::delete_message,
+            commands::assign_role,
+            commands::remove_role,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

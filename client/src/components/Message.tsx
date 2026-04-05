@@ -11,6 +11,7 @@ interface MessageProps {
   memberNames: Record<string, string>;
   grouped?: boolean;
   serverId: string;
+  onReply?: (message: MessageInfo) => void;
 }
 
 /** Derive a deterministic color from a string (public key or name). */
@@ -54,17 +55,49 @@ const imageCache = new Map<number, string>();
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
 
-export default function Message({ message, memberNames, grouped = false, serverId }: MessageProps) {
+// Module-level cache for own display name
+let cachedOwnDisplayName: string | null = null;
+
+function renderContent(text: string, memberNames: Record<string, string>, ownDisplayName: string | null) {
+  const parts = text.split(/(@\w+)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("@")) {
+      const name = part.slice(1);
+      const isMention =
+        name === "everyone" ||
+        Object.values(memberNames).some((n) => n.toLowerCase() === name.toLowerCase());
+      const isSelfMention =
+        ownDisplayName != null && name.toLowerCase() === ownDisplayName.toLowerCase();
+      if (isMention) {
+        return (
+          <span key={i} className={`mention${isSelfMention ? " mention-self" : ""}`}>
+            {part}
+          </span>
+        );
+      }
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
+export default function Message({ message, memberNames, grouped = false, serverId, onReply }: MessageProps) {
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const [showPicker, setShowPicker] = useState(false);
   const [reacting, setReacting] = useState(false);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
+  const [ownDisplayName, setOwnDisplayName] = useState(cachedOwnDisplayName);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState("");
 
   useEffect(() => {
     if (!cachedOwnPk) {
-      api.getPublicKey().then(pk => { cachedOwnPk = pk; setOwnPk(pk); });
+      api.getPublicKey().then((pk) => { cachedOwnPk = pk; setOwnPk(pk); });
+    }
+    if (!cachedOwnDisplayName) {
+      api.getDisplayName().then((name) => { cachedOwnDisplayName = name; setOwnDisplayName(name); });
     }
   }, []);
 
@@ -74,8 +107,10 @@ export default function Message({ message, memberNames, grouped = false, serverI
     ? "Deleted User"
     : (memberNames[pkStr] ?? pkStr.slice(0, 16) + "…");
   const color = deleted ? "#999" : authorColor(pkStr);
-  const member = deleted ? null : (activeServer?.members.find(m => publicKeyToString(m.public_key) === pkStr) ?? null);
+  const member = deleted ? null : (activeServer?.members.find((m) => publicKeyToString(m.public_key) === pkStr) ?? null);
   const roles = activeServer?.roles ?? [];
+
+  const isOwnMessage = ownPk === pkStr;
 
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
@@ -119,8 +154,24 @@ export default function Message({ message, memberNames, grouped = false, serverI
     }
   }
 
+  async function handleSaveEdit() {
+    if (!editContent.trim()) return;
+    try {
+      await api.editMessage(serverId, message.id, editContent.trim());
+    } catch {
+      // ignore
+    }
+    setEditing(false);
+  }
+
   return (
-    <div className={`message${grouped ? " grouped" : ""}`}>
+    <div
+      className={`message${grouped ? " grouped" : ""}`}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (!deleted) setContextMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
       {grouped && (
         <span className="grouped-timestamp">
           {new Date(message.timestamp * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
@@ -149,9 +200,35 @@ export default function Message({ message, memberNames, grouped = false, serverI
           serverId={serverId}
         />
       )}
+      {message.reply_to && (
+        <div className="message-reply-context">
+          Replying to a message
+        </div>
+      )}
       {(deleted || displayContent) && (
         <div className={`message-content${deleted ? " deleted-content" : ""}`}>
-          {deleted ? <em>This message has been deleted.</em> : displayContent}
+          {deleted ? (
+            <em>This message has been deleted.</em>
+          ) : editing ? (
+            <div className="message-edit-area">
+              <textarea
+                className="message-edit-input"
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSaveEdit(); }
+                  if (e.key === "Escape") setEditing(false);
+                }}
+                autoFocus
+              />
+              <div style={{ display: "flex", gap: 4, fontSize: 10 }}>
+                <span style={{ cursor: "pointer", color: "var(--xp-link)" }} onClick={handleSaveEdit}>save</span>
+                <span style={{ cursor: "pointer", color: "var(--xp-text-muted)" }} onClick={() => setEditing(false)}>cancel</span>
+              </div>
+            </div>
+          ) : (
+            renderContent(displayContent, memberNames, ownDisplayName)
+          )}
         </div>
       )}
 
@@ -193,6 +270,35 @@ export default function Message({ message, memberNames, grouped = false, serverI
         <div className="thread-link" onClick={handleThreadClick}>
           &gt; {message.thread_message_count > 0 ? `${message.thread_message_count} replies` : "View thread"}
         </div>
+      )}
+
+      {contextMenu && (
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setContextMenu(null)} />
+          <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+            <div className="context-menu-item" onClick={() => {
+              if (onReply) onReply(message);
+              setContextMenu(null);
+            }}>Reply</div>
+            {isOwnMessage && (
+              <div className="context-menu-item" onClick={() => {
+                setEditing(true);
+                setEditContent(message.content);
+                setContextMenu(null);
+              }}>Edit Message</div>
+            )}
+            <div className="context-menu-item" onClick={() => {
+              navigator.clipboard.writeText(message.content);
+              setContextMenu(null);
+            }}>Copy Text</div>
+            {isOwnMessage && (
+              <div className="context-menu-item delete" onClick={async () => {
+                try { await api.deleteMessage(serverId, message.id); } catch {}
+                setContextMenu(null);
+              }}>Delete Message</div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

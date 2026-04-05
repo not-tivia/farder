@@ -1798,3 +1798,59 @@ body {
   border-radius: 50%;
   border: 2px solid #0f2460;
 }
+
+/* ── Message edit inline ─────────────────────────────────── */
+.message-edit-area { margin-top: 4px; }
+.message-edit-input {
+  width: 100%;
+  font-family: var(--xp-font);
+  font-size: var(--xp-font-size);
+  border: 1px solid var(--xp-input-border);
+  padding: 4px;
+  resize: none;
+  min-height: 40px;
+}
+
+/* ── @mention highlighting ───────────────────────────────── */
+.mention {
+  background: rgba(49, 105, 198, 0.15);
+  color: var(--xp-blue);
+  padding: 0 2px;
+  border-radius: 2px;
+  font-weight: bold;
+}
+.mention-self {
+  background: rgba(49, 105, 198, 0.3);
+}
+
+/* ── Reply UI ────────────────────────────────────────────── */
+.reply-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--xp-panel-bg);
+  border-top: 1px solid var(--xp-border);
+  font-size: 11px;
+}
+.reply-preview-text {
+  color: var(--xp-text-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reply-cancel {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--xp-text-muted);
+  font-size: 12px;
+}
+.message-reply-context {
+  font-size: 10px;
+  color: var(--xp-text-muted);
+  padding-left: 42px;
+  margin-bottom: 2px;
+  font-style: italic;
+}

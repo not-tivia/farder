@@ -224,6 +224,22 @@ export async function sendTyping(serverId: string, channelId: number): Promise<v
   return invoke<void>("send_typing", { serverId, channelId });
 }
 
+export async function editMessage(serverId: string, messageId: number, newContent: string): Promise<void> {
+  return invoke<void>("edit_message", { serverId, messageId, newContent });
+}
+
+export async function deleteMessage(serverId: string, messageId: number): Promise<void> {
+  return invoke<void>("delete_message", { serverId, messageId });
+}
+
+export async function assignRole(serverId: string, memberKey: string, roleId: number): Promise<void> {
+  return invoke<void>("assign_role", { serverId, memberKey, roleId });
+}
+
+export async function removeRole(serverId: string, memberKey: string, roleId: number): Promise<void> {
+  return invoke<void>("remove_role", { serverId, memberKey, roleId });
+}
+
 export async function requestDeletion(serverId: string): Promise<void> {
   return invoke<void>("request_deletion", { serverId });
 }

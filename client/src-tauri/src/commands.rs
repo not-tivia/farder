@@ -1196,3 +1196,96 @@ pub async fn create_invite(
         other => Err(format!("unexpected response: {:?}", other)),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Message edit / delete commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn edit_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    message_id: u64,
+    new_content: String,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::EditMessage { message_id, new_content },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn delete_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    message_id: u64,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::DeleteMessage { message_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Role management commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn assign_role(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    member_key: String,
+    role_id: u64,
+) -> Result<(), String> {
+    let pk = parse_public_key(&member_key)?;
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::AssignRole { member_key: pk, role_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_role(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    member_key: String,
+    role_id: u64,
+) -> Result<(), String> {
+    let pk = parse_public_key(&member_key)?;
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::RemoveRole { member_key: pk, role_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
