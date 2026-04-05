@@ -188,7 +188,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
             {(activeServer?.roles ?? []).filter(r => r.name !== "@everyone").map(r => (
               <div key={r.id} className="organizer-row">
                 <span className="organizer-name" style={{
-                  color: typeof r.color === "number" && r.color > 0 ? `#${r.color.toString(16).padStart(6, '0')}` : undefined
+                  color: r.color ?? undefined
                 }}>
                   {r.name}
                 </span>

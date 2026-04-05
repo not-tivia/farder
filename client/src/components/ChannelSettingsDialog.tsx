@@ -124,7 +124,7 @@ function RolePermissionRow({ role, channelId: _channelId, onSet }: { role: RoleI
 
   return (
     <div className="permission-row">
-      <div className="permission-role-name" style={{ color: role.color ? `#${role.color.toString(16).padStart(6, "0")}` : undefined }}>
+      <div className="permission-role-name" style={{ color: role.color ?? undefined }}>
         {role.name}
       </div>
       <div className="permission-checks">

@@ -21,7 +21,7 @@ export interface RoleInfo {
   id: number;
   name: string;
   permissions: number;
-  color: number | null;
+  color: string | null;
   position: number;
 }
 

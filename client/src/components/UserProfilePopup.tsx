@@ -113,14 +113,11 @@ export default function UserProfilePopup({ member, roles, position, onClose, isS
               <div className="profile-card-label">ROLES</div>
               <div className="profile-card-roles">
                 {memberRoles.map(r => {
-                  const colorHex = typeof r.color === "number" && r.color > 0
-                    ? `#${r.color.toString(16).padStart(6, "0")}`
-                    : undefined;
                   return (
                     <span key={r.id} className="profile-card-role" style={{
-                      borderLeftColor: colorHex || "var(--xp-border)",
+                      borderLeftColor: r.color || "var(--xp-border)",
                     }}>
-                      {colorHex && <span className="role-dot" style={{ background: colorHex }} />}
+                      {r.color && <span className="role-dot" style={{ background: r.color }} />}
                       {r.name}
                     </span>
                   );
@@ -143,7 +140,12 @@ export default function UserProfilePopup({ member, roles, position, onClose, isS
                         try {
                           if (hasRole) await api.removeRole(serverId, pkStr, r.id);
                           else await api.assignRole(serverId, pkStr, r.id);
-                        } catch {}
+                          // Refresh members to get updated role_ids
+                          const members = await api.getMembers(serverId);
+                          dispatch({ type: "SET_MEMBERS", serverId, payload: members });
+                        } catch (e) {
+                          console.error("role toggle failed:", e);
+                        }
                       }}
                     >
                       {hasRole ? "- " : "+ "}{r.name}
