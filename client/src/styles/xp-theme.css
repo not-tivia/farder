@@ -1818,6 +1818,8 @@ body {
   padding: 0 2px;
   border-radius: 2px;
   font-weight: bold;
+  cursor: default;
+  user-select: text;
 }
 .mention-self {
   background: rgba(49, 105, 198, 0.3);
