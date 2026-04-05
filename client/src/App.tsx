@@ -19,9 +19,8 @@ function AppInner() {
       if (!match) return;
       const address = match[1];
       const inviteCode = match[2];
-      // Pre-fill the connect dialog with the invite details by dispatching a
-      // pending invite action that ConnectDialog can read from state.
-      dispatch({ type: "SET_PENDING_INVITE", payload: { address, inviteCode } });
+      // TODO: pre-fill connect dialog with the invite details
+      console.log("[deep-link] invite:", address, inviteCode);
     });
     return () => { unlisten.then((u) => u()); };
   }, [dispatch]);
