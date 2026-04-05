@@ -24,7 +24,7 @@ export default function DmPanel() {
     useEffect(() => {
         if (!channelId) return;
         (async () => {
-            await api.subscribeChannels([channelId]);
+            // subscribeChannels is handled centrally by AppShell
             const msgs = await api.fetchHistory(channelId);
             dispatch({ type: "SET_MESSAGES", payload: { channelId, messages: msgs.reverse() } });
         })();

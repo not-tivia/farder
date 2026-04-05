@@ -241,7 +241,7 @@ export default function ChannelSidebar() {
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
     try {
-      await api.subscribeChannels([channel.id]);
+      // subscribeChannels is handled centrally by AppShell
       const msgs = await api.fetchHistory(channel.id);
       // Server returns newest-first; reverse for chronological display
       const reversed = msgs.reverse();

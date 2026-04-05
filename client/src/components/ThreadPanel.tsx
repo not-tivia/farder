@@ -20,7 +20,7 @@ export default function ThreadPanel() {
     const id = threadChannelId;
     (async () => {
       try {
-        await api.subscribeChannels([id]);
+        // subscribeChannels is handled centrally by AppShell
         const msgs = await api.fetchHistory(id);
         dispatch({ type: "SET_MESSAGES", payload: { channelId: id, messages: msgs } });
       } catch {

@@ -138,7 +138,7 @@ export default function UserProfilePopup({ member, roles, position, onClose, isS
                                     const dms = await api.listDms();
                                     dispatch({ type: "SET_DMS", payload: dms });
                                     dispatch({ type: "SELECT_CHANNEL", payload: result.channel.id });
-                                    await api.subscribeChannels([result.channel.id]);
+                                    // subscribeChannels is handled centrally by AppShell
                                     const msgs = await api.fetchHistory(result.channel.id);
                                     dispatch({ type: "SET_MESSAGES", payload: { channelId: result.channel.id, messages: msgs.reverse() } });
                                     onClose();

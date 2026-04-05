@@ -10,6 +10,22 @@ import * as api from "../lib/tauri-bridge";
 export default function AppShell() {
   const { state, dispatch } = useServer();
 
+  // Subscribe to all active channels whenever they change
+  useEffect(() => {
+    if (!state.connected) return;
+    const ids: number[] = [];
+    if (state.currentChannelId) ids.push(state.currentChannelId);
+    if (state.dmPanelChannelId && state.dmPanelChannelId !== state.currentChannelId) {
+      ids.push(state.dmPanelChannelId);
+    }
+    if (state.threadChannelId && !ids.includes(state.threadChannelId)) {
+      ids.push(state.threadChannelId);
+    }
+    if (ids.length > 0) {
+      api.subscribeChannels(ids).catch(() => {});
+    }
+  }, [state.connected, state.currentChannelId, state.dmPanelChannelId, state.threadChannelId]);
+
   useEffect(() => {
     if (!state.connectionLost) return;
     let cancelled = false;
