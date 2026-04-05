@@ -46,6 +46,9 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Module-level cache: file_id → data URL
+const imageCache = new Map<number, string>();
+
 export default function Message({ message, memberNames, grouped = false }: MessageProps) {
   const { dispatch } = useServer();
   const [showPicker, setShowPicker] = useState(false);
@@ -57,6 +60,13 @@ export default function Message({ message, memberNames, grouped = false }: Messa
     ? "Deleted User"
     : (memberNames[pkStr] ?? pkStr.slice(0, 16) + "…");
   const color = deleted ? "#999" : authorColor(pkStr);
+
+  // Strip image URLs from message text when there are image attachments
+  const displayContent = deleted
+    ? message.content
+    : message.attachments.length > 0
+      ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
+      : message.content;
 
   async function handleReactionClick(emoji: string, alreadyMe: boolean) {
     if (reacting) return;
@@ -109,14 +119,16 @@ export default function Message({ message, memberNames, grouped = false }: Messa
           {message.edited_at && <span className="message-edited">(edited)</span>}
         </div>
       )}
-      <div className={`message-content${deleted ? " deleted-content" : ""}`}>
-        {deleted ? <em>This message has been deleted.</em> : message.content}
-      </div>
+      {(deleted || displayContent) && (
+        <div className={`message-content${deleted ? " deleted-content" : ""}`}>
+          {deleted ? <em>This message has been deleted.</em> : displayContent}
+        </div>
+      )}
 
       {message.attachments.length > 0 && (
         <div className="message-attachments">
           {message.attachments.map((att) => (
-            <AttachmentDisplay key={att.id} attachment={att} />
+            <AttachmentDisplay key={att.id} attachment={att} messageContent={message.content} />
           ))}
         </div>
       )}
@@ -156,45 +168,77 @@ export default function Message({ message, memberNames, grouped = false }: Messa
   );
 }
 
-function AttachmentDisplay({ attachment }: { attachment: AttachmentInfo }) {
+function AttachmentDisplay({ attachment, messageContent }: { attachment: AttachmentInfo; messageContent: string }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const isImage = attachment.mime_type.startsWith("image/");
 
   useEffect(() => {
-    if (isImage) {
-      api.downloadFile(attachment.file_id).then((r) => {
-        if (r.data_url) setImageUrl(r.data_url);
-      }).catch(() => {});
+    if (!isImage) return;
+    const cached = imageCache.get(attachment.file_id);
+    if (cached) {
+      setImageUrl(cached);
+      return;
     }
+    setLoading(true);
+    api.downloadFile(attachment.file_id).then((r) => {
+      if (r.data_url) {
+        imageCache.set(attachment.file_id, r.data_url);
+        setImageUrl(r.data_url);
+      }
+    }).catch(() => {}).finally(() => setLoading(false));
   }, [attachment.file_id, isImage]);
 
-  async function handleDownload() {
-    if (downloading) return;
+  async function handleSave() {
     setDownloading(true);
     try {
       const result = await api.downloadFile(attachment.file_id);
-      if (result.saved_path) {
-        alert(`Saved to ${result.saved_path}`);
-      }
+      if (result.saved_path) alert(`Saved to ${result.saved_path}`);
     } catch (e) {
       alert(`Download failed: ${e}`);
     } finally {
       setDownloading(false);
+      setMenu(null);
     }
+  }
+
+  function handleCopyLink() {
+    const urlMatch = messageContent.match(/https?:\/\/[^\s]+/);
+    if (urlMatch) navigator.clipboard.writeText(urlMatch[0]);
+    setMenu(null);
+  }
+
+  if (isImage && loading) {
+    return <div className="attachment-loading">Loading image...</div>;
   }
 
   if (isImage && imageUrl) {
     return (
       <div className="attachment-image">
-        <img src={imageUrl} alt={attachment.name} style={{ maxWidth: 400, maxHeight: 300, borderRadius: 3 }} />
+        <img
+          src={imageUrl}
+          alt={attachment.name}
+          onClick={(e) => setMenu({ x: e.clientX, y: e.clientY })}
+          style={{ cursor: "pointer", maxWidth: 400, maxHeight: 300, borderRadius: 3 }}
+        />
         <div className="attachment-name">{attachment.name} ({formatSize(attachment.size)})</div>
+        {menu && (
+          <>
+            <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setMenu(null)} />
+            <div className="context-menu" style={{ top: menu.y, left: menu.x }}>
+              <div className="context-menu-item" onClick={handleCopyLink}>Copy Image Link</div>
+              <div className="context-menu-item" onClick={handleSave}>Save Image</div>
+            </div>
+          </>
+        )}
       </div>
     );
   }
 
   return (
-    <div className="attachment-item" onClick={handleDownload} style={{ cursor: "pointer" }}>
+    <div className="attachment-item" onClick={handleSave} style={{ cursor: "pointer" }}>
       <span>[file]</span>
       <span>{attachment.name} ({formatSize(attachment.size)})</span>
       {downloading && <span> downloading...</span>}

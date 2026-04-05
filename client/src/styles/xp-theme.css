@@ -400,6 +400,16 @@ body {
   margin-top: 2px;
 }
 
+.attachment-loading {
+  background: var(--xp-panel-bg);
+  border: 1px solid var(--xp-border);
+  padding: 12px 20px;
+  color: var(--xp-text-muted);
+  font-size: 11px;
+  border-radius: 3px;
+  margin-top: 4px;
+}
+
 /* ── Reactions ──────────────────────────────────────────── */
 .reaction-bar {
   display: flex;
