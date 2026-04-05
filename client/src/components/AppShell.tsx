@@ -3,6 +3,7 @@ import TitleBar from "./TitleBar";
 import ChannelSidebar from "./ChannelSidebar";
 import ChatPanel from "./ChatPanel";
 import MemberSidebar from "./MemberSidebar";
+import DmPanel from "./DmPanel";
 import { useServer } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 
@@ -24,6 +25,11 @@ export default function AppShell() {
           // Re-fetch members
           const members = await api.getMembers();
           dispatch({ type: "SET_MEMBERS", payload: members });
+          // Re-load DMs
+          try {
+            const dms = await api.listDms();
+            dispatch({ type: "SET_DMS", payload: dms });
+          } catch {}
           // Re-subscribe to current channel
           if (state.currentChannelId) {
             await api.subscribeChannels([state.currentChannelId]);
@@ -47,6 +53,7 @@ export default function AppShell() {
         <ChannelSidebar />
         <ChatPanel />
         <MemberSidebar />
+        <DmPanel />
         {state.connectionLost && (
           <div className="reconnect-overlay">
             Connection lost. Reconnecting...

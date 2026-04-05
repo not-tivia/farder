@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, DmEntry } from "./types";
 
 export async function generateKeypair(): Promise<string> {
   return invoke<string>("generate_keypair");
@@ -221,4 +221,20 @@ export async function setProfileColor(color: string): Promise<void> {
 
 export async function getProfileColor(): Promise<string | null> {
   return invoke<string | null>("get_profile_color");
+}
+
+export async function openDm(targetKey: string): Promise<{ channel: ChannelInfo; participant: MemberInfo }> {
+  return invoke("open_dm", { targetKey });
+}
+
+export async function listDms(): Promise<DmEntry[]> {
+  return invoke<DmEntry[]>("list_dms");
+}
+
+export async function blockUser(targetKey: string): Promise<void> {
+  return invoke("block_user", { targetKey });
+}
+
+export async function unblockUser(targetKey: string): Promise<void> {
+  return invoke("unblock_user", { targetKey });
 }

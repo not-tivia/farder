@@ -482,6 +482,38 @@ pub fn delete_deletion_request(conn: &Connection, pk: &PublicKey) -> Result<()> 
 }
 
 // ---------------------------------------------------------------------------
+// Block operations
+// ---------------------------------------------------------------------------
+
+pub fn block_user(conn: &Connection, blocker: &PublicKey, blocked: &PublicKey) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO blocked_users (blocker_key, blocked_key, blocked_at) VALUES (?1, ?2, ?3)",
+        params![blocker.as_bytes().as_slice(), blocked.as_bytes().as_slice(), crate::db::now() as i64],
+    )?;
+    Ok(())
+}
+
+pub fn unblock_user(conn: &Connection, blocker: &PublicKey, blocked: &PublicKey) -> Result<()> {
+    conn.execute(
+        "DELETE FROM blocked_users WHERE blocker_key = ?1 AND blocked_key = ?2",
+        params![blocker.as_bytes().as_slice(), blocked.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+/// Returns true if either user has blocked the other.
+pub fn is_blocked(conn: &Connection, user_a: &PublicKey, user_b: &PublicKey) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM blocked_users \
+         WHERE (blocker_key = ?1 AND blocked_key = ?2) \
+            OR (blocker_key = ?2 AND blocked_key = ?1)",
+        params![user_a.as_bytes().as_slice(), user_b.as_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -769,5 +801,65 @@ mod tests {
         assert!(expired_keys.contains(&pk1));
         assert!(expired_keys.contains(&pk2));
         assert!(!expired_keys.contains(&pk3));
+    }
+
+    // -----------------------------------------------------------------------
+    // Block/unblock tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_block_and_is_blocked() {
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = gen_pk();
+        let pk_b = gen_pk();
+
+        // Initially not blocked in either direction.
+        assert!(!is_blocked(&conn, &pk_a, &pk_b).unwrap());
+        assert!(!is_blocked(&conn, &pk_b, &pk_a).unwrap());
+
+        block_user(&conn, &pk_a, &pk_b).unwrap();
+
+        // Now blocked — bidirectional check should return true.
+        assert!(is_blocked(&conn, &pk_a, &pk_b).unwrap());
+        assert!(is_blocked(&conn, &pk_b, &pk_a).unwrap());
+    }
+
+    #[test]
+    fn test_unblock_user() {
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = gen_pk();
+        let pk_b = gen_pk();
+
+        block_user(&conn, &pk_a, &pk_b).unwrap();
+        assert!(is_blocked(&conn, &pk_a, &pk_b).unwrap());
+
+        unblock_user(&conn, &pk_a, &pk_b).unwrap();
+        assert!(!is_blocked(&conn, &pk_a, &pk_b).unwrap());
+    }
+
+    #[test]
+    fn test_block_is_idempotent() {
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = gen_pk();
+        let pk_b = gen_pk();
+
+        block_user(&conn, &pk_a, &pk_b).unwrap();
+        // Second call should not fail (INSERT OR IGNORE).
+        block_user(&conn, &pk_a, &pk_b).unwrap();
+        assert!(is_blocked(&conn, &pk_a, &pk_b).unwrap());
+    }
+
+    #[test]
+    fn test_is_blocked_bidirectional() {
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = gen_pk();
+        let pk_b = gen_pk();
+
+        // B blocks A (not A blocks B).
+        block_user(&conn, &pk_b, &pk_a).unwrap();
+
+        // Still detected from A's perspective.
+        assert!(is_blocked(&conn, &pk_a, &pk_b).unwrap());
+        assert!(is_blocked(&conn, &pk_b, &pk_a).unwrap());
     }
 }

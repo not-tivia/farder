@@ -95,6 +95,17 @@ export default function ChatPanel() {
         {currentChannel?.topic && (
           <span className="channel-header-topic">{currentChannel.topic}</span>
         )}
+        {currentChannel?.channel_type === "Dm" && (
+          <button className="xp-button" style={{ fontSize: 10, marginLeft: 8, padding: "2px 8px" }}
+            onClick={() => {
+              dispatch({ type: "OPEN_DM_PANEL", payload: currentChannelId! });
+              const firstServerCh = state.channels.find(c => c.channel_type !== "Dm" && c.channel_type !== "Thread");
+              if (firstServerCh) {
+                dispatch({ type: "SELECT_CHANNEL", payload: firstServerCh.id });
+              }
+            }}
+          >Pop Out</button>
+        )}
         <button
           className="search-toggle"
           onClick={() => setShowSearch(!showSearch)}

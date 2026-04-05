@@ -10,6 +10,7 @@ pub fn channel_type_to_str(ct: &ChannelType) -> &'static str {
         ChannelType::Text => "text",
         ChannelType::Announcement => "announcement",
         ChannelType::Thread => "thread",
+        ChannelType::Dm => "dm",
     }
 }
 
@@ -17,6 +18,7 @@ pub fn str_to_channel_type(s: &str) -> ChannelType {
     match s {
         "announcement" => ChannelType::Announcement,
         "thread" => ChannelType::Thread,
+        "dm" => ChannelType::Dm,
         _ => ChannelType::Text,
     }
 }
@@ -251,7 +253,7 @@ pub fn get_channel_including_deleted(conn: &Connection, id: u64) -> Result<Optio
 
 pub fn list_channels(conn: &Connection) -> Result<Vec<ChannelInfo>> {
     let sql = format!(
-        "SELECT {} FROM channels WHERE deleted = 0 AND channel_type != 'thread' ORDER BY position ASC",
+        "SELECT {} FROM channels WHERE deleted = 0 AND channel_type != 'thread' AND channel_type != 'dm' ORDER BY position ASC",
         CHANNEL_SELECT
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -367,6 +369,101 @@ pub fn soft_delete_channel(conn: &Connection, id: u64) -> Result<()> {
         params![id as i64, now() as i64],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DM channel operations
+// ---------------------------------------------------------------------------
+
+/// Create a new DM channel between two users, insert both dm_participants rows,
+/// and return the new channel id.
+pub fn create_dm_channel(conn: &Connection, user_a: &farder_crypto::identity::PublicKey, user_b: &farder_crypto::identity::PublicKey) -> Result<u64> {
+    conn.execute(
+        "INSERT INTO channels (name, channel_type, position) VALUES ('', 'dm', 0)",
+        [],
+    )?;
+    let channel_id = conn.last_insert_rowid() as u64;
+    conn.execute(
+        "INSERT INTO dm_participants (channel_id, user_key) VALUES (?1, ?2)",
+        rusqlite::params![channel_id as i64, user_a.as_bytes().as_slice()],
+    )?;
+    conn.execute(
+        "INSERT INTO dm_participants (channel_id, user_key) VALUES (?1, ?2)",
+        rusqlite::params![channel_id as i64, user_b.as_bytes().as_slice()],
+    )?;
+    Ok(channel_id)
+}
+
+/// Find an existing DM channel between two users. Returns None if no such channel exists.
+pub fn find_dm_channel(conn: &Connection, user_a: &farder_crypto::identity::PublicKey, user_b: &farder_crypto::identity::PublicKey) -> Result<Option<ChannelInfo>> {
+    let sql = format!(
+        "SELECT {} FROM channels WHERE id IN (\
+            SELECT channel_id FROM dm_participants WHERE user_key = ?1 \
+            INTERSECT \
+            SELECT channel_id FROM dm_participants WHERE user_key = ?2\
+        ) AND deleted = 0 LIMIT 1",
+        CHANNEL_SELECT
+    );
+    let row = conn
+        .query_row(&sql, rusqlite::params![user_a.as_bytes().as_slice(), user_b.as_bytes().as_slice()], row_to_channel_info)
+        .optional()?;
+    Ok(row)
+}
+
+/// Find or create a DM channel between two users.
+/// Returns (channel_id, was_created).
+pub fn open_dm_channel(conn: &Connection, user_a: &farder_crypto::identity::PublicKey, user_b: &farder_crypto::identity::PublicKey) -> Result<(u64, bool)> {
+    if let Some(ch) = find_dm_channel(conn, user_a, user_b)? {
+        return Ok((ch.id, false));
+    }
+    let id = create_dm_channel(conn, user_a, user_b)?;
+    Ok((id, true))
+}
+
+/// List all DM channels for a user, returning (ChannelInfo, other_participant_key) pairs.
+pub fn list_dm_channels(conn: &Connection, user: &farder_crypto::identity::PublicKey) -> Result<Vec<(ChannelInfo, farder_crypto::identity::PublicKey)>> {
+    // Find all channel_ids the user participates in.
+    let channel_sql = format!(
+        "SELECT {} FROM channels WHERE id IN (\
+            SELECT channel_id FROM dm_participants WHERE user_key = ?1\
+        ) AND deleted = 0",
+        CHANNEL_SELECT
+    );
+    let mut stmt = conn.prepare(&channel_sql)?;
+    let channel_rows = stmt.query_map(rusqlite::params![user.as_bytes().as_slice()], row_to_channel_info)?;
+    let mut channels = Vec::new();
+    for row in channel_rows {
+        channels.push(row?);
+    }
+
+    let mut result = Vec::new();
+    for ch in channels {
+        // Find the other participant.
+        let other_bytes: Option<Vec<u8>> = conn.query_row(
+            "SELECT user_key FROM dm_participants WHERE channel_id = ?1 AND user_key != ?2 LIMIT 1",
+            rusqlite::params![ch.id as i64, user.as_bytes().as_slice()],
+            |row| row.get(0),
+        ).optional()?;
+
+        if let Some(bytes) = other_bytes {
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("user_key blob wrong length"))?;
+            let other_key = farder_crypto::identity::PublicKey::from_bytes(arr);
+            result.push((ch, other_key));
+        }
+    }
+    Ok(result)
+}
+
+/// Check whether `user` is a participant in the given DM channel.
+pub fn is_dm_participant(conn: &Connection, channel_id: u64, user: &farder_crypto::identity::PublicKey) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM dm_participants WHERE channel_id = ?1 AND user_key = ?2",
+        rusqlite::params![channel_id as i64, user.as_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 pub fn hard_delete_channel(conn: &Connection, id: u64) -> Result<()> {
@@ -923,6 +1020,130 @@ mod tests {
 
         let channels = list_channels(&conn).unwrap();
         assert_eq!(channels.len(), 1, "list_channels should exclude thread channels");
+        assert_eq!(channels[0].name, "general");
+    }
+
+    // -----------------------------------------------------------------------
+    // DM channel tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_dm_channel() {
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = Keypair::generate().public_key();
+        let pk_b = Keypair::generate().public_key();
+
+        let ch_id = create_dm_channel(&conn, &pk_a, &pk_b).unwrap();
+        let ch = get_channel(&conn, ch_id).unwrap().expect("DM channel should exist");
+        assert_eq!(ch.channel_type, ChannelType::Dm);
+
+        // Both participants should be present.
+        assert!(is_dm_participant(&conn, ch_id, &pk_a).unwrap());
+        assert!(is_dm_participant(&conn, ch_id, &pk_b).unwrap());
+    }
+
+    #[test]
+    fn test_find_dm_channel() {
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = Keypair::generate().public_key();
+        let pk_b = Keypair::generate().public_key();
+        let pk_c = Keypair::generate().public_key();
+
+        // No channel yet.
+        assert!(find_dm_channel(&conn, &pk_a, &pk_b).unwrap().is_none());
+
+        let ch_id = create_dm_channel(&conn, &pk_a, &pk_b).unwrap();
+
+        // Found in both directions.
+        let found_ab = find_dm_channel(&conn, &pk_a, &pk_b).unwrap().expect("should find a-b");
+        assert_eq!(found_ab.id, ch_id);
+        let found_ba = find_dm_channel(&conn, &pk_b, &pk_a).unwrap().expect("should find b-a");
+        assert_eq!(found_ba.id, ch_id);
+
+        // Different pair returns None.
+        assert!(find_dm_channel(&conn, &pk_a, &pk_c).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_open_dm_channel_idempotent() {
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = Keypair::generate().public_key();
+        let pk_b = Keypair::generate().public_key();
+
+        let (id1, created1) = open_dm_channel(&conn, &pk_a, &pk_b).unwrap();
+        assert!(created1, "first open should create");
+
+        let (id2, created2) = open_dm_channel(&conn, &pk_a, &pk_b).unwrap();
+        assert!(!created2, "second open should not create");
+        assert_eq!(id1, id2, "should return same channel id");
+
+        // Also idempotent when called in reverse order.
+        let (id3, created3) = open_dm_channel(&conn, &pk_b, &pk_a).unwrap();
+        assert!(!created3);
+        assert_eq!(id1, id3);
+    }
+
+    #[test]
+    fn test_list_dm_channels() {
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = Keypair::generate().public_key();
+        let pk_b = Keypair::generate().public_key();
+        let pk_c = Keypair::generate().public_key();
+
+        create_dm_channel(&conn, &pk_a, &pk_b).unwrap();
+        create_dm_channel(&conn, &pk_a, &pk_c).unwrap();
+
+        let dms_a = list_dm_channels(&conn, &pk_a).unwrap();
+        assert_eq!(dms_a.len(), 2);
+
+        // Each entry's other key should be b or c.
+        let other_keys: Vec<_> = dms_a.iter().map(|(_, k)| k.clone()).collect();
+        assert!(other_keys.contains(&pk_b));
+        assert!(other_keys.contains(&pk_c));
+
+        // b only has one DM (with a).
+        let dms_b = list_dm_channels(&conn, &pk_b).unwrap();
+        assert_eq!(dms_b.len(), 1);
+        assert_eq!(dms_b[0].1, pk_a);
+    }
+
+    #[test]
+    fn test_is_dm_participant() {
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = Keypair::generate().public_key();
+        let pk_b = Keypair::generate().public_key();
+        let pk_c = Keypair::generate().public_key();
+
+        let ch_id = create_dm_channel(&conn, &pk_a, &pk_b).unwrap();
+
+        assert!(is_dm_participant(&conn, ch_id, &pk_a).unwrap());
+        assert!(is_dm_participant(&conn, ch_id, &pk_b).unwrap());
+        assert!(!is_dm_participant(&conn, ch_id, &pk_c).unwrap());
+    }
+
+    #[test]
+    fn test_list_channels_excludes_dms() {
+        use farder_crypto::identity::Keypair;
+
+        let conn = db::open_in_memory().unwrap();
+        let pk_a = Keypair::generate().public_key();
+        let pk_b = Keypair::generate().public_key();
+
+        create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        create_dm_channel(&conn, &pk_a, &pk_b).unwrap();
+
+        let channels = list_channels(&conn).unwrap();
+        assert_eq!(channels.len(), 1, "list_channels should exclude DM channels");
         assert_eq!(channels[0].name, "general");
     }
 }

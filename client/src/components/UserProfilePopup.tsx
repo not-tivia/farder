@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
+import { useServer } from "../context/ServerContext";
 
 interface Props {
     member: MemberInfo;
@@ -12,6 +13,7 @@ interface Props {
 }
 
 export default function UserProfilePopup({ member, roles, position, onClose, isSelf }: Props) {
+    const { dispatch } = useServer();
     const pkStr = publicKeyToString(member.public_key);
     const memberRoles = roles.filter(r => member.role_ids.includes(r.id) && r.name !== "@everyone");
     const joinDate = new Date(member.joined_at * 1000).toLocaleDateString([], {
@@ -126,6 +128,28 @@ export default function UserProfilePopup({ member, roles, position, onClose, isS
                                     );
                                 })}
                             </div>
+                        </div>
+                    )}
+                    {!isSelf && (
+                        <div className="profile-card-actions">
+                            <button className="xp-button profile-action-btn" onClick={async () => {
+                                try {
+                                    const result = await api.openDm(pkStr);
+                                    const dms = await api.listDms();
+                                    dispatch({ type: "SET_DMS", payload: dms });
+                                    dispatch({ type: "SELECT_CHANNEL", payload: result.channel.id });
+                                    await api.subscribeChannels([result.channel.id]);
+                                    const msgs = await api.fetchHistory(result.channel.id);
+                                    dispatch({ type: "SET_MESSAGES", payload: { channelId: result.channel.id, messages: msgs.reverse() } });
+                                    onClose();
+                                } catch (e) {
+                                    console.error("open dm failed:", e);
+                                }
+                            }}>Message</button>
+                            <button className="xp-button profile-action-btn profile-block-btn" onClick={async () => {
+                                try { await api.blockUser(pkStr); } catch {}
+                                onClose();
+                            }}>Block</button>
                         </div>
                     )}
                 </div>

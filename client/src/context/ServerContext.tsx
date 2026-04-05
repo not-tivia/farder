@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry } from "../lib/types";
 
 export interface ServerState {
   connected: boolean;
@@ -13,6 +13,8 @@ export interface ServerState {
   messages: Record<number, MessageInfo[]>;
   threadChannelId: number | null;
   readState: Record<number, number>;
+  dms: DmEntry[];
+  dmPanelChannelId: number | null;
 }
 
 const initialState: ServerState = {
@@ -27,6 +29,8 @@ const initialState: ServerState = {
   messages: {},
   threadChannelId: null,
   readState: {},
+  dms: [],
+  dmPanelChannelId: null,
 };
 
 export type ServerAction =
@@ -52,7 +56,11 @@ export type ServerAction =
   | { type: "CATEGORY_UPDATED"; payload: CategoryInfo }
   | { type: "CHANNEL_UPDATED"; payload: ChannelInfo }
   | { type: "VIEW_THREAD"; payload: number | null }
-  | { type: "MARK_READ"; payload: { channelId: number; lastMessageId: number } };
+  | { type: "MARK_READ"; payload: { channelId: number; lastMessageId: number } }
+  | { type: "SET_DMS"; payload: DmEntry[] }
+  | { type: "DM_CREATED"; payload: { channel: ChannelInfo; participant: MemberInfo } }
+  | { type: "OPEN_DM_PANEL"; payload: number }
+  | { type: "CLOSE_DM_PANEL" };
 
 function reducer(state: ServerState, action: ServerAction): ServerState {
   switch (action.type) {
@@ -201,6 +209,19 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
       const { channelId, lastMessageId } = action.payload;
       return { ...state, readState: { ...state.readState, [channelId]: lastMessageId } };
     }
+    case "SET_DMS":
+      return { ...state, dms: action.payload };
+    case "DM_CREATED": {
+      const { channel, participant } = action.payload;
+      const newEntry: DmEntry = { channel, participant, last_message: null };
+      const exists = state.dms.some(d => d.channel.id === channel.id);
+      if (exists) return state;
+      return { ...state, dms: [...state.dms, newEntry] };
+    }
+    case "OPEN_DM_PANEL":
+      return { ...state, dmPanelChannelId: action.payload };
+    case "CLOSE_DM_PANEL":
+      return { ...state, dmPanelChannelId: null };
     default:
       return state;
   }

@@ -1,7 +1,7 @@
 export interface ChannelInfo {
   id: number;
   name: string;
-  channel_type: "Text" | "Announcement" | "Thread";
+  channel_type: "Text" | "Announcement" | "Thread" | "Dm";
   category_id: number | null;
   position: number;
   topic: string | null;
@@ -62,6 +62,12 @@ export interface MessageInfo {
   reactions: ReactionGroup[];
   thread_id: number | null;
   thread_message_count: number;
+}
+
+export interface DmEntry {
+  channel: ChannelInfo;
+  participant: MemberInfo;
+  last_message: MessageInfo | null;
 }
 
 export interface ConnectResult {

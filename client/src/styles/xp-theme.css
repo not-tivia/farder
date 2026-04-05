@@ -1642,3 +1642,64 @@ body {
   border-radius: 3px;
   background: var(--xp-panel-bg);
 }
+
+.dm-item {
+  padding-left: 12px !important;
+}
+
+.dm-avatar-mini {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: bold;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.profile-card-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--xp-border);
+}
+
+.profile-action-btn {
+  flex: 1;
+  text-align: center;
+}
+
+.profile-block-btn {
+  color: #cc0000;
+  flex: 0;
+}
+
+.dm-panel {
+  width: 320px;
+  border-left: 2px solid var(--xp-blue);
+  display: flex;
+  flex-direction: column;
+  background: var(--xp-white);
+  flex-shrink: 0;
+}
+
+.dm-panel-header {
+  padding: 6px 10px;
+  background: linear-gradient(180deg, var(--xp-blue-light) 0%, var(--xp-blue) 100%);
+  color: white;
+  font-weight: bold;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dm-panel-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
