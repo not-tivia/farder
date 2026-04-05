@@ -263,8 +263,8 @@ export default function ChannelSidebar() {
   }
 
 
-  // Exclude Thread channels from the sidebar (they appear inline)
-  const visibleChannels = state.channels.filter((c) => c.channel_type !== "Thread");
+  // Exclude Thread and Dm channels from the main channel list (DMs get their own section)
+  const visibleChannels = state.channels.filter((c) => c.channel_type !== "Thread" && c.channel_type !== "Dm");
   const sortedCategories = [...state.categories].sort((a, b) => a.position - b.position);
   const uncategorized = visibleChannels
     .filter((c) => c.category_id === null)
@@ -330,6 +330,28 @@ export default function ChannelSidebar() {
         <div className="channel-list">
           {uncategorized.map(renderChannel)}
           {sortedCategories.map(renderCategory)}
+          {/* Direct Messages */}
+          {state.dms.length > 0 && (
+            <>
+              <div className="channel-category" style={{ marginTop: 8 }}>DIRECT MESSAGES</div>
+              {state.dms.map(dm => {
+                const isActive = state.currentChannelId === dm.channel.id;
+                const lastRead = state.readState?.[dm.channel.id] ?? 0;
+                const dmMsgs = state.messages[dm.channel.id] ?? [];
+                const hasUnread = dmMsgs.some(m => m.id > lastRead) && !isActive;
+                return (
+                  <div
+                    key={dm.channel.id}
+                    className={`channel-item dm-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
+                    onClick={() => handleSelectChannel(dm.channel)}
+                  >
+                    <span className="dm-avatar-mini">{dm.participant.display_name.charAt(0).toUpperCase()}</span>
+                    <span>{dm.participant.display_name}</span>
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
         <div className="user-footer">
           <UserFooter members={state.members} roles={state.roles} />

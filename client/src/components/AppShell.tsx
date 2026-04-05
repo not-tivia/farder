@@ -24,6 +24,11 @@ export default function AppShell() {
           // Re-fetch members
           const members = await api.getMembers();
           dispatch({ type: "SET_MEMBERS", payload: members });
+          // Re-load DMs
+          try {
+            const dms = await api.listDms();
+            dispatch({ type: "SET_DMS", payload: dms });
+          } catch {}
           // Re-subscribe to current channel
           if (state.currentChannelId) {
             await api.subscribeChannels([state.currentChannelId]);

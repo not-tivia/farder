@@ -104,6 +104,10 @@ export default function ConnectDialog() {
         } catch {
           // non-fatal
         }
+        try {
+          const dms = await api.listDms();
+          dispatch({ type: "SET_DMS", payload: dms });
+        } catch {}
         return; // success
       } catch {
         // retry
@@ -205,6 +209,10 @@ export default function ConnectDialog() {
       } catch {
         // non-fatal
       }
+      try {
+        const dms = await api.listDms();
+        dispatch({ type: "SET_DMS", payload: dms });
+      } catch {}
     } catch (e) {
       setError(String(e));
     } finally {

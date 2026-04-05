@@ -1642,3 +1642,21 @@ body {
   border-radius: 3px;
   background: var(--xp-panel-bg);
 }
+
+.dm-item {
+  padding-left: 12px !important;
+}
+
+.dm-avatar-mini {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: bold;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
