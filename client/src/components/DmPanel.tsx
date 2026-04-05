@@ -28,10 +28,22 @@ export default function DmPanel() {
   }
 
   useEffect(() => {
-    if (!channelId || !serverId) return;
+    if (!channelId || !serverId || !dm) return;
     (async () => {
       const msgs = await api.fetchHistory(serverId, channelId);
-      dispatch({ type: "SET_MESSAGES", serverId: serverId!, payload: { channelId, messages: msgs.reverse() } });
+      const peerPk = publicKeyToString(dm.participant.public_key);
+      const decrypted = await Promise.all(
+        msgs.map(async (msg) => {
+          try {
+            const plaintext = await api.dmDecrypt(peerPk, msg.content);
+            return { ...msg, content: plaintext };
+          } catch {
+            // Message predates E2EE or decryption failed — show as-is
+            return msg;
+          }
+        })
+      );
+      dispatch({ type: "SET_MESSAGES", serverId: serverId!, payload: { channelId, messages: decrypted.reverse() } });
     })();
   }, [channelId, serverId]);
 

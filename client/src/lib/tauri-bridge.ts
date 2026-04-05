@@ -313,3 +313,21 @@ export async function getNotificationPrefs(): Promise<NotificationPrefs> {
 export async function saveNotificationPrefs(prefs: NotificationPrefs): Promise<void> {
   return invoke<void>("save_notification_prefs", { prefs });
 }
+
+// ── DM E2EE ───────────────────────────────────────────────────────────────────
+
+/**
+ * Encrypt a plaintext message for a DM peer.
+ * Returns a hex-encoded AES-256-GCM ciphertext (nonce prepended).
+ */
+export async function dmEncrypt(theirPublicKey: string, plaintext: string): Promise<string> {
+  return invoke<string>("dm_encrypt", { theirPublicKey, plaintext });
+}
+
+/**
+ * Decrypt a hex-encoded ciphertext received in a DM channel.
+ * Throws if decryption fails (wrong key, tampered data, or plaintext message).
+ */
+export async function dmDecrypt(theirPublicKey: string, ciphertextHex: string): Promise<string> {
+  return invoke<string>("dm_decrypt", { theirPublicKey, ciphertextHex });
+}

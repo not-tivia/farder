@@ -113,10 +113,24 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         }
       }
 
+      // Encrypt the message content if this is a DM channel
+      let messageContent = text;
+      const dm = activeServer?.dms.find(d => d.channel.id === channelId);
+      if (dm) {
+        const peerPk = publicKeyToString(dm.participant.public_key);
+        try {
+          messageContent = await api.dmEncrypt(peerPk, text);
+        } catch {
+          // If encryption fails, abort — don't send plaintext in a DM
+          setError("Encryption failed — message not sent");
+          return;
+        }
+      }
+
       await api.sendMessage(
         serverId,
         channelId,
-        text,
+        messageContent,
         replyTo,
         attachments.length > 0 ? attachments : undefined,
       );

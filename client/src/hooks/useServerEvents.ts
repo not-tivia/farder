@@ -81,6 +81,10 @@ export function useServerEvents(): void {
   const activeRef = useRef(state.activeServerId);
   useEffect(() => { activeRef.current = state.activeServerId; }, [state.activeServerId]);
 
+  // Keep a live reference to per-server state for use inside event callbacks
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
   useEffect(() => {
     const unlisten: Array<() => void> = [];
 
@@ -88,6 +92,39 @@ export function useServerEvents(): void {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       const message = data.message as MessageInfo;
+
+      // Check if this is a DM channel so we can decrypt the content
+      const serverState = stateRef.current.servers[serverId];
+      const dmEntry = serverState?.dms.find(d => d.channel.id === message.channel_id);
+
+      if (dmEntry) {
+        // Decrypt asynchronously then dispatch
+        const peerPk = publicKeyToString(dmEntry.participant.public_key);
+        api.dmDecrypt(peerPk, message.content)
+          .then((plaintext) => {
+            const decryptedMsg = { ...message, content: plaintext };
+            if (serverId === activeRef.current) {
+              dispatch({ type: "NEW_MESSAGE", serverId, payload: decryptedMsg });
+            } else {
+              dispatch({ type: "INCREMENT_UNREAD", serverId });
+              if (notifPrefs && shouldNotify(serverId, decryptedMsg, notifPrefs)) {
+                api.showNotification("Farder", plaintext.slice(0, 120)).catch(() => {});
+              } else if (!notifPrefs) {
+                api.showNotification("Farder", plaintext.slice(0, 120)).catch(() => {});
+              }
+            }
+          })
+          .catch(() => {
+            // Decryption failed (e.g. message from before E2EE was set up) — dispatch as-is
+            if (serverId === activeRef.current) {
+              dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
+            } else {
+              dispatch({ type: "INCREMENT_UNREAD", serverId });
+            }
+          });
+        return;
+      }
+
       if (serverId === activeRef.current) {
         dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
       } else {
