@@ -203,14 +203,26 @@ export default function ChannelSidebar() {
                   {currentIndex > 0 && (
                     <div className="context-menu-item" onClick={async () => {
                       const above = siblingsInCategory[currentIndex - 1];
-                      await handleMoveChannel(contextMenu.channelId, ch?.category_id ?? null, above.position);
+                      const myPos = ch!.position;
+                      const theirPos = above.position;
+                      // Swap positions
+                      try {
+                        await api.updateChannel(contextMenu.channelId, { position: theirPos });
+                        await api.updateChannel(above.id, { position: myPos });
+                      } catch {}
                       setContextMenu(null);
                     }}>Move Up</div>
                   )}
                   {currentIndex < siblingsInCategory.length - 1 && (
                     <div className="context-menu-item" onClick={async () => {
                       const below = siblingsInCategory[currentIndex + 1];
-                      await handleMoveChannel(contextMenu.channelId, ch?.category_id ?? null, below.position);
+                      const myPos = ch!.position;
+                      const theirPos = below.position;
+                      // Swap positions
+                      try {
+                        await api.updateChannel(contextMenu.channelId, { position: theirPos });
+                        await api.updateChannel(below.id, { position: myPos });
+                      } catch {}
                       setContextMenu(null);
                     }}>Move Down</div>
                   )}
@@ -253,15 +265,23 @@ export default function ChannelSidebar() {
                   }}>Edit Category</div>
                   {catIndex > 0 && (
                     <div className="context-menu-item" onClick={async () => {
+                      const myCat = sortedCategories[catIndex];
                       const above = sortedCategories[catIndex - 1];
-                      await handleMoveCategory(contextMenu.categoryId!, above.position);
+                      try {
+                        await api.updateCategory(contextMenu.categoryId!, { position: above.position });
+                        await api.updateCategory(above.id, { position: myCat.position });
+                      } catch {}
                       setContextMenu(null);
                     }}>Move Up</div>
                   )}
                   {catIndex < sortedCategories.length - 1 && (
                     <div className="context-menu-item" onClick={async () => {
+                      const myCat = sortedCategories[catIndex];
                       const below = sortedCategories[catIndex + 1];
-                      await handleMoveCategory(contextMenu.categoryId!, below.position);
+                      try {
+                        await api.updateCategory(contextMenu.categoryId!, { position: below.position });
+                        await api.updateCategory(below.id, { position: myCat.position });
+                      } catch {}
                       setContextMenu(null);
                     }}>Move Down</div>
                   )}
