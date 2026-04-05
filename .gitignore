@@ -6,3 +6,7 @@ node_modules/
 *.swo
 .DS_Store
 .superpowers/
+client/dist/
+client/src-tauri/gen/
+client/src-tauri/farder-*.key
+client/src-tauri/farder-*.json
