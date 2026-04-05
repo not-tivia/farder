@@ -32,6 +32,7 @@ fn main() {
             commands::add_reaction,
             commands::remove_reaction,
             commands::create_thread,
+            commands::search_messages,
             commands::create_invite,
             commands::create_channel,
             commands::create_category,
