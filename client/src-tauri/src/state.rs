@@ -3,42 +3,40 @@ use quinn::{Connection, Endpoint, SendStream};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-pub struct AppState {
-    /// Raw signing key bytes for the stored identity keypair.
-    pub signing_key_bytes: Mutex<Option<[u8; 32]>>,
-    /// The QUIC endpoint (must be kept alive or connections close).
-    pub endpoint: Mutex<Option<Endpoint>>,
-    /// The active QUIC connection (must be kept alive or streams die).
-    pub connection: Mutex<Option<Connection>>,
-    /// The active QUIC send stream to the server.
-    pub send_stream: tokio::sync::Mutex<Option<SendStream>>,
-    /// Monotonically increasing request ID counter.
+pub struct ServerConnection {
+    pub endpoint: Endpoint,
+    pub connection: Connection,
+    pub send_stream: tokio::sync::Mutex<SendStream>,
     pub next_request_id: AtomicU32,
-    /// Pending request oneshot senders keyed by request ID.
     pub pending_requests: Mutex<HashMap<u32, tokio::sync::oneshot::Sender<ServerResponse>>>,
-    /// Handle to the background event reader task.
     pub event_reader_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Whether the client is currently connected to a server.
-    pub connected: Mutex<bool>,
+    pub server_name: Mutex<String>,
+}
+
+impl ServerConnection {
+    pub fn next_id(&self) -> u32 {
+        self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+pub struct AppState {
+    pub signing_key_bytes: Mutex<Option<[u8; 32]>>,
+    pub servers: Mutex<HashMap<String, Arc<ServerConnection>>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             signing_key_bytes: Mutex::new(None),
-            endpoint: Mutex::new(None),
-            connection: Mutex::new(None),
-            send_stream: tokio::sync::Mutex::new(None),
-            next_request_id: AtomicU32::new(1),
-            pending_requests: Mutex::new(HashMap::new()),
-            event_reader_handle: Mutex::new(None),
-            connected: Mutex::new(false),
+            servers: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn next_id(&self) -> u32 {
-        self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    pub fn get_server(&self, server_id: &str) -> Result<Arc<ServerConnection>, String> {
+        let servers = self.servers.lock().map_err(|e| e.to_string())?;
+        servers.get(server_id).cloned().ok_or_else(|| format!("not connected to {}", server_id))
     }
 }
