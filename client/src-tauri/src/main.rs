@@ -41,6 +41,9 @@ fn main() {
             commands::upload_file,
             commands::download_file,
             commands::fetch_url,
+            commands::add_favorite,
+            commands::list_favorites,
+            commands::remove_favorite,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

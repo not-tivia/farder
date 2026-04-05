@@ -229,7 +229,13 @@ function AttachmentDisplay({ attachment, messageContent }: { attachment: Attachm
             <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setMenu(null)} />
             <div className="context-menu" style={{ top: menu.y, left: menu.x }}>
               <div className="context-menu-item" onClick={handleCopyLink}>Copy Image Link</div>
-              <div className="context-menu-item" onClick={handleSave}>Save Image</div>
+              <div className="context-menu-item" onClick={async () => {
+                try {
+                  const urlMatch = messageContent.match(/https?:\/\/[^\s]+/);
+                  await api.addFavorite(attachment.file_id, urlMatch?.[0]);
+                } catch {}
+                setMenu(null);
+              }}>Favorite</div>
             </div>
           </>
         )}

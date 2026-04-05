@@ -648,6 +648,132 @@ pub async fn delete_category(state: State<'_, Arc<AppState>>, category_id: u64) 
 }
 
 // ---------------------------------------------------------------------------
+// Favorites commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct FavoriteEntry {
+    pub id: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub data_url: String,
+    pub source_server: String,
+    pub original_url: Option<String>,
+    pub favorited_at: u64,
+}
+
+fn favorites_dir() -> std::path::PathBuf {
+    let dir = farder_data_dir().join("favorites");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn favorites_index_path() -> std::path::PathBuf {
+    farder_data_dir().join("favorites.json")
+}
+
+fn load_favorites_index() -> Vec<FavoriteEntry> {
+    let path = favorites_index_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_favorites_index(entries: &[FavoriteEntry]) -> Result<(), String> {
+    let path = favorites_index_path();
+    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn add_favorite(
+    state: State<'_, Arc<AppState>>,
+    file_id: u64,
+    original_url: Option<String>,
+) -> Result<FavoriteEntry, String> {
+    use sha2::Digest;
+
+    let conn = {
+        let c = state.connection.lock().map_err(|e| e.to_string())?;
+        c.as_ref().ok_or("not connected")?.clone()
+    };
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+
+    let req = farder_protocol::server::DownloadRequest { file_id };
+    let req_bytes = farder_protocol::codec::encode(&req).map_err(|e| e.to_string())?;
+    crate::connection::write_frame(&mut send, &req_bytes).await.map_err(|e| e.to_string())?;
+
+    let resp_bytes = crate::connection::read_frame(&mut recv).await.map_err(|e| e.to_string())?;
+    let resp: farder_protocol::server::DownloadResponse =
+        farder_protocol::codec::decode(&resp_bytes).map_err(|e| e.to_string())?;
+
+    match resp {
+        farder_protocol::server::DownloadResponse::Start { file_name, file_size, mime_type, .. } => {
+            let mut data = Vec::with_capacity(file_size as usize);
+            let mut remaining = file_size;
+            while remaining > 0 {
+                let mut buf = vec![0u8; std::cmp::min(remaining as usize, 65536)];
+                match recv.read(&mut buf).await {
+                    Ok(Some(n)) if n > 0 => {
+                        data.extend_from_slice(&buf[..n]);
+                        remaining -= n as u64;
+                    }
+                    _ => break,
+                }
+            }
+
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            let data_url = format!("data:{};base64,{}", mime_type, b64);
+
+            let id = format!("{:x}", sha2::Sha256::digest(&data));
+            let img_path = favorites_dir().join(&id);
+            std::fs::write(&img_path, &data).map_err(|e| e.to_string())?;
+
+            let server_name = get_last_server().unwrap_or_else(|| "Unknown Server".to_string());
+
+            let entry = FavoriteEntry {
+                id: id.clone(),
+                file_name,
+                mime_type,
+                data_url,
+                source_server: server_name,
+                original_url,
+                favorited_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            };
+
+            let mut entries = load_favorites_index();
+            if !entries.iter().any(|e| e.id == id) {
+                entries.push(entry.clone());
+                save_favorites_index(&entries)?;
+            }
+
+            Ok(entry)
+        }
+        farder_protocol::server::DownloadResponse::Error { reason } => Err(reason),
+    }
+}
+
+#[tauri::command]
+pub fn list_favorites() -> Result<Vec<FavoriteEntry>, String> {
+    Ok(load_favorites_index())
+}
+
+#[tauri::command]
+pub fn remove_favorite(id: String) -> Result<(), String> {
+    let mut entries = load_favorites_index();
+    entries.retain(|e| e.id != id);
+    save_favorites_index(&entries)?;
+    let img_path = favorites_dir().join(&id);
+    let _ = std::fs::remove_file(img_path);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Invite commands
 // ---------------------------------------------------------------------------
 

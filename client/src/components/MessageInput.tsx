@@ -1,5 +1,7 @@
 import { useState, KeyboardEvent } from "react";
 import * as api from "../lib/tauri-bridge";
+import type { FavoriteEntry } from "../lib/tauri-bridge";
+import FavoritesPanel from "./FavoritesPanel";
 
 interface MessageInputProps {
   channelId: number;
@@ -13,6 +15,7 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showFavorites, setShowFavorites] = useState(false);
 
   async function handleAttach() {
     setError(null);
@@ -37,6 +40,21 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
     setAttachedFileId(null);
     setAttachedFileName(null);
     setError(null);
+  }
+
+  async function handleFavoriteSelect(fav: FavoriteEntry) {
+    setShowFavorites(false);
+    setSending(true);
+    try {
+      if (fav.original_url) {
+        const fileId = await api.fetchUrl(fav.original_url, channelId);
+        await api.sendMessage(channelId, "", undefined, [fileId]);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSending(false);
+    }
   }
 
   const imageUrlRegex = /https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi;
@@ -86,6 +104,9 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
   return (
     <div className="message-input-area">
       <div className="message-input-wrapper">
+        {showFavorites && (
+          <FavoritesPanel onSelect={handleFavoriteSelect} onClose={() => setShowFavorites(false)} />
+        )}
         {(attachedFileName || uploading) && (
           <div className="attachment-preview">
             {uploading ? (
@@ -102,6 +123,14 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
         )}
         {error && <div className="error-text" style={{ padding: "2px 4px" }}>{error}</div>}
         <div className="message-input-row">
+          <button
+            className="xp-button attach-btn"
+            onClick={() => setShowFavorites(!showFavorites)}
+            disabled={sending}
+            title="Favorites"
+          >
+            *
+          </button>
           <button
             className="xp-button attach-btn"
             onClick={handleAttach}

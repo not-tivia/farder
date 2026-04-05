@@ -143,3 +143,25 @@ export async function downloadFile(fileId: number): Promise<DownloadResult> {
 export async function fetchUrl(url: string, channelId: number): Promise<number> {
   return invoke<number>("fetch_url", { url, channelId });
 }
+
+export interface FavoriteEntry {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  data_url: string;
+  source_server: string;
+  original_url: string | null;
+  favorited_at: number;
+}
+
+export async function addFavorite(fileId: number, originalUrl?: string): Promise<FavoriteEntry> {
+  return invoke<FavoriteEntry>("add_favorite", { fileId, originalUrl: originalUrl ?? null });
+}
+
+export async function listFavorites(): Promise<FavoriteEntry[]> {
+  return invoke<FavoriteEntry[]>("list_favorites");
+}
+
+export async function removeFavorite(id: string): Promise<void> {
+  return invoke<void>("remove_favorite", { id });
+}
