@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
-import { useApp } from "../context/ServerContext";
+import { useApp, useActiveServer } from "../context/ServerContext";
 
 interface Props {
   member: MemberInfo;
@@ -13,9 +13,14 @@ interface Props {
   serverId: string;
 }
 
-export default function UserProfilePopup({ member, roles, position, onClose, isSelf, serverId }: Props) {
+export default function UserProfilePopup({ member: initialMember, roles: initialRoles, position, onClose, isSelf, serverId }: Props) {
   const { dispatch } = useApp();
-  const pkStr = publicKeyToString(member.public_key);
+  const activeServer = useActiveServer();
+  const pkStr = publicKeyToString(initialMember.public_key);
+
+  // Read live member and roles from context so they update in real-time
+  const member = activeServer?.members.find(m => publicKeyToString(m.public_key) === pkStr) ?? initialMember;
+  const roles = activeServer?.roles ?? initialRoles;
   const memberRoles = roles.filter(r => member.role_ids.includes(r.id) && r.name !== "@everyone");
   const joinDate = new Date(member.joined_at * 1000).toLocaleDateString([], {
     year: "numeric", month: "short", day: "numeric"
