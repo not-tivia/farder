@@ -185,6 +185,27 @@ pub async fn connect_server(
     invite_code: Option<String>,
     setup_token: Option<String>,
 ) -> Result<ConnectResult, String> {
+    // Clean up any existing connection first
+    {
+        if let Ok(mut h) = state.event_reader_handle.lock() {
+            if let Some(handle) = h.take() {
+                handle.abort();
+            }
+        }
+        let mut ss = state.send_stream.lock().await;
+        *ss = None;
+        if let Ok(mut c) = state.connection.lock() {
+            *c = None;
+        }
+        if let Ok(mut ep) = state.endpoint.lock() {
+            *ep = None;
+        }
+        // Clear pending requests so they don't block
+        if let Ok(mut pending) = state.pending_requests.lock() {
+            pending.clear();
+        }
+    }
+
     // Reconstruct keypair from stored bytes.
     let keypair = {
         let lock = state
