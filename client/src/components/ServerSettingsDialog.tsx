@@ -90,9 +90,14 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   async function handleCreateChannel() {
     if (!newChName.trim() || !serverId) return;
     try {
+      console.log("[settings] creating channel:", newChName.trim(), newChType, newChCatId);
       await api.createChannel(serverId, newChName.trim(), newChType, newChCatId);
+      console.log("[settings] channel created successfully");
       setNewChName("");
-    } catch (e) { setError(String(e)); }
+    } catch (e) {
+      console.error("[settings] create channel failed:", e);
+      setError(String(e));
+    }
   }
 
   async function handleCreateCategory() {
