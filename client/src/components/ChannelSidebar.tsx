@@ -3,7 +3,7 @@ import { useApp, useActiveServer, useActiveServerId } from "../context/ServerCon
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, CategoryInfo, MemberInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
-import type { VoiceMember } from "../lib/tauri-bridge";
+
 import InviteDialog from "./InviteDialog";
 import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";

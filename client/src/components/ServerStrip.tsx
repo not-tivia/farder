@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
-import type { VoiceMember } from "../lib/tauri-bridge";
+
 import { publicKeyToString } from "../lib/types";
 import AddServerModal from "./AddServerModal";
 
