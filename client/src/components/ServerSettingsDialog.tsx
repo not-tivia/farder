@@ -1,7 +1,7 @@
 import { useState } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useServer } from "../context/ServerContext";
-import type { ChannelInfo, CategoryInfo } from "../lib/types";
+import type { ChannelInfo } from "../lib/types";
 
 interface Props { onClose: () => void; }
 
