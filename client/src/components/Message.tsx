@@ -4,6 +4,7 @@ import { publicKeyToString, isDeletedUser } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { useServer } from "../context/ServerContext";
 import ReactionPicker from "./ReactionPicker";
+import UserProfilePopup from "./UserProfilePopup";
 
 interface MessageProps {
   message: MessageInfo;
@@ -50,9 +51,10 @@ function formatSize(bytes: number): string {
 const imageCache = new Map<number, string>();
 
 export default function Message({ message, memberNames, grouped = false }: MessageProps) {
-  const { dispatch } = useServer();
+  const { state, dispatch } = useServer();
   const [showPicker, setShowPicker] = useState(false);
   const [reacting, setReacting] = useState(false);
+  const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
 
   const deleted = isDeletedUser(message.author);
   const pkStr = publicKeyToString(message.author);
@@ -60,6 +62,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
     ? "Deleted User"
     : (memberNames[pkStr] ?? pkStr.slice(0, 16) + "…");
   const color = deleted ? "#999" : authorColor(pkStr);
+  const member = deleted ? null : state.members.find(m => publicKeyToString(m.public_key) === pkStr) ?? null;
 
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
@@ -112,12 +115,24 @@ export default function Message({ message, memberNames, grouped = false }: Messa
       )}
       {!grouped && (
         <div className="message-header">
-          <span className="message-author" style={{ color }}>
+          <span
+            className="message-author"
+            style={{ color, cursor: member ? "pointer" : undefined }}
+            onClick={member ? (e) => setProfilePopup({ x: e.clientX, y: e.clientY }) : undefined}
+          >
             {displayName}
           </span>
           <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
           {message.edited_at && <span className="message-edited">(edited)</span>}
         </div>
+      )}
+      {profilePopup && member && (
+        <UserProfilePopup
+          member={member}
+          roles={state.roles}
+          position={profilePopup}
+          onClose={() => setProfilePopup(null)}
+        />
       )}
       {(deleted || displayContent) && (
         <div className={`message-content${deleted ? " deleted-content" : ""}`}>

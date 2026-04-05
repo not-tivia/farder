@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useServer } from "../context/ServerContext";
 import { publicKeyToString } from "../lib/types";
+import type { MessageInfo } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
 import MessageInput from "./MessageInput";
@@ -12,6 +13,10 @@ export default function ChatPanel() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<MessageInfo[] | null>(null);
+  const [searching, setSearching] = useState(false);
 
   const memberNames: Record<string, string> = {};
   for (const m of members) {
@@ -29,10 +34,25 @@ export default function ChatPanel() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [channelMessages.length]);
 
-  // Reset hasMore when switching channels
+  // Reset hasMore and search when switching channels
   useEffect(() => {
     setHasMore(true);
+    setShowSearch(false);
+    setSearchQuery("");
+    setSearchResults(null);
   }, [currentChannelId]);
+
+  async function handleSearch() {
+    if (!searchQuery.trim() || !currentChannelId) return;
+    setSearching(true);
+    try {
+      const results = await api.searchMessages(searchQuery.trim(), currentChannelId);
+      setSearchResults(results);
+    } catch {
+      // ignore
+    }
+    setSearching(false);
+  }
 
   async function handleScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget;
@@ -75,7 +95,32 @@ export default function ChatPanel() {
         {currentChannel?.topic && (
           <span className="channel-header-topic">{currentChannel.topic}</span>
         )}
+        <button
+          className="search-toggle"
+          onClick={() => setShowSearch(!showSearch)}
+          title="Search messages"
+        >
+          ?
+        </button>
       </div>
+      {showSearch && (
+        <div className="search-bar">
+          <input
+            className="search-input"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
+            placeholder="Search messages..."
+            autoFocus
+          />
+          <button className="xp-button" onClick={handleSearch} disabled={searching}>
+            {searching ? "..." : "Search"}
+          </button>
+          <button className="xp-button" onClick={() => { setShowSearch(false); setSearchResults(null); setSearchQuery(""); }}>
+            X
+          </button>
+        </div>
+      )}
       <div className="message-list" onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
         {channelMessages.map((msg, i) => {
@@ -89,6 +134,20 @@ export default function ChatPanel() {
         })}
         <div ref={bottomRef} />
       </div>
+      {searchResults && (
+        <div className="search-results">
+          <div className="search-results-header">
+            {searchResults.length} result{searchResults.length !== 1 ? "s" : ""} for "{searchQuery}"
+            <button className="xp-button" onClick={() => setSearchResults(null)} style={{ fontSize: 10, padding: "1px 6px" }}>Close</button>
+          </div>
+          <div className="search-results-list">
+            {searchResults.map((msg) => (
+              <Message key={msg.id} message={msg} memberNames={memberNames} grouped={false} />
+            ))}
+            {searchResults.length === 0 && <div className="search-no-results">No messages found.</div>}
+          </div>
+        </div>
+      )}
       <MessageInput channelId={currentChannelId} />
     </div>
   );

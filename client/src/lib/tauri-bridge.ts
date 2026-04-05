@@ -87,6 +87,18 @@ export async function createThread(messageId: number, name?: string): Promise<vo
   return invoke<void>("create_thread", { messageId, name: name ?? null });
 }
 
+export async function searchMessages(
+  query: string,
+  channelId?: number,
+  limit?: number,
+): Promise<MessageInfo[]> {
+  return invoke<MessageInfo[]>("search_messages", {
+    query,
+    channelId: channelId ?? null,
+    limit: limit ?? null,
+  });
+}
+
 export interface InviteResult {
   code: string;
   link: string;

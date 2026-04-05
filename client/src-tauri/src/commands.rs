@@ -572,6 +572,27 @@ pub async fn fetch_url(
 // Admin commands
 // ---------------------------------------------------------------------------
 
+/// Search messages by full-text query.
+#[tauri::command]
+pub async fn search_messages(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+    channel_id: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<MessageInfo>, String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::Search { query, channel_id, limit: limit.unwrap_or(20) },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::SearchResults { messages } => Ok(messages),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 /// Create a new channel on the server.
 #[tauri::command]
 pub async fn create_channel(
