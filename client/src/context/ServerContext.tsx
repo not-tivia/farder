@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
 import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry } from "../lib/types";
+import { publicKeyToString } from "../lib/types";
 
 export interface PerServerState {
   serverName: string;
@@ -77,7 +78,7 @@ export type AppAction =
   | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean } }
   | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string } }
   | { type: "MEMBER_JOINED"; serverId: string; payload: MemberInfo }
-  | { type: "MEMBER_LEFT"; serverId: string; payload: { publicKeyBytes: number[] } }
+  | { type: "MEMBER_LEFT"; serverId: string; payload: { publicKey: string } }
   | { type: "CHANNEL_CREATED"; serverId: string; payload: ChannelInfo }
   | { type: "CHANNEL_DELETED"; serverId: string; payload: { channelId: number } }
   | { type: "CATEGORY_CREATED"; serverId: string; payload: CategoryInfo }
@@ -209,13 +210,15 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     }
     case "MEMBER_JOINED":
       return { ...state, members: [...state.members, action.payload] };
-    case "MEMBER_LEFT":
+    case "MEMBER_LEFT": {
+      const leftPk = action.payload.publicKey;
       return {
         ...state,
         members: state.members.filter(
-          (m) => !m.public_key.bytes.every((b, i) => b === action.payload.publicKeyBytes[i]),
+          (m) => publicKeyToString(m.public_key) !== leftPk,
         ),
       };
+    }
     case "CHANNEL_CREATED":
       return { ...state, channels: [...state.channels, action.payload] };
     case "CHANNEL_DELETED":

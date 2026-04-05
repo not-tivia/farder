@@ -115,10 +115,10 @@ export function useServerEvents(): void {
     }).then((u) => unlisten.push(u));
 
     listen("server:member_left", (e) => {
-      const data = e.payload as MemberLeftPayload;
-      const serverId = data.server_id;
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
-      dispatch({ type: "MEMBER_LEFT", serverId, payload: { publicKeyBytes: data.public_key_bytes } });
+      dispatch({ type: "MEMBER_LEFT", serverId, payload: { publicKey: data.public_key as string } });
     }).then((u) => unlisten.push(u));
 
     listen("server:channel_created", (e) => {
