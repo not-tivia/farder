@@ -1147,3 +1147,119 @@ body {
   padding: 1px 2px;
 }
 }
+
+/* Organizer */
+.organizer-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.organizer-group {
+    border: 1px solid var(--xp-border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 4px;
+}
+
+.organizer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 6px;
+    font-size: 11px;
+}
+
+.organizer-row:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.organizer-channel {
+    padding-left: 20px;
+    border-top: 1px solid var(--xp-border);
+}
+
+.organizer-category-row {
+    background: var(--xp-panel-bg);
+    font-weight: bold;
+}
+
+.organizer-category-name {
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--xp-text-secondary);
+}
+
+.organizer-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.organizer-actions {
+    display: flex;
+    gap: 2px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.organizer-btn {
+    width: 20px;
+    height: 18px;
+    border: 1px solid var(--xp-border);
+    background: var(--xp-window-bg);
+    cursor: pointer;
+    font-size: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+    padding: 0;
+}
+
+.organizer-btn:hover:not(:disabled) {
+    background: #ddd;
+}
+
+.organizer-btn:disabled {
+    opacity: 0.3;
+    cursor: default;
+}
+
+.organizer-delete {
+    color: #cc0000;
+    font-weight: bold;
+}
+
+.organizer-delete:hover:not(:disabled) {
+    background: #ffdddd;
+}
+
+.organizer-move {
+    font-size: 10px;
+    padding: 0 2px;
+    height: 18px;
+    border: 1px solid var(--xp-border);
+    background: var(--xp-window-bg);
+    max-width: 80px;
+}
+
+.organizer-empty {
+    padding: 4px 20px;
+    color: var(--xp-text-muted);
+    font-style: italic;
+    font-size: 10px;
+    border-top: 1px solid var(--xp-border);
+}
+
+.organizer-group-header {
+    padding: 3px 6px;
+    background: var(--xp-panel-bg);
+    font-weight: bold;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--xp-text-secondary);
+}
