@@ -20,6 +20,7 @@ export default function ChatPanel() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<MessageInfo[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [replyTo, setReplyTo] = useState<MessageInfo | null>(null);
 
   const members = activeServer?.members ?? [];
   const channels = activeServer?.channels ?? [];
@@ -59,6 +60,7 @@ export default function ChatPanel() {
     setShowSearch(false);
     setSearchQuery("");
     setSearchResults(null);
+    setReplyTo(null);
   }, [currentChannelId]);
 
   async function handleSearch() {
@@ -168,7 +170,7 @@ export default function ChatPanel() {
           const withinWindow = prev &&
             (msg.timestamp - prev.timestamp) < 300;
           const grouped = !!(sameAuthor && withinWindow);
-          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} />;
+          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} onReply={(msg) => setReplyTo(msg)} />;
         })}
         <div ref={bottomRef} />
       </div>
@@ -180,7 +182,7 @@ export default function ChatPanel() {
           </div>
           <div className="search-results-list">
             {searchResults.map((msg) => (
-              <Message key={msg.id} message={msg} memberNames={memberNames} grouped={false} serverId={serverId} />
+              <Message key={msg.id} message={msg} memberNames={memberNames} grouped={false} serverId={serverId} onReply={(msg) => setReplyTo(msg)} />
             ))}
             {searchResults.length === 0 && <div className="search-no-results">No messages found.</div>}
           </div>
@@ -196,7 +198,14 @@ export default function ChatPanel() {
           }
         </div>
       )}
-      <MessageInput channelId={currentChannelId} serverId={serverId} />
+      {replyTo && (
+        <div className="reply-preview">
+          <span>Replying to <strong>{memberNames[publicKeyToString(replyTo.author)] ?? "someone"}</strong></span>
+          <span className="reply-preview-text">{replyTo.content.slice(0, 80)}{replyTo.content.length > 80 ? "..." : ""}</span>
+          <button className="reply-cancel" onClick={() => setReplyTo(null)}>X</button>
+        </div>
+      )}
+      <MessageInput channelId={currentChannelId} serverId={serverId} replyTo={replyTo?.id} onSent={() => setReplyTo(null)} />
     </div>
   );
 }

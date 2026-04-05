@@ -7,9 +7,10 @@ interface MessageInputProps {
   channelId: number;
   serverId: string;
   replyTo?: number;
+  onSent?: () => void;
 }
 
-export default function MessageInput({ channelId, serverId, replyTo }: MessageInputProps) {
+export default function MessageInput({ channelId, serverId, replyTo, onSent }: MessageInputProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
   const lastTypingSent = useRef(0);
@@ -90,6 +91,7 @@ export default function MessageInput({ channelId, serverId, replyTo }: MessageIn
       setContent("");
       setAttachedFileId(null);
       setAttachedFileName(null);
+      if (onSent) onSent();
     } catch (e) {
       setError(String(e));
     } finally {
