@@ -1495,7 +1495,8 @@ pub async fn start_recording() -> Result<(), String> {
 
         drop(stream);
         // Finalize the WAV file
-        if let Ok(mut guard) = writer.lock() {
+        {
+            let mut guard = writer.lock().unwrap();
             if let Some(w) = guard.take() {
                 let _ = w.finalize();
             }
