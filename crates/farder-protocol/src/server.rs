@@ -15,6 +15,14 @@ pub enum ChannelType {
     Text,
     Announcement,
     Thread,
+    Dm,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DmEntry {
+    pub channel: ChannelInfo,
+    pub participant: MemberInfo,
+    pub last_message: Option<MessageInfo>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -177,6 +185,10 @@ pub enum ServerRequest {
     CancelDeletion,
     GetDeletionStatus,
     FetchUrl { url: String, channel_id: u64 },
+    OpenDm { target_key: PublicKey },
+    ListDms,
+    BlockUser { target_key: PublicKey },
+    UnblockUser { target_key: PublicKey },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,6 +218,8 @@ pub enum ServerResponse {
     InviteCreated { code: String },
     DeletionStatusResp { status: DeletionStatus },
     UrlFetched { file_id: u64 },
+    DmOpened { channel: ChannelInfo, participant: MemberInfo },
+    DmList { dms: Vec<DmEntry> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -234,6 +248,7 @@ pub enum ServerEvent {
     DeletionRequested { public_key: PublicKey },
     DeletionCancelled { public_key: PublicKey },
     DeletionExecuted { public_key: PublicKey },
+    DmCreated { channel: ChannelInfo, participant: MemberInfo },
 }
 
 #[cfg(test)]
@@ -413,6 +428,10 @@ mod tests {
             ServerRequest::CancelDeletion,
             ServerRequest::GetDeletionStatus,
             ServerRequest::FetchUrl { url: "https://example.com/img.png".into(), channel_id: 1 },
+            ServerRequest::OpenDm { target_key: kp.public_key() },
+            ServerRequest::ListDms,
+            ServerRequest::BlockUser { target_key: kp.public_key() },
+            ServerRequest::UnblockUser { target_key: kp.public_key() },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };

@@ -895,6 +895,14 @@ pub fn handle_request(
         ServerRequest::FetchUrl { .. } => {
             err("FetchUrl must be handled at the connection level")
         }
+
+        // ----------------------------------------------------------------
+        // DM and block operations (stub handlers — implemented in Task 3)
+        // ----------------------------------------------------------------
+        ServerRequest::OpenDm { .. } => err("not yet implemented"),
+        ServerRequest::ListDms => err("not yet implemented"),
+        ServerRequest::BlockUser { .. } => err("not yet implemented"),
+        ServerRequest::UnblockUser { .. } => err("not yet implemented"),
     }
 }
 

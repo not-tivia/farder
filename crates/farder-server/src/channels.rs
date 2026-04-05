@@ -10,6 +10,7 @@ pub fn channel_type_to_str(ct: &ChannelType) -> &'static str {
         ChannelType::Text => "text",
         ChannelType::Announcement => "announcement",
         ChannelType::Thread => "thread",
+        ChannelType::Dm => "dm",
     }
 }
 
@@ -17,6 +18,7 @@ pub fn str_to_channel_type(s: &str) -> ChannelType {
     match s {
         "announcement" => ChannelType::Announcement,
         "thread" => ChannelType::Thread,
+        "dm" => ChannelType::Dm,
         _ => ChannelType::Text,
     }
 }
