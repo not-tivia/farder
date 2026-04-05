@@ -197,10 +197,14 @@ export function useServerEvents(): void {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current && notifPrefs?.notifyOnMemberJoin) {
-        api.showNotification("Farder", `${data.member?.display_name ?? "Someone"} joined the server`).catch(() => {});
+        api.showNotification("Farder", `${data.display_name ?? "Someone"} joined the server`).catch(() => {});
       }
       if (serverId !== activeRef.current) return;
-      dispatch({ type: "MEMBER_JOINED", serverId, payload: data.member as MemberInfo });
+      // Bridge sends { public_key, display_name } as separate fields, not a MemberInfo object
+      // Re-fetch the full member list to get accurate data
+      api.getMembers(serverId).then(members => {
+        dispatch({ type: "SET_MEMBERS", serverId, payload: members });
+      }).catch(() => {});
     }).then((u) => unlisten.push(u));
 
     listen("server:member_left", (e) => {
