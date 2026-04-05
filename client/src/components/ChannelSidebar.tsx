@@ -7,12 +7,14 @@ import InviteDialog from "./InviteDialog";
 import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import UserProfilePopup from "./UserProfilePopup";
+import NotificationSettings from "./NotificationSettings";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
   const serverId = useActiveServerId();
   const [name, setName] = useState<string | null>(null);
   const [ownPk, setOwnPk] = useState<string | null>(null);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
+  const [showNotifSettings, setShowNotifSettings] = useState(false);
 
   useEffect(() => {
     api.getDisplayName().then((n) => setName(n)).catch(() => {});
@@ -23,13 +25,21 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
 
   return (
     <>
-      <span
-        style={{ cursor: ownMember ? "pointer" : undefined }}
-        onClick={ownMember ? (e) => setProfilePopup({ x: e.clientX, y: e.clientY }) : undefined}
-        title={ownMember ? "View your profile" : undefined}
-      >
-        ● {name ?? "Unknown"}
-      </span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+        <span
+          style={{ cursor: ownMember ? "pointer" : undefined }}
+          onClick={ownMember ? (e) => setProfilePopup({ x: e.clientX, y: e.clientY }) : undefined}
+          title={ownMember ? "View your profile" : undefined}
+        >
+          ● {name ?? "Unknown"}
+        </span>
+        <button
+          className="server-invite-btn"
+          onClick={() => setShowNotifSettings(true)}
+          title="Notification Settings"
+          style={{ fontSize: 10 }}
+        >N</button>
+      </div>
       {profilePopup && ownMember && serverId && (
         <UserProfilePopup
           member={ownMember}
@@ -40,6 +50,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
           serverId={serverId}
         />
       )}
+      {showNotifSettings && <NotificationSettings onClose={() => setShowNotifSettings(false)} />}
     </>
   );
 }
