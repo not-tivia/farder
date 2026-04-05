@@ -568,4 +568,57 @@ async fn test_e2e_server_bootstrap_and_chat() {
         ServerResponse::DeletionStatusResp { status } => assert!(!status.pending),
         other => panic!("expected DeletionStatusResp, got {:?}", other),
     }
+
+    // ---- DM FLOW ----
+
+    // Owner opens a DM with the user
+    send_request(&mut owner_send, 11, ServerRequest::OpenDm {
+        target_key: user_kp.public_key(),
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    let dm_channel_id = match resp {
+        ServerResponse::DmOpened { channel, participant } => {
+            assert_eq!(channel.channel_type, ChannelType::Dm);
+            assert!(!participant.display_name.is_empty());
+            channel.id
+        }
+        other => panic!("expected DmOpened, got {:?}", other),
+    };
+
+    // Owner sends a DM
+    send_request(&mut owner_send, 12, ServerRequest::SendMessage {
+        channel_id: dm_channel_id,
+        content: "hey, private message!".to_string(),
+        reply_to: None,
+        attachment_ids: vec![],
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::MessageSent { .. } => {}
+        other => panic!("expected MessageSent in DM, got {:?}", other),
+    }
+
+    // Owner lists DMs
+    send_request(&mut owner_send, 13, ServerRequest::ListDms).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::DmList { dms } => {
+            assert_eq!(dms.len(), 1);
+            assert!(dms[0].last_message.is_some());
+            assert_eq!(dms[0].last_message.as_ref().unwrap().content, "hey, private message!");
+        }
+        other => panic!("expected DmList, got {:?}", other),
+    }
+
+    // Opening the same DM again returns the same channel (idempotent)
+    send_request(&mut owner_send, 14, ServerRequest::OpenDm {
+        target_key: user_kp.public_key(),
+    }).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::DmOpened { channel, .. } => {
+            assert_eq!(channel.id, dm_channel_id); // same channel
+        }
+        other => panic!("expected DmOpened (idempotent), got {:?}", other),
+    }
 }
