@@ -279,3 +279,11 @@ export async function getDeletionStatus(serverId: string): Promise<any> {
 export async function saveTempAudio(data: string): Promise<string> {
   return invoke<string>("save_temp_audio", { data });
 }
+
+export async function startRecording(): Promise<void> {
+  return invoke<void>("start_recording");
+}
+
+export async function stopRecording(): Promise<string> {
+  return invoke<string>("stop_recording");
+}

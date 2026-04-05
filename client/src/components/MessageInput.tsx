@@ -76,26 +76,12 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     }
   }
 
-  async function handleVoiceRecorded(blob: Blob, _duration: number) {
+  async function handleVoiceRecorded(filePath: string, _duration: number) {
     setShowVoiceRecorder(false);
     setSending(true);
     try {
-      // Convert blob to base64
-      const reader = new FileReader();
-      const base64 = await new Promise<string>((resolve, reject) => {
-        reader.onload = () => {
-          const result = reader.result as string;
-          resolve(result.split(",")[1]); // strip data:...;base64, prefix
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
-      // Save to temp file
-      const tempPath = await api.saveTempAudio(base64);
-
-      // Upload via existing system
-      const fileId = await api.uploadFile(serverId, channelId, tempPath);
+      // Upload the WAV file via existing system
+      const fileId = await api.uploadFile(serverId, channelId, filePath);
 
       // Send message with attachment
       await api.sendMessage(serverId, channelId, "", undefined, [fileId]);

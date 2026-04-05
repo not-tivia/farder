@@ -1409,3 +1409,109 @@ pub fn save_temp_audio(data: String) -> Result<String, String> {
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
+
+// Global recording state
+static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RECORDING_PATH: Mutex<Option<String>> = Mutex::new(None);
+
+/// Start recording audio from the default input device. Writes WAV to a temp file.
+#[tauri::command]
+pub async fn start_recording() -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    if RECORDING.load(Ordering::SeqCst) {
+        return Err("already recording".to_string());
+    }
+    RECORDING.store(true, Ordering::SeqCst);
+
+    let tmp_dir = std::env::temp_dir();
+    let filename = format!("farder_voice_{}.wav", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+    let path = tmp_dir.join(&filename);
+    let path_str = path.to_string_lossy().to_string();
+    *RECORDING_PATH.lock().unwrap() = Some(path_str.clone());
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        let host = cpal::default_host();
+        let device = host.default_input_device().ok_or("no input device").unwrap();
+        let config = device.default_input_config().unwrap();
+
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels() as u16;
+
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let writer = Arc::new(Mutex::new(Some(hound::WavWriter::create(&path, spec).unwrap())));
+        let writer_clone = Arc::clone(&writer);
+
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => {
+                device.build_input_stream(
+                    &config.into(),
+                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        if let Ok(mut guard) = writer_clone.lock() {
+                            if let Some(w) = guard.as_mut() {
+                                for &sample in data {
+                                    let s = (sample * 32767.0) as i16;
+                                    let _ = w.write_sample(s);
+                                }
+                            }
+                        }
+                    },
+                    |err| eprintln!("recording error: {}", err),
+                    None,
+                ).unwrap()
+            }
+            cpal::SampleFormat::I16 => {
+                device.build_input_stream(
+                    &config.into(),
+                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                        if let Ok(mut guard) = writer_clone.lock() {
+                            if let Some(w) = guard.as_mut() {
+                                for &sample in data {
+                                    let _ = w.write_sample(sample);
+                                }
+                            }
+                        }
+                    },
+                    |err| eprintln!("recording error: {}", err),
+                    None,
+                ).unwrap()
+            }
+            _ => return,
+        };
+
+        stream.play().unwrap();
+
+        // Wait until RECORDING is set to false
+        while RECORDING.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        drop(stream);
+        // Finalize the WAV file
+        if let Ok(mut guard) = writer.lock() {
+            if let Some(w) = guard.take() {
+                let _ = w.finalize();
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Stop recording and return the path to the WAV file.
+#[tauri::command]
+pub fn stop_recording() -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    RECORDING.store(false, Ordering::SeqCst);
+    // Wait a moment for the recording thread to finish
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let path = RECORDING_PATH.lock().unwrap().take().ok_or("no recording in progress")?;
+    Ok(path)
+}
