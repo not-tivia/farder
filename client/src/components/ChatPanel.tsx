@@ -25,6 +25,8 @@ export default function ChatPanel() {
 
   const currentChannel = currentChannelId !== null
     ? channels.find((c) => c.id === currentChannelId)
+      ?? state.dms.find((d) => d.channel.id === currentChannelId)?.channel
+      ?? null
     : null;
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
@@ -91,7 +93,11 @@ export default function ChatPanel() {
   return (
     <div className="chat-panel">
       <div className="channel-header">
-        <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
+        <span className="channel-header-name">
+          {currentChannel?.channel_type === "Dm"
+            ? state.dms.find(d => d.channel.id === currentChannelId)?.participant.display_name ?? "DM"
+            : `# ${currentChannel?.name ?? "unknown"}`}
+        </span>
         {currentChannel?.topic && (
           <span className="channel-header-topic">{currentChannel.topic}</span>
         )}
