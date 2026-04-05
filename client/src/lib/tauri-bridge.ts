@@ -299,6 +299,11 @@ export interface NotificationPrefs {
   mentionNotifications: boolean;
   keywords: string[];
   mutedUsers: string[];
+  // Event triggers
+  notifyOnMemberJoin?: boolean;
+  notifyOnMemberLeave?: boolean;
+  notifyOnReaction?: boolean;
+  notifyOnThreadReply?: boolean;
 }
 
 export async function getNotificationPrefs(): Promise<NotificationPrefs> {

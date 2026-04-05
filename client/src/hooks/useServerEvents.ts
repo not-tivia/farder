@@ -159,6 +159,9 @@ export function useServerEvents(): void {
     listen("server:member_joined", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
+      if (serverId !== activeRef.current && notifPrefs?.notifyOnMemberJoin) {
+        api.showNotification("Farder", `${data.member?.display_name ?? "Someone"} joined the server`).catch(() => {});
+      }
       if (serverId !== activeRef.current) return;
       dispatch({ type: "MEMBER_JOINED", serverId, payload: data.member as MemberInfo });
     }).then((u) => unlisten.push(u));
@@ -166,6 +169,9 @@ export function useServerEvents(): void {
     listen("server:member_left", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
+      if (serverId !== activeRef.current && notifPrefs?.notifyOnMemberLeave) {
+        api.showNotification("Farder", "A member left the server").catch(() => {});
+      }
       if (serverId !== activeRef.current) return;
       dispatch({ type: "MEMBER_LEFT", serverId, payload: { publicKey: data.public_key as string } });
     }).then((u) => unlisten.push(u));

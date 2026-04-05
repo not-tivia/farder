@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs } from "../lib/tauri-bridge";
 import { useApp } from "../context/ServerContext";
 import { refreshNotifPrefsCache } from "../hooks/useServerEvents";
+import { publicKeyToString } from "../lib/types";
 
 interface Props { onClose: () => void; }
 
@@ -11,6 +12,23 @@ export default function NotificationSettings({ onClose }: Props) {
     const [prefs, setPrefs] = useState<NotificationPrefs | null>(null);
     const [newKeyword, setNewKeyword] = useState("");
     const [saved, setSaved] = useState(false);
+    const [userSearch, setUserSearch] = useState("");
+
+    // Collect unique members across all connected servers
+    const allMembers = useMemo(() => {
+        const seen = new Set<string>();
+        const result: { pk: string; displayName: string }[] = [];
+        for (const serverId in state.servers) {
+            for (const m of state.servers[serverId].members) {
+                const pk = publicKeyToString(m.public_key);
+                if (!seen.has(pk)) {
+                    seen.add(pk);
+                    result.push({ pk, displayName: m.display_name });
+                }
+            }
+        }
+        return result.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    }, [state.servers]);
 
     useEffect(() => {
         api.getNotificationPrefs().then(setPrefs);
@@ -45,6 +63,32 @@ export default function NotificationSettings({ onClose }: Props) {
                             <option value="specific">Specific users only</option>
                             <option value="none">None</option>
                         </select>
+                        {prefs.dmNotifications === "specific" && (
+                            <div style={{ marginTop: 8 }}>
+                                <input className="connect-input" placeholder="Search users..." value={userSearch}
+                                    onChange={e => setUserSearch(e.target.value)} style={{ marginBottom: 6 }} />
+                                <div style={{ maxHeight: 150, overflowY: "auto", border: "1px solid var(--xp-border)", borderRadius: 2 }}>
+                                    {allMembers
+                                        .filter(m => m.displayName.toLowerCase().includes(userSearch.toLowerCase()))
+                                        .map(m => {
+                                            const isAllowed = prefs.dmAllowedUsers.includes(m.pk);
+                                            return (
+                                                <div key={m.pk} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 8px", fontSize: 11, cursor: "pointer",
+                                                    background: isAllowed ? "rgba(49,105,198,0.1)" : undefined }}
+                                                    onClick={() => {
+                                                        const updated = isAllowed
+                                                            ? prefs.dmAllowedUsers.filter(k => k !== m.pk)
+                                                            : [...prefs.dmAllowedUsers, m.pk];
+                                                        save({ ...prefs, dmAllowedUsers: updated });
+                                                    }}>
+                                                    <span style={{ width: 16, textAlign: "center" }}>{isAllowed ? "+" : ""}</span>
+                                                    <span>{m.displayName}</span>
+                                                </div>
+                                            );
+                                        })}
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     {/* Per-Server Settings */}
@@ -104,6 +148,36 @@ export default function NotificationSettings({ onClose }: Props) {
                             <input type="checkbox" checked={prefs.mentionNotifications}
                                 onChange={e => save({ ...prefs, mentionNotifications: e.target.checked })} />
                             Notify on @mentions
+                        </label>
+                    </div>
+
+                    {/* Custom Event Triggers */}
+                    <div className="connect-section">
+                        <div className="connect-section-title">Event Notifications</div>
+                        <p style={{ fontSize: 10, color: "#666", marginBottom: 6 }}>Get notified when these events happen</p>
+
+                        <label className="notif-toggle">
+                            <input type="checkbox" checked={prefs.notifyOnMemberJoin ?? false}
+                                onChange={e => save({ ...prefs, notifyOnMemberJoin: e.target.checked })} />
+                            New member joins a server
+                        </label>
+
+                        <label className="notif-toggle">
+                            <input type="checkbox" checked={prefs.notifyOnMemberLeave ?? false}
+                                onChange={e => save({ ...prefs, notifyOnMemberLeave: e.target.checked })} />
+                            Member leaves a server
+                        </label>
+
+                        <label className="notif-toggle">
+                            <input type="checkbox" checked={prefs.notifyOnReaction ?? false}
+                                onChange={e => save({ ...prefs, notifyOnReaction: e.target.checked })} />
+                            Someone reacts to your message
+                        </label>
+
+                        <label className="notif-toggle">
+                            <input type="checkbox" checked={prefs.notifyOnThreadReply ?? false}
+                                onChange={e => save({ ...prefs, notifyOnThreadReply: e.target.checked })} />
+                            New reply in a thread you participated in
                         </label>
                     </div>
 
