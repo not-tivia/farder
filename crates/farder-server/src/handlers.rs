@@ -1010,6 +1010,13 @@ pub fn handle_request(
             members::unblock_user(conn, member, &target_key)?;
             ok(ServerResponse::Ok)
         }
+
+        // ----------------------------------------------------------------
+        // Voice (Phase 4)
+        // ----------------------------------------------------------------
+        ServerRequest::JoinVoice { .. } => err("not yet implemented"),
+        ServerRequest::LeaveVoice { .. } => err("not yet implemented"),
+        ServerRequest::GetVoiceState { .. } => err("not yet implemented"),
     }
 }
 

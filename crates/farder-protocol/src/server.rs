@@ -16,6 +16,14 @@ pub enum ChannelType {
     Announcement,
     Thread,
     Dm,
+    Voice,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct VoiceMember {
+    pub public_key: PublicKey,
+    pub display_name: String,
+    pub joined_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -189,6 +197,9 @@ pub enum ServerRequest {
     ListDms,
     BlockUser { target_key: PublicKey },
     UnblockUser { target_key: PublicKey },
+    JoinVoice { channel_id: u64 },
+    LeaveVoice { channel_id: u64 },
+    GetVoiceState { channel_id: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,6 +231,7 @@ pub enum ServerResponse {
     UrlFetched { file_id: u64 },
     DmOpened { channel: ChannelInfo, participant: MemberInfo },
     DmList { dms: Vec<DmEntry> },
+    VoiceStateResp { participants: Vec<VoiceMember> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,6 +261,8 @@ pub enum ServerEvent {
     DeletionCancelled { public_key: PublicKey },
     DeletionExecuted { public_key: PublicKey },
     DmCreated { channel: ChannelInfo, participant: MemberInfo },
+    VoiceJoined { channel_id: u64, public_key: PublicKey, display_name: String },
+    VoiceLeft { channel_id: u64, public_key: PublicKey },
 }
 
 #[cfg(test)]
@@ -432,6 +446,9 @@ mod tests {
             ServerRequest::ListDms,
             ServerRequest::BlockUser { target_key: kp.public_key() },
             ServerRequest::UnblockUser { target_key: kp.public_key() },
+            ServerRequest::JoinVoice { channel_id: 1 },
+            ServerRequest::LeaveVoice { channel_id: 1 },
+            ServerRequest::GetVoiceState { channel_id: 1 },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };

@@ -157,6 +157,14 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             blocked_at INTEGER NOT NULL,
             PRIMARY KEY (blocker_key, blocked_key)
         );
+
+        CREATE TABLE IF NOT EXISTS voice_state (
+            channel_id INTEGER NOT NULL,
+            user_key BLOB NOT NULL,
+            joined_at INTEGER NOT NULL,
+            PRIMARY KEY (channel_id, user_key),
+            FOREIGN KEY (channel_id) REFERENCES channels(id)
+        );
     ")?;
 
     // Migration: add thread_parent_message_id column to channels if missing.
@@ -224,6 +232,7 @@ mod tests {
             "deletion_requests",
             "dm_participants",
             "blocked_users",
+            "voice_state",
         ];
 
         for table in &expected_tables {

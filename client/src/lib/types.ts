@@ -1,7 +1,7 @@
 export interface ChannelInfo {
   id: number;
   name: string;
-  channel_type: "Text" | "Announcement" | "Thread" | "Dm";
+  channel_type: "Text" | "Announcement" | "Thread" | "Dm" | "Voice";
   category_id: number | null;
   position: number;
   topic: string | null;
