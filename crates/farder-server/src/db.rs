@@ -143,6 +143,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             requested_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS dm_participants (
+            channel_id INTEGER NOT NULL,
+            user_key BLOB NOT NULL,
+            PRIMARY KEY (channel_id, user_key),
+            FOREIGN KEY (channel_id) REFERENCES channels(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS blocked_users (
+            blocker_key BLOB NOT NULL,
+            blocked_key BLOB NOT NULL,
+            blocked_at INTEGER NOT NULL,
+            PRIMARY KEY (blocker_key, blocked_key)
+        );
     ")?;
 
     // Migration: add thread_parent_message_id column to channels if missing.
@@ -208,6 +222,8 @@ mod tests {
             "message_attachments",
             "reactions",
             "deletion_requests",
+            "dm_participants",
+            "blocked_users",
         ];
 
         for table in &expected_tables {
