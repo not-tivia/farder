@@ -1438,3 +1438,88 @@ body {
     letter-spacing: 0.5px;
     color: var(--xp-text-secondary);
 }
+
+/* ── User Profile Popup ─────────────────────────────────── */
+.user-profile-popup {
+  position: fixed;
+  background: var(--xp-window-bg);
+  border: 2px solid var(--xp-blue);
+  border-radius: 4px;
+  box-shadow: 3px 3px 10px rgba(0,0,0,0.3);
+  z-index: 1000;
+  width: 240px;
+  overflow: hidden;
+}
+
+.profile-header {
+  background: linear-gradient(180deg, var(--xp-blue-light) 0%, var(--xp-blue) 100%);
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: white;
+}
+
+.profile-avatar {
+  width: 40px;
+  height: 40px;
+  background: rgba(255,255,255,0.2);
+  border: 2px solid rgba(255,255,255,0.4);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.profile-name {
+  font-weight: bold;
+  font-size: 14px;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-body {
+  padding: 10px 12px;
+}
+
+.profile-section {
+  margin-bottom: 8px;
+}
+
+.profile-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--xp-text-muted);
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+
+.profile-value {
+  font-size: 11px;
+}
+
+.profile-id {
+  font-family: monospace;
+  font-size: 9px;
+  color: var(--xp-text-secondary);
+  word-break: break-all;
+}
+
+.profile-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.profile-role-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border: 1px solid var(--xp-border);
+  border-radius: 3px;
+  background: var(--xp-panel-bg);
+}
