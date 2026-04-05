@@ -129,13 +129,15 @@ export async function updateChannel(channelId: number, opts: {
   categoryId?: number | null;
   position?: number;
 }): Promise<void> {
+  const setCategory = opts.categoryId !== undefined;
   return invoke<void>("update_channel", {
     channelId,
     name: opts.name ?? null,
     topic: opts.topic ?? null,
     nsfw: opts.nsfw ?? null,
     slowModeSecs: opts.slowModeSecs ?? null,
-    categoryId: opts.categoryId !== undefined ? opts.categoryId : null,
+    categoryId: opts.categoryId ?? null,
+    setCategory,
     position: opts.position ?? null,
   });
 }

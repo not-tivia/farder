@@ -782,9 +782,19 @@ pub async fn update_channel(
     topic: Option<String>,
     nsfw: Option<bool>,
     slow_mode_secs: Option<u32>,
-    category_id: Option<Option<u64>>,
+    category_id: Option<u64>,
+    set_category: Option<bool>,
     position: Option<u32>,
 ) -> Result<(), String> {
+    // Convert flat params to Option<Option<u64>>:
+    // set_category=true + category_id=Some(x) → Some(Some(x)) (move to category)
+    // set_category=true + category_id=None → Some(None) (uncategorize)
+    // set_category=None/false → None (don't change)
+    let cat = if set_category.unwrap_or(false) {
+        Some(category_id)
+    } else {
+        None
+    };
     let response = bridge::send_request(
         &state,
         ServerRequest::UpdateChannel {
@@ -794,7 +804,7 @@ pub async fn update_channel(
             nsfw,
             slow_mode_secs,
             retention_secs: None,
-            category_id,
+            category_id: cat,
             position,
         },
     ).await.map_err(|e| e.to_string())?;
