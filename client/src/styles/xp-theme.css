@@ -1660,3 +1660,20 @@ body {
   margin-right: 6px;
   flex-shrink: 0;
 }
+
+.profile-card-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--xp-border);
+}
+
+.profile-action-btn {
+  flex: 1;
+  text-align: center;
+}
+
+.profile-block-btn {
+  color: #cc0000;
+  flex: 0;
+}
