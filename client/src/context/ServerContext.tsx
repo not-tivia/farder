@@ -1,10 +1,10 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry } from "../lib/types";
 
-export interface ServerState {
+export interface PerServerState {
+  serverName: string;
   connected: boolean;
   connectionLost: boolean;
-  serverName: string;
   channels: ChannelInfo[];
   categories: CategoryInfo[];
   roles: RoleInfo[];
@@ -17,10 +17,20 @@ export interface ServerState {
   dmPanelChannelId: number | null;
 }
 
-const initialState: ServerState = {
-  connected: false,
-  connectionLost: false,
+export interface AppState {
+  hasIdentity: boolean;
+  activeServerId: string | null;
+  serverList: ServerListEntry[];
+  servers: Record<string, PerServerState>;
+}
+
+// Keep old ServerState as alias for backward compat
+export type ServerState = PerServerState;
+
+const initialPerServerState: PerServerState = {
   serverName: "",
+  connected: true,
+  connectionLost: false,
   channels: [],
   categories: [],
   roles: [],
@@ -33,52 +43,70 @@ const initialState: ServerState = {
   dmPanelChannelId: null,
 };
 
-export type ServerAction =
-  | { type: "CONNECTED"; payload: ConnectResult }
-  | { type: "DISCONNECTED" }
-  | { type: "CONNECTION_LOST" }
-  | { type: "RECONNECTED" }
-  | { type: "SET_MEMBERS"; payload: MemberInfo[] }
-  | { type: "SELECT_CHANNEL"; payload: number }
-  | { type: "SET_MESSAGES"; payload: { channelId: number; messages: MessageInfo[] } }
-  | { type: "PREPEND_MESSAGES"; payload: { channelId: number; messages: MessageInfo[] } }
-  | { type: "NEW_MESSAGE"; payload: MessageInfo }
-  | { type: "MESSAGE_EDITED"; payload: MessageInfo }
-  | { type: "MESSAGE_DELETED"; payload: { channelId: number; messageId: number } }
-  | { type: "REACTION_ADDED"; payload: { channelId: number; messageId: number; emoji: string; me: boolean } }
-  | { type: "REACTION_REMOVED"; payload: { channelId: number; messageId: number; emoji: string } }
-  | { type: "MEMBER_JOINED"; payload: MemberInfo }
-  | { type: "MEMBER_LEFT"; payload: { publicKeyBytes: number[] } }
-  | { type: "CHANNEL_CREATED"; payload: ChannelInfo }
-  | { type: "CHANNEL_DELETED"; payload: { channelId: number } }
-  | { type: "CATEGORY_CREATED"; payload: CategoryInfo }
-  | { type: "CATEGORY_DELETED"; payload: { categoryId: number } }
-  | { type: "CATEGORY_UPDATED"; payload: CategoryInfo }
-  | { type: "CHANNEL_UPDATED"; payload: ChannelInfo }
-  | { type: "VIEW_THREAD"; payload: number | null }
-  | { type: "MARK_READ"; payload: { channelId: number; lastMessageId: number } }
-  | { type: "SET_DMS"; payload: DmEntry[] }
-  | { type: "DM_CREATED"; payload: { channel: ChannelInfo; participant: MemberInfo } }
-  | { type: "OPEN_DM_PANEL"; payload: number }
-  | { type: "CLOSE_DM_PANEL" };
+const initialAppState: AppState = {
+  hasIdentity: false,
+  activeServerId: null,
+  serverList: [],
+  servers: {},
+};
 
-function reducer(state: ServerState, action: ServerAction): ServerState {
+export type AppAction =
+  // App-level actions
+  | { type: "SET_IDENTITY" }
+  | { type: "SERVER_ADDED"; serverId: string; payload: ConnectResult }
+  | { type: "SERVER_REMOVED"; serverId: string }
+  | { type: "SET_ACTIVE_SERVER"; serverId: string }
+  | { type: "UPDATE_SERVER_LIST"; payload: ServerListEntry[] }
+  | { type: "INCREMENT_UNREAD"; serverId: string }
+  | { type: "CLEAR_UNREAD"; serverId: string }
+  // Per-server actions (all require serverId)
+  | { type: "CONNECTED"; serverId: string; payload: ConnectResult }
+  | { type: "SERVER_REFRESHED"; serverId: string; payload: ConnectResult }
+  | { type: "DISCONNECTED"; serverId: string }
+  | { type: "CONNECTION_LOST"; serverId: string }
+  | { type: "RECONNECTED"; serverId: string }
+  | { type: "SET_MEMBERS"; serverId: string; payload: MemberInfo[] }
+  | { type: "SELECT_CHANNEL"; serverId: string; payload: number }
+  | { type: "SET_MESSAGES"; serverId: string; payload: { channelId: number; messages: MessageInfo[] } }
+  | { type: "PREPEND_MESSAGES"; serverId: string; payload: { channelId: number; messages: MessageInfo[] } }
+  | { type: "NEW_MESSAGE"; serverId: string; payload: MessageInfo }
+  | { type: "MESSAGE_EDITED"; serverId: string; payload: MessageInfo }
+  | { type: "MESSAGE_DELETED"; serverId: string; payload: { channelId: number; messageId: number } }
+  | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean } }
+  | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string } }
+  | { type: "MEMBER_JOINED"; serverId: string; payload: MemberInfo }
+  | { type: "MEMBER_LEFT"; serverId: string; payload: { publicKeyBytes: number[] } }
+  | { type: "CHANNEL_CREATED"; serverId: string; payload: ChannelInfo }
+  | { type: "CHANNEL_DELETED"; serverId: string; payload: { channelId: number } }
+  | { type: "CATEGORY_CREATED"; serverId: string; payload: CategoryInfo }
+  | { type: "CATEGORY_DELETED"; serverId: string; payload: { categoryId: number } }
+  | { type: "CATEGORY_UPDATED"; serverId: string; payload: CategoryInfo }
+  | { type: "CHANNEL_UPDATED"; serverId: string; payload: ChannelInfo }
+  | { type: "VIEW_THREAD"; serverId: string; payload: number | null }
+  | { type: "MARK_READ"; serverId: string; payload: { channelId: number; lastMessageId: number } }
+  | { type: "SET_DMS"; serverId: string; payload: DmEntry[] }
+  | { type: "DM_CREATED"; serverId: string; payload: { channel: ChannelInfo; participant: MemberInfo } }
+  | { type: "OPEN_DM_PANEL"; serverId: string; payload: number }
+  | { type: "CLOSE_DM_PANEL"; serverId: string };
+
+// Keep old ServerAction as alias
+export type ServerAction = AppAction;
+
+function perServerReducer(state: PerServerState, action: AppAction): PerServerState {
   switch (action.type) {
     case "CONNECTED":
+    case "SERVER_REFRESHED":
       return {
         ...state,
         connected: true,
+        connectionLost: false,
         serverName: action.payload.server_name,
         channels: action.payload.channels,
         categories: action.payload.categories,
         roles: action.payload.roles,
-        members: [],
-        currentChannelId: null,
-        messages: {},
-        threadChannelId: null,
       };
     case "DISCONNECTED":
-      return { ...initialState };
+      return { ...initialPerServerState, connected: false };
     case "CONNECTION_LOST":
       return { ...state, connected: false, connectionLost: true };
     case "RECONNECTED":
@@ -111,10 +139,7 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
     case "NEW_MESSAGE": {
       const channelId = action.payload.channel_id;
       const existing = state.messages[channelId] ?? [];
-      // Deduplicate — don't add if message ID already exists
-      if (existing.some((m) => m.id === action.payload.id)) {
-        return state;
-      }
+      if (existing.some((m) => m.id === action.payload.id)) return state;
       return {
         ...state,
         messages: { ...state.messages, [channelId]: [...existing, action.payload] },
@@ -150,7 +175,6 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
             if (m.id !== messageId) return m;
             const existing = m.reactions.find((r) => r.emoji === emoji);
             if (existing) {
-              // If "me" is true and I already reacted, don't increment (idempotent)
               if (me && existing.me) return m;
               const reactions = m.reactions.map((r) =>
                 r.emoji === emoji ? { ...r, count: r.count + 1, me: me || r.me } : r,
@@ -198,11 +222,11 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
     case "CATEGORY_CREATED":
       return { ...state, categories: [...state.categories, action.payload] };
     case "CATEGORY_DELETED":
-      return { ...state, categories: state.categories.filter(c => c.id !== action.payload.categoryId) };
+      return { ...state, categories: state.categories.filter((c) => c.id !== action.payload.categoryId) };
     case "CATEGORY_UPDATED":
-      return { ...state, categories: state.categories.map(c => c.id === action.payload.id ? action.payload : c) };
+      return { ...state, categories: state.categories.map((c) => c.id === action.payload.id ? action.payload : c) };
     case "CHANNEL_UPDATED":
-      return { ...state, channels: state.channels.map(c => c.id === action.payload.id ? action.payload : c) };
+      return { ...state, channels: state.channels.map((c) => c.id === action.payload.id ? action.payload : c) };
     case "VIEW_THREAD":
       return { ...state, threadChannelId: action.payload };
     case "MARK_READ": {
@@ -214,7 +238,7 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
     case "DM_CREATED": {
       const { channel, participant } = action.payload;
       const newEntry: DmEntry = { channel, participant, last_message: null };
-      const exists = state.dms.some(d => d.channel.id === channel.id);
+      const exists = state.dms.some((d) => d.channel.id === channel.id);
       if (exists) return state;
       return { ...state, dms: [...state.dms, newEntry] };
     }
@@ -227,20 +251,144 @@ function reducer(state: ServerState, action: ServerAction): ServerState {
   }
 }
 
-interface ServerContextValue {
-  state: ServerState;
-  dispatch: React.Dispatch<ServerAction>;
+function appReducer(state: AppState, action: AppAction): AppState {
+  switch (action.type) {
+    case "SET_IDENTITY":
+      return { ...state, hasIdentity: true };
+
+    case "SERVER_ADDED": {
+      const { serverId, payload } = action;
+      const existing = state.serverList.find((s) => s.id === serverId);
+      const newEntry: ServerListEntry = existing ?? {
+        id: serverId,
+        name: payload.server_name,
+        connected: true,
+        unreadCount: 0,
+        hasMention: false,
+      };
+      const updatedEntry: ServerListEntry = { ...newEntry, name: payload.server_name, connected: true };
+      const serverList = existing
+        ? state.serverList.map((s) => s.id === serverId ? updatedEntry : s)
+        : [...state.serverList, updatedEntry];
+
+      const existingServer = state.servers[serverId] ?? { ...initialPerServerState };
+      const newPerServer: PerServerState = {
+        ...existingServer,
+        connected: true,
+        connectionLost: false,
+        serverName: payload.server_name,
+        channels: payload.channels,
+        categories: payload.categories,
+        roles: payload.roles,
+      };
+
+      return {
+        ...state,
+        serverList,
+        servers: { ...state.servers, [serverId]: newPerServer },
+      };
+    }
+
+    case "SERVER_REMOVED": {
+      const { serverId } = action;
+      const serverList = state.serverList.filter((s) => s.id !== serverId);
+      const servers = { ...state.servers };
+      delete servers[serverId];
+      const activeServerId = state.activeServerId === serverId
+        ? (serverList[0]?.id ?? null)
+        : state.activeServerId;
+      return { ...state, serverList, servers, activeServerId };
+    }
+
+    case "SET_ACTIVE_SERVER":
+      return { ...state, activeServerId: action.serverId };
+
+    case "UPDATE_SERVER_LIST":
+      return { ...state, serverList: action.payload };
+
+    case "INCREMENT_UNREAD": {
+      const { serverId } = action;
+      const serverList = state.serverList.map((s) =>
+        s.id === serverId ? { ...s, unreadCount: s.unreadCount + 1 } : s,
+      );
+      return { ...state, serverList };
+    }
+
+    case "CLEAR_UNREAD": {
+      const { serverId } = action;
+      const serverList = state.serverList.map((s) =>
+        s.id === serverId ? { ...s, unreadCount: 0, hasMention: false } : s,
+      );
+      return { ...state, serverList };
+    }
+
+    default: {
+      // Per-server actions — route to the appropriate server slice
+      const serverId = (action as any).serverId as string | undefined;
+      if (!serverId) return state;
+      const existing = state.servers[serverId];
+      if (!existing) return state;
+      const updated = perServerReducer(existing, action);
+      if (updated === existing) return state;
+
+      // Sync serverList name/connected from per-server state when relevant
+      let serverList = state.serverList;
+      if (action.type === "CONNECTED" || action.type === "SERVER_REFRESHED") {
+        serverList = state.serverList.map((s) =>
+          s.id === serverId ? { ...s, name: updated.serverName, connected: true } : s,
+        );
+      } else if (action.type === "CONNECTION_LOST") {
+        serverList = state.serverList.map((s) =>
+          s.id === serverId ? { ...s, connected: false } : s,
+        );
+      } else if (action.type === "RECONNECTED") {
+        serverList = state.serverList.map((s) =>
+          s.id === serverId ? { ...s, connected: true } : s,
+        );
+      }
+
+      return {
+        ...state,
+        serverList,
+        servers: { ...state.servers, [serverId]: updated },
+      };
+    }
+  }
 }
 
-const ServerContext = createContext<ServerContextValue | null>(null);
-
-export function ServerProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, initialState);
-  return <ServerContext.Provider value={{ state, dispatch }}>{children}</ServerContext.Provider>;
+interface AppContextValue {
+  state: AppState;
+  dispatch: React.Dispatch<AppAction>;
 }
 
-export function useServer(): ServerContextValue {
-  const ctx = useContext(ServerContext);
-  if (!ctx) throw new Error("useServer must be used inside ServerProvider");
+const AppContext = createContext<AppContextValue | null>(null);
+
+export function AppProvider({ children }: { children: ReactNode }) {
+  const [state, dispatch] = useReducer(appReducer, initialAppState);
+  return <AppContext.Provider value={{ state, dispatch }}>{children}</AppContext.Provider>;
+}
+
+// Alias for backward compat
+export const ServerProvider = AppProvider;
+
+export function useApp(): AppContextValue {
+  const ctx = useContext(AppContext);
+  if (!ctx) throw new Error("useApp must be used inside AppProvider");
   return ctx;
+}
+
+// Alias for backward compat
+export function useServer(): AppContextValue {
+  return useApp();
+}
+
+export function useActiveServer(): PerServerState | null {
+  const { state } = useApp();
+  if (!state.activeServerId) return null;
+  return state.servers[state.activeServerId] ?? null;
+}
+
+export function useActiveServerId(): string | null {
+  const { state } = useApp();
+  return state.activeServerId;
 }

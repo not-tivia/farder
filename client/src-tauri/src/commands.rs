@@ -1,12 +1,14 @@
 use crate::bridge;
 use crate::connection::connect_and_authenticate;
-use crate::state::AppState;
+use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
     CategoryInfo, ChannelInfo, MemberInfo, MessageInfo, RoleInfo, ServerRequest, ServerResponse,
 };
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
 // ---------------------------------------------------------------------------
@@ -173,6 +175,46 @@ pub fn get_last_server() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Saved servers list
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct ServerEntry {
+    pub id: String,
+    pub name: String,
+}
+
+fn servers_list_path() -> std::path::PathBuf {
+    farder_data_dir().join("servers.json")
+}
+
+fn load_server_entries() -> Vec<ServerEntry> {
+    std::fs::read_to_string(servers_list_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_server_entry(address: &str, name: &str) {
+    let mut entries = load_server_entries();
+    if !entries.iter().any(|e| e.id == address) {
+        entries.push(ServerEntry { id: address.to_string(), name: name.to_string() });
+        let _ = std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap());
+    }
+}
+
+fn remove_server_entry(address: &str) {
+    let mut entries = load_server_entries();
+    entries.retain(|e| e.id != address);
+    let _ = std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap());
+}
+
+#[tauri::command]
+pub fn get_saved_servers() -> Vec<ServerEntry> {
+    load_server_entries()
+}
+
+// ---------------------------------------------------------------------------
 // Server commands
 // ---------------------------------------------------------------------------
 
@@ -185,27 +227,6 @@ pub async fn connect_server(
     invite_code: Option<String>,
     setup_token: Option<String>,
 ) -> Result<ConnectResult, String> {
-    // Clean up any existing connection first
-    {
-        if let Ok(mut h) = state.event_reader_handle.lock() {
-            if let Some(handle) = h.take() {
-                handle.abort();
-            }
-        }
-        let mut ss = state.send_stream.lock().await;
-        *ss = None;
-        if let Ok(mut c) = state.connection.lock() {
-            *c = None;
-        }
-        if let Ok(mut ep) = state.endpoint.lock() {
-            *ep = None;
-        }
-        // Clear pending requests so they don't block
-        if let Ok(mut pending) = state.pending_requests.lock() {
-            pending.clear();
-        }
-    }
-
     // Reconstruct keypair from stored bytes.
     let keypair = {
         let lock = state
@@ -229,39 +250,82 @@ pub async fn connect_server(
             .await
             .map_err(|e| e.to_string())?;
 
-    // Store endpoint + connection (both must stay alive or QUIC closes).
+    let server_conn = Arc::new(ServerConnection {
+        endpoint,
+        connection: conn,
+        send_stream: tokio::sync::Mutex::new(send),
+        next_request_id: AtomicU32::new(1),
+        pending_requests: Mutex::new(HashMap::new()),
+        event_reader_handle: Mutex::new(None),
+        server_name: Mutex::new(String::new()),
+    });
+
+    let handle = bridge::spawn_event_reader(app, address.clone(), Arc::clone(&server_conn), recv);
+    *server_conn.event_reader_handle.lock().unwrap() = Some(handle);
+
     {
-        let mut ep = state.endpoint.lock().map_err(|e| e.to_string())?;
-        *ep = Some(endpoint);
-    }
-    {
-        let mut c = state.connection.lock().map_err(|e| e.to_string())?;
-        *c = Some(conn);
-    }
-    {
-        let mut ss = state.send_stream.lock().await;
-        *ss = Some(send);
-    }
-    {
-        let mut c = state.connected.lock().map_err(|e| e.to_string())?;
-        *c = true;
+        let mut servers = state.servers.lock().unwrap();
+        servers.insert(address.clone(), Arc::clone(&server_conn));
     }
 
-    // Spawn the background event reader.
-    let handle = bridge::spawn_event_reader(app, Arc::clone(&state), recv);
-    {
-        let mut h = state.event_reader_handle.lock().map_err(|e| e.to_string())?;
-        *h = Some(handle);
-    }
-
-    // Persist the server address for next launch (non-fatal).
-    let _ = save_last_server(address);
+    // Save to settings for get_last_server compatibility (non-fatal).
+    let _ = save_last_server(address.clone());
 
     // Fetch initial server info.
-    let response = bridge::send_request(&state, ServerRequest::GetServerInfo)
+    let response = bridge::send_request(&state, &address, ServerRequest::GetServerInfo)
         .await
         .map_err(|e| e.to_string())?;
 
+    match response {
+        ServerResponse::ServerInfo { name, member_count, channels, categories, roles } => {
+            *server_conn.server_name.lock().unwrap() = name.clone();
+            // Save to persistent server list
+            save_server_entry(&address, &name);
+            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles })
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Disconnect from a specific server and remove it from the map.
+#[tauri::command]
+pub async fn disconnect_server(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<(), String> {
+    let conn = {
+        let mut servers = state.servers.lock().unwrap();
+        servers.remove(&server_id)
+    };
+    if let Some(c) = conn {
+        if let Some(handle) = c.event_reader_handle.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+    remove_server_entry(&server_id);
+    Ok(())
+}
+
+/// List all currently connected servers.
+#[tauri::command]
+pub fn list_servers(state: State<'_, Arc<AppState>>) -> Vec<ServerEntry> {
+    let servers = state.servers.lock().unwrap();
+    servers.iter().map(|(addr, conn)| ServerEntry {
+        id: addr.clone(),
+        name: conn.server_name.lock().unwrap().clone(),
+    }).collect()
+}
+
+/// Re-fetch server info for a connected server.
+#[tauri::command]
+pub async fn get_server_info(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<ConnectResult, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetServerInfo)
+        .await
+        .map_err(|e| e.to_string())?;
     match response {
         ServerResponse::ServerInfo { name, member_count, channels, categories, roles } => {
             Ok(ConnectResult { server_name: name, member_count, channels, categories, roles })
@@ -271,40 +335,11 @@ pub async fn connect_server(
     }
 }
 
-/// Disconnect from the current server.
-#[tauri::command]
-pub async fn disconnect_server(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    // Clear endpoint, connection, and send stream.
-    {
-        let mut ep = state.endpoint.lock().map_err(|e| e.to_string())?;
-        *ep = None;
-    }
-    {
-        let mut c = state.connection.lock().map_err(|e| e.to_string())?;
-        *c = None;
-    }
-    {
-        let mut ss = state.send_stream.lock().await;
-        *ss = None;
-    }
-    // Abort the event reader task.
-    {
-        let mut h = state.event_reader_handle.lock().map_err(|e| e.to_string())?;
-        if let Some(handle) = h.take() {
-            handle.abort();
-        }
-    }
-    {
-        let mut c = state.connected.lock().map_err(|e| e.to_string())?;
-        *c = false;
-    }
-    Ok(())
-}
-
 /// Send a chat message to a channel.
 #[tauri::command]
 pub async fn send_message(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     channel_id: u64,
     content: String,
     reply_to: Option<u64>,
@@ -312,6 +347,7 @@ pub async fn send_message(
 ) -> Result<SendMessageResult, String> {
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::SendMessage {
             channel_id,
             content,
@@ -333,12 +369,14 @@ pub async fn send_message(
 #[tauri::command]
 pub async fn fetch_history(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     channel_id: u64,
     before_id: Option<u64>,
     limit: Option<u32>,
 ) -> Result<Vec<MessageInfo>, String> {
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::FetchHistory {
             channel_id,
             before_id,
@@ -359,9 +397,10 @@ pub async fn fetch_history(
 #[tauri::command]
 pub async fn subscribe_channels(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     channel_ids: Vec<u64>,
 ) -> Result<(), String> {
-    let response = bridge::send_request(&state, ServerRequest::Subscribe { channel_ids })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::Subscribe { channel_ids })
         .await
         .map_err(|e| e.to_string())?;
 
@@ -374,8 +413,11 @@ pub async fn subscribe_channels(
 
 /// Get all server members.
 #[tauri::command]
-pub async fn get_members(state: State<'_, Arc<AppState>>) -> Result<Vec<MemberInfo>, String> {
-    let response = bridge::send_request(&state, ServerRequest::GetMembers)
+pub async fn get_members(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<MemberInfo>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetMembers)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -390,10 +432,11 @@ pub async fn get_members(state: State<'_, Arc<AppState>>) -> Result<Vec<MemberIn
 #[tauri::command]
 pub async fn add_reaction(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     message_id: u64,
     emoji: String,
 ) -> Result<(), String> {
-    let response = bridge::send_request(&state, ServerRequest::AddReaction { message_id, emoji })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::AddReaction { message_id, emoji })
         .await
         .map_err(|e| e.to_string())?;
 
@@ -408,11 +451,12 @@ pub async fn add_reaction(
 #[tauri::command]
 pub async fn remove_reaction(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     message_id: u64,
     emoji: String,
 ) -> Result<(), String> {
     let response =
-        bridge::send_request(&state, ServerRequest::RemoveReaction { message_id, emoji })
+        bridge::send_request(&state, &server_id, ServerRequest::RemoveReaction { message_id, emoji })
             .await
             .map_err(|e| e.to_string())?;
 
@@ -427,11 +471,12 @@ pub async fn remove_reaction(
 #[tauri::command]
 pub async fn create_thread(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     message_id: u64,
     name: Option<String>,
 ) -> Result<(), String> {
     let response =
-        bridge::send_request(&state, ServerRequest::CreateThread { message_id, name })
+        bridge::send_request(&state, &server_id, ServerRequest::CreateThread { message_id, name })
             .await
             .map_err(|e| e.to_string())?;
 
@@ -461,6 +506,7 @@ pub async fn pick_file() -> Result<Option<String>, String> {
 #[tauri::command]
 pub async fn upload_file(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     channel_id: u64,
     file_path: String,
 ) -> Result<u64, String> {
@@ -487,11 +533,9 @@ pub async fn upload_file(
     .to_string();
 
     // Open a new bi-stream on the existing connection
-    let conn = {
-        let c = state.connection.lock().map_err(|e| e.to_string())?;
-        c.as_ref().ok_or("not connected")?.clone()
-    };
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    let conn = state.get_server(&server_id).map_err(|e| e.to_string())?;
+    let quic_conn = conn.connection.clone();
+    let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 
     // Send UploadRequest
     let req = farder_protocol::server::UploadRequest {
@@ -555,18 +599,15 @@ pub struct DownloadResult {
 #[tauri::command]
 pub async fn download_file(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     file_id: u64,
 ) -> Result<DownloadResult, String> {
-    let fid = file_id;
-
-    let conn = {
-        let c = state.connection.lock().map_err(|e| e.to_string())?;
-        c.as_ref().ok_or("not connected")?.clone()
-    };
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    let conn = state.get_server(&server_id).map_err(|e| e.to_string())?;
+    let quic_conn = conn.connection.clone();
+    let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 
     // Send DownloadRequest
-    let req = farder_protocol::server::DownloadRequest { file_id: fid };
+    let req = farder_protocol::server::DownloadRequest { file_id };
     let req_bytes = farder_protocol::codec::encode(&req).map_err(|e| e.to_string())?;
     crate::connection::write_frame(&mut send, &req_bytes).await.map_err(|e| e.to_string())?;
 
@@ -618,10 +659,11 @@ pub async fn download_file(
 #[tauri::command]
 pub async fn fetch_url(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     url: String,
     channel_id: u64,
 ) -> Result<u64, String> {
-    let response = bridge::send_request(&state, ServerRequest::FetchUrl { url, channel_id })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::FetchUrl { url, channel_id })
         .await
         .map_err(|e| e.to_string())?;
     match response {
@@ -639,12 +681,14 @@ pub async fn fetch_url(
 #[tauri::command]
 pub async fn search_messages(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     query: String,
     channel_id: Option<u64>,
     limit: Option<u32>,
 ) -> Result<Vec<MessageInfo>, String> {
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::Search { query, channel_id, limit: limit.unwrap_or(20) },
     )
     .await
@@ -660,6 +704,7 @@ pub async fn search_messages(
 #[tauri::command]
 pub async fn create_channel(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     name: String,
     channel_type: String,
     category_id: Option<u64>,
@@ -671,6 +716,7 @@ pub async fn create_channel(
     };
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::CreateChannel { name, channel_type: ch_type, category_id, position: None },
     )
     .await
@@ -687,10 +733,12 @@ pub async fn create_channel(
 #[tauri::command]
 pub async fn create_category(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     name: String,
 ) -> Result<(), String> {
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::CreateCategory { name, position: None },
     )
     .await
@@ -705,9 +753,14 @@ pub async fn create_category(
 
 /// Delete a channel on the server.
 #[tauri::command]
-pub async fn delete_channel(state: State<'_, Arc<AppState>>, channel_id: u64) -> Result<(), String> {
+pub async fn delete_channel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+) -> Result<(), String> {
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::DeleteChannel { channel_id },
     ).await.map_err(|e| e.to_string())?;
     match response {
@@ -719,15 +772,171 @@ pub async fn delete_channel(state: State<'_, Arc<AppState>>, channel_id: u64) ->
 
 /// Delete a category on the server.
 #[tauri::command]
-pub async fn delete_category(state: State<'_, Arc<AppState>>, category_id: u64) -> Result<(), String> {
+pub async fn delete_category(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    category_id: u64,
+) -> Result<(), String> {
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::DeleteCategory { category_id },
     ).await.map_err(|e| e.to_string())?;
     match response {
         ServerResponse::Ok => Ok(()),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Update channel settings.
+#[tauri::command]
+pub async fn update_channel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    name: Option<String>,
+    topic: Option<String>,
+    nsfw: Option<bool>,
+    slow_mode_secs: Option<u32>,
+    category_id: Option<u64>,
+    set_category: Option<bool>,
+    position: Option<u32>,
+) -> Result<(), String> {
+    // Convert flat params to Option<Option<u64>>:
+    // set_category=true + category_id=Some(x) → Some(Some(x)) (move to category)
+    // set_category=true + category_id=None → Some(None) (uncategorize)
+    // set_category=None/false → None (don't change)
+    let cat = if set_category.unwrap_or(false) {
+        Some(category_id)
+    } else {
+        None
+    };
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::UpdateChannel {
+            channel_id,
+            name,
+            topic,
+            nsfw,
+            slow_mode_secs,
+            retention_secs: None,
+            category_id: cat,
+            position,
+        },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Update category settings.
+#[tauri::command]
+pub async fn update_category(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    category_id: u64,
+    name: Option<String>,
+    position: Option<u32>,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::UpdateCategory {
+            category_id,
+            name,
+            position,
+        },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Set per-role permission override for a channel.
+#[tauri::command]
+pub async fn set_channel_override(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    role_id: u64,
+    allow: u64,
+    deny: u64,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::SetChannelOverride { channel_id, role_id, allow, deny },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Account deletion commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct DeletionStatusResult {
+    pub pending: bool,
+    pub requested_at: Option<u64>,
+    pub expires_at: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn request_deletion(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::RequestDeletion)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn cancel_deletion(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::CancelDeletion)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_deletion_status(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<DeletionStatusResult, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetDeletionStatus)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::DeletionStatusResp { status } => Ok(DeletionStatusResult {
+            pending: status.pending,
+            requested_at: status.requested_at,
+            expires_at: status.expires_at,
+        }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
     }
 }
 
@@ -773,16 +982,15 @@ fn save_favorites_index(entries: &[FavoriteEntry]) -> Result<(), String> {
 #[tauri::command]
 pub async fn add_favorite(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     file_id: u64,
     original_url: Option<String>,
 ) -> Result<FavoriteEntry, String> {
     use sha2::Digest;
 
-    let conn = {
-        let c = state.connection.lock().map_err(|e| e.to_string())?;
-        c.as_ref().ok_or("not connected")?.clone()
-    };
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    let conn = state.get_server(&server_id).map_err(|e| e.to_string())?;
+    let quic_conn = conn.connection.clone();
+    let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 
     let req = farder_protocol::server::DownloadRequest { file_id };
     let req_bytes = farder_protocol::codec::encode(&req).map_err(|e| e.to_string())?;
@@ -815,14 +1023,15 @@ pub async fn add_favorite(
             let img_path = favorites_dir().join(&id);
             std::fs::write(&img_path, &data).map_err(|e| e.to_string())?;
 
-            let server_name = get_last_server().unwrap_or_else(|| "Unknown Server".to_string());
+            let server_name = conn.server_name.lock().unwrap().clone();
+            let source_server = if server_name.is_empty() { server_id } else { server_name };
 
             let entry = FavoriteEntry {
                 id: id.clone(),
                 file_name,
                 mime_type,
                 data_url,
-                source_server: server_name,
+                source_server,
                 original_url,
                 favorited_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -857,91 +1066,6 @@ pub fn remove_favorite(id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Update channel settings (name, topic, nsfw, slow_mode_secs, category_id, position).
-#[tauri::command]
-pub async fn update_channel(
-    state: State<'_, Arc<AppState>>,
-    channel_id: u64,
-    name: Option<String>,
-    topic: Option<String>,
-    nsfw: Option<bool>,
-    slow_mode_secs: Option<u32>,
-    category_id: Option<u64>,
-    set_category: Option<bool>,
-    position: Option<u32>,
-) -> Result<(), String> {
-    // Convert flat params to Option<Option<u64>>:
-    // set_category=true + category_id=Some(x) → Some(Some(x)) (move to category)
-    // set_category=true + category_id=None → Some(None) (uncategorize)
-    // set_category=None/false → None (don't change)
-    let cat = if set_category.unwrap_or(false) {
-        Some(category_id)
-    } else {
-        None
-    };
-    let response = bridge::send_request(
-        &state,
-        ServerRequest::UpdateChannel {
-            channel_id,
-            name,
-            topic,
-            nsfw,
-            slow_mode_secs,
-            retention_secs: None,
-            category_id: cat,
-            position,
-        },
-    ).await.map_err(|e| e.to_string())?;
-    match response {
-        ServerResponse::Ok => Ok(()),
-        ServerResponse::Error { reason } => Err(reason),
-        other => Err(format!("unexpected: {:?}", other)),
-    }
-}
-
-/// Update category settings (name, position).
-#[tauri::command]
-pub async fn update_category(
-    state: State<'_, Arc<AppState>>,
-    category_id: u64,
-    name: Option<String>,
-    position: Option<u32>,
-) -> Result<(), String> {
-    let response = bridge::send_request(
-        &state,
-        ServerRequest::UpdateCategory {
-            category_id,
-            name,
-            position,
-        },
-    ).await.map_err(|e| e.to_string())?;
-    match response {
-        ServerResponse::Ok => Ok(()),
-        ServerResponse::Error { reason } => Err(reason),
-        other => Err(format!("unexpected: {:?}", other)),
-    }
-}
-
-/// Set per-role permission override for a channel.
-#[tauri::command]
-pub async fn set_channel_override(
-    state: State<'_, Arc<AppState>>,
-    channel_id: u64,
-    role_id: u64,
-    allow: u64,
-    deny: u64,
-) -> Result<(), String> {
-    let response = bridge::send_request(
-        &state,
-        ServerRequest::SetChannelOverride { channel_id, role_id, allow, deny },
-    ).await.map_err(|e| e.to_string())?;
-    match response {
-        ServerResponse::Ok => Ok(()),
-        ServerResponse::Error { reason } => Err(reason),
-        other => Err(format!("unexpected: {:?}", other)),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // DM commands
 // ---------------------------------------------------------------------------
@@ -956,10 +1080,11 @@ fn parse_public_key(key_str: &str) -> Result<farder_crypto::identity::PublicKey,
 #[tauri::command]
 pub async fn open_dm(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     target_key: String,
 ) -> Result<serde_json::Value, String> {
     let pk = parse_public_key(&target_key)?;
-    let response = bridge::send_request(&state, ServerRequest::OpenDm { target_key: pk })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::OpenDm { target_key: pk })
         .await
         .map_err(|e| e.to_string())?;
     match response {
@@ -974,8 +1099,9 @@ pub async fn open_dm(
 #[tauri::command]
 pub async fn list_dms(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let response = bridge::send_request(&state, ServerRequest::ListDms)
+    let response = bridge::send_request(&state, &server_id, ServerRequest::ListDms)
         .await
         .map_err(|e| e.to_string())?;
     match response {
@@ -990,10 +1116,11 @@ pub async fn list_dms(
 #[tauri::command]
 pub async fn block_user(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     target_key: String,
 ) -> Result<(), String> {
     let pk = parse_public_key(&target_key)?;
-    let response = bridge::send_request(&state, ServerRequest::BlockUser { target_key: pk })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::BlockUser { target_key: pk })
         .await
         .map_err(|e| e.to_string())?;
     match response {
@@ -1006,10 +1133,11 @@ pub async fn block_user(
 #[tauri::command]
 pub async fn unblock_user(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     target_key: String,
 ) -> Result<(), String> {
     let pk = parse_public_key(&target_key)?;
-    let response = bridge::send_request(&state, ServerRequest::UnblockUser { target_key: pk })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::UnblockUser { target_key: pk })
         .await
         .map_err(|e| e.to_string())?;
     match response {
@@ -1033,23 +1161,24 @@ pub struct InviteResult {
 #[tauri::command]
 pub async fn create_invite(
     state: State<'_, Arc<AppState>>,
+    server_id: String,
     max_uses: Option<u32>,
 ) -> Result<InviteResult, String> {
     let response = bridge::send_request(
         &state,
+        &server_id,
         ServerRequest::CreateInvite { max_uses, expires_in_secs: None, target_channel: None },
     )
     .await
     .map_err(|e| e.to_string())?;
     match response {
         ServerResponse::InviteCreated { code } => {
-            // Build the https://farder.gg/join/ link using saved server address
-            let address = get_last_server().unwrap_or_else(|| "localhost:4435".to_string());
+            // Build the https://farder.gg/join/ link using server_id as the address
             use base64::Engine;
-            let plain = format!("{}/{}", address, code);
+            let plain = format!("{}/{}", server_id, code);
             let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plain.as_bytes());
             let link = format!("https://farder.gg/join/{}", encoded);
-            let deep_link = format!("farder://{}/{}", address, code);
+            let deep_link = format!("farder://{}/{}", server_id, code);
             Ok(InviteResult { code, link, deep_link })
         }
         ServerResponse::Error { reason } => Err(reason),

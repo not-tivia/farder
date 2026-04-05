@@ -1,14 +1,20 @@
 import { useEffect, useRef } from "react";
-import { useServer } from "../context/ServerContext";
+import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import { publicKeyToString } from "../lib/types";
 import Message from "./Message";
 import MessageInput from "./MessageInput";
 
 export default function ThreadPanel() {
-  const { state, dispatch } = useServer();
-  const { threadChannelId, members, messages } = state;
+  const { dispatch } = useApp();
+  const activeServer = useActiveServer();
+  const serverId = useActiveServerId();
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const threadChannelId = activeServer?.threadChannelId ?? null;
+  const members = activeServer?.members ?? [];
+  const messages = activeServer?.messages ?? {};
+  const channels = activeServer?.channels ?? [];
 
   const memberNames: Record<string, string> = {};
   for (const m of members) {
@@ -16,30 +22,27 @@ export default function ThreadPanel() {
   }
 
   useEffect(() => {
-    if (threadChannelId === null) return;
+    if (threadChannelId === null || !serverId) return;
     const id = threadChannelId;
     (async () => {
       try {
-        // subscribeChannels is handled centrally by AppShell
-        const msgs = await api.fetchHistory(id);
-        dispatch({ type: "SET_MESSAGES", payload: { channelId: id, messages: msgs } });
-      } catch {
-        // ignore
-      }
+        const msgs = await api.fetchHistory(serverId, id);
+        dispatch({ type: "SET_MESSAGES", serverId: serverId!, payload: { channelId: id, messages: msgs } });
+      } catch {}
     })();
-  }, [threadChannelId, dispatch]);
+  }, [threadChannelId, serverId, dispatch]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [threadChannelId === null ? null : (messages[threadChannelId]?.length ?? 0)]);
+  }, [threadChannelId === null ? null : (messages[threadChannelId!]?.length ?? 0)]);
 
-  if (threadChannelId === null) return null;
+  if (threadChannelId === null || !serverId) return null;
 
-  const threadChannel = state.channels.find((c) => c.id === threadChannelId);
+  const threadChannel = channels.find((c) => c.id === threadChannelId);
   const threadMessages = messages[threadChannelId] ?? [];
 
   function handleBack() {
-    dispatch({ type: "VIEW_THREAD", payload: null });
+    if (serverId) dispatch({ type: "VIEW_THREAD", serverId, payload: null });
   }
 
   return (
@@ -54,11 +57,11 @@ export default function ThreadPanel() {
       </div>
       <div className="message-list">
         {threadMessages.map((msg) => (
-          <Message key={msg.id} message={msg} memberNames={memberNames} />
+          <Message key={msg.id} message={msg} memberNames={memberNames} serverId={serverId} />
         ))}
         <div ref={bottomRef} />
       </div>
-      <MessageInput channelId={threadChannelId} />
+      <MessageInput channelId={threadChannelId} serverId={serverId} />
     </div>
   );
 }

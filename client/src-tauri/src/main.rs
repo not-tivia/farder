@@ -27,8 +27,11 @@ fn main() {
             commands::get_profile_color,
             commands::save_last_server,
             commands::get_last_server,
+            commands::get_saved_servers,
             commands::connect_server,
             commands::disconnect_server,
+            commands::list_servers,
+            commands::get_server_info,
             commands::send_message,
             commands::fetch_history,
             commands::subscribe_channels,
@@ -56,6 +59,9 @@ fn main() {
             commands::list_dms,
             commands::block_user,
             commands::unblock_user,
+            commands::request_deletion,
+            commands::cancel_deletion,
+            commands::get_deletion_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

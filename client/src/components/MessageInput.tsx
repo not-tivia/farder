@@ -5,10 +5,11 @@ import FavoritesPanel from "./FavoritesPanel";
 
 interface MessageInputProps {
   channelId: number;
+  serverId: string;
   replyTo?: number;
 }
 
-export default function MessageInput({ channelId, replyTo }: MessageInputProps) {
+export default function MessageInput({ channelId, serverId, replyTo }: MessageInputProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
   const [attachedFileId, setAttachedFileId] = useState<number | null>(null);
@@ -25,7 +26,7 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
     setAttachedFileName(fileName);
     setUploading(true);
     try {
-      const fileId = await api.uploadFile(channelId, path);
+      const fileId = await api.uploadFile(serverId, channelId, path);
       setAttachedFileId(fileId);
     } catch (e) {
       setError(String(e));
@@ -47,8 +48,8 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
     setSending(true);
     try {
       if (fav.original_url) {
-        const fileId = await api.fetchUrl(fav.original_url, channelId);
-        await api.sendMessage(channelId, "", undefined, [fileId]);
+        const fileId = await api.fetchUrl(serverId, fav.original_url, channelId);
+        await api.sendMessage(serverId, channelId, "", undefined, [fileId]);
       }
     } catch (e) {
       setError(String(e));
@@ -71,7 +72,7 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
       const urls = text.match(imageUrlRegex) || [];
       for (const url of urls) {
         try {
-          const fileId = await api.fetchUrl(url, channelId);
+          const fileId = await api.fetchUrl(serverId, url, channelId);
           attachments.push(fileId);
         } catch {
           // Failed to fetch — leave the URL as plain text
@@ -79,6 +80,7 @@ export default function MessageInput({ channelId, replyTo }: MessageInputProps) 
       }
 
       await api.sendMessage(
+        serverId,
         channelId,
         text,
         replyTo,

@@ -83,6 +83,14 @@ export interface SendMessageResult {
   timestamp: number;
 }
 
+export interface ServerListEntry {
+  id: string;
+  name: string;
+  connected: boolean;
+  unreadCount: number;
+  hasMention: boolean;
+}
+
 export const DELETED_USER_KEY: number[] = new Array(32).fill(0);
 
 export function publicKeyToString(pk: { bytes: number[] }): string {
