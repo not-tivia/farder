@@ -72,7 +72,7 @@ export type AppAction =
   | { type: "SET_MESSAGES"; serverId: string; payload: { channelId: number; messages: MessageInfo[] } }
   | { type: "PREPEND_MESSAGES"; serverId: string; payload: { channelId: number; messages: MessageInfo[] } }
   | { type: "NEW_MESSAGE"; serverId: string; payload: MessageInfo }
-  | { type: "MESSAGE_EDITED"; serverId: string; payload: MessageInfo }
+  | { type: "MESSAGE_EDITED"; serverId: string; payload: { channelId: number; messageId: number; newContent: string; editedAt: number } }
   | { type: "MESSAGE_DELETED"; serverId: string; payload: { channelId: number; messageId: number } }
   | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean } }
   | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string } }
@@ -150,13 +150,13 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       };
     }
     case "MESSAGE_EDITED": {
-      const channelId = action.payload.channel_id;
+      const { channelId, messageId, newContent, editedAt } = action.payload;
       const msgs = state.messages[channelId] ?? [];
       return {
         ...state,
         messages: {
           ...state.messages,
-          [channelId]: msgs.map((m) => (m.id === action.payload.id ? action.payload : m)),
+          [channelId]: msgs.map((m) => m.id === messageId ? { ...m, content: newContent, edited_at: editedAt } : m),
         },
       };
     }

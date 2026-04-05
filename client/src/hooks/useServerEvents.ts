@@ -57,7 +57,12 @@ export function useServerEvents(): void {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
-      dispatch({ type: "MESSAGE_EDITED", serverId, payload: data.message as MessageInfo });
+      dispatch({ type: "MESSAGE_EDITED", serverId, payload: {
+        channelId: data.channel_id as number,
+        messageId: data.message_id as number,
+        newContent: data.new_content as string,
+        editedAt: data.edited_at as number,
+      }});
     }).then((u) => unlisten.push(u));
 
     listen("server:message_deleted", (e) => {
