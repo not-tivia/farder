@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { publicKeyToString } from "../lib/types";
 import type { MessageInfo } from "../lib/types";
@@ -12,6 +13,7 @@ export default function ChatPanel() {
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [ownPk, setOwnPk] = useState(cachedOwnPk);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [showSearch, setShowSearch] = useState(false);
@@ -26,10 +28,19 @@ export default function ChatPanel() {
   const currentChannelId = activeServer?.currentChannelId ?? null;
   const threadChannelId = activeServer?.threadChannelId ?? null;
 
+  useEffect(() => {
+    if (!cachedOwnPk) {
+      api.getPublicKey().then(pk => { cachedOwnPk = pk; setOwnPk(pk); });
+    }
+  }, []);
+
   const memberNames: Record<string, string> = {};
   for (const m of members) {
     memberNames[publicKeyToString(m.public_key)] = m.display_name;
   }
+
+  const typingUsers = activeServer?.typingUsers?.[currentChannelId!] ?? [];
+  const othersTyping = typingUsers.filter(t => t.publicKey !== ownPk);
 
   const currentChannel = currentChannelId !== null
     ? channels.find((c) => c.id === currentChannelId)
@@ -173,6 +184,16 @@ export default function ChatPanel() {
             ))}
             {searchResults.length === 0 && <div className="search-no-results">No messages found.</div>}
           </div>
+        </div>
+      )}
+      {othersTyping.length > 0 && (
+        <div className="typing-indicator">
+          {othersTyping.length === 1
+            ? `${memberNames[othersTyping[0].publicKey] ?? "Someone"} is typing...`
+            : othersTyping.length === 2
+              ? `${memberNames[othersTyping[0].publicKey] ?? "Someone"} and ${memberNames[othersTyping[1].publicKey] ?? "someone"} are typing...`
+              : `${othersTyping.length} people are typing...`
+          }
         </div>
       )}
       <MessageInput channelId={currentChannelId} serverId={serverId} />

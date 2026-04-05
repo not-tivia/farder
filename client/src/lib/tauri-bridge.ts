@@ -220,6 +220,10 @@ export async function addFavorite(serverId: string, fileId: number, originalUrl?
   return invoke<FavoriteEntry>("add_favorite", { serverId, fileId, originalUrl: originalUrl ?? null });
 }
 
+export async function sendTyping(serverId: string, channelId: number): Promise<void> {
+  return invoke<void>("send_typing", { serverId, channelId });
+}
+
 export async function requestDeletion(serverId: string): Promise<void> {
   return invoke<void>("request_deletion", { serverId });
 }

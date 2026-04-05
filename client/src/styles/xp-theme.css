@@ -619,6 +619,14 @@ body {
   text-decoration: underline;
 }
 
+.typing-indicator {
+  padding: 2px 12px 4px;
+  font-size: 10px;
+  color: var(--xp-text-muted);
+  font-style: italic;
+  min-height: 16px;
+}
+
 /* ── Message Input ──────────────────────────────────────── */
 .message-input-area {
   padding: 8px 12px;

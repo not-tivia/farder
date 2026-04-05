@@ -15,6 +15,7 @@ export interface PerServerState {
   readState: Record<number, number>;
   dms: DmEntry[];
   dmPanelChannelId: number | null;
+  typingUsers: Record<number, { publicKey: string; displayName: string; expiresAt: number }[]>;
 }
 
 export interface AppState {
@@ -41,6 +42,7 @@ const initialPerServerState: PerServerState = {
   readState: {},
   dms: [],
   dmPanelChannelId: null,
+  typingUsers: {},
 };
 
 const initialAppState: AppState = {
@@ -87,7 +89,9 @@ export type AppAction =
   | { type: "SET_DMS"; serverId: string; payload: DmEntry[] }
   | { type: "DM_CREATED"; serverId: string; payload: { channel: ChannelInfo; participant: MemberInfo } }
   | { type: "OPEN_DM_PANEL"; serverId: string; payload: number }
-  | { type: "CLOSE_DM_PANEL"; serverId: string };
+  | { type: "CLOSE_DM_PANEL"; serverId: string }
+  | { type: "TYPING_STARTED"; serverId: string; payload: { channelId: number; publicKey: string; displayName: string } }
+  | { type: "TYPING_EXPIRED"; serverId: string; payload: { channelId: number; publicKey: string } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -246,6 +250,19 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       return { ...state, dmPanelChannelId: action.payload };
     case "CLOSE_DM_PANEL":
       return { ...state, dmPanelChannelId: null };
+    case "TYPING_STARTED": {
+      const { channelId, publicKey, displayName } = action.payload;
+      const existing = state.typingUsers[channelId] ?? [];
+      const filtered = existing.filter(t => t.publicKey !== publicKey);
+      const updated = [...filtered, { publicKey, displayName, expiresAt: Date.now() + 8000 }];
+      return { ...state, typingUsers: { ...state.typingUsers, [channelId]: updated } };
+    }
+    case "TYPING_EXPIRED": {
+      const { channelId, publicKey } = action.payload;
+      const existing = state.typingUsers[channelId] ?? [];
+      const filtered = existing.filter(t => t.publicKey !== publicKey);
+      return { ...state, typingUsers: { ...state.typingUsers, [channelId]: filtered } };
+    }
     default:
       return state;
   }

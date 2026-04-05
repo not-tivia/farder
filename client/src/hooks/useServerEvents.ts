@@ -170,6 +170,18 @@ export function useServerEvents(): void {
       dispatch({ type: "DM_CREATED", serverId, payload: { channel: data.channel, participant: data.participant } });
     }).then((u) => unlisten.push(u));
 
+    listen("server:typing", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      const channelId = data.channel_id as number;
+      const publicKey = data.public_key as string;
+      dispatch({ type: "TYPING_STARTED", serverId, payload: { channelId, publicKey, displayName: publicKey } });
+      setTimeout(() => {
+        dispatch({ type: "TYPING_EXPIRED", serverId, payload: { channelId, publicKey } });
+      }, 8000);
+    }).then((u) => unlisten.push(u));
+
     return () => {
       unlisten.forEach((u) => u());
     };

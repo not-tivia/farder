@@ -1067,6 +1067,17 @@ pub fn remove_favorite(id: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Typing indicator command
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn send_typing(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<(), String> {
+    let _ = bridge::send_request(&state, &server_id, ServerRequest::Typing { channel_id })
+        .await;
+    Ok(()) // Fire and forget — don't care about errors
+}
+
+// ---------------------------------------------------------------------------
 // DM commands
 // ---------------------------------------------------------------------------
 

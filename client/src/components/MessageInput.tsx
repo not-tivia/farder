@@ -1,4 +1,4 @@
-import { useState, KeyboardEvent } from "react";
+import { useState, useRef, KeyboardEvent } from "react";
 import * as api from "../lib/tauri-bridge";
 import type { FavoriteEntry } from "../lib/tauri-bridge";
 import FavoritesPanel from "./FavoritesPanel";
@@ -12,6 +12,7 @@ interface MessageInputProps {
 export default function MessageInput({ channelId, serverId, replyTo }: MessageInputProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
+  const lastTypingSent = useRef(0);
   const [attachedFileId, setAttachedFileId] = useState<number | null>(null);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -96,6 +97,15 @@ export default function MessageInput({ channelId, serverId, replyTo }: MessageIn
     }
   }
 
+  function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    setContent(e.target.value);
+    const now = Date.now();
+    if (now - lastTypingSent.current > 5000 && e.target.value.trim()) {
+      lastTypingSent.current = now;
+      api.sendTyping(serverId, channelId).catch(() => {});
+    }
+  }
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -144,7 +154,7 @@ export default function MessageInput({ channelId, serverId, replyTo }: MessageIn
           <textarea
             className="message-input"
             value={content}
-            onChange={(e) => setContent(e.target.value)}
+            onChange={handleChange}
             onKeyDown={handleKeyDown}
             placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
             rows={1}
