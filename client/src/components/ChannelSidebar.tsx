@@ -87,23 +87,10 @@ export default function ChannelSidebar() {
 
   async function handleMoveChannel(channelId: number, targetCategoryId: number | null, targetPosition: number) {
     try {
-      console.log("[drag] moveChannel", channelId, "to cat", targetCategoryId, "pos", targetPosition);
       await api.updateChannel(channelId, { categoryId: targetCategoryId, position: targetPosition });
-      console.log("[drag] moveChannel success");
-    } catch (e) {
-      console.error("[drag] moveChannel failed:", e);
-    }
+    } catch {}
   }
 
-  async function handleMoveCategory(categoryId: number, targetPosition: number) {
-    try {
-      console.log("[drag] moveCategory", categoryId, "to pos", targetPosition);
-      await api.updateCategory(categoryId, { position: targetPosition });
-      console.log("[drag] moveCategory success");
-    } catch (e) {
-      console.error("[drag] moveCategory failed:", e);
-    }
-  }
 
   // Exclude Thread channels from the sidebar (they appear inline)
   const visibleChannels = state.channels.filter((c) => c.channel_type !== "Thread");
