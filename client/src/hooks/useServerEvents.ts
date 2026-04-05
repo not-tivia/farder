@@ -1,9 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { useServer } from "../context/ServerContext";
+import { useApp } from "../context/ServerContext";
 import type { MessageInfo, MemberInfo, ChannelInfo, CategoryInfo } from "../lib/types";
 
 interface ReactionAddedPayload {
+  server_id: string;
   channel_id: number;
   message_id: number;
   emoji: string;
@@ -11,107 +12,162 @@ interface ReactionAddedPayload {
 }
 
 interface ReactionRemovedPayload {
+  server_id: string;
   channel_id: number;
   message_id: number;
   emoji: string;
 }
 
 interface MemberLeftPayload {
+  server_id: string;
   public_key_bytes: number[];
 }
 
 interface ChannelDeletedPayload {
+  server_id: string;
   channel_id: number;
 }
 
 interface MessageDeletedPayload {
+  server_id: string;
   channel_id: number;
   message_id: number;
 }
 
 export function useServerEvents(): void {
-  const { dispatch } = useServer();
+  const { state, dispatch } = useApp();
+  const activeRef = useRef(state.activeServerId);
+  useEffect(() => { activeRef.current = state.activeServerId; }, [state.activeServerId]);
 
   useEffect(() => {
     const unlisten: Array<() => void> = [];
 
-    listen<MessageInfo>("server:new_message", (e) => {
-      dispatch({ type: "NEW_MESSAGE", payload: e.payload });
+    listen("server:new_message", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      const message = data.message as MessageInfo;
+      if (serverId === activeRef.current) {
+        dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
+      } else {
+        dispatch({ type: "INCREMENT_UNREAD", serverId });
+      }
     }).then((u) => unlisten.push(u));
 
-    listen<MessageInfo>("server:message_edited", (e) => {
-      dispatch({ type: "MESSAGE_EDITED", payload: e.payload });
+    listen("server:message_edited", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "MESSAGE_EDITED", serverId, payload: data.message as MessageInfo });
     }).then((u) => unlisten.push(u));
 
-    listen<MessageDeletedPayload>("server:message_deleted", (e) => {
+    listen("server:message_deleted", (e) => {
+      const data = e.payload as MessageDeletedPayload;
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
       dispatch({
         type: "MESSAGE_DELETED",
-        payload: { channelId: e.payload.channel_id, messageId: e.payload.message_id },
+        serverId,
+        payload: { channelId: data.channel_id, messageId: data.message_id },
       });
     }).then((u) => unlisten.push(u));
 
-    listen<ReactionAddedPayload>("server:reaction_added", (e) => {
+    listen("server:reaction_added", (e) => {
+      const data = e.payload as ReactionAddedPayload;
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
       dispatch({
         type: "REACTION_ADDED",
+        serverId,
         payload: {
-          channelId: e.payload.channel_id,
-          messageId: e.payload.message_id,
-          emoji: e.payload.emoji,
-          me: e.payload.me,
+          channelId: data.channel_id,
+          messageId: data.message_id,
+          emoji: data.emoji,
+          me: data.me,
         },
       });
     }).then((u) => unlisten.push(u));
 
-    listen<ReactionRemovedPayload>("server:reaction_removed", (e) => {
+    listen("server:reaction_removed", (e) => {
+      const data = e.payload as ReactionRemovedPayload;
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
       dispatch({
         type: "REACTION_REMOVED",
+        serverId,
         payload: {
-          channelId: e.payload.channel_id,
-          messageId: e.payload.message_id,
-          emoji: e.payload.emoji,
+          channelId: data.channel_id,
+          messageId: data.message_id,
+          emoji: data.emoji,
         },
       });
     }).then((u) => unlisten.push(u));
 
-    listen<MemberInfo>("server:member_joined", (e) => {
-      dispatch({ type: "MEMBER_JOINED", payload: e.payload });
+    listen("server:member_joined", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "MEMBER_JOINED", serverId, payload: data.member as MemberInfo });
     }).then((u) => unlisten.push(u));
 
-    listen<MemberLeftPayload>("server:member_left", (e) => {
-      dispatch({ type: "MEMBER_LEFT", payload: { publicKeyBytes: e.payload.public_key_bytes } });
+    listen("server:member_left", (e) => {
+      const data = e.payload as MemberLeftPayload;
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "MEMBER_LEFT", serverId, payload: { publicKeyBytes: data.public_key_bytes } });
     }).then((u) => unlisten.push(u));
 
-    listen<ChannelInfo>("server:channel_created", (e) => {
-      dispatch({ type: "CHANNEL_CREATED", payload: e.payload });
+    listen("server:channel_created", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "CHANNEL_CREATED", serverId, payload: data.channel as ChannelInfo });
     }).then((u) => unlisten.push(u));
 
-    listen<ChannelDeletedPayload>("server:channel_deleted", (e) => {
-      dispatch({ type: "CHANNEL_DELETED", payload: { channelId: e.payload.channel_id } });
+    listen("server:channel_deleted", (e) => {
+      const data = e.payload as ChannelDeletedPayload;
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "CHANNEL_DELETED", serverId, payload: { channelId: data.channel_id } });
     }).then((u) => unlisten.push(u));
 
-    listen<CategoryInfo>("server:category_created", (e) => {
-      dispatch({ type: "CATEGORY_CREATED", payload: e.payload });
+    listen("server:category_created", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "CATEGORY_CREATED", serverId, payload: data.category as CategoryInfo });
     }).then((u) => unlisten.push(u));
 
-    listen<{ category_id: number }>("server:category_deleted", (e) => {
-      dispatch({ type: "CATEGORY_DELETED", payload: { categoryId: e.payload.category_id } });
+    listen("server:category_deleted", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "CATEGORY_DELETED", serverId, payload: { categoryId: data.category_id as number } });
     }).then((u) => unlisten.push(u));
 
-    listen<CategoryInfo>("server:category_updated", (e) => {
-      dispatch({ type: "CATEGORY_UPDATED", payload: e.payload });
+    listen("server:category_updated", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "CATEGORY_UPDATED", serverId, payload: data.category as CategoryInfo });
     }).then((u) => unlisten.push(u));
 
-    listen<ChannelInfo>("server:channel_updated", (e) => {
-      dispatch({ type: "CHANNEL_UPDATED", payload: e.payload });
+    listen("server:channel_updated", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "CHANNEL_UPDATED", serverId, payload: data.channel as ChannelInfo });
     }).then((u) => unlisten.push(u));
 
-    listen<void>("server:disconnected", () => {
-      dispatch({ type: "CONNECTION_LOST" });
+    listen("server:disconnected", (e) => {
+      const data = e.payload as any;
+      dispatch({ type: "CONNECTION_LOST", serverId: data.server_id as string });
     }).then((u) => unlisten.push(u));
 
     listen("server:dm_created", (e) => {
-      const p = e.payload as any;
-      dispatch({ type: "DM_CREATED", payload: { channel: p.channel, participant: p.participant } });
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "DM_CREATED", serverId, payload: { channel: data.channel, participant: data.participant } });
     }).then((u) => unlisten.push(u));
 
     return () => {
