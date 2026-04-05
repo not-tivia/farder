@@ -1080,3 +1080,38 @@ body {
 .favorite-item:hover .favorite-remove {
   display: flex;
 }
+
+/* ── Permission overrides ─────────────────────────────────── */
+.permission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--xp-border);
+}
+
+.permission-role-name {
+  font-weight: bold;
+  font-size: 11px;
+  min-width: 80px;
+}
+
+.permission-checks {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.permission-check {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 10px;
+  gap: 2px;
+}
+
+.permission-check select {
+  font-size: 10px;
+  padding: 1px 2px;
+}
+}

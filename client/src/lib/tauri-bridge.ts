@@ -121,6 +121,18 @@ export async function deleteCategory(categoryId: number): Promise<void> {
   return invoke<void>("delete_category", { categoryId });
 }
 
+export async function updateChannel(channelId: number, opts: { name?: string; topic?: string; nsfw?: boolean; slowModeSecs?: number }): Promise<void> {
+  return invoke<void>("update_channel", { channelId, ...opts });
+}
+
+export async function updateCategory(categoryId: number, opts: { name?: string; position?: number }): Promise<void> {
+  return invoke<void>("update_category", { categoryId, ...opts });
+}
+
+export async function setChannelOverride(channelId: number, roleId: number, allow: number, deny: number): Promise<void> {
+  return invoke<void>("set_channel_override", { channelId, roleId, allow, deny });
+}
+
 export async function pickFile(): Promise<string | null> {
   return invoke<string | null>("pick_file");
 }

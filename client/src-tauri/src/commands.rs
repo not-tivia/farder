@@ -773,6 +773,77 @@ pub fn remove_favorite(id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Update channel settings (name, topic, nsfw, slow_mode_secs).
+#[tauri::command]
+pub async fn update_channel(
+    state: State<'_, Arc<AppState>>,
+    channel_id: u64,
+    name: Option<String>,
+    topic: Option<String>,
+    nsfw: Option<bool>,
+    slow_mode_secs: Option<u32>,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::UpdateChannel {
+            channel_id,
+            name,
+            topic,
+            nsfw,
+            slow_mode_secs,
+            retention_secs: None,
+        },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Update category settings (name, position).
+#[tauri::command]
+pub async fn update_category(
+    state: State<'_, Arc<AppState>>,
+    category_id: u64,
+    name: Option<String>,
+    position: Option<u32>,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::UpdateCategory {
+            category_id,
+            name,
+            position,
+        },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Set per-role permission override for a channel.
+#[tauri::command]
+pub async fn set_channel_override(
+    state: State<'_, Arc<AppState>>,
+    channel_id: u64,
+    role_id: u64,
+    allow: u64,
+    deny: u64,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        ServerRequest::SetChannelOverride { channel_id, role_id, allow, deny },
+    ).await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Invite commands
 // ---------------------------------------------------------------------------
