@@ -297,9 +297,9 @@ export default function ChannelSidebar() {
               dispatch({ type: "JOIN_VOICE_CHANNEL", serverId, payload: ch.id });
               try {
                 const vs = await api.getVoiceState(serverId, ch.id);
-                const simplified = vs.map((v: VoiceMember) => ({
-                  publicKey: publicKeyToString(v.public_key),
-                  displayName: v.display_name,
+                const simplified = (vs || []).filter((v: any) => v && v.public_key).map((v: any) => ({
+                  publicKey: typeof v.public_key === "string" ? v.public_key : publicKeyToString(v.public_key),
+                  displayName: v.display_name || "Unknown",
                 }));
                 dispatch({ type: "SET_VOICE_STATE", serverId, payload: { channelId: ch.id, participants: simplified } });
               } catch {}
