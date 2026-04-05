@@ -76,6 +76,7 @@ fn main() {
             commands::save_temp_audio,
             commands::start_recording,
             commands::stop_recording,
+            commands::show_notification,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

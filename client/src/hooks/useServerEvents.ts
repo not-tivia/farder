@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
 import type { MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo } from "../lib/types";
+import * as api from "../lib/tauri-bridge";
 
 interface ReactionAddedPayload {
   server_id: string;
@@ -47,6 +48,9 @@ export function useServerEvents(): void {
         dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
       } else {
         dispatch({ type: "INCREMENT_UNREAD", serverId });
+        if (message.content) {
+          api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
+        }
       }
     }).then((u) => unlisten.push(u));
 

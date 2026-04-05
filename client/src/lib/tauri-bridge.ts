@@ -287,3 +287,7 @@ export async function startRecording(): Promise<void> {
 export async function stopRecording(): Promise<string> {
   return invoke<string>("stop_recording");
 }
+
+export async function showNotification(title: string, body: string): Promise<void> {
+  return invoke<void>("show_notification", { title, body });
+}

@@ -1533,3 +1533,48 @@ pub fn stop_recording() -> Result<String, String> {
     }
     Ok(path)
 }
+
+// ---------------------------------------------------------------------------
+// Desktop notification command
+// ---------------------------------------------------------------------------
+
+/// Show a desktop notification using notify-send (Linux) or equivalent.
+/// Falls back silently on unsupported platforms or when notify-send is absent.
+#[tauri::command]
+pub fn show_notification(title: String, body: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .arg(&title)
+            .arg(&body)
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, use PowerShell to show a toast notification.
+        let script = format!(
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
+             $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+             $template.SelectSingleNode('//text[@id=1]').InnerText = '{}'; \
+             $template.SelectSingleNode('//text[@id=2]').InnerText = '{}'; \
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Farder').Show([Windows.UI.Notifications.ToastNotification]::new($template));",
+            title.replace('\'', "''"),
+            body.replace('\'', "''")
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-WindowStyle", "Hidden", "-Command", &script])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            body.replace('"', "\\\""),
+            title.replace('"', "\\\"")
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    Ok(())
+}
