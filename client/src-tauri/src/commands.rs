@@ -1434,8 +1434,22 @@ pub async fn start_recording() -> Result<(), String> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("no input device").unwrap();
-        let config = device.default_input_config().unwrap();
+        let device = match host.default_input_device() {
+            Some(d) => d,
+            None => {
+                eprintln!("[voice] no input device available");
+                RECORDING.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+        };
+        let config = match device.default_input_config() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[voice] failed to get input config: {}", e);
+                RECORDING.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+        };
 
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as u16;
@@ -1512,7 +1526,10 @@ pub fn stop_recording() -> Result<String, String> {
     use std::sync::atomic::Ordering;
     RECORDING.store(false, Ordering::SeqCst);
     // Wait a moment for the recording thread to finish
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(std::time::Duration::from_millis(500));
     let path = RECORDING_PATH.lock().unwrap().take().ok_or("no recording in progress")?;
+    if !std::path::Path::new(&path).exists() {
+        return Err("recording failed — no audio device available".to_string());
+    }
     Ok(path)
 }
