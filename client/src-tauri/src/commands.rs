@@ -773,7 +773,7 @@ pub fn remove_favorite(id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Update channel settings (name, topic, nsfw, slow_mode_secs).
+/// Update channel settings (name, topic, nsfw, slow_mode_secs, category_id, position).
 #[tauri::command]
 pub async fn update_channel(
     state: State<'_, Arc<AppState>>,
@@ -782,6 +782,8 @@ pub async fn update_channel(
     topic: Option<String>,
     nsfw: Option<bool>,
     slow_mode_secs: Option<u32>,
+    category_id: Option<Option<u64>>,
+    position: Option<u32>,
 ) -> Result<(), String> {
     let response = bridge::send_request(
         &state,
@@ -792,6 +794,8 @@ pub async fn update_channel(
             nsfw,
             slow_mode_secs,
             retention_secs: None,
+            category_id,
+            position,
         },
     ).await.map_err(|e| e.to_string())?;
     match response {

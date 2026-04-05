@@ -459,6 +459,8 @@ pub fn handle_request(
             nsfw,
             slow_mode_secs,
             retention_secs,
+            category_id,
+            position,
         } => {
             let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
             if !permissions::has(perms, permissions::MANAGE_CHANNEL) {
@@ -472,6 +474,8 @@ pub fn handle_request(
                 nsfw,
                 slow_mode_secs,
                 retention_secs,
+                category_id,
+                position,
             )?;
             let channel = channels::get_channel(conn, channel_id)?.unwrap();
             let event = BroadcastEvent {

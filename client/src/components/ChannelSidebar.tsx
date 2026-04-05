@@ -66,6 +66,8 @@ export default function ChannelSidebar() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
+  const [dragItem, setDragItem] = useState<{ type: "channel" | "category"; id: number } | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ type: "channel" | "category" | "category-zone"; id: number } | null>(null);
 
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
@@ -85,6 +87,18 @@ export default function ChannelSidebar() {
     }
   }
 
+  async function handleMoveChannel(channelId: number, targetCategoryId: number | null, targetPosition: number) {
+    try {
+      await api.updateChannel(channelId, { categoryId: targetCategoryId, position: targetPosition });
+    } catch {}
+  }
+
+  async function handleMoveCategory(categoryId: number, targetPosition: number) {
+    try {
+      await api.updateCategory(categoryId, { position: targetPosition });
+    } catch {}
+  }
+
   // Exclude Thread channels from the sidebar (they appear inline)
   const visibleChannels = state.channels.filter((c) => c.channel_type !== "Thread");
   const sortedCategories = [...state.categories].sort((a, b) => a.position - b.position);
@@ -98,11 +112,35 @@ export default function ChannelSidebar() {
     const channelMsgs = state.messages[ch.id] ?? [];
     const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== state.currentChannelId;
     const prefix = ch.channel_type === "Announcement" ? "!" : "#";
+    const isDropTarget = dropTarget?.type === "channel" && dropTarget.id === ch.id;
     return (
       <div
         key={ch.id}
-        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
+        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}${isDropTarget ? " drop-target" : ""}`}
         onClick={() => handleSelectChannel(ch)}
+        draggable
+        onDragStart={(e) => {
+          setDragItem({ type: "channel", id: ch.id });
+          e.dataTransfer.effectAllowed = "move";
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (dragItem?.type === "channel") {
+            setDropTarget({ type: "channel", id: ch.id });
+          }
+        }}
+        onDragLeave={() => {
+          if (dropTarget?.id === ch.id) setDropTarget(null);
+        }}
+        onDrop={async (e) => {
+          e.preventDefault();
+          if (dragItem?.type === "channel" && dragItem.id !== ch.id) {
+            await handleMoveChannel(dragItem.id, ch.category_id, ch.position);
+          }
+          setDragItem(null);
+          setDropTarget(null);
+        }}
+        onDragEnd={() => { setDragItem(null); setDropTarget(null); }}
         onContextMenu={(e) => {
           e.preventDefault();
           setContextMenu({ x: e.clientX, y: e.clientY, channelId: ch.id, type: "channel" });
@@ -119,10 +157,39 @@ export default function ChannelSidebar() {
       .filter((c) => c.category_id === cat.id)
       .sort((a, b) => a.position - b.position);
     if (catChannels.length === 0) return null;
+    const isCategoryDropTarget = dropTarget?.type === "category" && dropTarget.id === cat.id;
+    const isCategoryZoneTarget = dropTarget?.type === "category-zone" && dropTarget.id === cat.id;
     return (
       <div key={cat.id}>
         <div
-          className="channel-category"
+          className={`channel-category${isCategoryDropTarget || isCategoryZoneTarget ? " drop-target" : ""}`}
+          draggable
+          onDragStart={(e) => {
+            setDragItem({ type: "category", id: cat.id });
+            e.dataTransfer.effectAllowed = "move";
+          }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (dragItem?.type === "channel") {
+              setDropTarget({ type: "category-zone", id: cat.id });
+            } else if (dragItem?.type === "category") {
+              setDropTarget({ type: "category", id: cat.id });
+            }
+          }}
+          onDragLeave={() => {
+            if (dropTarget?.id === cat.id) setDropTarget(null);
+          }}
+          onDrop={async (e) => {
+            e.preventDefault();
+            if (dragItem?.type === "channel") {
+              await handleMoveChannel(dragItem.id, cat.id, 0);
+            } else if (dragItem?.type === "category" && dragItem.id !== cat.id) {
+              await handleMoveCategory(dragItem.id, cat.position);
+            }
+            setDragItem(null);
+            setDropTarget(null);
+          }}
+          onDragEnd={() => { setDragItem(null); setDropTarget(null); }}
           onContextMenu={(e) => {
             e.preventDefault();
             setContextMenu({ x: e.clientX, y: e.clientY, channelId: 0, type: "category", categoryId: cat.id });

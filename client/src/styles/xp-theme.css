@@ -221,6 +221,32 @@ body {
   margin-left: auto;
 }
 
+.channel-item.drop-target {
+  border-top: 2px solid var(--xp-blue-light);
+}
+
+.channel-category.drop-target {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.channel-item[draggable="true"] {
+  cursor: grab;
+}
+
+.channel-item[draggable="true"]:active {
+  cursor: grabbing;
+  opacity: 0.6;
+}
+
+.channel-category[draggable="true"] {
+  cursor: grab;
+}
+
+.channel-category[draggable="true"]:active {
+  cursor: grabbing;
+  opacity: 0.6;
+}
+
 .user-footer {
   padding: 8px 10px;
   background: rgba(0,0,0,0.25);

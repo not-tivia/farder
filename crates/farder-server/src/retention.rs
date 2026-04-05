@@ -123,7 +123,7 @@ mod tests {
         // Channel with 1-hour retention (3600 seconds).
         let ch_id =
             channels::create_channel(&conn, "ephemeral", ChannelType::Text, None, 0).unwrap();
-        channels::update_channel(&conn, ch_id, None, None, None, None, Some(Some(3600))).unwrap();
+        channels::update_channel(&conn, ch_id, None, None, None, None, Some(Some(3600)), None, None).unwrap();
 
         // Channel with no retention.
         let ch_id2 =

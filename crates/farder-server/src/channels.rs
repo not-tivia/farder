@@ -271,12 +271,16 @@ pub fn update_channel(
     nsfw: Option<bool>,
     slow_mode_secs: Option<u32>,
     retention_secs: Option<Option<u64>>,
+    category_id: Option<Option<u64>>,
+    position: Option<u32>,
 ) -> Result<()> {
     if name.is_none()
         && topic.is_none()
         && nsfw.is_none()
         && slow_mode_secs.is_none()
         && retention_secs.is_none()
+        && category_id.is_none()
+        && position.is_none()
     {
         return Ok(());
     }
@@ -302,6 +306,14 @@ pub fn update_channel(
     }
     if retention_secs.is_some() {
         sets.push(format!("retention_secs = ?{}", param_idx));
+        param_idx += 1;
+    }
+    if category_id.is_some() {
+        sets.push(format!("category_id = ?{}", param_idx));
+        param_idx += 1;
+    }
+    if position.is_some() {
+        sets.push(format!("position = ?{}", param_idx));
     }
 
     let sql = format!("UPDATE channels SET {} WHERE id = ?1", sets.join(", "));
@@ -332,6 +344,17 @@ pub fn update_channel(
             Some(v) => stmt.raw_bind_parameter(idx, v as i64)?,
             None => stmt.raw_bind_parameter(idx, rusqlite::types::Null)?,
         }
+        idx += 1;
+    }
+    if let Some(cat) = category_id {
+        match cat {
+            Some(v) => stmt.raw_bind_parameter(idx, v as i64)?,
+            None => stmt.raw_bind_parameter(idx, rusqlite::types::Null)?,
+        }
+        idx += 1;
+    }
+    if let Some(p) = position {
+        stmt.raw_bind_parameter(idx, p as i64)?;
     }
 
     stmt.raw_execute()?;
@@ -674,7 +697,7 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         let id = create_channel(&conn, "chat", ChannelType::Text, None, 0).unwrap();
 
-        update_channel(&conn, id, Some("renamed"), Some("A topic"), Some(true), Some(5), None).unwrap();
+        update_channel(&conn, id, Some("renamed"), Some("A topic"), Some(true), Some(5), None, None, None).unwrap();
         let ch = get_channel(&conn, id).unwrap().unwrap();
         assert_eq!(ch.name, "renamed");
         assert_eq!(ch.topic, Some("A topic".to_string()));
@@ -683,12 +706,12 @@ mod tests {
         assert!(ch.retention_secs.is_none());
 
         // Now set retention_secs.
-        update_channel(&conn, id, None, None, None, None, Some(Some(3600))).unwrap();
+        update_channel(&conn, id, None, None, None, None, Some(Some(3600)), None, None).unwrap();
         let ch = get_channel(&conn, id).unwrap().unwrap();
         assert_eq!(ch.retention_secs, Some(3600));
 
         // Clear retention_secs.
-        update_channel(&conn, id, None, None, None, None, Some(None)).unwrap();
+        update_channel(&conn, id, None, None, None, None, Some(None), None, None).unwrap();
         let ch = get_channel(&conn, id).unwrap().unwrap();
         assert!(ch.retention_secs.is_none());
     }
