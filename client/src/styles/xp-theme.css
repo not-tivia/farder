@@ -1009,6 +1009,12 @@ body {
   color: white;
 }
 
+.context-menu-separator {
+  height: 1px;
+  background: var(--xp-border);
+  margin: 2px 4px;
+}
+
 /* ── Reconnect Overlay ──────────────────────────────────── */
 .reconnect-overlay {
   position: absolute;

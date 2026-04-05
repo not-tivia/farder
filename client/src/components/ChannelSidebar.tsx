@@ -66,8 +66,6 @@ export default function ChannelSidebar() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
-  const [dragItem, setDragItem] = useState<{ type: "channel" | "category"; id: number } | null>(null);
-  const [dropTarget, setDropTarget] = useState<{ type: "channel" | "category" | "category-zone"; id: number } | null>(null);
 
   async function handleSelectChannel(channel: ChannelInfo) {
     dispatch({ type: "SELECT_CHANNEL", payload: channel.id });
@@ -120,35 +118,11 @@ export default function ChannelSidebar() {
     const channelMsgs = state.messages[ch.id] ?? [];
     const hasUnread = channelMsgs.some((m) => m.id > lastRead) && ch.id !== state.currentChannelId;
     const prefix = ch.channel_type === "Announcement" ? "!" : "#";
-    const isDropTarget = dropTarget?.type === "channel" && dropTarget.id === ch.id;
     return (
       <div
         key={ch.id}
-        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}${isDropTarget ? " drop-target" : ""}`}
+        className={`channel-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
         onClick={() => handleSelectChannel(ch)}
-        draggable
-        onDragStart={(e) => {
-          setDragItem({ type: "channel", id: ch.id });
-          e.dataTransfer.effectAllowed = "move";
-        }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          if (dragItem?.type === "channel") {
-            setDropTarget({ type: "channel", id: ch.id });
-          }
-        }}
-        onDragLeave={() => {
-          if (dropTarget?.id === ch.id) setDropTarget(null);
-        }}
-        onDrop={async (e) => {
-          e.preventDefault();
-          if (dragItem?.type === "channel" && dragItem.id !== ch.id) {
-            await handleMoveChannel(dragItem.id, ch.category_id, ch.position);
-          }
-          setDragItem(null);
-          setDropTarget(null);
-        }}
-        onDragEnd={() => { setDragItem(null); setDropTarget(null); }}
         onContextMenu={(e) => {
           e.preventDefault();
           setContextMenu({ x: e.clientX, y: e.clientY, channelId: ch.id, type: "channel" });
@@ -165,39 +139,10 @@ export default function ChannelSidebar() {
       .filter((c) => c.category_id === cat.id)
       .sort((a, b) => a.position - b.position);
     if (catChannels.length === 0) return null;
-    const isCategoryDropTarget = dropTarget?.type === "category" && dropTarget.id === cat.id;
-    const isCategoryZoneTarget = dropTarget?.type === "category-zone" && dropTarget.id === cat.id;
     return (
       <div key={cat.id}>
         <div
-          className={`channel-category${isCategoryDropTarget || isCategoryZoneTarget ? " drop-target" : ""}`}
-          draggable
-          onDragStart={(e) => {
-            setDragItem({ type: "category", id: cat.id });
-            e.dataTransfer.effectAllowed = "move";
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            if (dragItem?.type === "channel") {
-              setDropTarget({ type: "category-zone", id: cat.id });
-            } else if (dragItem?.type === "category") {
-              setDropTarget({ type: "category", id: cat.id });
-            }
-          }}
-          onDragLeave={() => {
-            if (dropTarget?.id === cat.id) setDropTarget(null);
-          }}
-          onDrop={async (e) => {
-            e.preventDefault();
-            if (dragItem?.type === "channel") {
-              await handleMoveChannel(dragItem.id, cat.id, 0);
-            } else if (dragItem?.type === "category" && dragItem.id !== cat.id) {
-              await handleMoveCategory(dragItem.id, cat.position);
-            }
-            setDragItem(null);
-            setDropTarget(null);
-          }}
-          onDragEnd={() => { setDragItem(null); setDropTarget(null); }}
+          className="channel-category"
           onContextMenu={(e) => {
             e.preventDefault();
             setContextMenu({ x: e.clientX, y: e.clientY, channelId: 0, type: "category", categoryId: cat.id });
@@ -246,32 +191,88 @@ export default function ChannelSidebar() {
         <>
           <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setContextMenu(null)} />
           <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
-            {contextMenu.type === "channel" && (
-              <>
-                <div className="context-menu-item" onClick={() => {
-                  const ch = state.channels.find(c => c.id === contextMenu.channelId);
-                  if (ch) setEditChannel(ch);
-                  setContextMenu(null);
-                }}>Edit Channel</div>
-                <div className="context-menu-item delete" onClick={async () => {
-                  try { await api.deleteChannel(contextMenu.channelId); } catch {}
-                  setContextMenu(null);
-                }}>Delete Channel</div>
-              </>
-            )}
-            {contextMenu.type === "category" && (
-              <>
-                <div className="context-menu-item" onClick={() => {
-                  const cat = state.categories.find(c => c.id === contextMenu.categoryId);
-                  if (cat) setEditCategory(cat);
-                  setContextMenu(null);
-                }}>Edit Category</div>
-                <div className="context-menu-item delete" onClick={async () => {
-                  try { await api.deleteCategory(contextMenu.categoryId!); } catch {}
-                  setContextMenu(null);
-                }}>Delete Category</div>
-              </>
-            )}
+            {contextMenu.type === "channel" && (() => {
+              const ch = state.channels.find(c => c.id === contextMenu.channelId);
+              const siblingsInCategory = visibleChannels
+                .filter(c => c.category_id === (ch?.category_id ?? null))
+                .sort((a, b) => a.position - b.position);
+              const currentIndex = siblingsInCategory.findIndex(c => c.id === contextMenu.channelId);
+              return (
+                <>
+                  <div className="context-menu-item" onClick={() => { if (ch) setEditChannel(ch); setContextMenu(null); }}>Edit Channel</div>
+                  {currentIndex > 0 && (
+                    <div className="context-menu-item" onClick={async () => {
+                      const above = siblingsInCategory[currentIndex - 1];
+                      await handleMoveChannel(contextMenu.channelId, ch?.category_id ?? null, above.position);
+                      setContextMenu(null);
+                    }}>Move Up</div>
+                  )}
+                  {currentIndex < siblingsInCategory.length - 1 && (
+                    <div className="context-menu-item" onClick={async () => {
+                      const below = siblingsInCategory[currentIndex + 1];
+                      await handleMoveChannel(contextMenu.channelId, ch?.category_id ?? null, below.position);
+                      setContextMenu(null);
+                    }}>Move Down</div>
+                  )}
+                  {state.categories.length > 0 && (
+                    <>
+                      <div className="context-menu-separator" />
+                      {state.categories
+                        .filter(cat => cat.id !== ch?.category_id)
+                        .map(cat => (
+                          <div key={cat.id} className="context-menu-item" onClick={async () => {
+                            await handleMoveChannel(contextMenu.channelId, cat.id, 0);
+                            setContextMenu(null);
+                          }}>Move to {cat.name}</div>
+                        ))
+                      }
+                      {ch?.category_id !== null && (
+                        <div className="context-menu-item" onClick={async () => {
+                          await handleMoveChannel(contextMenu.channelId, null, 0);
+                          setContextMenu(null);
+                        }}>Remove from Category</div>
+                      )}
+                    </>
+                  )}
+                  <div className="context-menu-separator" />
+                  <div className="context-menu-item delete" onClick={async () => {
+                    try { await api.deleteChannel(contextMenu.channelId); } catch {}
+                    setContextMenu(null);
+                  }}>Delete Channel</div>
+                </>
+              );
+            })()}
+            {contextMenu.type === "category" && (() => {
+              const catIndex = sortedCategories.findIndex(c => c.id === contextMenu.categoryId);
+              return (
+                <>
+                  <div className="context-menu-item" onClick={() => {
+                    const cat = state.categories.find(c => c.id === contextMenu.categoryId);
+                    if (cat) setEditCategory(cat);
+                    setContextMenu(null);
+                  }}>Edit Category</div>
+                  {catIndex > 0 && (
+                    <div className="context-menu-item" onClick={async () => {
+                      const above = sortedCategories[catIndex - 1];
+                      await handleMoveCategory(contextMenu.categoryId!, above.position);
+                      setContextMenu(null);
+                    }}>Move Up</div>
+                  )}
+                  {catIndex < sortedCategories.length - 1 && (
+                    <div className="context-menu-item" onClick={async () => {
+                      const below = sortedCategories[catIndex + 1];
+                      await handleMoveCategory(contextMenu.categoryId!, below.position);
+                      setContextMenu(null);
+                    }}>Move Down</div>
+                  )}
+                  <div className="context-menu-separator" />
+                  <div className="context-menu-item delete" onClick={async () => {
+                    try { await api.deleteCategory(contextMenu.categoryId!); } catch {}
+                    setContextMenu(null);
+                  }}>Delete Category</div>
+                </>
+              );
+            })()}
           </div>
         </>
       )}
