@@ -50,11 +50,21 @@ function formatSize(bytes: number): string {
 // Module-level cache: file_id → data URL
 const imageCache = new Map<number, string>();
 
+// Module-level cache for own public key
+let cachedOwnPk: string | null = null;
+
 export default function Message({ message, memberNames, grouped = false }: MessageProps) {
   const { state, dispatch } = useServer();
   const [showPicker, setShowPicker] = useState(false);
   const [reacting, setReacting] = useState(false);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
+  const [ownPk, setOwnPk] = useState(cachedOwnPk);
+
+  useEffect(() => {
+    if (!cachedOwnPk) {
+      api.getPublicKey().then(pk => { cachedOwnPk = pk; setOwnPk(pk); });
+    }
+  }, []);
 
   const deleted = isDeletedUser(message.author);
   const pkStr = publicKeyToString(message.author);
@@ -132,6 +142,7 @@ export default function Message({ message, memberNames, grouped = false }: Messa
           roles={state.roles}
           position={profilePopup}
           onClose={() => setProfilePopup(null)}
+          isSelf={ownPk === pkStr}
         />
       )}
       {(deleted || displayContent) && (

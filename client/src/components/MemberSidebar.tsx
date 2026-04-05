@@ -1,11 +1,23 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useServer } from "../context/ServerContext";
 import type { MemberInfo } from "../lib/types";
+import { publicKeyToString } from "../lib/types";
+import * as api from "../lib/tauri-bridge";
 import UserProfilePopup from "./UserProfilePopup";
+
+// Module-level cache for own public key
+let cachedOwnPk: string | null = null;
 
 export default function MemberSidebar() {
   const { state } = useServer();
   const [profilePopup, setProfilePopup] = useState<{ member: MemberInfo; x: number; y: number } | null>(null);
+  const [ownPk, setOwnPk] = useState(cachedOwnPk);
+
+  useEffect(() => {
+    if (!cachedOwnPk) {
+      api.getPublicKey().then(pk => { cachedOwnPk = pk; setOwnPk(pk); });
+    }
+  }, []);
 
   // Sort members by their highest role position (descending), then by display name
   function highestRolePosition(member: MemberInfo): number {
@@ -47,6 +59,7 @@ export default function MemberSidebar() {
           roles={state.roles}
           position={{ x: profilePopup.x, y: profilePopup.y }}
           onClose={() => setProfilePopup(null)}
+          isSelf={ownPk === publicKeyToString(profilePopup.member.public_key)}
         />
       )}
     </div>

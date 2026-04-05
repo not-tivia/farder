@@ -99,8 +99,12 @@ pub fn get_public_key(state: State<'_, Arc<AppState>>) -> Option<String> {
 #[tauri::command]
 pub fn set_display_name(name: String) -> Result<(), String> {
     let path = profile_path();
-    let json = serde_json::json!({ "display_name": name });
-    std::fs::write(&path, json.to_string()).map_err(|e| e.to_string())
+    let mut data: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    data["display_name"] = serde_json::json!(name);
+    std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -109,6 +113,44 @@ pub fn get_display_name() -> Option<String> {
     let data = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
     v["display_name"].as_str().map(|s| s.to_string())
+}
+
+#[tauri::command]
+pub fn set_bio(bio: String) -> Result<(), String> {
+    let path = profile_path();
+    let mut data: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    data["bio"] = serde_json::json!(bio);
+    std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_bio() -> Option<String> {
+    let path = profile_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v["bio"].as_str().map(|s| s.to_string())
+}
+
+#[tauri::command]
+pub fn set_profile_color(color: String) -> Result<(), String> {
+    let path = profile_path();
+    let mut data: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    data["banner_color"] = serde_json::json!(color);
+    std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_profile_color() -> Option<String> {
+    let path = profile_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v["banner_color"].as_str().map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------

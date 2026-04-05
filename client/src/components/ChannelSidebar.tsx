@@ -1,19 +1,45 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useServer } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
-import type { ChannelInfo, CategoryInfo } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, MemberInfo } from "../lib/types";
+import { publicKeyToString } from "../lib/types";
 import InviteDialog from "./InviteDialog";
 import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";
+import UserProfilePopup from "./UserProfilePopup";
 
-function UserFooter() {
+function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
   const [name, setName] = useState<string | null>(null);
+  const [ownPk, setOwnPk] = useState<string | null>(null);
+  const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     api.getDisplayName().then((n) => setName(n)).catch(() => {});
+    api.getPublicKey().then((pk) => setOwnPk(pk)).catch(() => {});
   }, []);
 
-  return <span>● {name ?? "Unknown"}</span>;
+  const ownMember = ownPk ? members.find(m => publicKeyToString(m.public_key) === ownPk) ?? null : null;
+
+  return (
+    <>
+      <span
+        style={{ cursor: ownMember ? "pointer" : undefined }}
+        onClick={ownMember ? (e) => setProfilePopup({ x: e.clientX, y: e.clientY }) : undefined}
+        title={ownMember ? "View your profile" : undefined}
+      >
+        ● {name ?? "Unknown"}
+      </span>
+      {profilePopup && ownMember && (
+        <UserProfilePopup
+          member={ownMember}
+          roles={roles}
+          position={profilePopup}
+          onClose={() => setProfilePopup(null)}
+          isSelf={true}
+        />
+      )}
+    </>
+  );
 }
 
 function CategoryEditForm({ category, onClose }: { category: CategoryInfo; onClose: () => void }) {
@@ -306,7 +332,7 @@ export default function ChannelSidebar() {
           {sortedCategories.map(renderCategory)}
         </div>
         <div className="user-footer">
-          <UserFooter />
+          <UserFooter members={state.members} roles={state.roles} />
         </div>
       </div>
       {showInvite && <InviteDialog onClose={() => setShowInvite(false)} />}

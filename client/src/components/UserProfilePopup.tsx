@@ -1,63 +1,133 @@
+import { useState, useEffect } from "react";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
+import * as api from "../lib/tauri-bridge";
 
 interface Props {
     member: MemberInfo;
     roles: RoleInfo[];
     position: { x: number; y: number };
     onClose: () => void;
+    isSelf?: boolean;
 }
 
-export default function UserProfilePopup({ member, roles, position, onClose }: Props) {
+export default function UserProfilePopup({ member, roles, position, onClose, isSelf }: Props) {
     const pkStr = publicKeyToString(member.public_key);
-    const memberRoles = roles.filter(r => member.role_ids.includes(r.id));
+    const memberRoles = roles.filter(r => member.role_ids.includes(r.id) && r.name !== "@everyone");
     const joinDate = new Date(member.joined_at * 1000).toLocaleDateString([], {
         year: "numeric", month: "short", day: "numeric"
     });
+    const initial = member.display_name.charAt(0).toUpperCase();
 
-    // Clamp position so popup stays on screen
-    const popupWidth = 240;
-    const popupHeight = 200; // approximate
-    const x = Math.min(position.x, window.innerWidth - popupWidth - 8);
-    const y = Math.min(position.y, window.innerHeight - popupHeight - 8);
+    // Generate a deterministic banner color from the public key
+    const defaultBannerColor = `hsl(${Math.abs(pkStr.split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % 360}, 50%, 40%)`;
+
+    // For self profile, load bio and color
+    const [bio, setBio] = useState<string | null>(null);
+    const [bannerColor, setBannerColor] = useState(defaultBannerColor);
+    const [editingBio, setEditingBio] = useState(false);
+    const [bioInput, setBioInput] = useState("");
+
+    useEffect(() => {
+        if (isSelf) {
+            api.getBio().then(b => { if (b) setBio(b); });
+            api.getProfileColor().then(c => { if (c) setBannerColor(c); });
+        }
+    }, [isSelf]);
+
+    async function saveBio() {
+        const trimmed = bioInput.trim();
+        await api.setBio(trimmed);
+        setBio(trimmed || null);
+        setEditingBio(false);
+    }
+
+    // Clamp position to viewport
+    const style: React.CSSProperties = {
+        position: "fixed",
+        top: Math.min(position.y, window.innerHeight - 380),
+        left: Math.min(position.x, window.innerWidth - 300),
+        zIndex: 1000,
+    };
 
     return (
         <>
             <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={onClose} />
-            <div className="user-profile-popup" style={{ top: y, left: x }}>
-                <div className="profile-header">
-                    <div className="profile-avatar">{member.display_name.charAt(0).toUpperCase()}</div>
-                    <div className="profile-name">{member.display_name}</div>
-                </div>
-                <div className="profile-body">
-                    <div className="profile-section">
-                        <div className="profile-label">Member Since</div>
-                        <div className="profile-value">{joinDate}</div>
+            <div className="profile-card" style={style}>
+                {/* Banner */}
+                <div className="profile-card-banner" style={{ background: bannerColor }} />
+
+                {/* Avatar */}
+                <div className="profile-card-avatar-row">
+                    <div className="profile-card-avatar" style={{ background: bannerColor }}>
+                        {initial}
                     </div>
+                </div>
+
+                {/* Info */}
+                <div className="profile-card-body">
+                    <div className="profile-card-name">{member.display_name}</div>
+                    <div className="profile-card-id">{pkStr.slice(0, 18)}...</div>
+
+                    <div className="profile-card-divider" />
+
+                    {/* Bio */}
+                    {(bio || isSelf) && (
+                        <div className="profile-card-section">
+                            <div className="profile-card-label">ABOUT ME</div>
+                            {editingBio ? (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                    <textarea
+                                        className="profile-card-bio-input"
+                                        value={bioInput}
+                                        onChange={(e) => setBioInput(e.target.value)}
+                                        maxLength={190}
+                                        rows={3}
+                                        autoFocus
+                                        placeholder="Tell people about yourself..."
+                                    />
+                                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                                        <button className="xp-button" onClick={() => setEditingBio(false)} style={{ fontSize: 10, padding: "2px 8px" }}>Cancel</button>
+                                        <button className="xp-button" onClick={saveBio} style={{ fontSize: 10, padding: "2px 8px" }}>Save</button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="profile-card-bio" onClick={() => {
+                                    if (isSelf) { setEditingBio(true); setBioInput(bio || ""); }
+                                }} style={isSelf ? { cursor: "text" } : undefined}>
+                                    {bio || (isSelf ? "Click to add a bio..." : "")}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Member Since */}
+                    <div className="profile-card-section">
+                        <div className="profile-card-label">MEMBER SINCE</div>
+                        <div className="profile-card-value">{joinDate}</div>
+                    </div>
+
+                    {/* Roles */}
                     {memberRoles.length > 0 && (
-                        <div className="profile-section">
-                            <div className="profile-label">Roles</div>
-                            <div className="profile-roles">
-                                {memberRoles.map(r => (
-                                    <span
-                                        key={r.id}
-                                        className="profile-role-badge"
-                                        style={{
-                                            borderColor: typeof r.color === "number"
-                                                ? `#${r.color.toString(16).padStart(6, "0")}`
-                                                : undefined
-                                        }}
-                                    >
-                                        {r.name}
-                                    </span>
-                                ))}
+                        <div className="profile-card-section">
+                            <div className="profile-card-label">ROLES</div>
+                            <div className="profile-card-roles">
+                                {memberRoles.map(r => {
+                                    const colorHex = typeof r.color === "number" && r.color > 0
+                                        ? `#${r.color.toString(16).padStart(6, '0')}`
+                                        : undefined;
+                                    return (
+                                        <span key={r.id} className="profile-card-role" style={{
+                                            borderLeftColor: colorHex || "var(--xp-border)",
+                                        }}>
+                                            {colorHex && <span className="role-dot" style={{ background: colorHex }} />}
+                                            {r.name}
+                                        </span>
+                                    );
+                                })}
                             </div>
                         </div>
                     )}
-                    <div className="profile-section">
-                        <div className="profile-label">ID</div>
-                        <div className="profile-value profile-id">{pkStr.slice(0, 20)}...</div>
-                    </div>
                 </div>
             </div>
         </>

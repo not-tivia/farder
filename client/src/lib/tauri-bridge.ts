@@ -206,3 +206,19 @@ export async function listFavorites(): Promise<FavoriteEntry[]> {
 export async function removeFavorite(id: string): Promise<void> {
   return invoke<void>("remove_favorite", { id });
 }
+
+export async function setBio(bio: string): Promise<void> {
+  return invoke<void>("set_bio", { bio });
+}
+
+export async function getBio(): Promise<string | null> {
+  return invoke<string | null>("get_bio");
+}
+
+export async function setProfileColor(color: string): Promise<void> {
+  return invoke<void>("set_profile_color", { color });
+}
+
+export async function getProfileColor(): Promise<string | null> {
+  return invoke<string | null>("get_profile_color");
+}
