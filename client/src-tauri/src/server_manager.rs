@@ -17,7 +17,7 @@ pub struct ManagedServer {
 
 /// Tracks all locally-spawned server processes.
 pub struct ServerProcesses {
-    pub children: Mutex<HashMap<u16, (ManagedServer, CommandChild)>>,
+    children: Mutex<HashMap<u16, (ManagedServer, CommandChild)>>,
 }
 
 impl ServerProcesses {
@@ -26,17 +26,26 @@ impl ServerProcesses {
             children: Mutex::new(HashMap::new()),
         }
     }
+
+    pub fn register(&self, info: ManagedServer, child: CommandChild) {
+        let port = info.port;
+        self.children.lock().unwrap().insert(port, (info, child));
+    }
+
+    pub fn list(&self) -> Vec<ManagedServer> {
+        self.children.lock().unwrap().values().map(|(info, _)| info.clone()).collect()
+    }
 }
 
 /// Find an available TCP port starting from `start`.
 fn find_available_port(start: u16) -> Option<u16> {
     (start..start + 100).find(|&port| {
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+        std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok()
     })
 }
 
 /// Resolve the data directory for a server. Creates it if needed.
-fn server_data_dir(server_name: &str) -> PathBuf {
+fn server_data_dir(server_name: &str) -> Result<PathBuf, String> {
     let safe_name = server_name
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
@@ -46,10 +55,12 @@ fn server_data_dir(server_name: &str) -> PathBuf {
         .join("farder")
         .join("servers")
         .join(&safe_name);
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create server data dir {:?}: {}", dir, e))?;
     let files_dir = dir.join("files");
-    let _ = std::fs::create_dir_all(&files_dir);
-    dir
+    std::fs::create_dir_all(&files_dir)
+        .map_err(|e| format!("failed to create files dir {:?}: {}", files_dir, e))?;
+    Ok(dir)
 }
 
 /// Spawn a farder-server sidecar process with the given configuration.
@@ -62,7 +73,7 @@ pub fn spawn_server(
     let port = find_available_port(4435)
         .ok_or_else(|| "no available port found (tried 4435-4534)".to_string())?;
 
-    let data_dir = server_data_dir(name);
+    let data_dir = server_data_dir(name)?;
     let db_path = data_dir.join("server.db");
     let files_path = data_dir.join("files");
 
