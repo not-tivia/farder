@@ -3,7 +3,9 @@ mod bridge;
 mod commands;
 mod connection;
 mod state;
+mod server_manager;
 mod tls;
+mod tray;
 
 use state::AppState;
 use std::sync::Arc;
@@ -22,6 +24,8 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Arc::new(AppState::new()))
+        .manage(server_manager::ServerProcesses::new())
+        .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             if let Some(url) = deep_link_url {
                 // Emit after a short delay so the frontend has time to mount
@@ -31,6 +35,9 @@ fn main() {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     let _ = tauri::Emitter::emit(&app_handle, "deep-link", url);
                 });
+            }
+            if let Err(e) = tray::setup_tray(&app.handle()) {
+                eprintln!("Failed to setup tray: {}", e);
             }
             Ok(())
         })
@@ -103,6 +110,10 @@ fn main() {
             commands::join_voice,
             commands::leave_voice,
             commands::get_voice_state,
+            commands::create_local_server,
+            commands::stop_local_server,
+            commands::get_local_servers,
+            commands::list_templates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

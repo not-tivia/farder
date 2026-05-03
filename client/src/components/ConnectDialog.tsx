@@ -2,7 +2,15 @@ import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useApp } from "../context/ServerContext";
 
-type Step = "setup" | "join";
+type Step = "setup" | "choice" | "create-1" | "create-2" | "join";
+
+const DEFAULT_TEMPLATES = [
+  { id: "blank", name: "Blank", description: "Empty server — start from scratch" },
+  { id: "friend-group", name: "Friends", description: "Casual hangout for a small group" },
+  { id: "gaming-community", name: "Gaming", description: "Voice lobbies, LFG, and game channels" },
+  { id: "organization", name: "Organization", description: "Teams, projects, and announcements" },
+  { id: "public-community", name: "Community", description: "Public community with moderation" },
+];
 
 /** Parse a farder:// invite link into address + invite/setup token.
  *  Formats:
@@ -78,12 +86,18 @@ export default function ConnectDialog() {
   const [step, setStep] = useState<Step>("setup");
   const [displayName, setDisplayName] = useState("");
   const [savedName, setSavedName] = useState<string | null>(null);
-  const [inviteInput, setInviteInput] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [manualAddress, setManualAddress] = useState("");
   const [pubKey, setPubKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Create server state
+  const [serverName, setServerName] = useState("");
+  const [serverIcon, setServerIcon] = useState<string | null>(null);
+  const [selectedTemplate, setSelectedTemplate] = useState("blank");
+  const [privacy, setPrivacy] = useState("invite-only");
+
+  // Join state
+  const [inviteInput, setInviteInput] = useState("");
 
   useEffect(() => {
     async function init() {
@@ -99,7 +113,7 @@ export default function ConnectDialog() {
 
       if (key && name) {
         setSavedName(name);
-        setStep("join");
+        setStep("choice");
       }
     }
     init().catch(() => {});
@@ -119,7 +133,7 @@ export default function ConnectDialog() {
       setPubKey(key);
       setSavedName(trimmed);
       dispatch({ type: "SET_IDENTITY" });
-      setStep("join");
+      setStep("choice");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -127,7 +141,45 @@ export default function ConnectDialog() {
     }
   }
 
-  async function handleConnect() {
+  async function handlePickIcon() {
+    try {
+      const path = await api.pickFile();
+      if (path) setServerIcon(path);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleCreateServer() {
+    const trimmedName = serverName.trim();
+    if (!trimmedName) {
+      setError("Please enter a server name.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.createLocalServer(
+        trimmedName,
+        selectedTemplate,
+        privacy,
+        serverIcon ?? undefined,
+      );
+      const { address, ...connectPayload } = result;
+      dispatch({ type: "SERVER_ADDED", serverId: address, payload: connectPayload });
+      dispatch({ type: "SET_ACTIVE_SERVER", serverId: address });
+      try {
+        const members = await api.getMembers(address);
+        dispatch({ type: "SET_MEMBERS", serverId: address, payload: members });
+      } catch {}
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleJoin() {
     setLoading(true);
     setError(null);
 
@@ -146,11 +198,9 @@ export default function ConnectDialog() {
     try {
       const parsed = parseInviteLink(inviteInput);
 
-      // Use parsed address, or manual override
-      const address = parsed.address || manualAddress.trim();
+      const address = parsed.address;
       if (!address) {
-        setShowAdvanced(true);
-        setError("Include the server address in the link (e.g. farder://host:port/code) or enter it below.");
+        setError("Include the server address in the link (e.g. farder://host:port/code).");
         setLoading(false);
         return;
       }
@@ -181,6 +231,7 @@ export default function ConnectDialog() {
     setError(null);
   }
 
+  // ── Setup step ──────────────────────────────────────────────
   if (step === "setup") {
     return (
       <div className="connect-screen">
@@ -214,24 +265,183 @@ export default function ConnectDialog() {
     );
   }
 
+  // ── Choice step ─────────────────────────────────────────────
+  if (step === "choice") {
+    return (
+      <div className="connect-screen">
+        <div className="connect-dialog">
+          <div className="connect-dialog-titlebar">Welcome back, {savedName}!</div>
+          <div className="connect-dialog-body">
+            <div className="connect-section">
+              <div className="connect-section-title">What would you like to do?</div>
+            </div>
+
+            <div className="server-choice">
+              <div
+                className="server-choice-card"
+                onClick={() => { setError(null); setStep("create-1"); }}
+              >
+                <div className="choice-icon">+</div>
+                <div className="choice-title">Create a Server</div>
+                <div className="choice-desc">Start your own community</div>
+              </div>
+
+              <div
+                className="server-choice-card"
+                onClick={() => { setError(null); setStep("join"); }}
+              >
+                <div className="choice-icon">&#x2192;</div>
+                <div className="choice-title">Join a Server</div>
+                <div className="choice-desc">Enter an invite link</div>
+              </div>
+            </div>
+
+            <div className="connect-footer-links">
+              <button className="connect-link" onClick={handleChangeName}>
+                Change display name
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Create step 1: Name + icon ──────────────────────────────
+  if (step === "create-1") {
+    return (
+      <div className="connect-screen">
+        <div className="connect-dialog">
+          <div className="connect-dialog-titlebar">Create a Server</div>
+          <div className="connect-dialog-body">
+            <div className="connect-section">
+              <div className="connect-section-title">Server Name</div>
+              <input
+                className="connect-input"
+                type="text"
+                placeholder="My Awesome Server"
+                value={serverName}
+                maxLength={64}
+                onChange={(e) => setServerName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && serverName.trim()) setStep("create-2"); }}
+                autoFocus
+              />
+            </div>
+
+            <div className="connect-section">
+              <div className="connect-section-title">Server Icon (optional)</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button className="xp-button" onClick={handlePickIcon}>
+                  Choose Image...
+                </button>
+                {serverIcon && (
+                  <span style={{ fontSize: 11, color: "#666", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>
+                    {serverIcon.split(/[/\\]/).pop()}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {error && <div className="error-text">{error}</div>}
+
+            <div className="connect-actions">
+              <button className="xp-button" onClick={() => { setError(null); setStep("choice"); }}>
+                Back
+              </button>
+              <button
+                className="xp-button"
+                onClick={() => { setError(null); setStep("create-2"); }}
+                disabled={!serverName.trim()}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Create step 2: Template + privacy ───────────────────────
+  if (step === "create-2") {
+    return (
+      <div className="connect-screen">
+        <div className="connect-dialog">
+          <div className="connect-dialog-titlebar">Create a Server</div>
+          <div className="connect-dialog-body">
+            <div className="connect-section">
+              <div className="connect-section-title">Choose a Template</div>
+              <div className="template-grid">
+                {DEFAULT_TEMPLATES.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`template-card${selectedTemplate === t.id ? " selected" : ""}`}
+                    onClick={() => setSelectedTemplate(t.id)}
+                  >
+                    <div className="tmpl-name">{t.name}</div>
+                    <div className="tmpl-desc">{t.description}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="connect-section">
+              <div className="connect-section-title">Privacy</div>
+              <div className="privacy-options">
+                <label className="privacy-option">
+                  <input
+                    type="radio"
+                    name="privacy"
+                    value="invite-only"
+                    checked={privacy === "invite-only"}
+                    onChange={() => setPrivacy("invite-only")}
+                  />
+                  Invite only
+                </label>
+                <label className="privacy-option">
+                  <input
+                    type="radio"
+                    name="privacy"
+                    value="open"
+                    checked={privacy === "open"}
+                    onChange={() => setPrivacy("open")}
+                  />
+                  Open
+                </label>
+              </div>
+            </div>
+
+            {error && <div className="error-text">{error}</div>}
+
+            <div className="connect-actions">
+              <button className="xp-button" onClick={() => { setError(null); setStep("create-1"); }}>
+                Back
+              </button>
+              <button className="xp-button" onClick={handleCreateServer} disabled={loading}>
+                {loading ? "Creating..." : "Create Server"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Join step ───────────────────────────────────────────────
   return (
     <div className="connect-screen">
       <div className="connect-dialog">
         <div className="connect-dialog-titlebar">Join a Server</div>
         <div className="connect-dialog-body">
           <div className="connect-section">
-            <div className="connect-section-title">Hi, {savedName}!</div>
-          </div>
-
-          <div className="connect-section">
-            <label className="connect-label">Paste an invite link</label>
+            <div className="connect-section-title">Paste an invite link</div>
             <input
               className="connect-input"
               type="text"
               placeholder="farder://server/invite-code"
               value={inviteInput}
               onChange={(e) => setInviteInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleConnect(); }}
+              onKeyDown={(e) => { if (e.key === "Enter") handleJoin(); }}
               autoFocus
             />
           </div>
@@ -239,39 +449,13 @@ export default function ConnectDialog() {
           {error && <div className="error-text">{error}</div>}
 
           <div className="connect-actions">
-            <button className="xp-button" onClick={handleConnect} disabled={loading}>
+            <button className="xp-button" onClick={() => { setError(null); setStep("choice"); }}>
+              Back
+            </button>
+            <button className="xp-button" onClick={handleJoin} disabled={loading}>
               {loading ? "Connecting..." : "Join"}
             </button>
           </div>
-
-          <div className="connect-footer-links">
-            <button className="connect-link" onClick={handleChangeName}>
-              Change display name
-            </button>
-            <span className="connect-link-sep"> | </span>
-            <button className="connect-link" onClick={() => setShowAdvanced((v) => !v)}>
-              {showAdvanced ? "Hide advanced" : "Advanced"}
-            </button>
-          </div>
-
-          {showAdvanced && (
-            <div className="connect-section connect-advanced">
-              <label className="connect-label">Server Address (manual)</label>
-              <input
-                className="connect-input"
-                type="text"
-                placeholder="host:port"
-                value={manualAddress}
-                onChange={(e) => setManualAddress(e.target.value)}
-              />
-              {pubKey && (
-                <>
-                  <div className="connect-section-title" style={{ marginTop: 8 }}>Public Key</div>
-                  <div className="connect-pubkey">{pubKey}</div>
-                </>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </div>

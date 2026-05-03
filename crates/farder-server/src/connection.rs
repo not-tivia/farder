@@ -432,6 +432,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     // Step 4: Check existing vs new member
     let pk_bytes = *public_key.as_bytes();
     let mut setup_token_used = false;
+    let mut auto_claimed = false;
     let auth_result: Result<(), String> = {
         let conn_db = state.db.lock().unwrap();
         let existing = members::get_member(&conn_db, &public_key)?;
@@ -451,7 +452,8 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
                 setup_token.as_deref(),
                 active_setup_token.as_ref(),
             )? {
-                Ok(()) => {
+                Ok(claimed) => {
+                    auto_claimed = claimed;
                     if setup_token.is_some() {
                         drop(conn_db);
                         let mut st = state.setup_token.lock().unwrap();
@@ -468,8 +470,9 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         }
     };
 
-    // If the setup token was just consumed, set the owner.
-    if setup_token_used && auth_result.is_ok() {
+    // If the setup token was just consumed OR this is the first member (auto-claim),
+    // set the owner.
+    if (setup_token_used || auto_claimed) && auth_result.is_ok() {
         let mut owner = state.owner.write().await;
         *owner = Some(public_key.clone());
     }

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, DmEntry } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry } from "./types";
 
 // ── Server management (no serverId needed) ───────────────────────────────────
 
@@ -350,4 +350,55 @@ export async function leaveVoice(serverId: string, channelId: number): Promise<v
 
 export async function getVoiceState(serverId: string, channelId: number): Promise<VoiceMember[]> {
   return invoke("get_voice_state", { serverId, channelId });
+}
+
+// ---------------------------------------------------------------------------
+// Local server management
+// ---------------------------------------------------------------------------
+
+export interface TemplateInfo {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface ManagedServer {
+  name: string;
+  port: number;
+  data_dir: string;
+  template: string;
+  privacy: string;
+}
+
+export async function createLocalServer(
+  name: string,
+  template: string,
+  privacy: string,
+  iconPath?: string,
+): Promise<{
+  address: string;
+  server_name: string;
+  member_count: number;
+  channels: ChannelInfo[];
+  categories: CategoryInfo[];
+  roles: RoleInfo[];
+}> {
+  return invoke("create_local_server", {
+    name,
+    template,
+    privacy,
+    iconPath: iconPath ?? null,
+  });
+}
+
+export async function stopLocalServer(port: number): Promise<void> {
+  return invoke("stop_local_server", { port });
+}
+
+export async function getLocalServers(): Promise<ManagedServer[]> {
+  return invoke("get_local_servers");
+}
+
+export async function listTemplates(): Promise<TemplateInfo[]> {
+  return invoke("list_templates");
 }

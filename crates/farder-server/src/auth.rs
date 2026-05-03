@@ -33,7 +33,8 @@ pub fn verify_challenge(public_key: &PublicKey, challenge: &[u8], signature: &[u
 /// Attempt to authenticate and register a new member.
 ///
 /// Returns:
-/// - `Ok(Ok(()))` — authenticated successfully; member has been registered.
+/// - `Ok(Ok(true))` — authenticated via auto-claim (first member on empty server).
+/// - `Ok(Ok(false))` — authenticated successfully via setup token or invite code.
 /// - `Ok(Err(reason))` — authentication rejected (bad token, bad invite, etc.).
 /// - `Err(e)` — unexpected database or other error.
 pub fn authenticate_new_member(
@@ -43,7 +44,7 @@ pub fn authenticate_new_member(
     invite_code: Option<&str>,
     setup_token_hex: Option<&str>,
     active_setup_token: Option<&[u8; 32]>,
-) -> Result<Result<(), String>> {
+) -> Result<Result<bool, String>> {
     if let Some(provided_hex) = setup_token_hex {
         // Setup-token path (first owner claim).
         match active_setup_token {
@@ -65,7 +66,7 @@ pub fn authenticate_new_member(
                 if let Some(eid) = everyone_id {
                     crate::members::assign_role(conn, public_key, eid)?;
                 }
-                return Ok(Ok(()));
+                return Ok(Ok(false));
             }
         }
     }
@@ -83,12 +84,28 @@ pub fn authenticate_new_member(
                 if let Some(eid) = everyone_id {
                     crate::members::assign_role(conn, public_key, eid)?;
                 }
-                return Ok(Ok(()));
+                return Ok(Ok(false));
             }
             Err(reason) => {
                 return Ok(Err(format!("invalid invite: {}", reason)));
             }
         }
+    }
+
+    // Auto-claim: if the server has zero members, the first connection becomes owner.
+    let member_count: i64 = conn
+        .query_row("SELECT count(*) FROM members", [], |row| row.get(0))?;
+    if member_count == 0 {
+        crate::members::register_member(conn, public_key, display_name)?;
+        let everyone_id: Option<u64> = conn.query_row(
+            "SELECT id FROM roles WHERE name = '@everyone' AND builtin = 1",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        ).ok();
+        if let Some(eid) = everyone_id {
+            crate::members::assign_role(conn, public_key, eid)?;
+        }
+        return Ok(Ok(true));
     }
 
     Ok(Err("no invite code or setup token provided".to_string()))
@@ -214,7 +231,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.is_ok(), "setup token claim should succeed: {:?}", result.err());
+        assert_eq!(result, Ok(false), "setup token claim should succeed with auto_claimed=false");
 
         // Member should now exist in the database.
         let member = members::get_member(&conn, &pk).unwrap();
@@ -296,7 +313,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.is_ok(), "invite join should succeed: {:?}", result.err());
+        assert_eq!(result, Ok(false), "invite join should succeed with auto_claimed=false");
 
         let member = members::get_member(&conn, &new_pk).unwrap();
         assert!(member.is_some(), "new member should be registered");
@@ -329,5 +346,65 @@ mod tests {
         let result = authenticate_existing_member(&conn, &pk).unwrap();
         assert!(result.is_err(), "banned member should be rejected");
         assert_eq!(result.unwrap_err(), "member is banned");
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-claim owner tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_auto_claim_owner_empty_server() {
+        let conn = db::open_in_memory().unwrap();
+        let keypair = Keypair::generate();
+        let pk = keypair.public_key();
+
+        // No invite, no setup token, but server is empty (0 members)
+        let member_count: i64 = conn
+            .query_row("SELECT count(*) FROM members", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(member_count, 0);
+
+        let result = authenticate_new_member(
+            &conn,
+            &pk,
+            "FirstUser",
+            None,  // no invite
+            None,  // no setup token hex
+            None,  // no active setup token
+        )
+        .unwrap();
+
+        assert_eq!(result, Ok(true), "first connection to empty server should auto-claim with auto_claimed=true");
+
+        let member = members::get_member(&conn, &pk).unwrap();
+        assert!(member.is_some(), "member should be registered");
+        assert_eq!(member.unwrap().display_name, "FirstUser");
+    }
+
+    #[test]
+    fn test_no_auto_claim_when_members_exist() {
+        let conn = db::open_in_memory().unwrap();
+
+        // Register an existing member first
+        let owner_kp = Keypair::generate();
+        let owner_pk = owner_kp.public_key();
+        members::register_member(&conn, &owner_pk, "Owner").unwrap();
+
+        // Second user tries to connect with no invite/token
+        let new_kp = Keypair::generate();
+        let new_pk = new_kp.public_key();
+
+        let result = authenticate_new_member(
+            &conn,
+            &new_pk,
+            "Intruder",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(result.is_err(), "should reject when members exist and no invite provided");
+        assert_eq!(result.unwrap_err(), "no invite code or setup token provided");
     }
 }
