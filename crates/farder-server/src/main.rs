@@ -95,8 +95,8 @@ async fn main() -> Result<()> {
         let setup_token = auth::generate_setup_token();
         let setup_hex = hex::encode(&setup_token);
         info!("=== FIRST RUN ===");
-        info!("Setup token (give to the server owner): {}", setup_hex);
-        info!("This token is single-use. The first user to connect with it becomes the Owner.");
+        info!("The first user to connect will automatically become the server owner.");
+        info!("For headless/remote setup, use this token instead: {}", setup_hex);
         *state.setup_token.lock().unwrap() = Some(setup_token);
     }
 

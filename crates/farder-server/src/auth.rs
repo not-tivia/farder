@@ -91,6 +91,22 @@ pub fn authenticate_new_member(
         }
     }
 
+    // Auto-claim: if the server has zero members, the first connection becomes owner.
+    let member_count: i64 = conn
+        .query_row("SELECT count(*) FROM members", [], |row| row.get(0))?;
+    if member_count == 0 {
+        crate::members::register_member(conn, public_key, display_name)?;
+        let everyone_id: Option<u64> = conn.query_row(
+            "SELECT id FROM roles WHERE name = '@everyone' AND builtin = 1",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        ).ok();
+        if let Some(eid) = everyone_id {
+            crate::members::assign_role(conn, public_key, eid)?;
+        }
+        return Ok(Ok(()));
+    }
+
     Ok(Err("no invite code or setup token provided".to_string()))
 }
 
@@ -329,5 +345,65 @@ mod tests {
         let result = authenticate_existing_member(&conn, &pk).unwrap();
         assert!(result.is_err(), "banned member should be rejected");
         assert_eq!(result.unwrap_err(), "member is banned");
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-claim owner tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_auto_claim_owner_empty_server() {
+        let conn = db::open_in_memory().unwrap();
+        let keypair = Keypair::generate();
+        let pk = keypair.public_key();
+
+        // No invite, no setup token, but server is empty (0 members)
+        let member_count: i64 = conn
+            .query_row("SELECT count(*) FROM members", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(member_count, 0);
+
+        let result = authenticate_new_member(
+            &conn,
+            &pk,
+            "FirstUser",
+            None,  // no invite
+            None,  // no setup token hex
+            None,  // no active setup token
+        )
+        .unwrap();
+
+        assert!(result.is_ok(), "first connection to empty server should auto-claim: {:?}", result.err());
+
+        let member = members::get_member(&conn, &pk).unwrap();
+        assert!(member.is_some(), "member should be registered");
+        assert_eq!(member.unwrap().display_name, "FirstUser");
+    }
+
+    #[test]
+    fn test_no_auto_claim_when_members_exist() {
+        let conn = db::open_in_memory().unwrap();
+
+        // Register an existing member first
+        let owner_kp = Keypair::generate();
+        let owner_pk = owner_kp.public_key();
+        members::register_member(&conn, &owner_pk, "Owner").unwrap();
+
+        // Second user tries to connect with no invite/token
+        let new_kp = Keypair::generate();
+        let new_pk = new_kp.public_key();
+
+        let result = authenticate_new_member(
+            &conn,
+            &new_pk,
+            "Intruder",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(result.is_err(), "should reject when members exist and no invite provided");
+        assert_eq!(result.unwrap_err(), "no invite code or setup token provided");
     }
 }
