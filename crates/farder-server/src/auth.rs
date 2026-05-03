@@ -33,7 +33,8 @@ pub fn verify_challenge(public_key: &PublicKey, challenge: &[u8], signature: &[u
 /// Attempt to authenticate and register a new member.
 ///
 /// Returns:
-/// - `Ok(Ok(()))` — authenticated successfully; member has been registered.
+/// - `Ok(Ok(true))` — authenticated via auto-claim (first member on empty server).
+/// - `Ok(Ok(false))` — authenticated successfully via setup token or invite code.
 /// - `Ok(Err(reason))` — authentication rejected (bad token, bad invite, etc.).
 /// - `Err(e)` — unexpected database or other error.
 pub fn authenticate_new_member(
@@ -43,7 +44,7 @@ pub fn authenticate_new_member(
     invite_code: Option<&str>,
     setup_token_hex: Option<&str>,
     active_setup_token: Option<&[u8; 32]>,
-) -> Result<Result<(), String>> {
+) -> Result<Result<bool, String>> {
     if let Some(provided_hex) = setup_token_hex {
         // Setup-token path (first owner claim).
         match active_setup_token {
@@ -65,7 +66,7 @@ pub fn authenticate_new_member(
                 if let Some(eid) = everyone_id {
                     crate::members::assign_role(conn, public_key, eid)?;
                 }
-                return Ok(Ok(()));
+                return Ok(Ok(false));
             }
         }
     }
@@ -83,7 +84,7 @@ pub fn authenticate_new_member(
                 if let Some(eid) = everyone_id {
                     crate::members::assign_role(conn, public_key, eid)?;
                 }
-                return Ok(Ok(()));
+                return Ok(Ok(false));
             }
             Err(reason) => {
                 return Ok(Err(format!("invalid invite: {}", reason)));
@@ -104,7 +105,7 @@ pub fn authenticate_new_member(
         if let Some(eid) = everyone_id {
             crate::members::assign_role(conn, public_key, eid)?;
         }
-        return Ok(Ok(()));
+        return Ok(Ok(true));
     }
 
     Ok(Err("no invite code or setup token provided".to_string()))
@@ -230,7 +231,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.is_ok(), "setup token claim should succeed: {:?}", result.err());
+        assert_eq!(result, Ok(false), "setup token claim should succeed with auto_claimed=false");
 
         // Member should now exist in the database.
         let member = members::get_member(&conn, &pk).unwrap();
@@ -312,7 +313,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.is_ok(), "invite join should succeed: {:?}", result.err());
+        assert_eq!(result, Ok(false), "invite join should succeed with auto_claimed=false");
 
         let member = members::get_member(&conn, &new_pk).unwrap();
         assert!(member.is_some(), "new member should be registered");
@@ -373,7 +374,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.is_ok(), "first connection to empty server should auto-claim: {:?}", result.err());
+        assert_eq!(result, Ok(true), "first connection to empty server should auto-claim with auto_claimed=true");
 
         let member = members::get_member(&conn, &pk).unwrap();
         assert!(member.is_some(), "member should be registered");
