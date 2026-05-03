@@ -231,6 +231,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       };
     }
     case "CHANNEL_CREATED":
+      if (state.channels.some(c => c.id === action.payload.id)) return state;
       return { ...state, channels: [...state.channels, action.payload] };
     case "CHANNEL_DELETED":
       return {
