@@ -622,3 +622,165 @@ async fn test_e2e_server_bootstrap_and_chat() {
         other => panic!("expected DmOpened (idempotent), got {:?}", other),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Auto-claim owner e2e test
+// ---------------------------------------------------------------------------
+
+/// Fallible version of read_frame that returns Err on connection loss.
+async fn try_read_frame(recv: &mut RecvStream) -> Result<Vec<u8>, String> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| format!("connection closed: {}", e))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut payload = vec![0u8; len];
+    recv.read_exact(&mut payload)
+        .await
+        .map_err(|e| format!("connection closed: {}", e))?;
+    Ok(payload)
+}
+
+/// Try to authenticate a client, returning Ok((conn, send, recv)) on success
+/// or Err(reason) if the server sends AuthError or closes the connection.
+async fn try_connect_and_auth(
+    endpoint: &Endpoint,
+    server_addr: SocketAddr,
+    keypair: &Keypair,
+    invite_code: Option<&str>,
+    setup_token: Option<&str>,
+) -> Result<(Connection, SendStream, RecvStream), String> {
+    let conn = endpoint
+        .connect(server_addr, "farder-server")
+        .unwrap()
+        .await
+        .expect("connect");
+    let (mut send, mut recv) = conn.accept_bi().await.expect("accept_bi");
+
+    // Receive Challenge
+    let frame = recv_server_frame(&mut recv).await;
+    let nonce = match frame {
+        ServerFrame::Challenge { nonce } => nonce,
+        other => panic!("expected Challenge, got {:?}", other),
+    };
+
+    // Sign and send Authenticate
+    let signature = keypair.sign(&nonce);
+    let auth_frame = ClientFrame::Authenticate {
+        public_key: keypair.public_key(),
+        signed_challenge: signature,
+        invite_code: invite_code.map(|s| s.to_string()),
+        setup_token: setup_token.map(|s| s.to_string()),
+    };
+    send_frame(&mut send, &auth_frame).await;
+
+    // Receive Authenticated or AuthError (server may close connection after AuthError)
+    let data = try_read_frame(&mut recv).await?;
+    let frame: ServerFrame = codec::decode(&data).expect("decode server frame");
+    match frame {
+        ServerFrame::Authenticated { .. } => Ok((conn, send, recv)),
+        ServerFrame::AuthError { reason } => Err(reason),
+        other => panic!("expected Authenticated or AuthError, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_auto_claim_first_connection() {
+    // Install rustls crypto provider
+    rustls::crypto::ring::default_provider().install_default().ok();
+
+    // 1. Set up server in-process with in-memory DB and NO setup token
+    let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let server_endpoint = make_server_endpoint(bind_addr);
+    let actual_addr = server_endpoint.local_addr().unwrap();
+
+    let conn = farder_server::db::open_in_memory().unwrap();
+    farder_server::members::create_role(
+        &conn,
+        "@everyone",
+        farder_server::permissions::DEFAULT_EVERYONE,
+        None,
+        0,
+        true,
+    )
+    .unwrap();
+    let templates = farder_server::templates::list_builtin_templates();
+    let blank = templates
+        .iter()
+        .find(|t| t.template.name == "Blank")
+        .unwrap();
+    farder_server::templates::apply_template(&conn, blank).unwrap();
+
+    let tmp_dir = std::env::temp_dir().join(format!("farder-e2e-autoclaim-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let state = Arc::new(farder_server::state::ServerState::new(
+        conn,
+        "Auto-Claim Test Server".to_string(),
+        tmp_dir.to_string_lossy().to_string(),
+        50 * 1024 * 1024,
+    ));
+    // No setup token is set — the server has zero members and no owner.
+
+    // Spawn server accept loop
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        loop {
+            let incoming = match server_endpoint.accept().await {
+                Some(inc) => inc,
+                None => break,
+            };
+            let state = Arc::clone(&server_state);
+            tokio::spawn(async move {
+                let conn = incoming.await.unwrap();
+                let _ = farder_server::connection::handle_connection(state, conn).await;
+            });
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let client_endpoint = make_client_endpoint();
+
+    // 2. First client connects with NO invite and NO setup token — should auto-claim
+    let owner_kp = Keypair::generate();
+    let result = try_connect_and_auth(
+        &client_endpoint,
+        actual_addr,
+        &owner_kp,
+        None,
+        None,
+    )
+    .await;
+    assert!(result.is_ok(), "first connection should succeed via auto-claim, got: {:?}", result.err());
+    let (_owner_conn, mut owner_send, mut owner_recv) = result.unwrap();
+
+    // 3. Verify the client is the owner and member_count == 1
+    send_request(&mut owner_send, 1, ServerRequest::GetServerInfo).await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    match resp {
+        ServerResponse::ServerInfo { member_count, .. } => {
+            assert_eq!(member_count, 1, "auto-claimed owner should be the only member");
+        }
+        other => panic!("expected ServerInfo, got {:?}", other),
+    }
+
+    // 4. Second client connects with NO invite and NO setup token — should be REJECTED
+    let intruder_kp = Keypair::generate();
+    let result = try_connect_and_auth(
+        &client_endpoint,
+        actual_addr,
+        &intruder_kp,
+        None,
+        None,
+    )
+    .await;
+    assert!(result.is_err(), "second connection without invite should be rejected");
+    let reason = result.unwrap_err();
+    // The server sends AuthError then closes the connection. Depending on timing,
+    // the client may receive the AuthError frame or see a connection-closed error.
+    assert!(
+        reason == "no invite code or setup token provided"
+            || reason.contains("connection closed"),
+        "unexpected rejection reason: {}",
+        reason,
+    );
+}
