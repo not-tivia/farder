@@ -1708,8 +1708,8 @@ pub async fn create_local_server(
     privacy: String,
     icon_path: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    // Spawn the sidecar
-    let (info, child) = crate::server_manager::spawn_server(&app, &name, &template, &privacy)?;
+    // Spawn the server process
+    let (info, child) = crate::server_manager::spawn_server(&name, &template, &privacy)?;
     let port = info.port;
     let address = format!("127.0.0.1:{}", port);
 
