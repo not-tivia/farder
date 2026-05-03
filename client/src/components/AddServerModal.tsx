@@ -84,7 +84,7 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
   const [serverName, setServerName] = useState("");
   const [serverIcon, setServerIcon] = useState<string | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState("blank");
-  const [privacy, setPrivacy] = useState("private");
+  const [privacy, setPrivacy] = useState("invite-only");
 
   // Join state
   const [inviteInput, setInviteInput] = useState("");
@@ -272,21 +272,21 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
                     <input
                       type="radio"
                       name="privacy"
-                      value="private"
-                      checked={privacy === "private"}
-                      onChange={() => setPrivacy("private")}
+                      value="invite-only"
+                      checked={privacy === "invite-only"}
+                      onChange={() => setPrivacy("invite-only")}
                     />
-                    Private
+                    Invite only
                   </label>
                   <label className="privacy-option">
                     <input
                       type="radio"
                       name="privacy"
-                      value="public"
-                      checked={privacy === "public"}
-                      onChange={() => setPrivacy("public")}
+                      value="open"
+                      checked={privacy === "open"}
+                      onChange={() => setPrivacy("open")}
                     />
-                    Public
+                    Open
                   </label>
                 </div>
               </div>

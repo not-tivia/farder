@@ -38,6 +38,7 @@ impl ServerProcesses {
         let mut children = self.children.lock().unwrap();
         for (_port, (_info, ref mut child)) in children.drain() {
             let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -89,13 +90,10 @@ fn find_server_binary() -> Result<PathBuf, String> {
         }
     }
 
-    // Check if farder-server is on PATH
-    if let Ok(output) = Command::new("which").arg("farder-server").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(PathBuf::from(path));
-            }
+    // Check if farder-server is on PATH (try running it directly — works cross-platform)
+    if let Ok(output) = Command::new("farder-server").arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).status() {
+        if output.success() {
+            return Ok(PathBuf::from("farder-server"));
         }
     }
 
@@ -126,8 +124,8 @@ pub fn spawn_server(
             "--db", &db_path.to_string_lossy(),
             "--storage-dir", &files_path.to_string_lossy(),
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("failed to spawn farder-server at {:?}: {}", server_bin, e))?;
 
@@ -147,6 +145,7 @@ pub fn stop_server(procs: &ServerProcesses, port: u16) -> Result<(), String> {
     let mut children = procs.children.lock().unwrap();
     if let Some((_info, ref mut child)) = children.remove(&port) {
         child.kill().map_err(|e| format!("failed to kill server: {}", e))?;
+        let _ = child.wait();
     }
     Ok(())
 }
