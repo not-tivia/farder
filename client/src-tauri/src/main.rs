@@ -5,6 +5,7 @@ mod connection;
 mod state;
 mod server_manager;
 mod tls;
+mod tray;
 
 use state::AppState;
 use std::sync::Arc;
@@ -34,6 +35,9 @@ fn main() {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     let _ = tauri::Emitter::emit(&app_handle, "deep-link", url);
                 });
+            }
+            if let Err(e) = tray::setup_tray(&app.handle()) {
+                eprintln!("Failed to setup tray: {}", e);
             }
             Ok(())
         })

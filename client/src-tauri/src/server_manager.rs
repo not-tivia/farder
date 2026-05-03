@@ -35,6 +35,13 @@ impl ServerProcesses {
     pub fn list(&self) -> Vec<ManagedServer> {
         self.children.lock().unwrap().values().map(|(info, _)| info.clone()).collect()
     }
+
+    pub fn stop_all(&self) {
+        let mut children = self.children.lock().unwrap();
+        for (_port, (_info, child)) in children.drain() {
+            let _ = child.kill();
+        }
+    }
 }
 
 /// Find an available TCP port starting from `start`.
