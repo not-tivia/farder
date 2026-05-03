@@ -106,6 +106,10 @@ fn main() {
             commands::join_voice,
             commands::leave_voice,
             commands::get_voice_state,
+            commands::create_local_server,
+            commands::stop_local_server,
+            commands::get_local_servers,
+            commands::list_templates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1693,3 +1693,187 @@ pub async fn get_voice_state(state: State<'_, Arc<AppState>>, server_id: String,
         other => Err(format!("unexpected: {:?}", other)),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Local server management commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn create_local_server(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    procs: State<'_, crate::server_manager::ServerProcesses>,
+    name: String,
+    template: String,
+    privacy: String,
+    icon_path: Option<String>,
+) -> Result<serde_json::Value, String> {
+    // Spawn the sidecar
+    let (info, child) = crate::server_manager::spawn_server(&app, &name, &template, &privacy)?;
+    let port = info.port;
+    let address = format!("127.0.0.1:{}", port);
+
+    // Register the child process
+    procs.register(info, child);
+
+    // Wait for the server to be ready (poll up to 5 seconds)
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match crate::tls::make_client_endpoint() {
+                Ok(endpoint) => {
+                    let addr: std::net::SocketAddr = address.parse().unwrap();
+                    if let Ok(connecting) = endpoint.connect(addr, "farder-server") {
+                        match connecting.await {
+                            Ok(conn) => {
+                                conn.close(0u32.into(), b"probe");
+                                return;
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+
+    if ready.is_err() {
+        // Clean up the spawned server on timeout
+        crate::server_manager::stop_server(&procs, port)?;
+        return Err("server failed to start within 5 seconds".to_string());
+    }
+
+    // Now connect and auto-claim as owner (no invite or setup token needed)
+    let keypair = {
+        let lock = state
+            .signing_key_bytes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        match lock.as_ref() {
+            Some(bytes) => Keypair::from_signing_key_bytes(bytes),
+            None => return Err("no identity keypair set — call generate_keypair first".to_string()),
+        }
+    };
+
+    let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
+    let addr: std::net::SocketAddr = address
+        .parse()
+        .map_err(|e: std::net::AddrParseError| e.to_string())?;
+
+    let (conn, send, recv, _session_token) =
+        connect_and_authenticate(endpoint.clone(), addr, &keypair, None, None)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    // Store connection
+    let server_conn = Arc::new(ServerConnection {
+        endpoint,
+        connection: conn,
+        send_stream: tokio::sync::Mutex::new(send),
+        next_request_id: AtomicU32::new(1),
+        pending_requests: Mutex::new(HashMap::new()),
+        event_reader_handle: Mutex::new(None),
+        server_name: Mutex::new(name.clone()),
+    });
+
+    let handle = bridge::spawn_event_reader(app.clone(), address.clone(), Arc::clone(&server_conn), recv);
+    *server_conn.event_reader_handle.lock().unwrap() = Some(handle);
+
+    {
+        let mut servers = state.servers.lock().unwrap();
+        servers.insert(address.clone(), Arc::clone(&server_conn));
+    }
+
+    // Save to server list
+    save_server_entry(&address, &name);
+
+    // Set server avatar if provided
+    if let Some(path) = icon_path {
+        if let Ok(data) = std::fs::read(&path) {
+            let dir = farder_data_dir().join("server_avatars");
+            let _ = std::fs::create_dir_all(&dir);
+            let safe_name = address.replace([':', '.', '/'], "_");
+            let avatar_path = dir.join(format!("{}.png", safe_name));
+            let _ = std::fs::write(&avatar_path, &data);
+        }
+    }
+
+    // Fetch server info
+    let response = bridge::send_request(
+        &state,
+        &address,
+        ServerRequest::GetServerInfo,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match response {
+        ServerResponse::ServerInfo {
+            name: srv_name,
+            member_count,
+            channels,
+            categories,
+            roles,
+        } => {
+            *server_conn.server_name.lock().unwrap() = srv_name.clone();
+            Ok(serde_json::json!({
+                "address": address,
+                "server_name": srv_name,
+                "member_count": member_count,
+                "channels": channels,
+                "categories": categories,
+                "roles": roles,
+            }))
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub fn stop_local_server(
+    procs: State<'_, crate::server_manager::ServerProcesses>,
+    port: u16,
+) -> Result<(), String> {
+    crate::server_manager::stop_server(&procs, port)
+}
+
+#[tauri::command]
+pub fn get_local_servers(
+    procs: State<'_, crate::server_manager::ServerProcesses>,
+) -> Vec<crate::server_manager::ManagedServer> {
+    procs.list()
+}
+
+#[tauri::command]
+pub fn list_templates() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "id": "blank",
+            "name": "Blank",
+            "description": "Empty server — start from scratch"
+        }),
+        serde_json::json!({
+            "id": "friend-group",
+            "name": "Friends",
+            "description": "Casual hangout for a small group of friends"
+        }),
+        serde_json::json!({
+            "id": "gaming-community",
+            "name": "Gaming",
+            "description": "Voice lobbies, LFG, and game channels"
+        }),
+        serde_json::json!({
+            "id": "organization",
+            "name": "Organization",
+            "description": "Teams, projects, and announcements"
+        }),
+        serde_json::json!({
+            "id": "public-community",
+            "name": "Community",
+            "description": "Public community with moderation tools"
+        }),
+    ]
+}
