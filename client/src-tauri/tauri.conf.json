@@ -11,5 +11,20 @@
   "app": {
     "windows": [{ "title": "Farder", "width": 1200, "height": 800 }],
     "security": { "csp": null }
+  },
+  "bundle": {
+    "externalBin": ["binaries/farder-server"]
+  },
+  "plugins": {
+    "shell": {
+      "sidecar": true,
+      "scope": [
+        {
+          "name": "binaries/farder-server",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
   }
 }

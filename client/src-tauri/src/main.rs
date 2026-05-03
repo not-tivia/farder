@@ -3,6 +3,7 @@ mod bridge;
 mod commands;
 mod connection;
 mod state;
+mod server_manager;
 mod tls;
 
 use state::AppState;
@@ -22,6 +23,8 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Arc::new(AppState::new()))
+        .manage(server_manager::ServerProcesses::new())
+        .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             if let Some(url) = deep_link_url {
                 // Emit after a short delay so the frontend has time to mount

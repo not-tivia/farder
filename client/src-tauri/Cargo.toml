@@ -23,6 +23,7 @@ sha2 = "0.10"
 rfd = "0.15"
 cpal = "0.15"
 hound = "3.5"
+tauri-plugin-shell = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
