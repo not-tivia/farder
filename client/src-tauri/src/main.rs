@@ -114,6 +114,7 @@ fn main() {
             commands::stop_local_server,
             commands::get_local_servers,
             commands::list_templates,
+            commands::restart_local_servers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

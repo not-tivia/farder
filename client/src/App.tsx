@@ -31,8 +31,17 @@ function AppInner() {
       if (!key) return; // show onboarding (ConnectDialog handles identity setup)
       dispatch({ type: "SET_IDENTITY" });
 
-      const savedServers = await api.getSavedServers();
+      // Restart any locally-managed servers first, then get the updated list
+      let savedServers: { id: string; name: string }[];
+      try {
+        savedServers = await api.restartLocalServers();
+      } catch {
+        savedServers = await api.getSavedServers();
+      }
       if (savedServers.length === 0) return; // show first-server dialog
+
+      // Wait briefly for local servers to become ready
+      await new Promise(r => setTimeout(r, 1000));
 
       // Connect to all saved servers
       for (const server of savedServers) {

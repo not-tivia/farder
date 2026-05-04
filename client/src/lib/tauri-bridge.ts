@@ -23,6 +23,10 @@ export async function getSavedServers(): Promise<{ id: string; name: string }[]>
   return invoke<{ id: string; name: string }[]>("get_saved_servers");
 }
 
+export async function restartLocalServers(): Promise<{ id: string; name: string }[]> {
+  return invoke<{ id: string; name: string }[]>("restart_local_servers");
+}
+
 // ── Identity (no serverId) ────────────────────────────────────────────────────
 
 export async function generateKeypair(): Promise<string> {

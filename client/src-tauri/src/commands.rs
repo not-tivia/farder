@@ -246,9 +246,17 @@ pub fn get_last_server() -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct LocalServerConfig {
+    pub data_dir: String,
+    pub template: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct ServerEntry {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub local: Option<LocalServerConfig>,
 }
 
 fn servers_list_path() -> std::path::PathBuf {
@@ -263,9 +271,13 @@ fn load_server_entries() -> Vec<ServerEntry> {
 }
 
 fn save_server_entry(address: &str, name: &str) {
+    save_server_entry_with_config(address, name, None);
+}
+
+fn save_server_entry_with_config(address: &str, name: &str, local: Option<LocalServerConfig>) {
     let mut entries = load_server_entries();
     if !entries.iter().any(|e| e.id == address) {
-        entries.push(ServerEntry { id: address.to_string(), name: name.to_string() });
+        entries.push(ServerEntry { id: address.to_string(), name: name.to_string(), local });
         let _ = std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap());
     }
 }
@@ -381,6 +393,7 @@ pub fn list_servers(state: State<'_, Arc<AppState>>) -> Vec<ServerEntry> {
     servers.iter().map(|(addr, conn)| ServerEntry {
         id: addr.clone(),
         name: conn.server_name.lock().unwrap().clone(),
+        local: None,
     }).collect()
 }
 
@@ -1712,6 +1725,8 @@ pub async fn create_local_server(
     let (info, child) = crate::server_manager::spawn_server(&name, &template, &privacy)?;
     let port = info.port;
     let address = format!("127.0.0.1:{}", port);
+    let local_data_dir = info.data_dir.clone();
+    let local_template = info.template.clone();
 
     // Register the child process
     procs.register(info, child);
@@ -1786,8 +1801,11 @@ pub async fn create_local_server(
         servers.insert(address.clone(), Arc::clone(&server_conn));
     }
 
-    // Save to server list
-    save_server_entry(&address, &name);
+    // Save to server list (with local config so we can respawn on relaunch)
+    save_server_entry_with_config(&address, &name, Some(LocalServerConfig {
+        data_dir: local_data_dir,
+        template: local_template,
+    }));
 
     // Set server avatar if provided
     if let Some(path) = icon_path {
@@ -1876,4 +1894,45 @@ pub fn list_templates() -> Vec<serde_json::Value> {
             "description": "Public community with moderation tools"
         }),
     ]
+}
+
+/// Restart any locally-managed servers from the saved server list.
+/// Called on app startup before connecting.
+#[tauri::command]
+pub fn restart_local_servers(
+    procs: State<'_, crate::server_manager::ServerProcesses>,
+) -> Vec<ServerEntry> {
+    let entries = load_server_entries();
+    let mut restarted = Vec::new();
+
+    for entry in &entries {
+        if let Some(ref local) = entry.local {
+            // Respawn the server using its saved data directory
+            match crate::server_manager::spawn_server_with_data_dir(
+                &entry.name,
+                &local.template,
+                &local.data_dir,
+            ) {
+                Ok((info, child)) => {
+                    let new_address = format!("127.0.0.1:{}", info.port);
+                    procs.register(info, child);
+                    restarted.push(ServerEntry {
+                        id: new_address,
+                        name: entry.name.clone(),
+                        local: entry.local.clone(),
+                    });
+                }
+                Err(e) => {
+                    eprintln!("Failed to restart local server '{}': {}", entry.name, e);
+                }
+            }
+        } else {
+            restarted.push(entry.clone());
+        }
+    }
+
+    // Update the saved entries with new addresses (ports may differ)
+    let _ = std::fs::write(servers_list_path(), serde_json::to_string(&restarted).unwrap());
+
+    restarted
 }

@@ -140,6 +140,45 @@ pub fn spawn_server(
     Ok((info, child))
 }
 
+/// Spawn a server using an existing data directory (for restarting on app relaunch).
+pub fn spawn_server_with_data_dir(
+    name: &str,
+    template: &str,
+    data_dir: &str,
+) -> Result<(ManagedServer, Child), String> {
+    let port = find_available_port(4435)
+        .ok_or_else(|| "no available port found (tried 4435-4534)".to_string())?;
+
+    let data_path = PathBuf::from(data_dir);
+    let db_path = data_path.join("server.db");
+    let files_path = data_path.join("files");
+    let bind_addr = format!("0.0.0.0:{}", port);
+    let server_bin = find_server_binary()?;
+
+    let child = Command::new(&server_bin)
+        .args([
+            "--bind", &bind_addr,
+            "--name", name,
+            "--template", template,
+            "--db", &db_path.to_string_lossy(),
+            "--storage-dir", &files_path.to_string_lossy(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("failed to spawn farder-server at {:?}: {}", server_bin, e))?;
+
+    let info = ManagedServer {
+        name: name.to_string(),
+        port,
+        data_dir: data_dir.to_string(),
+        template: template.to_string(),
+        privacy: "invite-only".to_string(),
+    };
+
+    Ok((info, child))
+}
+
 /// Stop a locally-managed server by port.
 pub fn stop_server(procs: &ServerProcesses, port: u16) -> Result<(), String> {
     let mut children = procs.children.lock().unwrap();
