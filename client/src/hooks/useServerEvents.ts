@@ -6,9 +6,11 @@ import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs } from "../lib/tauri-bridge";
 
-// Module-level cache for notification prefs
+// Module-level cache for notification prefs and own public key
 let notifPrefs: NotificationPrefs | null = null;
 api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
+let cachedOwnPk: string | null = null;
+api.getPublicKey().then(pk => { cachedOwnPk = pk; }).catch(() => {});
 
 function checkMentionsOrKeywords(content: string, prefs: NotificationPrefs): boolean {
   if (prefs.keywords.length > 0) {
@@ -53,7 +55,7 @@ interface ReactionAddedPayload {
   channel_id: number;
   message_id: number;
   emoji: string;
-  me: boolean;
+  public_key: string;
 }
 
 interface ReactionRemovedPayload {
@@ -166,6 +168,7 @@ export function useServerEvents(): void {
       const data = e.payload as ReactionAddedPayload;
       const serverId = data.server_id;
       if (serverId !== activeRef.current) return;
+      const isMe = cachedOwnPk != null && data.public_key === cachedOwnPk;
       dispatch({
         type: "REACTION_ADDED",
         serverId,
@@ -173,7 +176,7 @@ export function useServerEvents(): void {
           channelId: data.channel_id,
           messageId: data.message_id,
           emoji: data.emoji,
-          me: data.me,
+          me: isMe,
         },
       });
     }).then((u) => unlisten.push(u));

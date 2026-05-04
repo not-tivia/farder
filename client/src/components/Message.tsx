@@ -292,6 +292,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
               navigator.clipboard.writeText(message.content);
               setContextMenu(null);
             }}>Copy Text</div>
+            {!message.thread_id && (
+              <div className="context-menu-item" onClick={async () => {
+                try { await api.createThread(serverId, message.id); } catch {}
+                setContextMenu(null);
+              }}>Create Thread</div>
+            )}
             {isOwnMessage && (
               <div className="context-menu-item delete" onClick={async () => {
                 try { await api.deleteMessage(serverId, message.id); } catch {}
