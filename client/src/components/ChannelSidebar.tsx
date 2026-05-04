@@ -9,6 +9,7 @@ import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
+import AppearanceSettings from "./AppearanceSettings";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
   const serverId = useActiveServerId();
@@ -16,6 +17,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
   const [ownPk, setOwnPk] = useState<string | null>(null);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
   const [showNotifSettings, setShowNotifSettings] = useState(false);
+  const [showAppearance, setShowAppearance] = useState(false);
 
   useEffect(() => {
     api.getDisplayName().then((n) => setName(n)).catch(() => {});
@@ -36,6 +38,12 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
         </span>
         <button
           className="server-invite-btn"
+          onClick={() => setShowAppearance(true)}
+          title="Appearance"
+          style={{ fontSize: 10, marginRight: 4 }}
+        >⚙</button>
+        <button
+          className="server-invite-btn"
           onClick={() => setShowNotifSettings(true)}
           title="Notification Settings"
           style={{ fontSize: 10 }}
@@ -52,6 +60,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
         />
       )}
       {showNotifSettings && <NotificationSettings onClose={() => setShowNotifSettings(false)} />}
+      {showAppearance && <AppearanceSettings onClose={() => setShowAppearance(false)} />}
     </>
   );
 }
