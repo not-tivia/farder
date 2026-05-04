@@ -1915,6 +1915,7 @@ pub fn restart_local_servers(
             ) {
                 Ok((info, child)) => {
                     let new_address = format!("127.0.0.1:{}", info.port);
+                    eprintln!("[restart] Respawned '{}' on {}", entry.name, new_address);
                     procs.register(info, child);
                     restarted.push(ServerEntry {
                         id: new_address,

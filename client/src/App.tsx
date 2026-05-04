@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AppProvider, useApp } from "./context/ServerContext";
 import { useServerEvents } from "./hooks/useServerEvents";
@@ -8,10 +8,10 @@ import * as api from "./lib/tauri-bridge";
 
 function AppInner() {
   const { state, dispatch } = useApp();
+  const [initializing, setInitializing] = useState(true);
   useServerEvents();
 
   // Handle farder:// deep links passed via CLI argument at launch.
-  // URL format: farder://<host:port>/<invite_code>
   useEffect(() => {
     const unlisten = listen<string>("deep-link", (e) => {
       const url = e.payload;
@@ -19,7 +19,6 @@ function AppInner() {
       if (!match) return;
       const address = match[1];
       const inviteCode = match[2];
-      // TODO: pre-fill connect dialog with the invite details
       console.log("[deep-link] invite:", address, inviteCode);
     });
     return () => { unlisten.then((u) => u()); };
@@ -28,7 +27,7 @@ function AppInner() {
   useEffect(() => {
     async function init() {
       const key = await api.loadIdentity();
-      if (!key) return; // show onboarding (ConnectDialog handles identity setup)
+      if (!key) { setInitializing(false); return; }
       dispatch({ type: "SET_IDENTITY" });
 
       // Restart any locally-managed servers first, then get the updated list
@@ -38,18 +37,18 @@ function AppInner() {
       } catch {
         savedServers = await api.getSavedServers();
       }
-      if (savedServers.length === 0) return; // show first-server dialog
+      if (savedServers.length === 0) { setInitializing(false); return; }
 
-      // Wait briefly for local servers to become ready
-      await new Promise(r => setTimeout(r, 1000));
+      // Wait for local servers to become ready
+      await new Promise(r => setTimeout(r, 2000));
 
       // Connect to all saved servers
       for (const server of savedServers) {
         try {
           const result = await api.connectServer(server.id);
           dispatch({ type: "SERVER_ADDED", serverId: server.id, payload: result });
-        } catch {
-          // Skip failed servers
+        } catch (e) {
+          console.error(`[init] failed to connect to ${server.name} (${server.id}):`, e);
         }
       }
 
@@ -64,9 +63,25 @@ function AppInner() {
           dispatch({ type: "SET_DMS", serverId: firstId, payload: dms });
         } catch {}
       }
+
+      setInitializing(false);
     }
-    init().catch(() => {});
+    init().catch(() => setInitializing(false));
   }, []);
+
+  // Still loading — show nothing (or a splash screen later)
+  if (initializing) {
+    return (
+      <div className="connect-screen">
+        <div className="connect-dialog">
+          <div className="connect-dialog-titlebar">Farder</div>
+          <div className="connect-dialog-body" style={{ textAlign: "center", padding: 32 }}>
+            Connecting...
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Show onboarding if no identity yet
   if (!state.hasIdentity) {
