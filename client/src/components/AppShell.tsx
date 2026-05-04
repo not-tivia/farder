@@ -50,7 +50,8 @@ export default function AppShell() {
             await api.subscribeChannels(serverId, [activeServer.currentChannelId]);
           }
           break;
-        } catch {
+        } catch (e) {
+          console.error(`[reconnect] ${serverId}:`, e);
           await new Promise((r) => setTimeout(r, 3000));
         }
       }

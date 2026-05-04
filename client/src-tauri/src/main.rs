@@ -9,6 +9,7 @@ mod tray;
 
 use state::AppState;
 use std::sync::Arc;
+use tauri::Manager;
 
 fn main() {
     rustls::crypto::ring::default_provider()
@@ -116,6 +117,14 @@ fn main() {
             commands::list_templates,
             commands::restart_local_servers,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Kill all locally-spawned farder-server children when the app exits,
+            // so they don't pile up across sessions.
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                let procs = app_handle.state::<server_manager::ServerProcesses>();
+                procs.stop_all();
+            }
+        });
 }

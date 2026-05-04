@@ -505,6 +505,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 
     // Step 6: Register client in state.clients
     let (event_tx, event_rx) = mpsc::channel::<ServerEvent>(64);
+    let our_event_tx = event_tx.clone();
     {
         let mut clients = state.clients.write().await;
         clients.insert(pk_bytes, event_tx);
@@ -579,10 +580,19 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     // Abort the stream acceptor on disconnect
     stream_acceptor.abort();
 
-    // Step 11: Cleanup on disconnect
+    // Step 11: Cleanup on disconnect.
+    // Only remove from the clients map if WE'RE still the registered sender —
+    // otherwise a newer connection from the same identity has taken over and
+    // we'd evict its entry, killing the live session.
     {
         let mut clients = state.clients.write().await;
-        clients.remove(&pk_bytes);
+        let still_ours = clients
+            .get(&pk_bytes)
+            .map(|existing| existing.same_channel(&our_event_tx))
+            .unwrap_or(false);
+        if still_ours {
+            clients.remove(&pk_bytes);
+        }
     }
     {
         let mut subs = state.subscriptions.write().await;

@@ -6,6 +6,12 @@ import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
 import * as api from "./lib/tauri-bridge";
 
+// Module-level guard: React StrictMode in dev mounts the root twice, which
+// would otherwise run init() twice — spawning duplicate local servers and
+// opening two QUIC sessions per identity (and causing the server to tear
+// itself down via a races on its `clients` map).
+let initStarted = false;
+
 function AppInner() {
   const { state, dispatch } = useApp();
   const [initializing, setInitializing] = useState(true);
@@ -25,6 +31,8 @@ function AppInner() {
   }, [dispatch]);
 
   useEffect(() => {
+    if (initStarted) return;
+    initStarted = true;
     async function init() {
       const key = await api.loadIdentity();
       if (!key) { setInitializing(false); return; }
