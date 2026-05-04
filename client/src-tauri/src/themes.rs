@@ -131,6 +131,27 @@ fn sanitize_theme_id(input: &str) -> Result<String, String> {
     Ok(trimmed)
 }
 
+/// Returns true iff the given id is one of the BUILTIN_THEMES (resolved by parsing
+/// each builtin's embedded meta_json).
+fn is_builtin_theme_id(id: &str) -> bool {
+    BUILTIN_THEMES
+        .iter()
+        .filter_map(|b| parse_meta(b.meta_json, "builtin"))
+        .any(|m| m.id == id)
+}
+
+/// Returns the directory for a user theme, refusing if the id resolves to a built-in.
+fn user_theme_dir(id: &str) -> Result<std::path::PathBuf, String> {
+    if is_builtin_theme_id(id) {
+        return Err(format!("'{}' is a built-in theme and cannot be modified", id));
+    }
+    let dir = user_themes_dir().join(id);
+    if !dir.exists() {
+        return Err(format!("user theme not found: {}", id));
+    }
+    Ok(dir)
+}
+
 #[tauri::command]
 pub fn list_themes() -> Vec<ThemeMeta> {
     all_themes().into_iter().map(|(m, _)| m).collect()
@@ -208,6 +229,62 @@ pub fn fork_theme(base_id: String, new_id: String, name: String) -> Result<Strin
     .map_err(|e| format!("write theme.json failed: {}", e))?;
 
     Ok(safe_new_id)
+}
+
+const MAX_ASSET_BYTES: u64 = 25 * 1024 * 1024; // 25 MB hard cap
+
+#[tauri::command]
+pub fn save_user_theme(id: String, css: String) -> Result<(), String> {
+    let dir = user_theme_dir(&id)?;
+    std::fs::write(dir.join("theme.css"), css)
+        .map_err(|e| format!("write theme.css failed: {}", e))
+}
+
+#[tauri::command]
+pub fn add_theme_asset(
+    theme_id: String,
+    source_path: String,
+    target_filename: String,
+) -> Result<String, String> {
+    let dir = user_theme_dir(&theme_id)?;
+    let assets = dir.join("assets");
+    std::fs::create_dir_all(&assets).map_err(|e| format!("create assets dir failed: {}", e))?;
+
+    let src = std::path::Path::new(&source_path);
+    let metadata = std::fs::metadata(src).map_err(|e| format!("source not readable: {}", e))?;
+    if metadata.len() > MAX_ASSET_BYTES {
+        return Err(format!(
+            "image too large ({} bytes > {} limit)",
+            metadata.len(),
+            MAX_ASSET_BYTES
+        ));
+    }
+
+    // Sanitize the target filename so callers can't escape the assets dir.
+    let safe_name: String = target_filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe_name.is_empty() || safe_name == "." || safe_name == ".." {
+        return Err("invalid target filename".to_string());
+    }
+
+    let target = assets.join(&safe_name);
+    std::fs::copy(src, &target).map_err(|e| format!("copy failed: {}", e))?;
+
+    Ok(format!("./assets/{}", safe_name))
+}
+
+#[tauri::command]
+pub fn delete_user_theme(id: String) -> Result<(), String> {
+    let dir = user_theme_dir(&id)?;
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("remove failed: {}", e))
 }
 
 #[tauri::command]
@@ -371,6 +448,93 @@ mod tests {
         let result = fork_theme("nonexistent".to_string(), "x".to_string(), "X".to_string());
         assert!(result.is_err());
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn fresh_tmp_data_dir() -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "farder-customizer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("FARDER_DATA", &tmp);
+        tmp
+    }
+
+    #[test]
+    fn save_user_theme_writes_css_to_disk() {
+        let tmp = fresh_tmp_data_dir();
+        let id = fork_theme("xp-luna-blue".into(), "save-test".into(), "Save Test".into()).unwrap();
+        save_user_theme(id.clone(), "/* hello */".to_string()).unwrap();
+
+        let written = std::fs::read_to_string(tmp.join("themes").join(&id).join("theme.css")).unwrap();
+        assert_eq!(written, "/* hello */");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn save_user_theme_refuses_builtin() {
+        let tmp = fresh_tmp_data_dir();
+        let result = save_user_theme("xp-luna-blue".to_string(), "/* x */".to_string());
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn add_theme_asset_copies_file() {
+        let tmp = fresh_tmp_data_dir();
+        let id = fork_theme("xp-luna-blue".into(), "asset-test".into(), "Asset Test".into()).unwrap();
+
+        let source = tmp.join("source.png");
+        std::fs::write(&source, b"fake png bytes").unwrap();
+
+        let rel = add_theme_asset(id.clone(), source.to_string_lossy().to_string(), "dog.png".to_string()).unwrap();
+        assert_eq!(rel, "./assets/dog.png");
+
+        let copied = tmp.join("themes").join(&id).join("assets").join("dog.png");
+        assert!(copied.exists());
+        assert_eq!(std::fs::read(&copied).unwrap(), b"fake png bytes");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn add_theme_asset_sanitizes_target_filename() {
+        let tmp = fresh_tmp_data_dir();
+        let id = fork_theme("xp-luna-blue".into(), "asset-san".into(), "Asset San".into()).unwrap();
+        let source = tmp.join("source.png");
+        std::fs::write(&source, b"x").unwrap();
+
+        let rel = add_theme_asset(id.clone(), source.to_string_lossy().into(), "../../etc/passwd".into()).unwrap();
+        // '.' is kept (valid in filenames), '/' maps to '_'
+        assert_eq!(rel, "./assets/.._.._etc_passwd");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn delete_user_theme_removes_folder() {
+        let tmp = fresh_tmp_data_dir();
+        let id = fork_theme("xp-luna-blue".into(), "del-test".into(), "Del Test".into()).unwrap();
+
+        let dir = tmp.join("themes").join(&id);
+        assert!(dir.exists());
+
+        delete_user_theme(id.clone()).unwrap();
+        assert!(!dir.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn delete_user_theme_refuses_builtin() {
+        let tmp = fresh_tmp_data_dir();
+        let result = delete_user_theme("xp-luna-blue".to_string());
+        assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
