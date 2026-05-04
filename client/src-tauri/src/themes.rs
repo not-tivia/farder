@@ -5,16 +5,14 @@ const DEFAULT_THEME_ID: &str = "xp-luna-blue";
 
 // Built-in themes: CSS + metadata embedded at compile time.
 // Add a new built-in by creating client/src/themes/<id>/{theme.css,theme.json}
-// and adding an entry to BUILTIN_THEMES below.
+// and adding an entry to BUILTIN_THEMES below. The id comes from theme.json.
 struct BuiltinTheme {
-    id: &'static str,
     css: &'static str,
     meta_json: &'static str,
 }
 
 const BUILTIN_THEMES: &[BuiltinTheme] = &[
     BuiltinTheme {
-        id: "xp-luna-blue",
         css: include_str!("../../src/themes/xp-luna-blue/theme.css"),
         meta_json: include_str!("../../src/themes/xp-luna-blue/theme.json"),
     },
@@ -150,9 +148,13 @@ pub fn set_active_theme(id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_themes_folder(app: tauri::AppHandle) -> Result<(), String> {
+    // TODO: migrate to tauri-plugin-opener when we add it as a dep — Shell::open
+    // is deprecated in tauri-plugin-shell v2 in favor of the dedicated opener plugin.
+    #[allow(deprecated)]
     use tauri_plugin_shell::ShellExt;
     ensure_user_themes_dir();
     let path = user_themes_dir();
+    #[allow(deprecated)]
     app.shell()
         .open(path.to_string_lossy().to_string(), None)
         .map_err(|e| e.to_string())
