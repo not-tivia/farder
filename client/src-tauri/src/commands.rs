@@ -226,19 +226,37 @@ pub fn get_server_avatar(server_id: String) -> Option<String> {
 // Settings commands
 // ---------------------------------------------------------------------------
 
+fn read_settings() -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_settings(map: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let value = serde_json::Value::Object(map);
+    std::fs::write(settings_path(), value.to_string()).map_err(|e| e.to_string())
+}
+
+pub(crate) fn settings_get(key: &str) -> Option<serde_json::Value> {
+    read_settings().get(key).cloned()
+}
+
+pub(crate) fn settings_set(key: &str, value: serde_json::Value) -> Result<(), String> {
+    let mut map = read_settings();
+    map.insert(key.to_string(), value);
+    write_settings(map)
+}
+
 #[tauri::command]
 pub fn save_last_server(address: String) -> Result<(), String> {
-    let path = settings_path();
-    let json = serde_json::json!({ "address": address });
-    std::fs::write(&path, json.to_string()).map_err(|e| e.to_string())
+    settings_set("address", serde_json::Value::String(address))
 }
 
 #[tauri::command]
 pub fn get_last_server() -> Option<String> {
-    let path = settings_path();
-    let data = std::fs::read_to_string(&path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-    v["address"].as_str().map(|s| s.to_string())
+    settings_get("address").and_then(|v| v.as_str().map(|s| s.to_string()))
 }
 
 // ---------------------------------------------------------------------------
