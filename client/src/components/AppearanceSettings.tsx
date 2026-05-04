@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
+import CustomizeModal from "./CustomizeModal";
 
 interface Props {
   onClose: () => void;
@@ -53,6 +54,7 @@ export default function AppearanceSettings({ onClose }: Props) {
   const [swatchByCss, setSwatchByCss] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [customizing, setCustomizing] = useState<{ themeId: string; name: string } | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -93,6 +95,22 @@ export default function AppearanceSettings({ onClose }: Props) {
       setActiveId(id);
     } catch (e) {
       console.error("[appearance] failed to switch theme:", e);
+      setError(String(e));
+    }
+  }
+
+  async function startCustomizing(base: api.ThemeMeta): Promise<void> {
+    const proposedName = window.prompt(
+      `Customize a copy of "${base.name}". Name it:`,
+      `${base.name} (Custom)`,
+    );
+    if (!proposedName) return;
+    try {
+      const newId = await api.forkTheme(base.id, proposedName.toLowerCase().replace(/\s+/g, "-"), proposedName);
+      // Refresh the picker list so the new theme appears, then open the customizer on it.
+      await refresh();
+      setCustomizing({ themeId: newId, name: proposedName });
+    } catch (e) {
       setError(String(e));
     }
   }
@@ -229,6 +247,22 @@ export default function AppearanceSettings({ onClose }: Props) {
                           />
                         ))}
                       </div>
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => { e.stopPropagation(); void startCustomizing(t); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void startCustomizing(t); } }}
+                        style={{
+                          marginTop: 8,
+                          fontSize: 10,
+                          color: "var(--xp-blue, #0058E6)",
+                          textDecoration: "underline",
+                          cursor: "pointer",
+                          alignSelf: "flex-start",
+                        }}
+                      >
+                        Customize…
+                      </div>
                     </button>
                   );
                 })}
@@ -273,6 +307,14 @@ export default function AppearanceSettings({ onClose }: Props) {
           )}
         </div>
       </div>
+      {customizing && (
+        <CustomizeModal
+          themeId={customizing.themeId}
+          initialName={customizing.name}
+          onClose={() => { setCustomizing(null); refresh(); }}
+          onSaved={() => { refresh(); }}
+        />
+      )}
     </div>
   );
 }
