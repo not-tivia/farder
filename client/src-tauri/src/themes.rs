@@ -159,3 +159,32 @@ pub fn open_themes_folder(app: tauri::AppHandle) -> Result<(), String> {
         .open(path.to_string_lossy().to_string(), None)
         .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_meta_accepts_valid_json() {
+        let raw = r#"{"id":"x","name":"X","author":"A","description":"D"}"#;
+        let meta = parse_meta(raw, "builtin").expect("should parse");
+        assert_eq!(meta.id, "x");
+        assert_eq!(meta.name, "X");
+        assert_eq!(meta.source, "builtin");
+    }
+
+    #[test]
+    fn parse_meta_rejects_invalid_json() {
+        assert!(parse_meta("not json", "user").is_none());
+        assert!(parse_meta(r#"{"id":"x"}"#, "user").is_none()); // missing fields
+    }
+
+    #[test]
+    fn builtin_xp_luna_blue_is_registered() {
+        let themes = list_themes();
+        assert!(
+            themes.iter().any(|t| t.id == "xp-luna-blue"),
+            "xp-luna-blue must be in the built-in registry"
+        );
+    }
+}
