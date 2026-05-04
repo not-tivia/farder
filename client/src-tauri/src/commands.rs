@@ -1956,3 +1956,8 @@ pub fn restart_local_servers(
 
     restarted
 }
+
+// Public re-export so other modules can resolve paths under ~/.farder/.
+pub(crate) fn farder_data_dir_pub() -> std::path::PathBuf {
+    farder_data_dir()
+}

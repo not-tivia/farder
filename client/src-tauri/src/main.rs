@@ -4,6 +4,7 @@ mod commands;
 mod connection;
 mod state;
 mod server_manager;
+mod themes;
 mod tls;
 mod tray;
 
@@ -116,6 +117,11 @@ fn main() {
             commands::get_local_servers,
             commands::list_templates,
             commands::restart_local_servers,
+            themes::list_themes,
+            themes::load_theme_css,
+            themes::get_active_theme,
+            themes::set_active_theme,
+            themes::open_themes_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
