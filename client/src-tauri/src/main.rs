@@ -123,6 +123,9 @@ fn main() {
             themes::set_active_theme,
             themes::fork_theme,
             themes::open_themes_folder,
+            themes::save_user_theme,
+            themes::add_theme_asset,
+            themes::delete_user_theme,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
