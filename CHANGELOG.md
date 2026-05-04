@@ -12,6 +12,7 @@ All notable changes to this project — bug fixes, features, and learnings.
 - (2026-05-03) Reaction 'me' flag was always undefined — bridge sends public_key not 'me' bool. Fixed by comparing event's public_key against own key in the event listener.
 
 ### Added
+- (2026-05-04) User-loadable CSS themes: ships with three built-ins (Windows XP — Luna Blue, Discord Modern Dark, Hello Kitty Pink) plus a `~/.farder/themes/<id>/` folder for user-authored themes (each is `theme.css` + `theme.json`). Switching is hot — no restart, no flash; CSS injected pre-mount via a `<style id="active-theme">` element. Picker lives under the new ⚙ button in the user footer, with swatch-strip previews, "Open themes folder" (cross-platform: explorer.exe via wslpath on WSL, xdg-open on Linux, open on macOS, explorer on Windows), and a Refresh button. User themes win on id collision so authors can override built-ins by dropping a folder of the same name.
 - (2026-05-03) "Create Thread" option in message right-click context menu
 
 ### Added
