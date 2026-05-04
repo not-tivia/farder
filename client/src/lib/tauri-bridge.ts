@@ -406,3 +406,40 @@ export async function getLocalServers(): Promise<ManagedServer[]> {
 export async function listTemplates(): Promise<TemplateInfo[]> {
   return invoke("list_templates");
 }
+
+// ---------------------------------------------------------------------------
+// Themes
+// ---------------------------------------------------------------------------
+
+export interface ThemeMeta {
+  id: string;
+  name: string;
+  author: string;
+  description: string;
+  source: "builtin" | "user";
+}
+
+export interface ActiveTheme {
+  id: string;
+  css: string;
+}
+
+export async function listThemes(): Promise<ThemeMeta[]> {
+  return invoke<ThemeMeta[]>("list_themes");
+}
+
+export async function loadThemeCss(id: string): Promise<string> {
+  return invoke<string>("load_theme_css", { id });
+}
+
+export async function getActiveTheme(): Promise<ActiveTheme> {
+  return invoke<ActiveTheme>("get_active_theme");
+}
+
+export async function setActiveTheme(id: string): Promise<void> {
+  return invoke<void>("set_active_theme", { id });
+}
+
+export async function openThemesFolder(): Promise<void> {
+  return invoke<void>("open_themes_folder");
+}
