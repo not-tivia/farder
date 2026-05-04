@@ -20,6 +20,10 @@ const BUILTIN_THEMES: &[BuiltinTheme] = &[
         css: include_str!("../../src/themes/discord-dark/theme.css"),
         meta_json: include_str!("../../src/themes/discord-dark/theme.json"),
     },
+    BuiltinTheme {
+        css: include_str!("../../src/themes/hello-kitty/theme.css"),
+        meta_json: include_str!("../../src/themes/hello-kitty/theme.json"),
+    },
 ];
 
 #[derive(Serialize, Deserialize, Clone)]
