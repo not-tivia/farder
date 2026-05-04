@@ -147,17 +147,72 @@ pub fn set_active_theme(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn open_themes_folder(app: tauri::AppHandle) -> Result<(), String> {
-    // TODO: migrate to tauri-plugin-opener when we add it as a dep — Shell::open
-    // is deprecated in tauri-plugin-shell v2 in favor of the dedicated opener plugin.
-    #[allow(deprecated)]
-    use tauri_plugin_shell::ShellExt;
+pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
+    use std::process::Command;
     ensure_user_themes_dir();
     let path = user_themes_dir();
-    #[allow(deprecated)]
-    app.shell()
-        .open(path.to_string_lossy().to_string(), None)
-        .map_err(|e| e.to_string())
+
+    // Spawn the platform's native file-browser opener. We avoid
+    // tauri-plugin-shell::Shell::open both because it's deprecated and
+    // because on WSL it'd try to invoke xdg-open, which usually isn't
+    // installed — silently failing.
+    #[cfg(target_os = "linux")]
+    {
+        if is_wsl() {
+            // WSL: use Windows Explorer with the \\wsl.localhost\... path it understands.
+            let win_path = wsl_to_windows_path(&path)?;
+            // explorer.exe returns exit code 1 even on success; spawn-and-forget.
+            return Command::new("explorer.exe")
+                .arg(win_path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("explorer.exe failed: {}", e));
+        }
+        return Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("xdg-open failed: {}", e));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("open failed: {}", e));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("explorer failed: {}", e));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    std::fs::read_to_string("/proc/version")
+        .map(|s| s.to_lowercase().contains("microsoft"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn wsl_to_windows_path(path: &std::path::Path) -> Result<String, String> {
+    let output = std::process::Command::new("wslpath")
+        .arg("-w")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("wslpath failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "wslpath returned non-zero: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

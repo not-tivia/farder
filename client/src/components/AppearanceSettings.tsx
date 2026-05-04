@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 
 interface Props {
@@ -23,6 +23,32 @@ function extractSwatch(css: string): string[] {
   return colors;
 }
 
+const chromeButton: CSSProperties = {
+  padding: "3px 12px",
+  background: "linear-gradient(to bottom, #fefdf8 0%, #f0ece0 40%, #dbd7c7 100%)",
+  border: "1px solid #888",
+  borderTopColor: "#fff",
+  borderLeftColor: "#fff",
+  borderRadius: 3,
+  color: "#000",
+  font: "inherit",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+const closeButton: CSSProperties = {
+  background: "linear-gradient(to bottom, #ee5a5a 0%, #c83030 100%)",
+  color: "#fff",
+  border: "1px solid #fff",
+  borderRadius: 3,
+  width: 22,
+  height: 18,
+  lineHeight: "16px",
+  padding: 0,
+  fontWeight: "bold",
+  cursor: "pointer",
+};
+
 export default function AppearanceSettings({ onClose }: Props) {
   const [themes, setThemes] = useState<api.ThemeMeta[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -38,7 +64,6 @@ export default function AppearanceSettings({ onClose }: Props) {
       setThemes(list);
       const active = await api.getActiveTheme();
       setActiveId(active.id);
-      // Load CSS for each to compute swatches. Cheap — already in memory on Rust side.
       const swatches: Record<string, string[]> = {};
       for (const t of list) {
         try {
@@ -94,47 +119,73 @@ export default function AppearanceSettings({ onClose }: Props) {
           background: "var(--xp-window-bg, #ECE9D8)",
           color: "#000",
           border: "2px solid var(--xp-blue-dark, #003C74)",
-          borderRadius: 6,
-          width: 560,
-          maxHeight: "80vh",
+          borderRadius: "6px 6px 0 0",
+          width: 720,
+          maxWidth: "92vw",
+          maxHeight: "82vh",
+          minHeight: 320,
           display: "flex",
           flexDirection: "column",
           fontFamily: "var(--xp-font, Tahoma, sans-serif)",
           fontSize: "var(--xp-font-size, 11px)",
+          boxShadow: "3px 3px 16px rgba(0,0,0,0.45)",
+          overflow: "hidden",
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Title bar */}
         <div
           style={{
-            background: "linear-gradient(to right, var(--xp-blue, #0058E6), var(--xp-blue-light, #3389FF))",
+            background:
+              "linear-gradient(to bottom, var(--xp-blue, #0058E6) 0%, var(--xp-blue-light, #3389FF) 100%)",
             color: "#fff",
-            padding: "4px 8px",
+            padding: "4px 6px 4px 10px",
             fontWeight: "bold",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            flexShrink: 0,
           }}
         >
           <span>Appearance</span>
-          <button
-            onClick={onClose}
-            style={{ background: "transparent", color: "#fff", border: "1px solid #fff", padding: "0 6px", cursor: "pointer" }}
-            title="Close"
-          >
+          <button onClick={onClose} style={closeButton} title="Close">
             ✕
           </button>
         </div>
 
-        <div style={{ padding: 12, overflow: "auto", flex: 1 }}>
+        {/* Body */}
+        <div
+          style={{
+            padding: 16,
+            overflowY: "auto",
+            overflowX: "hidden",
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+          }}
+        >
           {loading && <div>Loading themes…</div>}
-          {error && <div style={{ color: "#a00" }}>Error: {error}</div>}
-          {!loading && !error && (
+          {error && (
+            <div
+              style={{
+                color: "#a00",
+                background: "#fff5f5",
+                border: "1px solid #f3b8b8",
+                padding: 8,
+                borderRadius: 3,
+              }}
+            >
+              {error}
+            </div>
+          )}
+          {!loading && (
             <>
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-                  gap: 10,
+                  gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))",
+                  gap: 12,
                 }}
               >
                 {themes.map((t) => {
@@ -146,27 +197,34 @@ export default function AppearanceSettings({ onClose }: Props) {
                       onClick={() => selectTheme(t.id)}
                       style={{
                         textAlign: "left",
-                        padding: 10,
-                        border: isActive ? "2px solid var(--xp-blue, #0058E6)" : "1px solid #aca899",
+                        padding: 12,
+                        border: isActive
+                          ? "2px solid var(--xp-blue, #0058E6)"
+                          : "1px solid #aca899",
                         background: "#fff",
                         cursor: "pointer",
                         display: "flex",
                         flexDirection: "column",
                         gap: 6,
+                        font: "inherit",
+                        color: "#000",
+                        boxShadow: isActive ? "0 0 0 1px var(--xp-blue, #0058E6) inset" : "none",
                       }}
                     >
-                      <div style={{ fontWeight: "bold" }}>{t.name}</div>
-                      <div style={{ fontSize: 10, color: "#555" }}>
+                      <div style={{ fontWeight: "bold", fontSize: 12 }}>{t.name}</div>
+                      <div style={{ fontSize: 10, color: "#666" }}>
                         {t.author} · {t.source}
                       </div>
-                      <div style={{ fontSize: 10, color: "#555" }}>{t.description}</div>
-                      <div style={{ display: "flex", gap: 2, marginTop: 4 }}>
+                      <div style={{ fontSize: 10, color: "#555", lineHeight: 1.35, minHeight: 26 }}>
+                        {t.description}
+                      </div>
+                      <div style={{ display: "flex", gap: 2, marginTop: 2 }}>
                         {swatch.map((c, i) => (
                           <div
                             key={i}
                             style={{
-                              width: 24,
-                              height: 16,
+                              width: 28,
+                              height: 18,
                               background: c,
                               border: "1px solid #888",
                             }}
@@ -178,22 +236,38 @@ export default function AppearanceSettings({ onClose }: Props) {
                 })}
               </div>
 
+              {/* Footer actions */}
               <div
                 style={{
-                  marginTop: 14,
+                  marginTop: "auto",
+                  paddingTop: 10,
+                  borderTop: "1px solid #c8c4b4",
                   display: "flex",
                   gap: 8,
                   alignItems: "center",
                   flexWrap: "wrap",
                 }}
               >
-                <button onClick={() => api.openThemesFolder().catch((e) => setError(String(e)))}>
+                <button
+                  style={chromeButton}
+                  onClick={() =>
+                    api.openThemesFolder().catch((e) => setError(String(e)))
+                  }
+                >
                   Open themes folder
                 </button>
-                <button onClick={refresh} title="Re-scan ~/.farder/themes/">
+                <button style={chromeButton} onClick={refresh} title="Re-scan ~/.farder/themes/">
                   Refresh
                 </button>
-                <span style={{ fontSize: 10, color: "#666", flex: 1, minWidth: 200 }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: "#666",
+                    flex: 1,
+                    minWidth: 220,
+                    lineHeight: 1.4,
+                  }}
+                >
                   Themes can load external resources. Only use themes from sources you trust.
                 </span>
               </div>
