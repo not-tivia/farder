@@ -10,3 +10,7 @@ client/dist/
 client/src-tauri/gen/
 client/src-tauri/farder-*.key
 client/src-tauri/farder-*.json
+farder-server.db
+farder-server.db-shm
+farder-server.db-wal
+files/
