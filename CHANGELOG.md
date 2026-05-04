@@ -8,6 +8,10 @@ All notable changes to this project — bug fixes, features, and learnings.
 - (2026-05-03) Channel creation debug: was investigating channel creation failure, debug logging added then removed
 - (2026-05-03) Shell plugin config crash: Tauri v2 shell plugin uses `open` field not `scope` in tauri.conf.json. Sidecar permissions go in capabilities/default.json, not plugin config.
 - (2026-05-03) Duplicate channel display: creating a channel showed it twice because the reducer blindly appended on CHANNEL_CREATED events. The server broadcasts the event to ALL clients including the creator, causing a double-add. Fixed by deduplicating on channel ID.
+- (2026-05-03) Reaction 'me' flag was always undefined — bridge sends public_key not 'me' bool. Fixed by comparing event's public_key against own key in the event listener.
+
+### Added
+- (2026-05-03) "Create Thread" option in message right-click context menu
 
 ### Added
 - (2026-05-03) Auto-claim owner on first connection to empty server — no setup token needed
