@@ -110,6 +110,27 @@ fn all_themes() -> Vec<(ThemeMeta, String)> {
     out
 }
 
+/// Sanitize a user-supplied id into a filesystem-safe folder name.
+fn sanitize_theme_id(input: &str) -> Result<String, String> {
+    let cleaned: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else if c == ' ' {
+                '-'
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches('-').to_string();
+    if trimmed.is_empty() || !trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err("theme id cannot be empty after sanitization".to_string());
+    }
+    Ok(trimmed)
+}
+
 #[tauri::command]
 pub fn list_themes() -> Vec<ThemeMeta> {
     all_themes().into_iter().map(|(m, _)| m).collect()
@@ -152,6 +173,41 @@ pub fn get_active_theme() -> Result<ActiveTheme, String> {
 #[tauri::command]
 pub fn set_active_theme(id: String) -> Result<(), String> {
     crate::commands::settings_set("theme", serde_json::Value::String(id))
+}
+
+#[tauri::command]
+pub fn fork_theme(base_id: String, new_id: String, name: String) -> Result<String, String> {
+    let safe_new_id = sanitize_theme_id(&new_id)?;
+
+    let target_dir = user_themes_dir().join(&safe_new_id);
+    if target_dir.exists() {
+        return Err(format!("a theme with id '{}' already exists", safe_new_id));
+    }
+
+    let base_css = all_themes()
+        .into_iter()
+        .find(|(m, _)| m.id == base_id)
+        .map(|(_, css)| css)
+        .ok_or_else(|| format!("base theme not found: {}", base_id))?;
+
+    std::fs::create_dir_all(&target_dir).map_err(|e| format!("create dir failed: {}", e))?;
+    std::fs::write(target_dir.join("theme.css"), base_css)
+        .map_err(|e| format!("write theme.css failed: {}", e))?;
+
+    let meta = serde_json::json!({
+        "id": safe_new_id,
+        "name": name,
+        "author": "you",
+        "description": format!("Customized from {}", base_id),
+        "baseThemeId": base_id,
+    });
+    std::fs::write(
+        target_dir.join("theme.json"),
+        serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write theme.json failed: {}", e))?;
+
+    Ok(safe_new_id)
 }
 
 #[tauri::command]
@@ -249,5 +305,72 @@ mod tests {
             themes.iter().any(|t| t.id == "xp-luna-blue"),
             "xp-luna-blue must be in the built-in registry"
         );
+    }
+
+    #[test]
+    fn sanitize_strips_unsafe_chars() {
+        assert_eq!(sanitize_theme_id("My Theme!").unwrap(), "my-theme_");
+        assert_eq!(sanitize_theme_id("foo/bar").unwrap(), "foo_bar");
+        assert_eq!(sanitize_theme_id("  hello  ").unwrap(), "hello");
+    }
+
+    #[test]
+    fn sanitize_rejects_empty_after_clean() {
+        assert!(sanitize_theme_id("").is_err());
+        assert!(sanitize_theme_id("   ").is_err());
+        assert!(sanitize_theme_id("///").is_err());
+    }
+
+    #[test]
+    fn fork_theme_creates_new_user_theme() {
+        let tmp = std::env::temp_dir().join(format!("farder-fork-test-{}", std::process::id()));
+        std::env::set_var("FARDER_DATA", &tmp);
+
+        let result = fork_theme(
+            "xp-luna-blue".to_string(),
+            "my custom".to_string(),
+            "My Custom Theme".to_string(),
+        );
+        assert!(result.is_ok(), "fork_theme failed: {:?}", result);
+        let new_id = result.unwrap();
+        assert_eq!(new_id, "my-custom");
+
+        let dir = tmp.join("themes").join(&new_id);
+        assert!(dir.join("theme.css").exists());
+        assert!(dir.join("theme.json").exists());
+
+        let written = std::fs::read_to_string(dir.join("theme.css")).unwrap();
+        assert!(written.contains("--xp-blue"));
+
+        let raw = std::fs::read_to_string(dir.join("theme.json")).unwrap();
+        let meta = parse_meta(&raw, "user").expect("parse_meta failed");
+        assert_eq!(meta.id, "my-custom");
+        assert_eq!(meta.name, "My Custom Theme");
+        assert_eq!(meta.author, "you");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn fork_theme_refuses_to_overwrite() {
+        let tmp = std::env::temp_dir().join(format!("farder-fork-overwrite-{}", std::process::id()));
+        std::env::set_var("FARDER_DATA", &tmp);
+
+        let _ = fork_theme("xp-luna-blue".to_string(), "dup".to_string(), "Dup".to_string()).unwrap();
+        let second = fork_theme("xp-luna-blue".to_string(), "dup".to_string(), "Dup 2".to_string());
+        assert!(second.is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn fork_theme_rejects_unknown_base() {
+        let tmp = std::env::temp_dir().join(format!("farder-fork-unknown-{}", std::process::id()));
+        std::env::set_var("FARDER_DATA", &tmp);
+
+        let result = fork_theme("nonexistent".to_string(), "x".to_string(), "X".to_string());
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

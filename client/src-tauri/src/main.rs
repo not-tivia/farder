@@ -121,6 +121,7 @@ fn main() {
             themes::load_theme_css,
             themes::get_active_theme,
             themes::set_active_theme,
+            themes::fork_theme,
             themes::open_themes_folder,
         ])
         .build(tauri::generate_context!())
