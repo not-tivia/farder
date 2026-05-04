@@ -24,13 +24,11 @@ function extractSwatch(css: string): string[] {
 }
 
 const chromeButton: CSSProperties = {
-  padding: "3px 12px",
-  background: "linear-gradient(to bottom, #fefdf8 0%, #f0ece0 40%, #dbd7c7 100%)",
-  border: "1px solid #888",
-  borderTopColor: "#fff",
-  borderLeftColor: "#fff",
-  borderRadius: 3,
-  color: "#000",
+  padding: "4px 14px",
+  background: "var(--xp-panel-bg, #f0ece0)",
+  color: "var(--xp-text-normal, #000)",
+  border: "1px solid var(--xp-border, #888)",
+  borderRadius: 4,
   font: "inherit",
   cursor: "pointer",
   whiteSpace: "nowrap",
@@ -200,22 +198,22 @@ export default function AppearanceSettings({ onClose }: Props) {
                         padding: 12,
                         border: isActive
                           ? "2px solid var(--xp-blue, #0058E6)"
-                          : "1px solid #aca899",
-                        background: "#fff",
+                          : "1px solid var(--xp-border, #aca899)",
+                        background: "var(--xp-panel-bg, #fff)",
                         cursor: "pointer",
                         display: "flex",
                         flexDirection: "column",
                         gap: 6,
                         font: "inherit",
-                        color: "#000",
+                        color: "var(--xp-text-normal, #000)",
                         boxShadow: isActive ? "0 0 0 1px var(--xp-blue, #0058E6) inset" : "none",
                       }}
                     >
                       <div style={{ fontWeight: "bold", fontSize: 12 }}>{t.name}</div>
-                      <div style={{ fontSize: 10, color: "#666" }}>
+                      <div style={{ fontSize: 10, color: "var(--xp-text-muted, #666)" }}>
                         {t.author} · {t.source}
                       </div>
-                      <div style={{ fontSize: 10, color: "#555", lineHeight: 1.35, minHeight: 26 }}>
+                      <div style={{ fontSize: 10, color: "var(--xp-text-secondary, #555)", lineHeight: 1.35, minHeight: 26 }}>
                         {t.description}
                       </div>
                       <div style={{ display: "flex", gap: 2, marginTop: 2 }}>
@@ -226,7 +224,7 @@ export default function AppearanceSettings({ onClose }: Props) {
                               width: 28,
                               height: 18,
                               background: c,
-                              border: "1px solid #888",
+                              border: "1px solid var(--xp-border, #888)",
                             }}
                           />
                         ))}
@@ -241,7 +239,7 @@ export default function AppearanceSettings({ onClose }: Props) {
                 style={{
                   marginTop: "auto",
                   paddingTop: 10,
-                  borderTop: "1px solid #c8c4b4",
+                  borderTop: "1px solid var(--xp-border, #c8c4b4)",
                   display: "flex",
                   gap: 8,
                   alignItems: "center",
@@ -262,7 +260,7 @@ export default function AppearanceSettings({ onClose }: Props) {
                 <span
                   style={{
                     fontSize: 10,
-                    color: "#666",
+                    color: "var(--xp-text-muted, #666)",
                     flex: 1,
                     minWidth: 220,
                     lineHeight: 1.4,
