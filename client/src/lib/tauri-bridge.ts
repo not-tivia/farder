@@ -443,3 +443,19 @@ export async function setActiveTheme(id: string): Promise<void> {
 export async function openThemesFolder(): Promise<void> {
   return invoke<void>("open_themes_folder");
 }
+
+export async function forkTheme(baseId: string, newId: string, name: string): Promise<string> {
+  return invoke<string>("fork_theme", { baseId, newId, name });
+}
+
+export async function saveUserTheme(id: string, css: string): Promise<void> {
+  return invoke<void>("save_user_theme", { id, css });
+}
+
+export async function addThemeAsset(themeId: string, sourcePath: string, targetFilename: string): Promise<string> {
+  return invoke<string>("add_theme_asset", { themeId, sourcePath, targetFilename });
+}
+
+export async function deleteUserTheme(id: string): Promise<void> {
+  return invoke<void>("delete_user_theme", { id });
+}
