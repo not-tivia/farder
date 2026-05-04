@@ -236,7 +236,8 @@ fn read_settings() -> serde_json::Map<String, serde_json::Value> {
 
 fn write_settings(map: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
     let value = serde_json::Value::Object(map);
-    std::fs::write(settings_path(), value.to_string()).map_err(|e| e.to_string())
+    let pretty = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(settings_path(), pretty).map_err(|e| e.to_string())
 }
 
 pub(crate) fn settings_get(key: &str) -> Option<serde_json::Value> {
