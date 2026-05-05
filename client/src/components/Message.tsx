@@ -8,6 +8,7 @@ import { useApp, useActiveServer } from "../context/ServerContext";
 import ReactionPicker from "./ReactionPicker";
 import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
+import RenderedMessageContent from "./RenderedMessageContent";
 
 interface MessageProps {
   message: MessageInfo;
@@ -61,6 +62,18 @@ let cachedOwnPk: string | null = null;
 // Module-level cache for own display name
 let cachedOwnDisplayName: string | null = null;
 
+// Module-level cache for book index
+let cachedBookIndex: BookItem[] = [];
+let bookIndexLoadPromise: Promise<void> | null = null;
+function loadBookIndex(): Promise<void> {
+  if (!bookIndexLoadPromise) {
+    bookIndexLoadPromise = bookApi.bookListItems()
+      .then((items) => { cachedBookIndex = items; })
+      .catch(() => {});
+  }
+  return bookIndexLoadPromise;
+}
+
 function renderContent(text: string, memberNames: Record<string, string>, ownDisplayName: string | null) {
   const parts = text.split(/(@\w+)/g);
   return parts.map((part, i) => {
@@ -91,6 +104,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
   const [ownDisplayName, setOwnDisplayName] = useState(cachedOwnDisplayName);
+  const [bookIndex, setBookIndex] = useState<BookItem[]>(cachedBookIndex);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [memberMenu, setMemberMenu] = useState<{ x: number; y: number } | null>(null);
   const [editing, setEditing] = useState(false);
@@ -103,6 +117,14 @@ export default function Message({ message, memberNames, grouped = false, serverI
     if (!cachedOwnDisplayName) {
       api.getDisplayName().then((name) => { cachedOwnDisplayName = name; setOwnDisplayName(name); });
     }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadBookIndex().then(() => {
+      if (!cancelled) setBookIndex(cachedBookIndex);
+    });
+    return () => { cancelled = true; };
   }, []);
 
   const deleted = isDeletedUser(message.author);
@@ -260,16 +282,28 @@ export default function Message({ message, memberNames, grouped = false, serverI
               </div>
             </div>
           ) : (
-            renderContent(displayContent, memberNames, ownDisplayName)
+            <RenderedMessageContent
+              text={displayContent}
+              attachments={message.attachments}
+              bookIndex={bookIndex}
+              serverId={serverId}
+              renderTextSegment={(t) => renderContent(t, memberNames, ownDisplayName)}
+              renderRemainingAttachments={(remaining) =>
+                remaining.length > 0 ? (
+                  <div className="message-attachments">
+                    {remaining.map((att) => (
+                      <AttachmentDisplay
+                        key={att.id}
+                        attachment={att}
+                        messageContent={message.content}
+                        serverId={serverId}
+                      />
+                    ))}
+                  </div>
+                ) : null
+              }
+            />
           )}
-        </div>
-      )}
-
-      {message.attachments.length > 0 && (
-        <div className="message-attachments">
-          {message.attachments.map((att) => (
-            <AttachmentDisplay key={att.id} attachment={att} messageContent={message.content} serverId={serverId} />
-          ))}
         </div>
       )}
 
