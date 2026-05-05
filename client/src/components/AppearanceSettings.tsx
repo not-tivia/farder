@@ -170,6 +170,12 @@ export default function AppearanceSettings({ onClose }: Props) {
   }
 
   async function startCustomizing(base: api.ThemeMeta): Promise<void> {
+    // User themes: edit in place. Built-ins: fork to a new user theme first
+    // (built-ins are compiled in and can't be modified directly).
+    if (base.source === "user") {
+      setCustomizing({ themeId: base.id, name: base.name });
+      return;
+    }
     const proposedName = window.prompt(
       `Customize a copy of "${base.name}". Name it:`,
       `${base.name} (Custom)`,
@@ -403,6 +409,7 @@ export default function AppearanceSettings({ onClose }: Props) {
                           tabIndex={0}
                           onClick={(e) => { e.stopPropagation(); void startCustomizing(t); }}
                           onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void startCustomizing(t); } }}
+                          title={t.source === "user" ? "Edit this theme" : "Make a customizable copy of this theme"}
                           style={{
                             fontSize: 10,
                             color: "var(--xp-blue, #0058E6)",
@@ -410,7 +417,7 @@ export default function AppearanceSettings({ onClose }: Props) {
                             cursor: "pointer",
                           }}
                         >
-                          Customize…
+                          {t.source === "user" ? "Edit…" : "Customize…"}
                         </div>
                         {t.source === "user" && (
                           <div
