@@ -99,6 +99,38 @@ export default function AppearanceSettings({ onClose }: Props) {
     }
   }
 
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState<string>("");
+
+  async function deleteTheme(t: api.ThemeMeta): Promise<void> {
+    if (!window.confirm(`Delete "${t.name}"? This removes the folder from disk and can't be undone.`)) return;
+    try {
+      await api.deleteUserTheme(t.id);
+      // If we just deleted the active theme, fall back to the first remaining one.
+      if (t.id === activeId) {
+        const remaining = (await api.listThemes()).find((x) => x.id !== t.id);
+        if (remaining) {
+          await selectTheme(remaining.id);
+        }
+      }
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function commitRename(t: api.ThemeMeta): Promise<void> {
+    const next = renameDraft.trim();
+    setRenamingId(null);
+    if (!next || next === t.name) return;
+    try {
+      await api.renameUserTheme(t.id, next);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function startCustomizing(base: api.ThemeMeta): Promise<void> {
     const proposedName = window.prompt(
       `Customize a copy of "${base.name}". Name it:`,
@@ -227,7 +259,59 @@ export default function AppearanceSettings({ onClose }: Props) {
                         boxShadow: isActive ? "0 0 0 1px var(--xp-blue, #0058E6) inset" : "none",
                       }}
                     >
-                      <div style={{ fontWeight: "bold", fontSize: 12 }}>{t.name}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        {renamingId === t.id ? (
+                          <input
+                            autoFocus
+                            value={renameDraft}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              if (e.key === "Enter") void commitRename(t);
+                              else if (e.key === "Escape") setRenamingId(null);
+                            }}
+                            onBlur={() => void commitRename(t)}
+                            style={{
+                              fontWeight: "bold",
+                              fontSize: 12,
+                              flex: 1,
+                              minWidth: 0,
+                              padding: "1px 4px",
+                              border: "1px solid var(--xp-blue, #0058E6)",
+                              background: "var(--xp-panel-bg, #fff)",
+                              color: "var(--xp-text-normal, #000)",
+                              font: "inherit",
+                            }}
+                          />
+                        ) : (
+                          <>
+                            <div style={{ fontWeight: "bold", fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {t.name}
+                            </div>
+                            {t.source === "user" && (
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                title="Rename"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRenameDraft(t.name);
+                                  setRenamingId(t.id);
+                                }}
+                                style={{
+                                  fontSize: 11,
+                                  cursor: "pointer",
+                                  padding: "0 4px",
+                                  color: "var(--xp-text-muted, #666)",
+                                }}
+                              >
+                                ✎
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
                       <div style={{ fontSize: 10, color: "var(--xp-text-muted, #666)" }}>
                         {t.author} · {t.source}
                       </div>
@@ -247,21 +331,38 @@ export default function AppearanceSettings({ onClose }: Props) {
                           />
                         ))}
                       </div>
-                      <div
-                        role="button"
-                        tabIndex={0}
-                        onClick={(e) => { e.stopPropagation(); void startCustomizing(t); }}
-                        onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void startCustomizing(t); } }}
-                        style={{
-                          marginTop: 8,
-                          fontSize: 10,
-                          color: "var(--xp-blue, #0058E6)",
-                          textDecoration: "underline",
-                          cursor: "pointer",
-                          alignSelf: "flex-start",
-                        }}
-                      >
-                        Customize…
+                      <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => { e.stopPropagation(); void startCustomizing(t); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void startCustomizing(t); } }}
+                          style={{
+                            fontSize: 10,
+                            color: "var(--xp-blue, #0058E6)",
+                            textDecoration: "underline",
+                            cursor: "pointer",
+                          }}
+                        >
+                          Customize…
+                        </div>
+                        {t.source === "user" && (
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            onClick={(e) => { e.stopPropagation(); void deleteTheme(t); }}
+                            onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void deleteTheme(t); } }}
+                            title="Delete this theme"
+                            style={{
+                              fontSize: 10,
+                              color: "#a00",
+                              textDecoration: "underline",
+                              cursor: "pointer",
+                            }}
+                          >
+                            Delete
+                          </div>
+                        )}
                       </div>
                     </button>
                   );

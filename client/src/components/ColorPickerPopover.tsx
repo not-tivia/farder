@@ -91,21 +91,37 @@ export default function ColorPickerPopover({
           }}
           style={{ width: 36, height: 24, padding: 0, border: "1px solid var(--xp-border, #888)" }}
         />
-        <button
-          onClick={onClear}
-          title="Clear (use base theme value)"
-          style={{
-            marginLeft: "auto",
-            font: "inherit",
-            background: "transparent",
-            border: "1px solid var(--xp-border, #888)",
-            padding: "2px 8px",
-            cursor: "pointer",
-            color: "var(--xp-text-normal, #000)",
-          }}
-        >
-          Clear
-        </button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+          <button
+            onClick={onClear}
+            title="Clear (use base theme value)"
+            style={{
+              font: "inherit",
+              background: "transparent",
+              border: "1px solid var(--xp-border, #888)",
+              padding: "2px 8px",
+              cursor: "pointer",
+              color: "var(--xp-text-normal, #000)",
+            }}
+          >
+            Clear
+          </button>
+          <button
+            onClick={onClose}
+            title="Done"
+            style={{
+              font: "inherit",
+              background: "var(--xp-blue, #0058E6)",
+              color: "#fff",
+              border: "1px solid var(--xp-blue-dark, #003C74)",
+              padding: "2px 12px",
+              cursor: "pointer",
+              fontWeight: "bold",
+            }}
+          >
+            OK
+          </button>
+        </div>
       </div>
     </div>
   );

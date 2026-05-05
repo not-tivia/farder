@@ -459,3 +459,7 @@ export async function addThemeAsset(themeId: string, sourcePath: string, targetF
 export async function deleteUserTheme(id: string): Promise<void> {
   return invoke<void>("delete_user_theme", { id });
 }
+
+export async function renameUserTheme(id: string, newName: string): Promise<void> {
+  return invoke<void>("rename_user_theme", { id, newName });
+}

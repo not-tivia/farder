@@ -287,6 +287,29 @@ pub fn delete_user_theme(id: String) -> Result<(), String> {
     std::fs::remove_dir_all(&dir).map_err(|e| format!("remove failed: {}", e))
 }
 
+/// Update only the `name` field of a user theme's theme.json. Folder id stays
+/// stable so file references and the active-theme pointer don't break.
+#[tauri::command]
+pub fn rename_user_theme(id: String, new_name: String) -> Result<(), String> {
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err("name cannot be empty".to_string());
+    }
+    let dir = user_theme_dir(&id)?;
+    let meta_path = dir.join("theme.json");
+    let raw = std::fs::read_to_string(&meta_path)
+        .map_err(|e| format!("read theme.json failed: {}", e))?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse theme.json failed: {}", e))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("name".to_string(), serde_json::Value::String(trimmed.to_string()));
+    } else {
+        return Err("theme.json is not an object".to_string());
+    }
+    let pretty = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    std::fs::write(&meta_path, pretty).map_err(|e| format!("write theme.json failed: {}", e))
+}
+
 #[tauri::command]
 pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
     use std::process::Command;
