@@ -79,8 +79,8 @@ export type AppAction =
   | { type: "NEW_MESSAGE"; serverId: string; payload: MessageInfo }
   | { type: "MESSAGE_EDITED"; serverId: string; payload: { channelId: number; messageId: number; newContent: string; editedAt: number } }
   | { type: "MESSAGE_DELETED"; serverId: string; payload: { channelId: number; messageId: number } }
-  | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean } }
-  | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string } }
+  | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean; fileId?: number } }
+  | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; fileId?: number } }
   | { type: "MEMBER_JOINED"; serverId: string; payload: MemberInfo }
   | { type: "MEMBER_LEFT"; serverId: string; payload: { publicKey: string } }
   | { type: "CHANNEL_CREATED"; serverId: string; payload: ChannelInfo }
@@ -181,30 +181,34 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       };
     }
     case "REACTION_ADDED": {
-      const { channelId, messageId, emoji, me } = action.payload;
+      const { channelId, messageId, emoji, me, fileId } = action.payload;
       const msgs = state.messages[channelId] ?? [];
+      const matches = (r: { emoji: string; file_id?: number }) =>
+        r.emoji === emoji && (r.file_id ?? null) === (fileId ?? null);
       return {
         ...state,
         messages: {
           ...state.messages,
           [channelId]: msgs.map((m) => {
             if (m.id !== messageId) return m;
-            const existing = m.reactions.find((r) => r.emoji === emoji);
+            const existing = m.reactions.find(matches);
             if (existing) {
               if (me && existing.me) return m;
               const reactions = m.reactions.map((r) =>
-                r.emoji === emoji ? { ...r, count: r.count + 1, me: me || r.me } : r,
+                matches(r) ? { ...r, count: r.count + 1, me: me || r.me } : r,
               );
               return { ...m, reactions };
             }
-            return { ...m, reactions: [...m.reactions, { emoji, count: 1, me }] };
+            return { ...m, reactions: [...m.reactions, { emoji, count: 1, me, file_id: fileId }] };
           }),
         },
       };
     }
     case "REACTION_REMOVED": {
-      const { channelId, messageId, emoji } = action.payload;
+      const { channelId, messageId, emoji, fileId } = action.payload;
       const msgs = state.messages[channelId] ?? [];
+      const matches = (r: { emoji: string; file_id?: number }) =>
+        r.emoji === emoji && (r.file_id ?? null) === (fileId ?? null);
       return {
         ...state,
         messages: {
@@ -212,7 +216,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
           [channelId]: msgs.map((m) => {
             if (m.id !== messageId) return m;
             const reactions = m.reactions
-              .map((r) => (r.emoji === emoji ? { ...r, count: r.count - 1 } : r))
+              .map((r) => (matches(r) ? { ...r, count: r.count - 1 } : r))
               .filter((r) => r.count > 0);
             return { ...m, reactions };
           }),

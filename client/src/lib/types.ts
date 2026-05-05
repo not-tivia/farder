@@ -47,6 +47,7 @@ export interface ReactionGroup {
   emoji: string;
   count: number;
   me: boolean;
+  file_id?: number;
 }
 
 export interface MessageInfo {

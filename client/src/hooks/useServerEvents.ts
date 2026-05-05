@@ -56,6 +56,7 @@ interface ReactionAddedPayload {
   message_id: number;
   emoji: string;
   public_key: string;
+  file_id?: number;
 }
 
 interface ReactionRemovedPayload {
@@ -63,6 +64,7 @@ interface ReactionRemovedPayload {
   channel_id: number;
   message_id: number;
   emoji: string;
+  file_id?: number;
 }
 
 
@@ -187,6 +189,7 @@ export function useServerEvents(): void {
           messageId: data.message_id,
           emoji: data.emoji,
           me: isMe,
+          fileId: data.file_id,
         },
       });
     }).then(safePush);
@@ -202,6 +205,7 @@ export function useServerEvents(): void {
           channelId: data.channel_id,
           messageId: data.message_id,
           emoji: data.emoji,
+          fileId: data.file_id,
         },
       });
     }).then(safePush);
