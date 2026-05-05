@@ -143,6 +143,10 @@ fn main() {
             book::book_migrate_legacy_favorites,
             book::book_save_from_url,
             book::book_item_absolute_path,
+            tenor::tenor_search,
+            tenor::tenor_trending,
+            tenor::get_gif_search_settings,
+            tenor::set_gif_search_settings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
