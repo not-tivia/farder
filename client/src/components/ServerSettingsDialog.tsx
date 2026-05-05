@@ -2,6 +2,11 @@ import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { ChannelInfo } from "../lib/types";
+import BannedMembersTab from "./BannedMembersTab";
+import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
+
+// Module-level cache for own public key (same pattern as MemberSidebar)
+let cachedOwnPk: string | null = null;
 
 interface Props { onClose: () => void; }
 
@@ -16,6 +21,21 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newRoleColor, setNewRoleColor] = useState("#3169C6");
   const [error, setError] = useState<string | null>(null);
   const [serverAvatarUrl, setServerAvatarUrl] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"general" | "banned">("general");
+  const [ownPk, setOwnPk] = useState(cachedOwnPk);
+
+  useEffect(() => {
+    if (!cachedOwnPk) {
+      api.getPublicKey().then(pk => { cachedOwnPk = pk; setOwnPk(pk); });
+    }
+  }, []);
+
+  const members = activeServer?.members ?? [];
+  const roles = activeServer?.roles ?? [];
+  const { bits } = ownPk
+    ? getActorPermissions(members, roles, ownPk)
+    : { bits: 0n };
+  const canBan = hasPermission(bits, PERMISSIONS.BAN_MEMBERS);
 
   useEffect(() => {
     if (serverId) {
@@ -144,7 +164,29 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           <span>Server Settings</span>
           <button className="modal-close" onClick={onClose}>X</button>
         </div>
+        {/* Tab bar */}
+        <div style={{ display: "flex", borderBottom: "1px solid var(--xp-border)", padding: "0 12px", gap: 4 }}>
+          <button
+            className={`tab-btn${activeTab === "general" ? " tab-btn--active" : ""}`}
+            onClick={() => setActiveTab("general")}
+          >
+            General
+          </button>
+          {canBan && (
+            <button
+              className={`tab-btn${activeTab === "banned" ? " tab-btn--active" : ""}`}
+              onClick={() => setActiveTab("banned")}
+            >
+              Banned Members
+            </button>
+          )}
+        </div>
+
         <div className="modal-body" style={{ overflowY: "auto", flex: 1 }}>
+          {activeTab === "banned" && serverId && (
+            <BannedMembersTab serverId={serverId} />
+          )}
+          {activeTab === "general" && <>
           {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
 
           {/* Server Icon */}
@@ -257,6 +299,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               <button className="xp-button" onClick={handleCreateRole} disabled={!newRoleName.trim()}>Add</button>
             </div>
           </div>
+          </>}
         </div>
       </div>
     </div>
