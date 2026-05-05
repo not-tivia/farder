@@ -88,7 +88,17 @@ export function useServerEvents(): void {
   useEffect(() => { stateRef.current = state; }, [state]);
 
   useEffect(() => {
+    // Each listen() returns a Promise<UnlistenFn>. Cleanup runs synchronously
+    // and may fire before those promises resolve — without the cancelled flag
+    // the resolved unlisten functions would be pushed onto a discarded array
+    // and the listener would leak into the next mount cycle (StrictMode dev).
+    // safePush invokes the unlisten fn immediately if cleanup already ran.
+    let cancelled = false;
     const unlisten: Array<() => void> = [];
+    const safePush = (u: () => void) => {
+      if (cancelled) u();
+      else unlisten.push(u);
+    };
 
     listen("server:new_message", (e) => {
       const data = e.payload as any;
@@ -139,7 +149,7 @@ export function useServerEvents(): void {
           api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
         }
       }
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:message_edited", (e) => {
       const data = e.payload as any;
@@ -151,7 +161,7 @@ export function useServerEvents(): void {
         newContent: data.new_content as string,
         editedAt: data.edited_at as number,
       }});
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:message_deleted", (e) => {
       const data = e.payload as MessageDeletedPayload;
@@ -162,7 +172,7 @@ export function useServerEvents(): void {
         serverId,
         payload: { channelId: data.channel_id, messageId: data.message_id },
       });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:reaction_added", (e) => {
       const data = e.payload as ReactionAddedPayload;
@@ -179,7 +189,7 @@ export function useServerEvents(): void {
           me: isMe,
         },
       });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:reaction_removed", (e) => {
       const data = e.payload as ReactionRemovedPayload;
@@ -194,7 +204,7 @@ export function useServerEvents(): void {
           emoji: data.emoji,
         },
       });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:member_joined", (e) => {
       const data = e.payload as any;
@@ -208,7 +218,7 @@ export function useServerEvents(): void {
       api.getMembers(serverId).then(members => {
         dispatch({ type: "SET_MEMBERS", serverId, payload: members });
       }).catch(() => {});
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:member_left", (e) => {
       const data = e.payload as any;
@@ -218,75 +228,75 @@ export function useServerEvents(): void {
       }
       if (serverId !== activeRef.current) return;
       dispatch({ type: "MEMBER_LEFT", serverId, payload: { publicKey: data.public_key as string } });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:channel_created", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "CHANNEL_CREATED", serverId, payload: data.channel as ChannelInfo });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:channel_deleted", (e) => {
       const data = e.payload as ChannelDeletedPayload;
       const serverId = data.server_id;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "CHANNEL_DELETED", serverId, payload: { channelId: data.channel_id } });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:category_created", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "CATEGORY_CREATED", serverId, payload: data.category as CategoryInfo });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:category_deleted", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "CATEGORY_DELETED", serverId, payload: { categoryId: data.category_id as number } });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:category_updated", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "CATEGORY_UPDATED", serverId, payload: data.category as CategoryInfo });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:channel_updated", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "CHANNEL_UPDATED", serverId, payload: data.channel as ChannelInfo });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:disconnected", (e) => {
       const data = e.payload as any;
       dispatch({ type: "CONNECTION_LOST", serverId: data.server_id as string });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:dm_created", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "DM_CREATED", serverId, payload: { channel: data.channel, participant: data.participant } });
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:role_created", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "ROLE_CREATED", serverId, payload: data.role as RoleInfo });
-    }).then(u => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:role_deleted", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "ROLE_DELETED", serverId, payload: { roleId: data.role_id as number } });
-    }).then(u => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:typing", (e) => {
       const data = e.payload as any;
@@ -298,7 +308,7 @@ export function useServerEvents(): void {
       setTimeout(() => {
         dispatch({ type: "TYPING_EXPIRED", serverId, payload: { channelId, publicKey } });
       }, 8000);
-    }).then((u) => unlisten.push(u));
+    }).then(safePush);
 
     // Voice events — dispatched for ALL servers so voice activity is visible across servers
     listen("server:voice_joined", (e) => {
@@ -309,7 +319,7 @@ export function useServerEvents(): void {
         publicKey: data.public_key as string,
         displayName: data.display_name as string,
       }});
-    }).then(u => unlisten.push(u));
+    }).then(safePush);
 
     listen("server:voice_left", (e) => {
       const data = e.payload as any;
@@ -318,9 +328,10 @@ export function useServerEvents(): void {
         channelId: data.channel_id as number,
         publicKey: data.public_key as string,
       }});
-    }).then(u => unlisten.push(u));
+    }).then(safePush);
 
     return () => {
+      cancelled = true;
       unlisten.forEach((u) => u());
     };
   }, [dispatch]);
