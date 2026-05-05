@@ -130,6 +130,13 @@ fn main() {
             themes::rename_user_theme,
             themes::get_theme_order,
             themes::set_theme_order,
+            book::book_list_items,
+            book::book_upload_item,
+            book::book_delete_item,
+            book::book_rename_item,
+            book::book_get_file_for_server,
+            book::book_migrate_legacy_favorites,
+            book::book_save_from_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
