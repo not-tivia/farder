@@ -287,6 +287,26 @@ pub fn delete_user_theme(id: String) -> Result<(), String> {
     std::fs::remove_dir_all(&dir).map_err(|e| format!("remove failed: {}", e))
 }
 
+/// Read the user's preferred theme order (persisted in settings.json).
+/// Returns ids in user-chosen order; missing themes are silently dropped at the
+/// frontend level.
+#[tauri::command]
+pub fn get_theme_order() -> Vec<String> {
+    crate::commands::settings_get("themeOrder")
+        .and_then(|v| v.as_array().cloned())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// Persist the user's preferred theme order.
+#[tauri::command]
+pub fn set_theme_order(ids: Vec<String>) -> Result<(), String> {
+    let value = serde_json::Value::Array(
+        ids.into_iter().map(serde_json::Value::String).collect(),
+    );
+    crate::commands::settings_set("themeOrder", value)
+}
+
 /// Update only the `name` field of a user theme's theme.json. Folder id stays
 /// stable so file references and the active-theme pointer don't break.
 #[tauri::command]

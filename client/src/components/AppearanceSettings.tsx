@@ -6,6 +6,27 @@ interface Props {
   onClose: () => void;
 }
 
+// Reorder a theme list according to the user's saved preference.
+// Themes named in `order` come first in that order; any unlisted themes
+// follow in the order list_themes returned them (Rust sorts alphabetically).
+function applyOrder(list: api.ThemeMeta[], order: string[]): api.ThemeMeta[] {
+  if (order.length === 0) return list;
+  const byId = new Map(list.map((t) => [t.id, t]));
+  const used = new Set<string>();
+  const out: api.ThemeMeta[] = [];
+  for (const id of order) {
+    const t = byId.get(id);
+    if (t) {
+      out.push(t);
+      used.add(id);
+    }
+  }
+  for (const t of list) {
+    if (!used.has(t.id)) out.push(t);
+  }
+  return out;
+}
+
 // Pull a few representative colors out of a theme's CSS for the swatch strip.
 // Looks for `--<prefix>-bg`, `--<prefix>-blue`, `--<prefix>-accent`, etc, and
 // returns up to 5 distinct color values in declaration order.
@@ -61,11 +82,13 @@ export default function AppearanceSettings({ onClose }: Props) {
     setError(null);
     try {
       const list = await api.listThemes();
-      setThemes(list);
+      const order = await api.getThemeOrder();
+      const ordered = applyOrder(list, order);
+      setThemes(ordered);
       const active = await api.getActiveTheme();
       setActiveId(active.id);
       const swatches: Record<string, string[]> = {};
-      for (const t of list) {
+      for (const t of ordered) {
         try {
           const css = await api.loadThemeCss(t.id);
           swatches[t.id] = extractSwatch(css);
@@ -78,6 +101,19 @@ export default function AppearanceSettings({ onClose }: Props) {
       setError(String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function reorderThemes(fromIndex: number, toIndex: number): Promise<void> {
+    if (fromIndex === toIndex) return;
+    const next = themes.slice();
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    setThemes(next);
+    try {
+      await api.setThemeOrder(next.map((t) => t.id));
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -101,6 +137,8 @@ export default function AppearanceSettings({ onClose }: Props) {
 
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<string>("");
+  const [dragSrcIndex, setDragSrcIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   async function deleteTheme(t: api.ThemeMeta): Promise<void> {
     if (!window.confirm(`Delete "${t.name}"? This removes the folder from disk and can't be undone.`)) return;
@@ -236,21 +274,49 @@ export default function AppearanceSettings({ onClose }: Props) {
                   gap: 12,
                 }}
               >
-                {themes.map((t) => {
+                {themes.map((t, idx) => {
                   const isActive = t.id === activeId;
                   const swatch = swatchByCss[t.id] ?? [];
+                  const isDragging = dragSrcIndex === idx;
+                  const isDropTarget = dragOverIndex === idx && dragSrcIndex !== null && dragSrcIndex !== idx;
                   return (
                     <button
                       key={t.id}
                       onClick={() => selectTheme(t.id)}
+                      draggable={renamingId !== t.id}
+                      onDragStart={(e) => {
+                        setDragSrcIndex(idx);
+                        e.dataTransfer.effectAllowed = "move";
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        if (dragOverIndex !== idx) setDragOverIndex(idx);
+                      }}
+                      onDragLeave={() => {
+                        if (dragOverIndex === idx) setDragOverIndex(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragSrcIndex !== null) void reorderThemes(dragSrcIndex, idx);
+                        setDragSrcIndex(null);
+                        setDragOverIndex(null);
+                      }}
+                      onDragEnd={() => {
+                        setDragSrcIndex(null);
+                        setDragOverIndex(null);
+                      }}
                       style={{
                         textAlign: "left",
                         padding: 12,
-                        border: isActive
+                        border: isDropTarget
+                          ? "2px dashed var(--xp-blue, #0058E6)"
+                          : isActive
                           ? "2px solid var(--xp-blue, #0058E6)"
                           : "1px solid var(--xp-border, #aca899)",
                         background: "var(--xp-panel-bg, #fff)",
-                        cursor: "pointer",
+                        cursor: isDragging ? "grabbing" : "pointer",
+                        opacity: isDragging ? 0.4 : 1,
                         display: "flex",
                         flexDirection: "column",
                         gap: 6,

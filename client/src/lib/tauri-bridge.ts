@@ -463,3 +463,11 @@ export async function deleteUserTheme(id: string): Promise<void> {
 export async function renameUserTheme(id: string, newName: string): Promise<void> {
   return invoke<void>("rename_user_theme", { id, newName });
 }
+
+export async function getThemeOrder(): Promise<string[]> {
+  return invoke<string[]>("get_theme_order");
+}
+
+export async function setThemeOrder(ids: string[]): Promise<void> {
+  return invoke<void>("set_theme_order", { ids });
+}
