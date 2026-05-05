@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod channels;
+pub mod image_validation;
 pub mod connection;
 pub mod db;
 pub mod events;

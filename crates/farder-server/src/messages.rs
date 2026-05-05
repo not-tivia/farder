@@ -578,7 +578,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("farder-msg-test-{}", rand::random::<u32>()));
         std::fs::create_dir_all(&dir).unwrap();
         let file_id = crate::attachments::store_file(
-            &conn, &dir.to_string_lossy(), &pk, "photo.jpg", b"file data", &hash, "image/jpeg", None, None, None
+            &conn, &dir.to_string_lossy(), &pk, "photo.jpg", b"file data", &hash, "application/octet-stream", None, None, None
         ).unwrap();
         crate::attachments::create_message_attachment(&conn, msg_id, file_id, 0, "photo.jpg", Some(800), Some(600), None).unwrap();
         let msg = get_message(&conn, msg_id, &pk).unwrap().unwrap();

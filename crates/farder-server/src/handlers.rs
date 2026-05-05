@@ -1511,7 +1511,7 @@ mod tests {
         let data = b"image bytes here";
         let hash = crate::attachments::compute_sha256(data);
         let file_id = crate::attachments::store_file(
-            &conn, &dir.to_string_lossy(), &owner, "pic.png", data, &hash, "image/png", None, None, None
+            &conn, &dir.to_string_lossy(), &owner, "pic.png", data, &hash, "application/octet-stream", None, None, None
         ).unwrap();
 
         let result = handle_request(&conn, &owner, true, ServerRequest::SendMessage {

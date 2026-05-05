@@ -76,6 +76,12 @@ pub fn store_file(
         );
     }
 
+    // Validate image files before writing anything to disk.
+    if mime_type.starts_with("image/") {
+        let _ = crate::image_validation::validate_image(data, false)
+            .map_err(|e| anyhow::anyhow!("image rejected: {}", e))?;
+    }
+
     // Write to content-addressed path.
     let path = content_path(storage_dir, &actual_hash);
     if let Some(parent) = path.parent() {
@@ -712,14 +718,28 @@ mod tests {
     // Test 6: create and query message attachments
     // -----------------------------------------------------------------------
 
+    fn minimal_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
+            0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54,
+            0x78, 0x9C, 0x62, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x01,
+            0x0D, 0x0A, 0x2D, 0xB4,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+            0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+
     #[test]
     fn test_create_and_get_message_attachments() {
         let (conn, channel_id, pk) = setup_db_channel_author();
         let storage = make_temp_dir();
 
-        let data = b"image data";
-        let hash = compute_sha256(data);
-        let file_id = store_file(&conn, &storage, &pk, "img.png", data, &hash, "image/png", None, None, None).unwrap();
+        let data = minimal_png();
+        let hash = compute_sha256(&data);
+        let file_id = store_file(&conn, &storage, &pk, "img.png", &data, &hash, "image/png", None, None, None).unwrap();
 
         let message_id = insert_message(&conn, channel_id, &pk, "check this out", None).unwrap();
         let att_id = create_message_attachment(
