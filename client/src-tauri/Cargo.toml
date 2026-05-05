@@ -24,6 +24,8 @@ rfd = "0.15"
 cpal = "0.15"
 hound = "3.5"
 tauri-plugin-shell = "2"
+uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

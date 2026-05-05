@@ -68,10 +68,10 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:message_edited", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "new_content": new_content, "edited_at": edited_at })),
         ServerEvent::MessageDeleted { message_id, channel_id } =>
             app.emit("server:message_deleted", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id })),
-        ServerEvent::ReactionAdded { message_id, channel_id, emoji, public_key } =>
-            app.emit("server:reaction_added", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "emoji": emoji, "public_key": public_key.to_string() })),
-        ServerEvent::ReactionRemoved { message_id, channel_id, emoji, public_key } =>
-            app.emit("server:reaction_removed", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "emoji": emoji, "public_key": public_key.to_string() })),
+        ServerEvent::ReactionAdded { message_id, channel_id, emoji, public_key, file_id } =>
+            app.emit("server:reaction_added", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "emoji": emoji, "public_key": public_key.to_string(), "file_id": file_id })),
+        ServerEvent::ReactionRemoved { message_id, channel_id, emoji, public_key, file_id } =>
+            app.emit("server:reaction_removed", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "emoji": emoji, "public_key": public_key.to_string(), "file_id": file_id })),
         ServerEvent::MemberJoined { public_key, display_name } =>
             app.emit("server:member_joined", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string(), "display_name": display_name })),
         ServerEvent::MemberLeft { public_key } =>

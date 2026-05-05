@@ -535,7 +535,7 @@ pub async fn add_reaction(
     message_id: u64,
     emoji: String,
 ) -> Result<(), String> {
-    let response = bridge::send_request(&state, &server_id, ServerRequest::AddReaction { message_id, emoji })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::AddReaction { message_id, emoji, file_id: None })
         .await
         .map_err(|e| e.to_string())?;
 
@@ -555,7 +555,7 @@ pub async fn remove_reaction(
     emoji: String,
 ) -> Result<(), String> {
     let response =
-        bridge::send_request(&state, &server_id, ServerRequest::RemoveReaction { message_id, emoji })
+        bridge::send_request(&state, &server_id, ServerRequest::RemoveReaction { message_id, emoji, file_id: None })
             .await
             .map_err(|e| e.to_string())?;
 
