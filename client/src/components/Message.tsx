@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import type { MessageInfo, AttachmentInfo } from "../lib/types";
 import { publicKeyToString, isDeletedUser } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
+import * as bookApi from "../lib/book/client";
+import type { BookItem } from "../lib/book/types";
 import { useApp, useActiveServer } from "../context/ServerContext";
 import ReactionPicker from "./ReactionPicker";
 import UserProfilePopup from "./UserProfilePopup";
@@ -119,14 +121,14 @@ export default function Message({ message, memberNames, grouped = false, serverI
       ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
       : message.content;
 
-  async function handleReactionClick(emoji: string, alreadyMe: boolean) {
+  async function handleReactionClick(emoji: string, alreadyMe: boolean, fileId?: number) {
     if (reacting) return;
     setReacting(true);
     try {
       if (alreadyMe) {
-        await api.removeReaction(serverId, message.id, emoji);
+        await api.removeReaction(serverId, message.id, emoji, fileId);
       } else {
-        await api.addReaction(serverId, message.id, emoji);
+        await api.addReaction(serverId, message.id, emoji, fileId);
       }
     } catch {
       // ignore
@@ -143,6 +145,20 @@ export default function Message({ message, memberNames, grouped = false, serverI
       await api.addReaction(serverId, message.id, emoji);
     } catch {
       // ignore
+    } finally {
+      setReacting(false);
+    }
+  }
+
+  async function handlePickerBookSelect(item: BookItem) {
+    if (reacting) return;
+    setShowPicker(false);
+    setReacting(true);
+    try {
+      const fileId = await bookApi.bookGetFileForServer(serverId, item.id);
+      await api.addReaction(serverId, message.id, ":custom:", fileId);
+    } catch (e) {
+      console.error("[reaction:book] failed:", e);
     } finally {
       setReacting(false);
     }
@@ -243,15 +259,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
       <div className={`reaction-bar${message.reactions.length === 0 ? " hover-only" : ""}`}>
         {message.reactions.map((r) => (
-          <button
-            key={r.emoji}
-            className={`reaction${r.me ? " me" : ""}`}
-            onClick={() => handleReactionClick(r.emoji, r.me)}
-            title={`${r.emoji} ${r.count}`}
-          >
-            {r.emoji}
-            <span className="reaction-count">{r.count}</span>
-          </button>
+          <ReactionBadge
+            key={`${r.emoji}-${r.file_id ?? "u"}`}
+            serverId={serverId}
+            reaction={r}
+            onClick={() => handleReactionClick(r.emoji, r.me, r.file_id)}
+          />
         ))}
         <div style={{ position: "relative" }}>
           <button
@@ -262,7 +275,10 @@ export default function Message({ message, memberNames, grouped = false, serverI
             +
           </button>
           {showPicker && (
-            <ReactionPicker onSelect={handlePickerSelect} />
+            <ReactionPicker
+              onSelect={handlePickerSelect}
+              onSelectBookItem={handlePickerBookSelect}
+            />
           )}
         </div>
       </div>
@@ -402,5 +418,54 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
       <span>{attachment.name} ({formatSize(attachment.size)})</span>
       {downloading && <span> downloading...</span>}
     </div>
+  );
+}
+
+function ReactionBadge({
+  serverId,
+  reaction,
+  onClick,
+}: {
+  serverId: string;
+  reaction: { emoji: string; count: number; me: boolean; file_id?: number };
+  onClick: () => void;
+}) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (reaction.file_id == null) return;
+    const fileId = reaction.file_id;
+    const cached = imageCache.get(fileId);
+    if (cached) {
+      setImageUrl(cached);
+      return;
+    }
+    let cancelled = false;
+    api.downloadFile(serverId, fileId).then((r) => {
+      if (!cancelled && r.data_url) {
+        imageCache.set(fileId, r.data_url);
+        setImageUrl(r.data_url);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [reaction.file_id, serverId]);
+
+  return (
+    <button
+      className={`reaction${reaction.me ? " me" : ""}`}
+      onClick={onClick}
+      title={`${reaction.emoji === ":custom:" ? "" : reaction.emoji} ${reaction.count}`}
+    >
+      {reaction.file_id != null ? (
+        imageUrl ? (
+          <img src={imageUrl} alt="reaction" style={{ width: 18, height: 18, verticalAlign: "middle" }} />
+        ) : (
+          <span style={{ fontSize: 10 }}>…</span>
+        )
+      ) : (
+        reaction.emoji
+      )}
+      <span className="reaction-count">{reaction.count}</span>
+    </button>
   );
 }
