@@ -1740,6 +1740,24 @@ pub async fn create_local_server(
     privacy: String,
     icon_path: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    // Refuse to create a duplicate local server. Names are unique per machine
+    // because they map to a single data directory — letting "1" exist twice
+    // means two server processes fighting over one SQLite database, which
+    // produces hard-to-diagnose corruption.
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("server name cannot be empty".to_string());
+    }
+    if let Some(dup) = load_server_entries()
+        .into_iter()
+        .find(|e| e.local.is_some() && e.name.eq_ignore_ascii_case(trimmed_name))
+    {
+        return Err(format!(
+            "A local server named '{}' already exists at {}. Pick a different name or delete the existing one first.",
+            dup.name, dup.id
+        ));
+    }
+
     // Spawn the server process
     let (info, child) = crate::server_manager::spawn_server(&name, &template, &privacy)?;
     let port = info.port;
@@ -1915,6 +1933,53 @@ pub fn list_templates() -> Vec<serde_json::Value> {
     ]
 }
 
+/// Find and kill any orphan farder-server processes pointing at the given
+/// data directory. Used at startup to clean up zombies left over from prior
+/// dev sessions where the Tauri exit hook didn't fire (Ctrl+C in dev,
+/// kill -9, OOM, crashes). Each orphan against the same SQLite DB is a
+/// concurrency hazard.
+///
+/// Best-effort: uses `pgrep -af farder-server` on Unix; no-op on Windows.
+fn reap_orphan_servers_for_data_dir(data_dir: &str) {
+    #[cfg(unix)]
+    {
+        let output = match std::process::Command::new("pgrep")
+            .args(["-af", "farder-server"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return, // pgrep not available — skip silently
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let our_pid = std::process::id();
+        for line in stdout.lines() {
+            let mut parts = line.splitn(2, ' ');
+            let pid_str = match parts.next() {
+                Some(p) => p,
+                None => continue,
+            };
+            let cmdline = parts.next().unwrap_or("");
+            // Only kill orphans whose --db arg matches OUR data directory.
+            if !cmdline.contains(data_dir) {
+                continue;
+            }
+            let pid: u32 = match pid_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if pid == our_pid {
+                continue;
+            }
+            // SIGKILL — these processes have already escaped graceful shutdown.
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid_str])
+                .status();
+            eprintln!("[restart] Killed orphan farder-server pid {} for data dir {}", pid, data_dir);
+        }
+    }
+    let _ = data_dir; // silence unused-var on non-unix
+}
+
 /// Restart any locally-managed servers from the saved server list.
 /// Called on app startup before connecting.
 #[tauri::command]
@@ -1926,6 +1991,11 @@ pub fn restart_local_servers(
 
     for entry in &entries {
         if let Some(ref local) = entry.local {
+            // Reap any zombies pointing at this data dir BEFORE spawning a new
+            // process. Multiple servers on one SQLite DB causes hard-to-debug
+            // contention bugs (the same root cause as the disconnect storm fix).
+            reap_orphan_servers_for_data_dir(&local.data_dir);
+
             // Respawn the server using its saved data directory
             match crate::server_manager::spawn_server_with_data_dir(
                 &entry.name,
