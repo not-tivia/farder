@@ -102,3 +102,10 @@ export function publicKeyToString(pk: { bytes: number[] }): string {
 export function isDeletedUser(pk: { bytes: number[] }): boolean {
   return pk.bytes.every((b) => b === 0);
 }
+
+export interface BannedMember {
+  public_key: string;
+  display_name: string;
+  ban_reason?: string;
+  banned_at: number;
+}

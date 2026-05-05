@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember } from "./types";
 
 // ── Server management (no serverId needed) ───────────────────────────────────
 
@@ -470,4 +470,20 @@ export async function getThemeOrder(): Promise<string[]> {
 
 export async function setThemeOrder(ids: string[]): Promise<void> {
   return invoke<void>("set_theme_order", { ids });
+}
+
+export async function kickMember(serverId: string, memberKey: string): Promise<void> {
+  return invoke<void>("kick_member", { serverId, memberKey });
+}
+
+export async function banMember(serverId: string, memberKey: string, reason?: string): Promise<void> {
+  return invoke<void>("ban_member", { serverId, memberKey, reason: reason ?? null });
+}
+
+export async function unbanMember(serverId: string, memberKey: string): Promise<void> {
+  return invoke<void>("unban_member", { serverId, memberKey });
+}
+
+export async function listBanned(serverId: string): Promise<BannedMember[]> {
+  return invoke<BannedMember[]>("list_banned", { serverId });
 }
