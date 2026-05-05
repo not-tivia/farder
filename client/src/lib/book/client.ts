@@ -28,3 +28,7 @@ export async function bookMigrateLegacyFavorites(): Promise<number> {
 export async function bookSaveFromUrl(serverId: string, fileId: number, name?: string): Promise<BookItem> {
   return invoke<BookItem>("book_save_from_url", { serverId, fileId, name: name ?? null });
 }
+
+export async function bookItemAbsolutePath(id: string): Promise<string> {
+  return invoke<string>("book_item_absolute_path", { id });
+}

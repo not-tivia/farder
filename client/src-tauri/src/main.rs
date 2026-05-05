@@ -137,6 +137,7 @@ fn main() {
             book::book_get_file_for_server,
             book::book_migrate_legacy_favorites,
             book::book_save_from_url,
+            book::book_item_absolute_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

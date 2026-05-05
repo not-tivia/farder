@@ -351,6 +351,18 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
     }).catch(() => {}).finally(() => setLoading(false));
   }, [attachment.file_id, isImage, isAudio, serverId]);
 
+  async function handleSaveToBook() {
+    const defaultName = (attachment.name ?? "").replace(/\.[^.]+$/, "");
+    const name = window.prompt(`Save "${attachment.name ?? "image"}" to your book. Name it:`, defaultName);
+    if (!name) return;
+    try {
+      await bookApi.bookSaveFromUrl(serverId, attachment.file_id, name);
+    } catch (e) {
+      console.error("[book:save-from-chat] failed:", e);
+    }
+    setMenu(null);
+  }
+
   async function handleSave() {
     setDownloading(true);
     try {
@@ -390,6 +402,10 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
           src={imageUrl}
           alt={attachment.name}
           onClick={(e) => setMenu({ x: e.clientX, y: e.clientY })}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setMenu({ x: e.clientX, y: e.clientY });
+          }}
           style={{ cursor: "pointer", maxWidth: 400, maxHeight: 300, borderRadius: 3 }}
         />
         <div className="attachment-name">{attachment.name} ({formatSize(attachment.size)})</div>
@@ -405,6 +421,7 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
                 } catch {}
                 setMenu(null);
               }}>Favorite</div>
+              <div className="context-menu-item" onClick={() => { void handleSaveToBook(); }}>Save to book</div>
             </div>
           </>
         )}

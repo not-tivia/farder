@@ -1,5 +1,6 @@
-import { type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import * as bookApi from "../lib/book/client";
 import type { BookItem } from "../lib/book/types";
 
 interface Props {
@@ -24,14 +25,28 @@ const tileStyle: CSSProperties = {
   color: "var(--xp-text-normal, #000)",
 };
 
-// FIXME(Task 14): replace with a Rust command (book_item_absolute_path) that
-// returns the resolved absolute path. The current hardcoded HOME works on the
-// dev machine but breaks for other users.
+// Resolves an item's absolute on-disk path → Tauri-safe asset URL.
+// Returns empty string while loading; the <img> shows broken-image briefly.
+export function useBookItemSrc(itemId: string): string {
+  const [src, setSrc] = useState("");
+  useEffect(() => {
+    bookApi
+      .bookItemAbsolutePath(itemId)
+      .then((p) => setSrc(convertFileSrc(p)))
+      .catch(() => setSrc(""));
+  }, [itemId]);
+  return src;
+}
+
+// Backward-compat shim: callers that need a sync src can use this until they
+// migrate to useBookItemSrc. It returns the convertFileSrc of the manually-
+// constructed path; works on dev's machine but is not portable. Prefer the hook.
 export function resolveBookItemSrc(item: { id: string; ext: string }): string {
   return convertFileSrc(`/home/deez/.farder/book/files/${item.id}.${item.ext}`);
 }
 
 export default function BookItemTile({ item, onClick, onContextMenu, selected }: Props) {
+  const src = useBookItemSrc(item.id);
   return (
     <div
       role="button"
@@ -44,14 +59,9 @@ export default function BookItemTile({ item, onClick, onContextMenu, selected }:
       }}
     >
       <img
-        src={resolveBookItemSrc(item)}
+        src={src}
         alt={item.name}
-        style={{
-          width: 64,
-          height: 64,
-          objectFit: "contain",
-          border: "1px solid var(--xp-border, #888)",
-        }}
+        style={{ width: 64, height: 64, objectFit: "contain", border: "1px solid var(--xp-border, #888)" }}
       />
       <div
         style={{

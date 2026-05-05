@@ -321,15 +321,84 @@ pub fn book_migrate_legacy_favorites() -> Result<u32, String> {
     Ok(imported)
 }
 
-/// Stub: implemented in Task 14 once the chat-image-save UI is wired in.
+#[tauri::command]
+pub fn book_item_absolute_path(id: String) -> Result<String, String> {
+    let items = load_index();
+    let item = items
+        .into_iter()
+        .find(|i| i.id == id)
+        .ok_or_else(|| format!("item not found: {}", id))?;
+    let path = files_dir().join(format!("{}.{}", item.id, item.ext));
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub async fn book_save_from_url(
-    _state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
-    _server_id: String,
-    _file_id: u64,
-    _name: Option<String>,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    server_id: String,
+    file_id: u64,
+    name: Option<String>,
 ) -> Result<BookItem, String> {
-    Err("book_save_from_url is not implemented yet (Task 14)".to_string())
+    let result = crate::commands::download_file_internal(&state, &server_id, file_id)
+        .await
+        .map_err(|e| format!("download failed: {}", e))?;
+
+    // The DownloadResult has data_url which is "data:<mime>;base64,<data>" — we need raw bytes.
+    let data_url = result.data_url.ok_or_else(|| "download returned no data".to_string())?;
+    let comma = data_url.find(',').ok_or_else(|| "malformed data URL".to_string())?;
+    let b64 = &data_url[comma + 1..];
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("base64 decode failed: {}", e))?;
+
+    if bytes.len() as u64 > MAX_BOOK_BYTES {
+        return Err(format!("image too large ({} bytes; max {})", bytes.len(), MAX_BOOK_BYTES));
+    }
+
+    let ext = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) { "png" }
+        else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) { "jpg" }
+        else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { "gif" }
+        else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" { "webp" }
+        else { return Err("unsupported image format".to_string()); };
+
+    let new_id = uuid::Uuid::new_v4().to_string();
+    ensure_dirs()?;
+    let target = files_dir().join(format!("{}.{}", new_id, ext));
+    std::fs::write(&target, &bytes).map_err(|e| format!("write image failed: {}", e))?;
+
+    let resolved_name = match name {
+        Some(n) if !n.trim().is_empty() => sanitize_name(n.trim()),
+        _ => sanitize_name("emoji"),
+    };
+    if resolved_name.is_empty() {
+        return Err("could not derive a valid name".to_string());
+    }
+
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .map(|(w, h)| (Some(w), Some(h)))
+        .unwrap_or((None, None));
+
+    let mut item = BookItem {
+        id: new_id,
+        name: resolved_name,
+        ext: ext.to_string(),
+        width,
+        height,
+        animated: detect_animated(&bytes, ext),
+        added_at: now_secs(),
+        source: "chat".to_string(),
+        server_files: HashMap::new(),
+    };
+    item.server_files.insert(server_id, file_id);
+
+    let mut items = load_index();
+    items.push(item.clone());
+    save_index(&items)?;
+    Ok(item)
 }
 
 #[cfg(test)]

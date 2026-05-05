@@ -10,6 +10,7 @@ import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
 import AppearanceSettings from "./AppearanceSettings";
+import BookBrowser from "./BookBrowser";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
   const serverId = useActiveServerId();
@@ -18,6 +19,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
   const [showNotifSettings, setShowNotifSettings] = useState(false);
   const [showAppearance, setShowAppearance] = useState(false);
+  const [showBook, setShowBook] = useState(false);
 
   useEffect(() => {
     api.getDisplayName().then((n) => setName(n)).catch(() => {});
@@ -36,6 +38,12 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
         >
           ● {name ?? "Unknown"}
         </span>
+        <button
+          className="server-invite-btn"
+          onClick={() => setShowBook(true)}
+          title="Reaction Book"
+          style={{ fontSize: 10, marginRight: 4 }}
+        >📚</button>
         <button
           className="server-invite-btn"
           onClick={() => setShowAppearance(true)}
@@ -61,6 +69,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
       )}
       {showNotifSettings && <NotificationSettings onClose={() => setShowNotifSettings(false)} />}
       {showAppearance && <AppearanceSettings onClose={() => setShowAppearance(false)} />}
+      {showBook && <BookBrowser onClose={() => setShowBook(false)} />}
     </>
   );
 }

@@ -723,7 +723,15 @@ pub async fn download_file(
     server_id: String,
     file_id: u64,
 ) -> Result<DownloadResult, String> {
-    let conn = state.get_server(&server_id).map_err(|e| e.to_string())?;
+    download_file_internal(&state, &server_id, file_id).await
+}
+
+pub(crate) async fn download_file_internal(
+    state: &AppState,
+    server_id: &str,
+    file_id: u64,
+) -> Result<DownloadResult, String> {
+    let conn = state.get_server(server_id).map_err(|e| e.to_string())?;
     let quic_conn = conn.connection.clone();
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 
