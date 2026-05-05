@@ -138,6 +138,15 @@ pub struct MemberInfo {
     pub role_ids: Vec<u64>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BannedMember {
+    pub public_key: PublicKey,
+    pub display_name: String,
+    #[serde(default)]
+    pub ban_reason: Option<String>,
+    pub banned_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct OverrideInfo {
     pub role_id: u64,
@@ -182,7 +191,15 @@ pub enum ServerRequest {
     AssignRole { member_key: PublicKey, role_id: u64 },
     RemoveRole { member_key: PublicKey, role_id: u64 },
     KickMember { member_key: PublicKey },
-    BanMember { member_key: PublicKey },
+    BanMember {
+        member_key: PublicKey,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    UnbanMember {
+        member_key: PublicKey,
+    },
+    ListBanned,
     CreateInvite { max_uses: Option<u32>, expires_in_secs: Option<u64>, target_channel: Option<u64> },
     GetServerInfo,
     GetMembers,
@@ -228,6 +245,9 @@ pub enum ServerResponse {
         roles: Vec<RoleInfo>,
     },
     Members { members: Vec<MemberInfo> },
+    BannedMembers {
+        entries: Vec<BannedMember>,
+    },
     InviteCreated { code: String },
     DeletionStatusResp { status: DeletionStatus },
     UrlFetched { file_id: u64 },
@@ -245,7 +265,14 @@ pub enum ServerEvent {
     MessageUnpinned { message_id: u64, channel_id: u64 },
     MemberJoined { public_key: PublicKey, display_name: String },
     MemberLeft { public_key: PublicKey },
-    MemberBanned { public_key: PublicKey },
+    MemberBanned {
+        public_key: PublicKey,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    MemberUnbanned {
+        public_key: PublicKey,
+    },
     TypingStarted { channel_id: u64, public_key: PublicKey },
     ChannelCreated { channel: ChannelInfo },
     ChannelUpdated { channel: ChannelInfo },
@@ -431,7 +458,9 @@ mod tests {
             ServerRequest::AssignRole { member_key: kp.public_key(), role_id: 1 },
             ServerRequest::RemoveRole { member_key: kp.public_key(), role_id: 1 },
             ServerRequest::KickMember { member_key: kp.public_key() },
-            ServerRequest::BanMember { member_key: kp.public_key() },
+            ServerRequest::BanMember { member_key: kp.public_key(), reason: Some("spam".into()) },
+            ServerRequest::UnbanMember { member_key: kp.public_key() },
+            ServerRequest::ListBanned,
             ServerRequest::CreateInvite { max_uses: Some(10), expires_in_secs: Some(3600), target_channel: Some(1) },
             ServerRequest::GetServerInfo,
             ServerRequest::GetMembers,
