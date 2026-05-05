@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, KeyboardEvent } from "react";
 import * as api from "../lib/tauri-bridge";
 import * as bookApi from "../lib/book/client";
+import * as gifApi from "../lib/gifSearch";
 import type { MemberInfo } from "../lib/types";
 import type { BookItem } from "../lib/book/types";
 import { publicKeyToString } from "../lib/types";
@@ -9,6 +10,8 @@ import SendStickerPicker from "./SendStickerPicker";
 import EmojiAutocomplete from "./EmojiAutocomplete";
 import VoiceRecorder from "./VoiceRecorder";
 import BookBrowser from "./BookBrowser";
+import GifPicker from "./GifPicker";
+import GifSearchOptIn from "./GifSearchOptIn";
 
 interface MessageInputProps {
   channelId: number;
@@ -28,6 +31,8 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const [showBook, setShowBook] = useState(false);
+  const [showGifPicker, setShowGifPicker] = useState(false);
+  const [showGifOptIn, setShowGifOptIn] = useState(false);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -71,6 +76,30 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setAttachedFileId(null);
     setAttachedFileName(null);
     setError(null);
+  }
+
+  async function handleGifButtonClick() {
+    try {
+      const settings = await gifApi.getGifSearchSettings();
+      if (settings.enabled) {
+        setShowGifPicker((s) => !s);
+      } else {
+        setShowGifOptIn(true);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleGifOptInEnable() {
+    try {
+      const current = await gifApi.getGifSearchSettings();
+      await gifApi.setGifSearchSettings({ ...current, enabled: true });
+      setShowGifOptIn(false);
+      setShowGifPicker(true);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   function detectTokenAtCursor(text: string, cursor: number): string | null {
@@ -339,6 +368,23 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
                 />
               )}
             </div>
+            <div style={{ position: "relative" }}>
+              <button
+                className="xp-button attach-btn"
+                onClick={handleGifButtonClick}
+                disabled={sending}
+                title="GIF Search"
+              >
+                🎬
+              </button>
+              {showGifPicker && (
+                <GifPicker
+                  serverId={serverId}
+                  channelId={channelId}
+                  onClose={() => setShowGifPicker(false)}
+                />
+              )}
+            </div>
             <button
               className="xp-button attach-btn"
               onClick={handleAttach}
@@ -387,6 +433,12 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         )}
       </div>
       {showBook && <BookBrowser onClose={() => setShowBook(false)} />}
+      {showGifOptIn && (
+        <GifSearchOptIn
+          onCancel={() => setShowGifOptIn(false)}
+          onEnable={handleGifOptInEnable}
+        />
+      )}
       {autocompleteQuery !== null && autocompletePos && (
         <EmojiAutocomplete
           query={autocompleteQuery}
