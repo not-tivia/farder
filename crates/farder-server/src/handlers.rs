@@ -714,7 +714,7 @@ pub fn handle_request(
             if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
                 return Ok(denied);
             }
-            members::ban_member(conn, &member_key, None)?;
+            members::ban_member(conn, &member_key, reason.as_deref())?;
             let event = BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberBanned {
@@ -726,14 +726,26 @@ pub fn handle_request(
         }
 
         // ----------------------------------------------------------------
-        // Unban / List banned (stubs — wired fully in Task 4 / MM.4)
+        // Unban / List banned
         // ----------------------------------------------------------------
-        ServerRequest::UnbanMember { member_key: _ } => {
-            ok(ServerResponse::Error { reason: "not implemented".into() })
+        ServerRequest::UnbanMember { member_key } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::BAN_MEMBERS, "BAN_MEMBERS")? {
+                return Ok(denied);
+            }
+            members::unban_member(conn, &member_key)?;
+            let event = BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::MemberUnbanned { public_key: member_key.clone() },
+            };
+            ok_with(ServerResponse::Ok, vec![event])
         }
 
         ServerRequest::ListBanned => {
-            ok(ServerResponse::Error { reason: "not implemented".into() })
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::BAN_MEMBERS, "BAN_MEMBERS")? {
+                return Ok(denied);
+            }
+            let entries = members::list_banned(conn)?;
+            ok(ServerResponse::BannedMembers { entries })
         }
 
         // ----------------------------------------------------------------
@@ -1871,5 +1883,39 @@ mod tests {
             }
             other => panic!("expected Error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn unban_member_clears_ban_and_emits_event() {
+        let (conn, owner_pk) = setup();
+        let victim = add_member(&conn, "Victim");
+
+        // Ban the victim first.
+        let _ = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::BanMember {
+                member_key: victim.clone(),
+                reason: Some("test".to_string()),
+            },
+            "",
+        )
+        .unwrap();
+
+        // Now unban.
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::UnbanMember { member_key: victim.clone() },
+            "",
+        )
+        .unwrap();
+
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_eq!(result.events.len(), 1);
+        assert!(matches!(result.events[0].event, ServerEvent::MemberUnbanned { .. }));
+        assert!(crate::members::list_banned(&conn).unwrap().is_empty());
     }
 }
