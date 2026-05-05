@@ -707,21 +707,33 @@ pub fn handle_request(
             ok_with(ServerResponse::Ok, vec![event])
         }
 
-        ServerRequest::BanMember { member_key } => {
+        ServerRequest::BanMember { member_key, reason } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::BAN_MEMBERS, "BAN_MEMBERS")? {
                 return Ok(denied);
             }
             if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
                 return Ok(denied);
             }
-            members::ban_member(conn, &member_key)?;
+            members::ban_member(conn, &member_key, None)?;
             let event = BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberBanned {
                     public_key: member_key,
+                    reason,
                 },
             };
             ok_with(ServerResponse::Ok, vec![event])
+        }
+
+        // ----------------------------------------------------------------
+        // Unban / List banned (stubs — wired fully in Task 4 / MM.4)
+        // ----------------------------------------------------------------
+        ServerRequest::UnbanMember { member_key: _ } => {
+            ok(ServerResponse::Error { reason: "not implemented".into() })
+        }
+
+        ServerRequest::ListBanned => {
+            ok(ServerResponse::Error { reason: "not implemented".into() })
         }
 
         // ----------------------------------------------------------------
@@ -1417,6 +1429,7 @@ mod tests {
             true,
             ServerRequest::BanMember {
                 member_key: victim.clone(),
+                reason: None,
             },
             "",
         )

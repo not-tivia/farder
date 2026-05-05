@@ -96,12 +96,43 @@ pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
     Ok(members)
 }
 
-pub fn ban_member(conn: &Connection, pk: &PublicKey) -> Result<()> {
+pub fn ban_member(conn: &Connection, pk: &PublicKey, reason: Option<&str>) -> Result<()> {
     conn.execute(
-        "UPDATE members SET banned = 1 WHERE public_key = ?1",
-        params![pk.as_bytes().as_slice()],
+        "UPDATE members SET banned = 1, ban_reason = ?2 WHERE public_key = ?1",
+        rusqlite::params![pk.as_bytes().as_slice(), reason],
     )?;
     Ok(())
+}
+
+pub fn unban_member(conn: &Connection, pk: &PublicKey) -> Result<()> {
+    conn.execute(
+        "UPDATE members SET banned = 0, ban_reason = NULL WHERE public_key = ?1",
+        rusqlite::params![pk.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+pub fn list_banned(conn: &Connection) -> Result<Vec<farder_protocol::server::BannedMember>> {
+    let mut stmt = conn.prepare(
+        "SELECT public_key, display_name, ban_reason, joined_at \
+         FROM members WHERE banned = 1 \
+         ORDER BY joined_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let pk_bytes: Vec<u8> = row.get(0)?;
+        let display_name: String = row.get(1)?;
+        let ban_reason: Option<String> = row.get(2)?;
+        let banned_at: i64 = row.get(3)?;
+        let pk_array: [u8; 32] = pk_bytes.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let pk = farder_crypto::identity::PublicKey::from_bytes(pk_array);
+        Ok(farder_protocol::server::BannedMember {
+            public_key: pk,
+            display_name,
+            ban_reason,
+            banned_at: banned_at as u64,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
 pub fn revoke_member(conn: &Connection, pk: &PublicKey) -> Result<()> {
@@ -563,7 +594,7 @@ mod tests {
         register_member(&conn, &pk3, "Carol").unwrap();
 
         // Ban Carol, revoke Bob — only Alice should appear.
-        ban_member(&conn, &pk3).unwrap();
+        ban_member(&conn, &pk3, None).unwrap();
         revoke_member(&conn, &pk2).unwrap();
 
         let members = list_members(&conn).unwrap();
@@ -576,7 +607,7 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         let pk = gen_pk();
         register_member(&conn, &pk, "Dave").unwrap();
-        ban_member(&conn, &pk).unwrap();
+        ban_member(&conn, &pk, None).unwrap();
         let rec = get_member(&conn, &pk).unwrap().unwrap();
         assert!(rec.banned);
     }
@@ -861,5 +892,43 @@ mod tests {
         // Still detected from A's perspective.
         assert!(is_blocked(&conn, &pk_a, &pk_b).unwrap());
         assert!(is_blocked(&conn, &pk_b, &pk_a).unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Ban / unban / list_banned tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ban_with_reason_persists() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = farder_crypto::identity::PublicKey::from_bytes([1u8; 32]);
+        conn.execute(
+            "INSERT INTO members (public_key, display_name, joined_at, banned, revoked) VALUES (?1, ?2, ?3, 0, 0)",
+            rusqlite::params![pk.as_bytes().as_slice(), "TestUser", 1000i64],
+        ).unwrap();
+
+        ban_member(&conn, &pk, Some("spamming")).unwrap();
+        let banned = list_banned(&conn).unwrap();
+        assert_eq!(banned.len(), 1);
+        assert_eq!(banned[0].ban_reason.as_deref(), Some("spamming"));
+        assert_eq!(banned[0].display_name, "TestUser");
+    }
+
+    #[test]
+    fn unban_clears_flag_and_reason() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = farder_crypto::identity::PublicKey::from_bytes([2u8; 32]);
+        conn.execute(
+            "INSERT INTO members (public_key, display_name, joined_at, banned, revoked) VALUES (?1, ?2, ?3, 0, 0)",
+            rusqlite::params![pk.as_bytes().as_slice(), "Other", 1000i64],
+        ).unwrap();
+
+        ban_member(&conn, &pk, Some("test")).unwrap();
+        assert_eq!(list_banned(&conn).unwrap().len(), 1);
+        unban_member(&conn, &pk).unwrap();
+        assert_eq!(list_banned(&conn).unwrap().len(), 0);
+
+        let m = get_member(&conn, &pk).unwrap().unwrap();
+        assert!(!m.banned);
     }
 }

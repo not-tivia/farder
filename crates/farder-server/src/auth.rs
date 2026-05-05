@@ -341,7 +341,7 @@ mod tests {
         let keypair = Keypair::generate();
         let pk = keypair.public_key();
         members::register_member(&conn, &pk, "BadActor").unwrap();
-        members::ban_member(&conn, &pk).unwrap();
+        members::ban_member(&conn, &pk, None).unwrap();
 
         let result = authenticate_existing_member(&conn, &pk).unwrap();
         assert!(result.is_err(), "banned member should be rejected");
