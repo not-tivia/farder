@@ -119,12 +119,12 @@ export async function getMembers(serverId: string): Promise<MemberInfo[]> {
   return invoke<MemberInfo[]>("get_members", { serverId });
 }
 
-export async function addReaction(serverId: string, messageId: number, emoji: string): Promise<void> {
-  return invoke<void>("add_reaction", { serverId, messageId, emoji });
+export async function addReaction(serverId: string, messageId: number, emoji: string, fileId?: number): Promise<void> {
+  return invoke<void>("add_reaction", { serverId, messageId, emoji, fileId: fileId ?? null });
 }
 
-export async function removeReaction(serverId: string, messageId: number, emoji: string): Promise<void> {
-  return invoke<void>("remove_reaction", { serverId, messageId, emoji });
+export async function removeReaction(serverId: string, messageId: number, emoji: string, fileId?: number): Promise<void> {
+  return invoke<void>("remove_reaction", { serverId, messageId, emoji, fileId: fileId ?? null });
 }
 
 export async function createThread(serverId: string, messageId: number, name?: string): Promise<void> {
