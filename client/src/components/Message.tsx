@@ -7,6 +7,7 @@ import type { BookItem } from "../lib/book/types";
 import { useApp, useActiveServer } from "../context/ServerContext";
 import ReactionPicker from "./ReactionPicker";
 import UserProfilePopup from "./UserProfilePopup";
+import MemberContextMenu from "./MemberContextMenu";
 
 interface MessageProps {
   message: MessageInfo;
@@ -91,6 +92,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
   const [ownDisplayName, setOwnDisplayName] = useState(cachedOwnDisplayName);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [memberMenu, setMemberMenu] = useState<{ x: number; y: number } | null>(null);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
 
@@ -200,6 +202,11 @@ export default function Message({ message, memberNames, grouped = false, serverI
             className="message-author"
             style={{ color, cursor: member ? "pointer" : undefined }}
             onClick={member ? (e) => setProfilePopup({ x: e.clientX, y: e.clientY }) : undefined}
+            onContextMenu={member ? (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setMemberMenu({ x: e.clientX, y: e.clientY });
+            } : undefined}
           >
             {displayName}
           </span>
@@ -215,6 +222,15 @@ export default function Message({ message, memberNames, grouped = false, serverI
           onClose={() => setProfilePopup(null)}
           isSelf={ownPk === pkStr}
           serverId={serverId}
+        />
+      )}
+      {memberMenu && member && (
+        <MemberContextMenu
+          target={member}
+          serverId={serverId}
+          position={memberMenu}
+          ownPk={ownPk}
+          onClose={() => setMemberMenu(null)}
         />
       )}
       {message.reply_to && (

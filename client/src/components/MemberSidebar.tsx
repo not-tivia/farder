@@ -4,6 +4,7 @@ import type { MemberInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import UserProfilePopup from "./UserProfilePopup";
+import MemberContextMenu from "./MemberContextMenu";
 
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
@@ -12,6 +13,7 @@ export default function MemberSidebar() {
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
   const [profilePopup, setProfilePopup] = useState<{ member: MemberInfo; x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ target: MemberInfo; position: { x: number; y: number } } | null>(null);
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
 
   useEffect(() => {
@@ -50,6 +52,10 @@ export default function MemberSidebar() {
             key={member.public_key.bytes.join(",")}
             className="member-item"
             onClick={(e) => setProfilePopup({ member, x: e.clientX, y: e.clientY })}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setContextMenu({ target: member, position: { x: e.clientX, y: e.clientY } });
+            }}
           >
             <span className="member-avatar-mini">{member.display_name.charAt(0).toUpperCase()}</span>
             <span className="online-dot" />
@@ -65,6 +71,15 @@ export default function MemberSidebar() {
           onClose={() => setProfilePopup(null)}
           isSelf={ownPk === publicKeyToString(profilePopup.member.public_key)}
           serverId={serverId}
+        />
+      )}
+      {contextMenu && serverId && (
+        <MemberContextMenu
+          target={contextMenu.target}
+          serverId={serverId}
+          position={contextMenu.position}
+          ownPk={ownPk}
+          onClose={() => setContextMenu(null)}
         />
       )}
     </div>

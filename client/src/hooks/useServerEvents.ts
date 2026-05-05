@@ -210,6 +210,16 @@ export function useServerEvents(): void {
       });
     }).then(safePush);
 
+    listen("server:member_banned", (e) => {
+      const data = e.payload as { server_id: string; public_key: string; reason?: string };
+      window.dispatchEvent(new CustomEvent("farder:banned-list-changed", { detail: { serverId: data.server_id } }));
+    }).then(safePush);
+
+    listen("server:member_unbanned", (e) => {
+      const data = e.payload as { server_id: string; public_key: string };
+      window.dispatchEvent(new CustomEvent("farder:banned-list-changed", { detail: { serverId: data.server_id } }));
+    }).then(safePush);
+
     listen("server:member_joined", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
