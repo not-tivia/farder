@@ -94,6 +94,16 @@ async fn handle_upload_stream(
         return Ok(());
     }
 
+    // 2b. Rate limit — 10 uploads/min per user.
+    let pk_bytes = *member_key.as_bytes();
+    if !state.upload_limiter.allow(&pk_bytes) {
+        let resp = codec::encode(&UploadResponse::Error {
+            reason: "upload rate limit exceeded — please slow down".to_string(),
+        })?;
+        write_frame(&mut send, &resp).await?;
+        return Ok(());
+    }
+
     // 3. Check dedup — drop the guard before any await.
     let existing_id: Option<u64> = {
         let db = state.db.lock().unwrap();
@@ -699,6 +709,21 @@ async fn main_loop(
                                 }
                             }
                             request => {
+                                // Rate-limit AddReaction before dispatching to handler
+                                if matches!(request, ServerRequest::AddReaction { .. }) {
+                                    let pk_bytes = *member_key.as_bytes();
+                                    if !state.reaction_limiter.allow(&pk_bytes) {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error {
+                                                reason: "reaction rate limit exceeded — please slow down".to_string(),
+                                            },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                }
+
                                 // Lock db, call handler, drop lock before await
                                 let handle_result = {
                                     let conn = state.db.lock().unwrap();
