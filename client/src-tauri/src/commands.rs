@@ -1456,6 +1456,73 @@ pub async fn remove_role(
     }
 }
 
+#[tauri::command]
+pub async fn kick_member(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    member_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&member_key)?;
+    let response = bridge::send_request(&state, &server_id, ServerRequest::KickMember { member_key: pk })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn ban_member(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    member_key: String,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let pk = parse_public_key(&member_key)?;
+    let response = bridge::send_request(&state, &server_id, ServerRequest::BanMember { member_key: pk, reason })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn unban_member(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    member_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&member_key)?;
+    let response = bridge::send_request(&state, &server_id, ServerRequest::UnbanMember { member_key: pk })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_banned(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<farder_protocol::server::BannedMember>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::ListBanned)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::BannedMembers { entries } => Ok(entries),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Voice message helper
 // ---------------------------------------------------------------------------
