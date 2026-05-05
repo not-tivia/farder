@@ -6,6 +6,7 @@ import { publicKeyToString } from "../lib/types";
 import { useActiveServer } from "../context/ServerContext";
 import FavoritesPanel from "./FavoritesPanel";
 import VoiceRecorder from "./VoiceRecorder";
+import BookBrowser from "./BookBrowser";
 
 interface MessageInputProps {
   channelId: number;
@@ -24,6 +25,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [error, setError] = useState<string | null>(null);
   const [showFavorites, setShowFavorites] = useState(false);
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
+  const [showBook, setShowBook] = useState(false);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -285,6 +287,14 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
               disabled={sending}
             />
             <button
+              className="xp-button attach-btn"
+              onClick={() => setShowBook(true)}
+              disabled={sending}
+              title="Reaction Book"
+            >
+              📚
+            </button>
+            <button
               className="xp-button"
               onClick={handleSend}
               disabled={sending || uploading || (!content.trim() && !attachedFileId)}
@@ -294,6 +304,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
           </div>
         )}
       </div>
+      {showBook && <BookBrowser onClose={() => setShowBook(false)} />}
     </div>
   );
 }
