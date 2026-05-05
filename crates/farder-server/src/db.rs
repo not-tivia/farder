@@ -194,6 +194,22 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Members: add ban_reason column for moderator-supplied context (Task 1 of Member Moderation).
+    let has_ban_reason: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "ban_reason")
+    };
+    if !has_ban_reason {
+        conn.execute(
+            "ALTER TABLE members ADD COLUMN ban_reason TEXT NULL",
+            [],
+        )?;
+    }
+
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
     // supported for virtual tables in older SQLite versions).
     let fts_exists: bool = conn.query_row(
