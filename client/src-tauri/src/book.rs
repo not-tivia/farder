@@ -228,15 +228,38 @@ pub async fn book_get_file_for_server(
         return Ok(existing);
     }
 
-    let file_path = files_dir().join(format!("{}.{}", item.id, item.ext));
-    if !file_path.exists() {
+    let source_file_path = files_dir().join(format!("{}.{}", item.id, item.ext));
+    if !source_file_path.exists() {
         return Err(format!("image file missing on disk for item {}", item.id));
     }
 
-    let path_str = file_path.to_string_lossy().to_string();
-    let file_id = crate::commands::upload_file_internal(&state, &server_id, &path_str)
-        .await
-        .map_err(|e| format!("upload failed: {}", e))?;
+    // Upload the file with the book item's name as the filename. Receiving
+    // clients use `original_name` to match `:name:` tokens to the attachment
+    // for inline rendering. Achieved by copying to a temp file whose basename
+    // is the book name; upload_file_internal derives `original_name` from the
+    // basename.
+    let safe_name = item.name.replace(
+        |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+        "_",
+    );
+    // Use a dedicated subdir per upload (PID + UUID) so the basename is exactly
+    // "<safe_name>.<ext>" with no collision risk even under concurrent uploads.
+    let temp_subdir = std::env::temp_dir().join(format!(
+        "farder-book-upload-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&temp_subdir)
+        .map_err(|e| format!("create temp dir failed: {}", e))?;
+    let temp_path = temp_subdir.join(format!("{}.{}", safe_name, item.ext));
+    std::fs::copy(&source_file_path, &temp_path)
+        .map_err(|e| format!("temp copy failed: {}", e))?;
+
+    let path_str = temp_path.to_string_lossy().to_string();
+    let upload_result = crate::commands::upload_file_internal(&state, &server_id, &path_str).await;
+    // Best-effort cleanup of temp dir regardless of upload outcome.
+    let _ = std::fs::remove_dir_all(&temp_subdir);
+    let file_id = upload_result.map_err(|e| format!("upload failed: {}", e))?;
 
     let mut items = load_index();
     if let Some(it) = items.iter_mut().find(|i| i.id == item_id) {
