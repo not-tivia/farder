@@ -76,6 +76,10 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:member_joined", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string(), "display_name": display_name })),
         ServerEvent::MemberLeft { public_key } =>
             app.emit("server:member_left", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string() })),
+        ServerEvent::MemberBanned { public_key, reason } =>
+            app.emit("server:member_banned", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string(), "reason": reason })),
+        ServerEvent::MemberUnbanned { public_key } =>
+            app.emit("server:member_unbanned", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string() })),
         ServerEvent::ChannelCreated { channel } =>
             app.emit("server:channel_created", serde_json::json!({ "server_id": sid, "channel": channel })),
         ServerEvent::ChannelUpdated { channel } =>
