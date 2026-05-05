@@ -632,7 +632,7 @@ mod tests {
     fn test_get_message_includes_reactions() {
         let (conn, ch_id, pk) = setup();
         let msg_id = insert_message(&conn, ch_id, &pk, "react", None).unwrap();
-        crate::reactions::add_reaction(&conn, msg_id, &pk, "👍").unwrap();
+        crate::reactions::add_reaction(&conn, msg_id, &pk, "👍", None).unwrap();
         let msg = get_message(&conn, msg_id, &pk).unwrap().unwrap();
         assert_eq!(msg.reactions.len(), 1);
         assert_eq!(msg.reactions[0].emoji, "👍");
@@ -655,7 +655,7 @@ mod tests {
     fn test_fetch_history_includes_reactions() {
         let (conn, ch_id, pk) = setup();
         let msg_id = insert_message(&conn, ch_id, &pk, "msg", None).unwrap();
-        crate::reactions::add_reaction(&conn, msg_id, &pk, "❤️").unwrap();
+        crate::reactions::add_reaction(&conn, msg_id, &pk, "❤️", None).unwrap();
         let history = fetch_history(&conn, ch_id, None, 50, &pk).unwrap();
         assert_eq!(history[0].reactions.len(), 1);
     }

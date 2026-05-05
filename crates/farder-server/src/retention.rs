@@ -164,8 +164,8 @@ mod tests {
         let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
         let msg_id1 = messages::insert_message(&conn, ch_id, &pk1, "Alice's message", None).unwrap();
         let _msg_id2 = messages::insert_message(&conn, ch_id, &pk2, "Bob's message", None).unwrap();
-        reactions::add_reaction(&conn, msg_id1, &pk1, "👍").unwrap();
-        reactions::add_reaction(&conn, msg_id1, &pk2, "❤️").unwrap();
+        reactions::add_reaction(&conn, msg_id1, &pk1, "👍", None).unwrap();
+        reactions::add_reaction(&conn, msg_id1, &pk2, "❤️", None).unwrap();
 
         // Create an already-expired deletion request for Alice (pk1)
         members::create_deletion_request_with_expires(&conn, &pk1, 1000, 2000).unwrap();

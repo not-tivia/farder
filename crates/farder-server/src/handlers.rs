@@ -848,30 +848,30 @@ pub fn handle_request(
             }])
         }
 
-        ServerRequest::AddReaction { message_id, emoji } => {
+        ServerRequest::AddReaction { message_id, emoji, file_id } => {
             let msg = messages::get_message(conn, message_id, member)?
                 .ok_or_else(|| anyhow::anyhow!("message not found"))?;
             let perms = resolve_member_perms(conn, member, msg.channel_id, is_owner)?;
             if !permissions::has(perms, permissions::READ_MESSAGES) {
                 return err("missing READ_MESSAGES permission");
             }
-            crate::reactions::add_reaction(conn, message_id, member, &emoji)?;
+            crate::reactions::add_reaction(conn, message_id, member, &emoji, file_id)?;
             ok_with(ServerResponse::Ok, vec![BroadcastEvent {
                 target: EventTarget::Subscribers(msg.channel_id),
                 event: ServerEvent::ReactionAdded {
-                    message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(),
+                    message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(), file_id,
                 },
             }])
         }
 
-        ServerRequest::RemoveReaction { message_id, emoji } => {
+        ServerRequest::RemoveReaction { message_id, emoji, file_id } => {
             let msg = messages::get_message(conn, message_id, member)?
                 .ok_or_else(|| anyhow::anyhow!("message not found"))?;
-            crate::reactions::remove_reaction(conn, message_id, member, &emoji)?;
+            crate::reactions::remove_reaction(conn, message_id, member, &emoji, file_id)?;
             ok_with(ServerResponse::Ok, vec![BroadcastEvent {
                 target: EventTarget::Subscribers(msg.channel_id),
                 event: ServerEvent::ReactionRemoved {
-                    message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(),
+                    message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(), file_id,
                 },
             }])
         }
@@ -1567,7 +1567,7 @@ mod tests {
         let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
         let msg_id = messages::insert_message(&conn, ch_id, &owner, "react", None).unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::AddReaction {
-            message_id: msg_id, emoji: "👍".to_string(),
+            message_id: msg_id, emoji: "👍".to_string(), file_id: None,
         }, "").unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
         let msg = messages::get_message(&conn, msg_id, &owner).unwrap().unwrap();
@@ -1579,9 +1579,9 @@ mod tests {
         let (conn, owner) = setup();
         let ch_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
         let msg_id = messages::insert_message(&conn, ch_id, &owner, "react", None).unwrap();
-        crate::reactions::add_reaction(&conn, msg_id, &owner, "👍").unwrap();
+        crate::reactions::add_reaction(&conn, msg_id, &owner, "👍", None).unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::RemoveReaction {
-            message_id: msg_id, emoji: "👍".to_string(),
+            message_id: msg_id, emoji: "👍".to_string(), file_id: None,
         }, "").unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
     }
