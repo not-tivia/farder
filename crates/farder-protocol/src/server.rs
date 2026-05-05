@@ -50,6 +50,8 @@ pub struct ReactionGroup {
     pub emoji: String,
     pub count: u32,
     pub me: bool,
+    #[serde(default)]
+    pub file_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,8 +189,8 @@ pub enum ServerRequest {
     SetChannelOverride { channel_id: u64, role_id: u64, allow: u64, deny: u64 },
     SetCategoryOverride { category_id: u64, role_id: u64, allow: u64, deny: u64 },
     CreateThread { message_id: u64, name: Option<String> },
-    AddReaction { message_id: u64, emoji: String },
-    RemoveReaction { message_id: u64, emoji: String },
+    AddReaction { message_id: u64, emoji: String, #[serde(default)] file_id: Option<u64> },
+    RemoveReaction { message_id: u64, emoji: String, #[serde(default)] file_id: Option<u64> },
     RequestDeletion,
     CancelDeletion,
     GetDeletionStatus,
@@ -255,8 +257,8 @@ pub enum ServerEvent {
     RoleUpdated { role: RoleInfo },
     RoleDeleted { role_id: u64 },
     PermissionsChanged,
-    ReactionAdded { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey },
-    ReactionRemoved { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey },
+    ReactionAdded { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey, #[serde(default)] file_id: Option<u64> },
+    ReactionRemoved { message_id: u64, channel_id: u64, emoji: String, public_key: PublicKey, #[serde(default)] file_id: Option<u64> },
     DeletionRequested { public_key: PublicKey },
     DeletionCancelled { public_key: PublicKey },
     DeletionExecuted { public_key: PublicKey },
