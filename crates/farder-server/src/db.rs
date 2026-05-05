@@ -177,6 +177,23 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE channels ADD COLUMN thread_parent_message_id INTEGER", [])?;
     }
 
+    // Reactions: add file_id column for custom-emoji reactions (Phase 1 of Reaction Book).
+    // SQLite has no IF NOT EXISTS for ALTER, so we check pragma table_info first.
+    let has_file_id: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(reactions)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "file_id")
+    };
+    if !has_file_id {
+        conn.execute(
+            "ALTER TABLE reactions ADD COLUMN file_id INTEGER NULL REFERENCES files(id)",
+            [],
+        )?;
+    }
+
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
     // supported for virtual tables in older SQLite versions).
     let fts_exists: bool = conn.query_row(
