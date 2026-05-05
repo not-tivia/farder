@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import CustomizeModal from "./CustomizeModal";
+import GifSearchSettings from "./GifSearchSettings";
 
 interface Props {
   onClose: () => void;
@@ -76,6 +77,7 @@ export default function AppearanceSettings({ onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [customizing, setCustomizing] = useState<{ themeId: string; name: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<"appearance" | "gif">("appearance");
 
   async function refresh() {
     setLoading(true);
@@ -239,10 +241,42 @@ export default function AppearanceSettings({ onClose }: Props) {
             flexShrink: 0,
           }}
         >
-          <span>Appearance</span>
+          <span>Settings</span>
           <button onClick={onClose} style={closeButton} title="Close">
             ✕
           </button>
+        </div>
+
+        {/* Tab bar */}
+        <div
+          style={{
+            display: "flex",
+            borderBottom: "1px solid var(--xp-border, #888)",
+            padding: "0 4px",
+            flexShrink: 0,
+            background: "var(--xp-window-bg, #ECE9D8)",
+          }}
+        >
+          {(["appearance", "gif"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              style={{
+                font: "inherit",
+                padding: "6px 12px",
+                background: activeTab === tab ? "var(--xp-panel-bg, #fff)" : "transparent",
+                color: activeTab === tab ? "var(--xp-blue, #0058E6)" : "inherit",
+                border: "none",
+                borderBottom:
+                  activeTab === tab
+                    ? "2px solid var(--xp-blue, #0058E6)"
+                    : "2px solid transparent",
+                cursor: "pointer",
+              }}
+            >
+              {tab === "appearance" ? "Appearance" : "GIF Search"}
+            </button>
+          ))}
         </div>
 
         {/* Body */}
@@ -257,6 +291,9 @@ export default function AppearanceSettings({ onClose }: Props) {
             gap: 14,
           }}
         >
+          {activeTab === "gif" && <GifSearchSettings />}
+          {activeTab === "appearance" && (
+            <>
           {loading && <div>Loading themes…</div>}
           {error && (
             <div
@@ -477,6 +514,8 @@ export default function AppearanceSettings({ onClose }: Props) {
                   Themes can load external resources. Only use themes from sources you trust.
                 </span>
               </div>
+            </>
+          )}
             </>
           )}
         </div>
