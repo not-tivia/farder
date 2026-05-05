@@ -1,10 +1,12 @@
-import { useState, useRef, KeyboardEvent } from "react";
+import { useEffect, useState, useRef, KeyboardEvent } from "react";
 import * as api from "../lib/tauri-bridge";
-import type { FavoriteEntry } from "../lib/tauri-bridge";
+import * as bookApi from "../lib/book/client";
 import type { MemberInfo } from "../lib/types";
+import type { BookItem } from "../lib/book/types";
 import { publicKeyToString } from "../lib/types";
 import { useActiveServer } from "../context/ServerContext";
-import FavoritesPanel from "./FavoritesPanel";
+import SendStickerPicker from "./SendStickerPicker";
+import EmojiAutocomplete from "./EmojiAutocomplete";
 import VoiceRecorder from "./VoiceRecorder";
 import BookBrowser from "./BookBrowser";
 
@@ -23,13 +25,21 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showFavorites, setShowFavorites] = useState(false);
+  const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const [showBook, setShowBook] = useState(false);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [bookIndex, setBookIndex] = useState<BookItem[]>([]);
+  const [autocompleteQuery, setAutocompleteQuery] = useState<string | null>(null);
+  const [autocompletePos, setAutocompletePos] = useState<{ x: number; y: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaWrapperRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    bookApi.bookListItems().then(setBookIndex).catch(() => {});
+  }, []);
 
   const activeServer = useActiveServer();
   const members = activeServer?.members ?? [];
@@ -63,19 +73,65 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setError(null);
   }
 
-  async function handleFavoriteSelect(fav: FavoriteEntry) {
-    setShowFavorites(false);
-    setSending(true);
-    try {
-      if (fav.original_url) {
-        const fileId = await api.fetchUrl(serverId, fav.original_url, channelId);
-        await api.sendMessage(serverId, channelId, "", undefined, [fileId]);
+  function detectTokenAtCursor(text: string, cursor: number): string | null {
+    let i = cursor - 1;
+    while (i >= 0) {
+      const c = text[i];
+      if (c === ":") {
+        const after = text.slice(i + 1, cursor);
+        if (after.length < 2 || /[:\s]/.test(after)) return null;
+        if (!/^[a-z0-9_+\-]+$/i.test(after)) return null;
+        return after;
       }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSending(false);
+      if (/[\s:]/.test(c)) return null;
+      i--;
     }
+    return null;
+  }
+
+  function handleAutocompleteSelect(name: string) {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const cursor = ta.selectionStart;
+    let colonIdx = cursor - 1;
+    while (colonIdx >= 0 && content[colonIdx] !== ":") colonIdx--;
+    if (colonIdx < 0) return;
+    const before = content.slice(0, colonIdx);
+    const after = content.slice(cursor);
+    const inserted = `:${name}: `;
+    const next = before + inserted + after;
+    setContent(next);
+    setAutocompleteQuery(null);
+    setAutocompletePos(null);
+    setTimeout(() => {
+      ta.focus();
+      const newCursor = colonIdx + inserted.length;
+      ta.setSelectionRange(newCursor, newCursor);
+    }, 0);
+  }
+
+  async function resolveInlineEmojiAttachments(text: string, currentAttachments: number[]): Promise<number[]> {
+    const tokens: string[] = [];
+    const re = /:([a-z0-9_+\-]+):/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      tokens.push(m[1].toLowerCase());
+    }
+    const out = [...currentAttachments];
+    const seen = new Set<string>();
+    for (const name of tokens) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const item = bookIndex.find((b) => b.name === name);
+      if (!item) continue;
+      try {
+        const fileId = await bookApi.bookGetFileForServer(serverId, item.id);
+        if (!out.includes(fileId)) out.push(fileId);
+      } catch (e) {
+        console.error("[message-input:inline-emoji]", name, e);
+      }
+    }
+    return out;
   }
 
   async function handleVoiceRecorded(filePath: string, _duration: number) {
@@ -129,12 +185,17 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         }
       }
 
+      // Resolve inline :name: tokens in the message text into book-item file_ids,
+      // appended to the attachment list. Receiver renders them inline at the
+      // token positions; the message text stays as raw `:name:` for edit/search.
+      const finalAttachments = await resolveInlineEmojiAttachments(text, attachments);
+
       await api.sendMessage(
         serverId,
         channelId,
         messageContent,
         replyTo,
-        attachments.length > 0 ? attachments : undefined,
+        finalAttachments.length > 0 ? finalAttachments : undefined,
       );
       setContent("");
       setAttachedFileId(null);
@@ -180,6 +241,18 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       lastTypingSent.current = now;
       api.sendTyping(serverId, channelId).catch(() => {});
     }
+
+    // Token autocomplete detection.
+    const query = detectTokenAtCursor(val, cursorPos);
+    setAutocompleteQuery(query);
+    if (query) {
+      const rect = textareaWrapperRef.current?.getBoundingClientRect();
+      if (rect) {
+        setAutocompletePos({ x: rect.left, y: rect.top - 4 });
+      }
+    } else {
+      setAutocompletePos(null);
+    }
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -213,9 +286,6 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   return (
     <div className="message-input-area">
       <div className="message-input-wrapper">
-        {showFavorites && (
-          <FavoritesPanel onSelect={handleFavoriteSelect} onClose={() => setShowFavorites(false)} />
-        )}
         {showMentions && filteredMembers.length > 0 && (
           <div className="mention-autocomplete">
             {filteredMembers.map((m, i) => (
@@ -252,14 +322,23 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
           />
         ) : (
           <div className="message-input-row">
-            <button
-              className="xp-button attach-btn"
-              onClick={() => setShowFavorites(!showFavorites)}
-              disabled={sending}
-              title="Favorites"
-            >
-              *
-            </button>
+            <div style={{ position: "relative" }}>
+              <button
+                className="xp-button attach-btn"
+                onClick={() => setShowStickerPicker((s) => !s)}
+                disabled={sending}
+                title="Send Sticker"
+              >
+                🎁
+              </button>
+              {showStickerPicker && (
+                <SendStickerPicker
+                  serverId={serverId}
+                  channelId={channelId}
+                  onClose={() => setShowStickerPicker(false)}
+                />
+              )}
+            </div>
             <button
               className="xp-button attach-btn"
               onClick={handleAttach}
@@ -276,16 +355,19 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
             >
               Mic
             </button>
-            <textarea
-              ref={textareaRef}
-              className="message-input"
-              value={content}
-              onChange={handleChange}
-              onKeyDown={handleKeyDown}
-              placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
-              rows={1}
-              disabled={sending}
-            />
+            <div ref={textareaWrapperRef} style={{ position: "relative", flex: 1 }}>
+              <textarea
+                ref={textareaRef}
+                className="message-input"
+                value={content}
+                onChange={handleChange}
+                onKeyDown={handleKeyDown}
+                placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+                rows={1}
+                disabled={sending}
+                style={{ width: "100%", boxSizing: "border-box" }}
+              />
+            </div>
             <button
               className="xp-button attach-btn"
               onClick={() => setShowBook(true)}
@@ -305,6 +387,15 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         )}
       </div>
       {showBook && <BookBrowser onClose={() => setShowBook(false)} />}
+      {autocompleteQuery !== null && autocompletePos && (
+        <EmojiAutocomplete
+          query={autocompleteQuery}
+          bookIndex={bookIndex}
+          position={autocompletePos}
+          onSelect={handleAutocompleteSelect}
+          onClose={() => { setAutocompleteQuery(null); setAutocompletePos(null); }}
+        />
+      )}
     </div>
   );
 }
