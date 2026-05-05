@@ -609,11 +609,31 @@ pub async fn upload_file(
     channel_id: u64,
     file_path: String,
 ) -> Result<u64, String> {
+    upload_file_internal_with_channel(&state, &server_id, channel_id, &file_path).await
+}
+
+/// Internal helper: upload a file to a server without a specific channel (channel_id = 0).
+/// Used by book.rs to cache uploaded images per-server without going through the Tauri command layer.
+pub(crate) async fn upload_file_internal(
+    state: &AppState,
+    server_id: &str,
+    file_path: &str,
+) -> Result<u64, String> {
+    upload_file_internal_with_channel(state, server_id, 0, file_path).await
+}
+
+/// Core upload logic shared by the Tauri command and the internal helper.
+async fn upload_file_internal_with_channel(
+    state: &AppState,
+    server_id: &str,
+    channel_id: u64,
+    file_path: &str,
+) -> Result<u64, String> {
     use sha2::{Digest, Sha256};
 
     // Read file from disk
-    let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
-    let file_name = std::path::Path::new(&file_path)
+    let data = std::fs::read(file_path).map_err(|e| e.to_string())?;
+    let file_name = std::path::Path::new(file_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".to_string());
@@ -632,7 +652,7 @@ pub async fn upload_file(
     .to_string();
 
     // Open a new bi-stream on the existing connection
-    let conn = state.get_server(&server_id).map_err(|e| e.to_string())?;
+    let conn = state.get_server(server_id).map_err(|e| e.to_string())?;
     let quic_conn = conn.connection.clone();
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 

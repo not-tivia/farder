@@ -208,6 +208,130 @@ pub fn book_rename_item(id: String, new_name: String) -> Result<BookItem, String
     Ok(snapshot)
 }
 
+/// Returns the file_id of the item on the given server. If not yet uploaded,
+/// uploads via the existing upload_file path and caches the result.
+#[tauri::command]
+pub async fn book_get_file_for_server(
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    server_id: String,
+    item_id: String,
+) -> Result<u64, String> {
+    let item = {
+        let items = load_index();
+        items
+            .into_iter()
+            .find(|i| i.id == item_id)
+            .ok_or_else(|| format!("item not found: {}", item_id))?
+    };
+
+    if let Some(&existing) = item.server_files.get(&server_id) {
+        return Ok(existing);
+    }
+
+    let file_path = files_dir().join(format!("{}.{}", item.id, item.ext));
+    if !file_path.exists() {
+        return Err(format!("image file missing on disk for item {}", item.id));
+    }
+
+    let path_str = file_path.to_string_lossy().to_string();
+    let file_id = crate::commands::upload_file_internal(&state, &server_id, &path_str)
+        .await
+        .map_err(|e| format!("upload failed: {}", e))?;
+
+    let mut items = load_index();
+    if let Some(it) = items.iter_mut().find(|i| i.id == item_id) {
+        it.server_files.insert(server_id, file_id);
+    }
+    save_index(&items)?;
+
+    Ok(file_id)
+}
+
+/// One-time migration: import legacy ~/.farder/favorites.json entries into the book.
+/// Renames favorites.json → favorites.json.bak so it won't re-import. Files are COPIED
+/// so the user's favorites/ dir is preserved. Returns count of imported items.
+#[tauri::command]
+pub fn book_migrate_legacy_favorites() -> Result<u32, String> {
+    let data_dir = crate::commands::farder_data_dir_pub();
+    let legacy_index = data_dir.join("favorites.json");
+    if !legacy_index.exists() {
+        return Ok(0);
+    }
+    let raw = std::fs::read_to_string(&legacy_index)
+        .map_err(|e| format!("read favorites.json failed: {}", e))?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+
+    ensure_dirs()?;
+    let legacy_files = data_dir.join("favorites");
+    let mut imported = 0u32;
+    let mut items = load_index();
+
+    for entry in entries {
+        let id_str = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or(id_str);
+        if id_str.is_empty() {
+            continue;
+        }
+        let src = legacy_files.join(id_str);
+        if !src.exists() {
+            continue;
+        }
+        let bytes = match std::fs::read(&src) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let ext = if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) { "png" }
+            else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) { "jpg" }
+            else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { "gif" }
+            else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" { "webp" }
+            else { continue };
+
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let target = files_dir().join(format!("{}.{}", new_id, ext));
+        if std::fs::copy(&src, &target).is_err() {
+            continue;
+        }
+
+        let resolved_name = sanitize_name(name);
+        if resolved_name.is_empty() { continue; }
+
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.into_dimensions().ok())
+            .map(|(w, h)| (Some(w), Some(h)))
+            .unwrap_or((None, None));
+
+        items.push(BookItem {
+            id: new_id,
+            name: resolved_name,
+            ext: ext.to_string(),
+            width,
+            height,
+            animated: detect_animated(&bytes, ext),
+            added_at: now_secs(),
+            source: "favorites-migration".to_string(),
+            server_files: HashMap::new(),
+        });
+        imported += 1;
+    }
+
+    save_index(&items)?;
+    let _ = std::fs::rename(&legacy_index, data_dir.join("favorites.json.bak"));
+    Ok(imported)
+}
+
+/// Stub: implemented in Task 14 once the chat-image-save UI is wired in.
+#[tauri::command]
+pub async fn book_save_from_url(
+    _state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    _server_id: String,
+    _file_id: u64,
+    _name: Option<String>,
+) -> Result<BookItem, String> {
+    Err("book_save_from_url is not implemented yet (Task 14)".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
