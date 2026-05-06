@@ -875,11 +875,15 @@ pub fn handle_request(
             }
             members::remove_member(conn, &member_key)?;
             let mut events = vec![BroadcastEvent {
+                target: EventTarget::Members(vec![member_key.clone()]),
+                event: ServerEvent::YouWereKicked,
+            }];
+            events.push(BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberLeft {
                     public_key: member_key.clone(),
                 },
-            }];
+            });
             if let Some(audit_evt) = audit_emit(conn, member, Some(&member_key), "kick", json!({})) {
                 events.push(audit_evt);
             }
@@ -895,14 +899,22 @@ pub fn handle_request(
             }
             members::ban_member(conn, &member_key, reason.as_deref())?;
             let reason_for_audit = reason.clone();
+            let reason_for_target_event = reason.clone();
             let target_for_audit = member_key.clone();
+            let target_for_kicked_event = member_key.clone();
             let mut events = vec![BroadcastEvent {
+                target: EventTarget::Members(vec![target_for_kicked_event]),
+                event: ServerEvent::YouWereBanned {
+                    reason: reason_for_target_event,
+                },
+            }];
+            events.push(BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberBanned {
                     public_key: member_key,
                     reason,
                 },
-            }];
+            });
             if let Some(audit_evt) = audit_emit(
                 conn,
                 member,
@@ -2437,6 +2449,47 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, "ban");
         assert_eq!(events[0].metadata["reason"], "spam");
+    }
+
+    #[test]
+    fn test_kick_emits_you_were_kicked_to_target() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::KickMember { member_key: target_pk.clone() },
+            "/tmp",
+        )
+        .unwrap();
+        let has_targeted_kick = result.events.iter().any(|e| {
+            matches!(e.event, ServerEvent::YouWereKicked)
+                && matches!(&e.target, EventTarget::Members(pks) if pks.contains(&target_pk))
+        });
+        assert!(has_targeted_kick, "expected YouWereKicked targeted at the kicked member");
+    }
+
+    #[test]
+    fn test_ban_emits_you_were_banned_to_target() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::BanMember {
+                member_key: target_pk.clone(),
+                reason: Some("spam".into()),
+            },
+            "/tmp",
+        )
+        .unwrap();
+        let has_targeted_ban = result.events.iter().any(|e| {
+            matches!(&e.event, ServerEvent::YouWereBanned { reason: Some(r) } if r == "spam")
+                && matches!(&e.target, EventTarget::Members(pks) if pks.contains(&target_pk))
+        });
+        assert!(has_targeted_ban, "expected YouWereBanned targeted at banned member");
     }
 
     #[test]
