@@ -819,8 +819,32 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
                 }
             }
         }
-        EventTarget::Members(_) | EventTarget::PermissionHolders(_) => {
-            // TODO(P2.6): implement targeted broadcast arms.
+        EventTarget::Members(pks) => {
+            let clients = state.clients.read().await;
+            for pk in pks {
+                if let Some(sender) = clients.get(pk.as_bytes()) {
+                    let _ = sender.try_send(event.clone());
+                }
+            }
+        }
+        EventTarget::PermissionHolders(perm_bit) => {
+            let clients = state.clients.read().await;
+            let owner_pk = state.owner.read().await.clone();
+            let conn = state.db.lock().unwrap();
+            for (pk_bytes, sender) in clients.iter() {
+                let pk = farder_crypto::identity::PublicKey::from_bytes(*pk_bytes);
+                let is_owner = owner_pk
+                    .as_ref()
+                    .map(|o| o.as_bytes() == pk.as_bytes())
+                    .unwrap_or(false);
+                if let Ok(perms) =
+                    crate::handlers::resolve_member_server_perms(&conn, &pk, is_owner)
+                {
+                    if crate::permissions::has(perms, perm_bit) {
+                        let _ = sender.try_send(event.clone());
+                    }
+                }
+            }
         }
     }
 }

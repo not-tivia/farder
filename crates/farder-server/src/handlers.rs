@@ -64,6 +64,33 @@ pub fn resolve_member_perms_pub(
     resolve_member_perms(conn, member, channel_id, is_owner)
 }
 
+/// Server-level permissions only (no channel/category overrides).
+pub fn resolve_member_server_perms(
+    conn: &Connection,
+    member: &PublicKey,
+    is_owner: bool,
+) -> Result<u64> {
+    if is_owner {
+        return Ok(permissions::ALL_PERMISSIONS);
+    }
+    let everyone_perms: u64 = conn
+        .query_row(
+            "SELECT permissions FROM roles WHERE name = '@everyone' AND builtin = 1",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        )
+        .unwrap_or(0);
+    let role_perms = members::get_member_role_permissions(conn, member)?;
+    let ctx = permissions::ResolutionContext {
+        everyone_permissions: everyone_perms,
+        role_permissions: role_perms,
+        category_overrides: vec![],
+        channel_overrides: vec![],
+        is_owner,
+    };
+    Ok(permissions::resolve(ctx))
+}
+
 fn resolve_member_perms(
     conn: &Connection,
     member: &PublicKey,
