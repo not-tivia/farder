@@ -79,6 +79,7 @@ export interface ConnectResult {
   channels: ChannelInfo[];
   categories: CategoryInfo[];
   roles: RoleInfo[];
+  owner_public_key?: { bytes: number[] } | null;
 }
 
 export interface SendMessageResult {

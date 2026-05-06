@@ -984,6 +984,7 @@ pub fn handle_request(
                 channels: channels_list,
                 categories: categories_list,
                 roles: roles_list,
+                owner_public_key: None, // patched by connection handler
             })
         }
 

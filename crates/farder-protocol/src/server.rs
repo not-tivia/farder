@@ -262,6 +262,8 @@ pub enum ServerResponse {
         channels: Vec<ChannelInfo>,
         categories: Vec<CategoryInfo>,
         roles: Vec<RoleInfo>,
+        #[serde(default)]
+        owner_public_key: Option<PublicKey>,
     },
     Members { members: Vec<MemberInfo> },
     BannedMembers {

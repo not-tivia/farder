@@ -29,13 +29,21 @@ export function hasPermission(bits: bigint, perm: bigint): boolean {
   return (bits & perm) === perm;
 }
 
-/** Find the actor's MemberInfo + their resolved permissions in one shot. */
+// Bitmask covering every defined permission. Owner short-circuits to this.
+const ALL_BITS: bigint = Object.values(PERMISSIONS).reduce((a, b) => a | b, 0n);
+
+/** Find the actor's MemberInfo + their resolved permissions in one shot.
+ *  If `ownerPk` matches `ownPk`, returns ALL_BITS regardless of roles. */
 export function getActorPermissions(
   members: MemberInfo[],
   roles: RoleInfo[],
   ownPk: string,
+  ownerPk?: string | null,
 ): { member: MemberInfo | null; bits: bigint } {
   const member = members.find((m) => publicKeyToString(m.public_key) === ownPk) ?? null;
+  if (ownerPk && ownerPk === ownPk) {
+    return { member, bits: ALL_BITS };
+  }
   if (!member) return { member: null, bits: 0n };
   return { member, bits: resolveMemberPermissions(member, roles) };
 }

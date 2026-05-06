@@ -1425,6 +1425,7 @@ dependencies = [
  "farder-crypto",
  "rmp-serde",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -19,6 +19,7 @@ export interface PerServerState {
   typingUsers: Record<number, { publicKey: string; displayName: string; expiresAt: number }[]>;
   voiceStates: Record<number, { publicKey: string; displayName: string }[]>;
   currentVoiceChannelId: number | null;
+  ownerPublicKey: string | null;
 }
 
 export interface AppState {
@@ -49,6 +50,7 @@ const initialPerServerState: PerServerState = {
   typingUsers: {},
   voiceStates: {},
   currentVoiceChannelId: null,
+  ownerPublicKey: null,
 };
 
 const initialAppState: AppState = {
@@ -126,6 +128,9 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         channels: action.payload.channels,
         categories: action.payload.categories,
         roles: action.payload.roles,
+        ownerPublicKey: action.payload.owner_public_key
+          ? publicKeyToString(action.payload.owner_public_key)
+          : null,
       };
     case "DISCONNECTED":
       return { ...initialPerServerState, connected: false };
@@ -351,6 +356,9 @@ function appReducer(state: AppState, action: AppAction): AppState {
         channels: payload.channels,
         categories: payload.categories,
         roles: payload.roles,
+        ownerPublicKey: payload.owner_public_key
+          ? publicKeyToString(payload.owner_public_key)
+          : null,
       };
 
       return {

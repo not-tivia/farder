@@ -34,7 +34,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const members = activeServer?.members ?? [];
   const roles = activeServer?.roles ?? [];
   const { bits } = ownPk
-    ? getActorPermissions(members, roles, ownPk)
+    ? getActorPermissions(members, roles, ownPk, activeServer?.ownerPublicKey ?? null)
     : { bits: 0n };
   const canBan = hasPermission(bits, PERMISSIONS.BAN_MEMBERS);
   const canManageServer = hasPermission(bits, PERMISSIONS.MANAGE_SERVER);

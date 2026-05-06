@@ -5,6 +5,7 @@ All notable changes to this project — bug fixes, features, and learnings.
 ## [Unreleased]
 
 ### Fixed
+- (2026-05-06) Server owner had no admin controls in the UI: the owner's only role was `@everyone` (basic perms), and `ServerInfo` didn't expose the owner's public key, so the client couldn't recognize the owner. Now `ServerInfo` carries `owner_public_key` (backwards-compatible `#[serde(default)]`), populated by the connection-layer patcher from `state.owner`. Client `getActorPermissions` short-circuits to all-bits when `ownPk === ownerPk`. The owner's existing rights on the server were unaffected — this just unlocks the buttons.
 - (2026-05-03) Self-inflicted disconnect storm on client launch: React StrictMode opened two QUIC connections from the same identity, the server's identity-keyed `clients` map raced, and the first connection's unconditional cleanup evicted the second's entry — killing the live session and producing "failed to write request frame". Fixed with (a) module-level StrictMode guard on App init, (b) same-owner check before `clients.remove` on the server, (c) Tauri exit hook calling `procs.stop_all()` to stop server-process leaks across sessions, (d) reconnect catch now logs the real error.
 - (2026-05-03) Channel creation debug: was investigating channel creation failure, debug logging added then removed
 - (2026-05-03) Shell plugin config crash: Tauri v2 shell plugin uses `open` field not `scope` in tauri.conf.json. Sidecar permissions go in capabilities/default.json, not plugin config.

@@ -741,9 +741,14 @@ async fn main_loop(
                                         send_server_frame(send, &response).await?;
                                     }
                                     Ok(mut result) => {
-                                        // Patch server name into ServerInfo responses
-                                        if let ServerResponse::ServerInfo { ref mut name, .. } = result.response {
+                                        // Patch server name + owner pubkey into ServerInfo responses
+                                        if let ServerResponse::ServerInfo {
+                                            ref mut name,
+                                            ref mut owner_public_key,
+                                            ..
+                                        } = result.response {
                                             *name = state.server_name.clone();
+                                            *owner_public_key = state.owner.read().await.clone();
                                         }
 
                                         let response = ServerFrame::Response {

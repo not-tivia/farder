@@ -72,7 +72,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const roles: RoleInfo[] = activeServer?.roles ?? [];
 
   const { bits } = ownPk
-    ? getActorPermissions(members, roles, ownPk)
+    ? getActorPermissions(members, roles, ownPk, activeServer?.ownerPublicKey ?? null)
     : { bits: 0n };
 
   const canManageRoles = hasPermission(bits, PERMISSIONS.MANAGE_ROLES);
