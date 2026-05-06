@@ -191,6 +191,20 @@ fn require_role_hierarchy(
     Ok(None)
 }
 
+fn require_not_timed_out(conn: &Connection, member: &PublicKey) -> Result<Option<HandleResult>> {
+    if let Some((until_ms, reason)) = members::is_timed_out(conn, member, current_unix_ms())? {
+        let reason_part = reason.map(|r| format!(": {r}")).unwrap_or_default();
+        return Ok(Some(HandleResult {
+            response: ServerResponse::Error {
+                reason: format!("timed out until {until_ms}{reason_part}"),
+            },
+            events: Vec::new(),
+            orphaned_file_ids: vec![],
+        }));
+    }
+    Ok(None)
+}
+
 /// Check that the actor outranks the target member.
 fn require_member_hierarchy(
     conn: &Connection,
@@ -236,6 +250,9 @@ pub fn handle_request(
             reply_to,
             attachment_ids,
         } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
             if content.len() > 8000 {
                 return err("message content too long (max 8000 characters)");
             }
@@ -887,6 +904,9 @@ pub fn handle_request(
         }
 
         ServerRequest::AddReaction { message_id, emoji, file_id } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
             let msg = messages::get_message(conn, message_id, member)?
                 .ok_or_else(|| anyhow::anyhow!("message not found"))?;
             let perms = resolve_member_perms(conn, member, msg.channel_id, is_owner)?;
@@ -1065,6 +1085,9 @@ pub fn handle_request(
         // Voice (Phase 4)
         // ----------------------------------------------------------------
         ServerRequest::JoinVoice { channel_id } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
             let channel = channels::get_channel(conn, channel_id)?
                 .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
             if channel.channel_type != ChannelType::Voice {
@@ -1460,6 +1483,37 @@ mod tests {
                 assert!(msgs[0].content.contains("hello"));
             }
             other => panic!("expected SearchResults, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_timed_out_send_message_rejected() {
+        let (conn, _owner_pk) = setup();
+        let actor = add_member(&conn, "Talker");
+        let channel_id = make_channel(&conn);
+
+        // Time out the actor for 60 seconds.
+        members::set_timeout(&conn, &actor, current_unix_ms() + 60_000, Some("spam")).unwrap();
+
+        let result = handle_request(
+            &conn,
+            &actor,
+            false,
+            ServerRequest::SendMessage {
+                channel_id,
+                content: "hi".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "/tmp",
+        )
+        .unwrap();
+
+        match result.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains("timed out"), "got: {reason}");
+            }
+            other => panic!("expected error, got {other:?}"),
         }
     }
 
