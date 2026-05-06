@@ -1377,8 +1377,12 @@ pub fn handle_request(
             ok_with(ServerResponse::Ok, events)
         }
 
-        ServerRequest::ListAuditEvents { .. } => {
-            err("not yet implemented")  // TODO(P2.8)
+        ServerRequest::ListAuditEvents { before_id, limit } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            let events = audit::list(conn, before_id, limit)?;
+            ok(ServerResponse::AuditEventsList { events })
         }
     }
 }
@@ -2788,5 +2792,57 @@ mod tests {
         assert_eq!(events[0].metadata["role_id"], role_id);
         assert_eq!(events[0].metadata["allow"], allow.to_string());
         assert_eq!(events[0].metadata["deny"], deny.to_string());
+    }
+
+    // -----------------------------------------------------------------------
+    // ListAuditEvents handler tests (Task 8 / P2.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_list_audit_events_requires_manage_server() {
+        let (conn, _owner_pk) = setup();
+        let actor_pk = add_member(&conn, "Actor");
+        let result = handle_request(
+            &conn,
+            &actor_pk,
+            false,
+            ServerRequest::ListAuditEvents {
+                before_id: None,
+                limit: 10,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        match result.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains("MANAGE_SERVER"), "got: {reason}")
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_audit_events_returns_paginated() {
+        let (conn, owner_pk) = setup();
+        for _ in 0..3 {
+            audit::insert(&conn, &owner_pk, None, "test", serde_json::json!({})).unwrap();
+        }
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::ListAuditEvents {
+                before_id: None,
+                limit: 2,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        match result.response {
+            ServerResponse::AuditEventsList { events } => {
+                assert_eq!(events.len(), 2);
+            }
+            other => panic!("expected AuditEventsList, got {other:?}"),
+        }
     }
 }
