@@ -5,11 +5,12 @@ import ChatPanel from "./ChatPanel";
 import MemberSidebar from "./MemberSidebar";
 import DmPanel from "./DmPanel";
 import ServerStrip from "./ServerStrip";
+import KickedBannedDialog from "./KickedBannedDialog";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 
 export default function AppShell() {
-  const { dispatch } = useApp();
+  const { state, dispatch } = useApp();
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
 
@@ -75,6 +76,21 @@ export default function AppShell() {
           <div className="reconnect-overlay">
             Connection lost. Reconnecting...
           </div>
+        )}
+        {state.kickedBanned && (
+          <KickedBannedDialog
+            kind={state.kickedBanned.kind}
+            serverName={
+              state.serverList.find((s) => s.id === state.kickedBanned!.serverId)?.name ?? "the server"
+            }
+            reason={state.kickedBanned.reason}
+            onClose={() => {
+              const sid = state.kickedBanned!.serverId;
+              dispatch({ type: "CLEAR_KICKED_BANNED" });
+              // Also disconnect the server so the dialog doesn't recur on reconnect.
+              api.disconnectServer(sid).catch(() => {});
+            }}
+          />
         )}
       </div>
     </>
