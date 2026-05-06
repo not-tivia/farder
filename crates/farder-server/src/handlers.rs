@@ -1136,11 +1136,51 @@ pub fn handle_request(
             ok(ServerResponse::VoiceStateResp { participants: voice_members })
         }
 
-        // TODO(P2.5/P2.8): real handlers in subsequent tasks.
-        ServerRequest::TimeoutMember { .. }
-        | ServerRequest::RemoveTimeout { .. }
-        | ServerRequest::ListAuditEvents { .. } => {
-            err("not yet implemented")
+        ServerRequest::TimeoutMember { member_key, until_ms, reason } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::TIMEOUT_MEMBERS, "TIMEOUT_MEMBERS")? {
+                return Ok(denied);
+            }
+            if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
+                return Ok(denied);
+            }
+            let now = current_unix_ms();
+            const MAX_TIMEOUT_MS: u64 = 28 * 24 * 60 * 60 * 1000;
+            if until_ms <= now || until_ms > now + MAX_TIMEOUT_MS {
+                return err("timeout duration out of range (must be in the future, max 28 days)");
+            }
+            members::set_timeout(conn, &member_key, until_ms, reason.as_deref())?;
+            let event = BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::MemberTimeoutChanged {
+                    public_key: member_key,
+                    until_ms: Some(until_ms),
+                    reason: reason.clone(),
+                },
+            };
+            ok_with(ServerResponse::Ok, vec![event])
+        }
+
+        ServerRequest::RemoveTimeout { member_key } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::TIMEOUT_MEMBERS, "TIMEOUT_MEMBERS")? {
+                return Ok(denied);
+            }
+            if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
+                return Ok(denied);
+            }
+            members::clear_timeout(conn, &member_key)?;
+            let event = BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::MemberTimeoutChanged {
+                    public_key: member_key,
+                    until_ms: None,
+                    reason: None,
+                },
+            };
+            ok_with(ServerResponse::Ok, vec![event])
+        }
+
+        ServerRequest::ListAuditEvents { .. } => {
+            err("not yet implemented")  // TODO(P2.8)
         }
     }
 }
@@ -2004,5 +2044,130 @@ mod tests {
         assert_eq!(result.events.len(), 1);
         assert!(matches!(result.events[0].event, ServerEvent::MemberUnbanned { .. }));
         assert!(crate::members::list_banned(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_timeout_member_requires_perm() {
+        let (conn, _owner_pk) = setup();
+        let actor_pk = add_member(&conn, "Actor");
+        let target_pk = add_member(&conn, "Target");
+        let result = handle_request(
+            &conn,
+            &actor_pk,
+            false,
+            ServerRequest::TimeoutMember {
+                member_key: target_pk.clone(),
+                until_ms: current_unix_ms() + 60_000,
+                reason: None,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        match result.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains("TIMEOUT_MEMBERS"), "got: {reason}")
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_timeout_member_rejects_invalid_duration() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let now = current_unix_ms();
+
+        // until_ms in the past.
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::TimeoutMember {
+                member_key: target_pk.clone(),
+                until_ms: now.saturating_sub(1000),
+                reason: None,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(
+            matches!(&result.response, ServerResponse::Error { reason } if reason.contains("out of range")),
+            "got: {:?}",
+            result.response
+        );
+
+        // until_ms > now + 28d.
+        let too_far = now + 29 * 24 * 60 * 60 * 1000;
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::TimeoutMember {
+                member_key: target_pk.clone(),
+                until_ms: too_far,
+                reason: None,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(
+            matches!(&result.response, ServerResponse::Error { reason } if reason.contains("out of range"))
+        );
+    }
+
+    #[test]
+    fn test_timeout_member_happy_path() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let until = current_unix_ms() + 60_000;
+
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::TimeoutMember {
+                member_key: target_pk.clone(),
+                until_ms: until,
+                reason: Some("warning".into()),
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0].event {
+            ServerEvent::MemberTimeoutChanged {
+                until_ms: Some(u),
+                reason: Some(r),
+                ..
+            } => {
+                assert_eq!(*u, until);
+                assert_eq!(r, "warning");
+            }
+            other => panic!("expected MemberTimeoutChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_remove_timeout_clears() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        members::set_timeout(&conn, &target_pk, current_unix_ms() + 60_000, Some("oops")).unwrap();
+
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::RemoveTimeout {
+                member_key: target_pk.clone(),
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_eq!(
+            members::is_timed_out(&conn, &target_pk, current_unix_ms()).unwrap(),
+            None
+        );
     }
 }
