@@ -13,6 +13,7 @@ pub const KICK_MEMBERS: u64 = 1 << 10;
 pub const BAN_MEMBERS: u64 = 1 << 11;
 pub const ADMIN: u64 = 1 << 12;
 pub const CREATE_INVITES: u64 = 1 << 13;
+pub const TIMEOUT_MEMBERS: u64 = 1 << 14;
 
 pub const ALL_PERMISSIONS: u64 = VIEW_CHANNEL
     | READ_MESSAGES
@@ -27,7 +28,8 @@ pub const ALL_PERMISSIONS: u64 = VIEW_CHANNEL
     | KICK_MEMBERS
     | BAN_MEMBERS
     | ADMIN
-    | CREATE_INVITES;
+    | CREATE_INVITES
+    | TIMEOUT_MEMBERS;
 
 pub const DEFAULT_EVERYONE: u64 = VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES | CREATE_INVITES;
 
@@ -138,6 +140,7 @@ mod tests {
         BAN_MEMBERS,
         ADMIN,
         CREATE_INVITES,
+        TIMEOUT_MEMBERS,
     ];
 
     #[test]

@@ -44,6 +44,13 @@ fn err(reason: &str) -> Result<HandleResult> {
     })
 }
 
+fn current_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 // ---------------------------------------------------------------------------
 // Permission resolution helper
 // ---------------------------------------------------------------------------
@@ -784,16 +791,21 @@ pub fn handle_request(
 
         ServerRequest::GetMembers => {
             let all_members = members::list_members(conn)?;
+            let now_ms = current_unix_ms();
             let mut member_infos: Vec<MemberInfo> = Vec::new();
             for m in all_members {
                 let role_ids = members::get_member_role_ids(conn, &m.public_key)?;
+                let (timeout_until, timeout_reason) = match members::is_timed_out(conn, &m.public_key, now_ms)? {
+                    Some((until, reason)) => (Some(until), reason),
+                    None => (None, None),
+                };
                 member_infos.push(MemberInfo {
                     public_key: m.public_key,
                     display_name: m.display_name,
                     joined_at: m.joined_at,
                     role_ids,
-                    timeout_until: None,
-                    timeout_reason: None,
+                    timeout_until,
+                    timeout_reason,
                 });
             }
             ok(ServerResponse::Members {
@@ -969,13 +981,17 @@ pub fn handle_request(
             let target_record = members::get_member(conn, &target_key)?
                 .ok_or_else(|| anyhow::anyhow!("target member disappeared"))?;
             let role_ids = members::get_member_role_ids(conn, &target_key)?;
+            let (timeout_until, timeout_reason) = match members::is_timed_out(conn, &target_key, current_unix_ms())? {
+                Some((until, reason)) => (Some(until), reason),
+                None => (None, None),
+            };
             let participant = MemberInfo {
                 public_key: target_key.clone(),
                 display_name: target_record.display_name,
                 joined_at: target_record.joined_at,
                 role_ids,
-                timeout_until: None,
-                timeout_reason: None,
+                timeout_until,
+                timeout_reason,
             };
 
             let mut events = Vec::new();
@@ -1002,13 +1018,17 @@ pub fn handle_request(
                     None => continue,
                 };
                 let role_ids = members::get_member_role_ids(conn, &other_key)?;
+                let (timeout_until, timeout_reason) = match members::is_timed_out(conn, &other_key, current_unix_ms())? {
+                    Some((until, reason)) => (Some(until), reason),
+                    None => (None, None),
+                };
                 let participant = MemberInfo {
                     public_key: other_key,
                     display_name: other_record.display_name,
                     joined_at: other_record.joined_at,
                     role_ids,
-                    timeout_until: None,
-                    timeout_reason: None,
+                    timeout_until,
+                    timeout_reason,
                 };
                 let ch_id = ch.id;
                 let last_msgs = messages::fetch_history(conn, ch_id, None, 1, member)?;

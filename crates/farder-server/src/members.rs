@@ -112,6 +112,46 @@ pub fn unban_member(conn: &Connection, pk: &PublicKey) -> Result<()> {
     Ok(())
 }
 
+pub fn set_timeout(conn: &Connection, pk: &PublicKey, until_ms: u64, reason: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE members SET timeout_until = ?1, timeout_reason = ?2 WHERE public_key = ?3",
+        rusqlite::params![until_ms as i64, reason, pk.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+pub fn clear_timeout(conn: &Connection, pk: &PublicKey) -> Result<()> {
+    conn.execute(
+        "UPDATE members SET timeout_until = NULL, timeout_reason = NULL WHERE public_key = ?1",
+        rusqlite::params![pk.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+/// Returns active timeout details if `now_ms < timeout_until`. If the timeout
+/// has expired, lazily clears the column and returns None.
+pub fn is_timed_out(conn: &Connection, pk: &PublicKey, now_ms: u64) -> Result<Option<(u64, Option<String>)>> {
+    let row: Option<(Option<i64>, Option<String>)> = conn
+        .query_row(
+            "SELECT timeout_until, timeout_reason FROM members WHERE public_key = ?1",
+            rusqlite::params![pk.as_bytes().as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+    match row {
+        Some((Some(until_i64), reason)) => {
+            let until_ms_db = until_i64 as u64;
+            if now_ms < until_ms_db {
+                Ok(Some((until_ms_db, reason)))
+            } else {
+                clear_timeout(conn, pk)?;
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 pub fn list_banned(conn: &Connection) -> Result<Vec<farder_protocol::server::BannedMember>> {
     let mut stmt = conn.prepare(
         "SELECT public_key, display_name, ban_reason, joined_at \
@@ -930,5 +970,44 @@ mod tests {
 
         let m = get_member(&conn, &pk).unwrap().unwrap();
         assert!(!m.banned);
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeout tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_and_get_timeout() {
+        let conn = db::open_in_memory().unwrap();
+        let kp = farder_crypto::identity::Keypair::generate();
+        let pk = kp.public_key();
+        register_member(&conn, &pk, "alice").unwrap();
+
+        // No timeout initially.
+        assert_eq!(is_timed_out(&conn, &pk, 1000).unwrap(), None);
+
+        // Set a timeout that hasn't expired.
+        set_timeout(&conn, &pk, 5000, Some("warning")).unwrap();
+        let active = is_timed_out(&conn, &pk, 1000).unwrap();
+        assert_eq!(active, Some((5000, Some("warning".to_string()))));
+
+        // Past `until_ms` -> returns None and lazily clears the column.
+        let active = is_timed_out(&conn, &pk, 6000).unwrap();
+        assert_eq!(active, None);
+        // Re-checking confirms the column is cleared.
+        let active = is_timed_out(&conn, &pk, 1000).unwrap();
+        assert_eq!(active, None);
+    }
+
+    #[test]
+    fn test_clear_timeout() {
+        let conn = db::open_in_memory().unwrap();
+        let kp = farder_crypto::identity::Keypair::generate();
+        let pk = kp.public_key();
+        register_member(&conn, &pk, "bob").unwrap();
+        set_timeout(&conn, &pk, 9999, None).unwrap();
+
+        clear_timeout(&conn, &pk).unwrap();
+        assert_eq!(is_timed_out(&conn, &pk, 1000).unwrap(), None);
     }
 }
