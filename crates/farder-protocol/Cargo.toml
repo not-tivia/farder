@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 farder-crypto = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 rmp-serde = "1"
 anyhow = { workspace = true }
 

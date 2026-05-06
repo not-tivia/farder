@@ -819,5 +819,8 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
                 }
             }
         }
+        EventTarget::Members(_) | EventTarget::PermissionHolders(_) => {
+            // TODO(P2.6): implement targeted broadcast arms.
+        }
     }
 }

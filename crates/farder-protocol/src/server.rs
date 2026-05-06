@@ -136,6 +136,10 @@ pub struct MemberInfo {
     pub display_name: String,
     pub joined_at: u64,
     pub role_ids: Vec<u64>,
+    #[serde(default)]
+    pub timeout_until: Option<u64>,
+    #[serde(default)]
+    pub timeout_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -145,6 +149,18 @@ pub struct BannedMember {
     #[serde(default)]
     pub ban_reason: Option<String>,
     pub banned_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AuditEvent {
+    pub id: u64,
+    pub actor: PublicKey,
+    #[serde(default)]
+    pub target: Option<PublicKey>,
+    pub action: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    pub timestamp_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -199,6 +215,9 @@ pub enum ServerRequest {
     UnbanMember {
         member_key: PublicKey,
     },
+    TimeoutMember { member_key: PublicKey, until_ms: u64, reason: Option<String> },
+    RemoveTimeout { member_key: PublicKey },
+    ListAuditEvents { before_id: Option<u64>, limit: u32 },
     ListBanned,
     CreateInvite { max_uses: Option<u32>, expires_in_secs: Option<u64>, target_channel: Option<u64> },
     GetServerInfo,
@@ -248,6 +267,7 @@ pub enum ServerResponse {
     BannedMembers {
         entries: Vec<BannedMember>,
     },
+    AuditEventsList { events: Vec<AuditEvent> },
     InviteCreated { code: String },
     DeletionStatusResp { status: DeletionStatus },
     UrlFetched { file_id: u64 },
@@ -273,6 +293,19 @@ pub enum ServerEvent {
     MemberUnbanned {
         public_key: PublicKey,
     },
+    MemberTimeoutChanged {
+        public_key: PublicKey,
+        #[serde(default)]
+        until_ms: Option<u64>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    YouWereKicked,
+    YouWereBanned {
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    AuditEventCreated { event: AuditEvent },
     TypingStarted { channel_id: u64, public_key: PublicKey },
     ChannelCreated { channel: ChannelInfo },
     ChannelUpdated { channel: ChannelInfo },
@@ -460,6 +493,9 @@ mod tests {
             ServerRequest::KickMember { member_key: kp.public_key() },
             ServerRequest::BanMember { member_key: kp.public_key(), reason: Some("spam".into()) },
             ServerRequest::UnbanMember { member_key: kp.public_key() },
+            ServerRequest::TimeoutMember { member_key: kp.public_key(), until_ms: 9999, reason: Some("test".into()) },
+            ServerRequest::RemoveTimeout { member_key: kp.public_key() },
+            ServerRequest::ListAuditEvents { before_id: Some(100), limit: 50 },
             ServerRequest::ListBanned,
             ServerRequest::CreateInvite { max_uses: Some(10), expires_in_secs: Some(3600), target_channel: Some(1) },
             ServerRequest::GetServerInfo,
@@ -467,8 +503,8 @@ mod tests {
             ServerRequest::SetChannelOverride { channel_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
             ServerRequest::SetCategoryOverride { category_id: 1, role_id: 2, allow: 0x03, deny: 0x04 },
             ServerRequest::CreateThread { message_id: 1, name: Some("thread".into()) },
-            ServerRequest::AddReaction { message_id: 1, emoji: "👍".into() },
-            ServerRequest::RemoveReaction { message_id: 1, emoji: "👍".into() },
+            ServerRequest::AddReaction { message_id: 1, emoji: "👍".into(), file_id: None },
+            ServerRequest::RemoveReaction { message_id: 1, emoji: "👍".into(), file_id: None },
             ServerRequest::RequestDeletion,
             ServerRequest::CancelDeletion,
             ServerRequest::GetDeletionStatus,
@@ -542,6 +578,7 @@ mod tests {
             emoji: "👍".to_string(),
             count: 5,
             me: true,
+            file_id: None,
         };
         let bytes = codec::encode(&rg).unwrap();
         let decoded: ReactionGroup = codec::decode(&bytes).unwrap();

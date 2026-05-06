@@ -792,6 +792,8 @@ pub fn handle_request(
                     display_name: m.display_name,
                     joined_at: m.joined_at,
                     role_ids,
+                    timeout_until: None,
+                    timeout_reason: None,
                 });
             }
             ok(ServerResponse::Members {
@@ -972,6 +974,8 @@ pub fn handle_request(
                 display_name: target_record.display_name,
                 joined_at: target_record.joined_at,
                 role_ids,
+                timeout_until: None,
+                timeout_reason: None,
             };
 
             let mut events = Vec::new();
@@ -1003,6 +1007,8 @@ pub fn handle_request(
                     display_name: other_record.display_name,
                     joined_at: other_record.joined_at,
                     role_ids,
+                    timeout_until: None,
+                    timeout_reason: None,
                 };
                 let ch_id = ch.id;
                 let last_msgs = messages::fetch_history(conn, ch_id, None, 1, member)?;
@@ -1085,6 +1091,13 @@ pub fn handle_request(
                 voice_members.push(VoiceMember { public_key: pk, display_name: name, joined_at });
             }
             ok(ServerResponse::VoiceStateResp { participants: voice_members })
+        }
+
+        // TODO(P2.5/P2.8): real handlers in subsequent tasks.
+        ServerRequest::TimeoutMember { .. }
+        | ServerRequest::RemoveTimeout { .. }
+        | ServerRequest::ListAuditEvents { .. } => {
+            err("not yet implemented")
         }
     }
 }
