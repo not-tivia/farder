@@ -26,6 +26,7 @@ export interface AppState {
   activeServerId: string | null;
   serverList: ServerListEntry[];
   servers: Record<string, PerServerState>;
+  kickedBanned: { kind: "kick" | "ban"; serverId: string; reason: string | null } | null;
 }
 
 // Keep old ServerState as alias for backward compat
@@ -55,6 +56,7 @@ const initialAppState: AppState = {
   activeServerId: null,
   serverList: [],
   servers: {},
+  kickedBanned: null,
 };
 
 export type AppAction =
@@ -103,7 +105,11 @@ export type AppAction =
   | { type: "VOICE_LEFT"; serverId: string; payload: { channelId: number; publicKey: string } }
   | { type: "SET_VOICE_STATE"; serverId: string; payload: { channelId: number; participants: { publicKey: string; displayName: string }[] } }
   | { type: "JOIN_VOICE_CHANNEL"; serverId: string; payload: number }
-  | { type: "LEAVE_VOICE_CHANNEL"; serverId: string };
+  | { type: "LEAVE_VOICE_CHANNEL"; serverId: string }
+  | { type: "MEMBER_TIMEOUT_CHANGED"; serverId: string; payload: { publicKey: string; untilMs: number | null; reason: string | null } }
+  | { type: "YOU_WERE_KICKED"; serverId: string }
+  | { type: "YOU_WERE_BANNED"; serverId: string; reason: string | null }
+  | { type: "CLEAR_KICKED_BANNED" };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -129,6 +135,14 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       return { ...state, connected: true, connectionLost: false };
     case "SET_MEMBERS":
       return { ...state, members: action.payload };
+    case "MEMBER_TIMEOUT_CHANGED": {
+      const members = state.members.map((m) =>
+        publicKeyToString(m.public_key) === action.payload.publicKey
+          ? { ...m, timeout_until: action.payload.untilMs, timeout_reason: action.payload.reason }
+          : m
+      );
+      return { ...state, members };
+    }
     case "SELECT_CHANNEL": {
       const chMsgs = state.messages[action.payload] ?? [];
       const latestId = chMsgs.length > 0 ? Math.max(...chMsgs.map((m) => m.id)) : 0;
@@ -378,6 +392,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
       );
       return { ...state, serverList };
     }
+
+    case "YOU_WERE_KICKED":
+      return { ...state, kickedBanned: { kind: "kick", serverId: action.serverId, reason: null } };
+
+    case "YOU_WERE_BANNED":
+      return { ...state, kickedBanned: { kind: "ban", serverId: action.serverId, reason: action.reason } };
+
+    case "CLEAR_KICKED_BANNED":
+      return { ...state, kickedBanned: null };
 
     default: {
       // Per-server actions — route to the appropriate server slice

@@ -4,7 +4,7 @@ import { useApp } from "../context/ServerContext";
 import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
-import type { NotificationPrefs } from "../lib/tauri-bridge";
+import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 
 // Module-level cache for notification prefs and own public key
 let notifPrefs: NotificationPrefs | null = null;
@@ -218,6 +218,31 @@ export function useServerEvents(): void {
     listen("server:member_unbanned", (e) => {
       const data = e.payload as { server_id: string; public_key: string };
       window.dispatchEvent(new CustomEvent("farder:banned-list-changed", { detail: { serverId: data.server_id } }));
+    }).then(safePush);
+
+    listen("server:member_timeout_changed", (e) => {
+      const data = e.payload as { server_id: string; public_key: string; until_ms: number | null; reason: string | null };
+      dispatch({
+        type: "MEMBER_TIMEOUT_CHANGED",
+        serverId: data.server_id,
+        payload: { publicKey: data.public_key, untilMs: data.until_ms, reason: data.reason },
+      });
+    }).then(safePush);
+
+    listen("server:you_were_kicked", (e) => {
+      const data = e.payload as { server_id: string };
+      dispatch({ type: "YOU_WERE_KICKED", serverId: data.server_id });
+    }).then(safePush);
+
+    listen("server:you_were_banned", (e) => {
+      const data = e.payload as { server_id: string; reason: string | null };
+      dispatch({ type: "YOU_WERE_BANNED", serverId: data.server_id, reason: data.reason });
+    }).then(safePush);
+
+    listen("server:audit_event_created", (e) => {
+      const data = e.payload as { server_id: string; event: AuditEvent };
+      // Cross-component pubsub — AuditLogTab listens for this directly via window event.
+      window.dispatchEvent(new CustomEvent("farder:audit-event-created", { detail: data }));
     }).then(safePush);
 
     listen("server:member_joined", (e) => {
