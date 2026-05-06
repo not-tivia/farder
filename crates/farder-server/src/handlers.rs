@@ -1,5 +1,5 @@
 use crate::{
-    channels,
+    audit, channels,
     events::{BroadcastEvent, EventTarget},
     invites, members, messages, permissions,
 };
@@ -7,6 +7,7 @@ use anyhow::Result;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::*;
 use rusqlite::Connection;
+use serde_json::json;
 
 // ---------------------------------------------------------------------------
 // Output type
@@ -216,6 +217,28 @@ fn require_role_hierarchy(
         }));
     }
     Ok(None)
+}
+
+/// Insert an audit row and return a `BroadcastEvent` envelope (PermissionHolders(MANAGE_SERVER))
+/// for the matching `AuditEventCreated` event. Returns `None` (and logs) on insert failure so the
+/// caller's primary mutation still completes.
+fn audit_emit(
+    conn: &Connection,
+    actor: &PublicKey,
+    target: Option<&PublicKey>,
+    action: &str,
+    metadata: serde_json::Value,
+) -> Option<BroadcastEvent> {
+    match audit::insert(conn, actor, target, action, metadata) {
+        Ok(event) => Some(BroadcastEvent {
+            target: EventTarget::PermissionHolders(permissions::MANAGE_SERVER),
+            event: ServerEvent::AuditEventCreated { event },
+        }),
+        Err(e) => {
+            eprintln!("[audit] insert failed: {e}");
+            None
+        }
+    }
 }
 
 fn require_not_timed_out(conn: &Connection, member: &PublicKey) -> Result<Option<HandleResult>> {
@@ -513,13 +536,21 @@ pub fn handle_request(
             let channel_id =
                 channels::create_channel(conn, &name, channel_type, category_id, pos)?;
             let channel = channels::get_channel(conn, channel_id)?.unwrap();
-            let event = BroadcastEvent {
+            let audit_meta = json!({
+                "channel_id": channel.id,
+                "channel_name": channel.name,
+                "channel_type": format!("{:?}", channel.channel_type),
+            });
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::ChannelCreated {
                     channel: channel.clone(),
                 },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(conn, member, None, "channel_created", audit_meta) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::UpdateChannel {
@@ -536,6 +567,10 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::MANAGE_CHANNEL) {
                 return err("missing MANAGE_CHANNEL permission");
             }
+            // Capture pre-update name so we can detect actual rename for audit.
+            let prev_name = channels::get_channel(conn, channel_id)?
+                .map(|ch| ch.name)
+                .unwrap_or_default();
             channels::update_channel(
                 conn,
                 channel_id,
@@ -548,13 +583,31 @@ pub fn handle_request(
                 position,
             )?;
             let channel = channels::get_channel(conn, channel_id)?.unwrap();
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::ChannelUpdated {
                     channel: channel.clone(),
                 },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            // Only audit when the channel was actually renamed.
+            if let Some(new_name) = name.as_deref() {
+                if new_name != prev_name {
+                    if let Some(audit_evt) = audit_emit(
+                        conn,
+                        member,
+                        None,
+                        "channel_renamed",
+                        json!({
+                            "channel_id": channel_id,
+                            "old_name": prev_name,
+                            "new_name": new_name,
+                        }),
+                    ) {
+                        events.push(audit_evt);
+                    }
+                }
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::DeleteChannel { channel_id } => {
@@ -562,12 +615,25 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::MANAGE_CHANNEL) {
                 return err("missing MANAGE_CHANNEL permission");
             }
+            // Capture name BEFORE delete so the audit row has it.
+            let prev_channel_name = channels::get_channel(conn, channel_id)?
+                .map(|ch| ch.name)
+                .unwrap_or_default();
             channels::soft_delete_channel(conn, channel_id)?;
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::ChannelDeleted { channel_id },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(
+                conn,
+                member,
+                None,
+                "channel_deleted",
+                json!({ "channel_id": channel_id, "channel_name": prev_channel_name }),
+            ) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         // ----------------------------------------------------------------
@@ -645,11 +711,19 @@ pub fn handle_request(
                 false,
             )?;
             let role = members::get_role(conn, role_id)?.unwrap();
-            let event = BroadcastEvent {
+            let audit_meta = json!({
+                "role_id": role.id,
+                "role_name": role.name,
+                "permissions": role.permissions.to_string(),
+            });
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::RoleCreated { role: role.clone() },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(conn, member, None, "role_created", audit_meta) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::UpdateRole {
@@ -671,6 +745,8 @@ pub fn handle_request(
                     return Ok(denied);
                 }
             }
+            // Capture prior permissions BEFORE update so we can detect a real change.
+            let prev_perms = target_role.permissions;
             // color field in UpdateRole is Option<String> (not Option<Option<String>>),
             // so we pass it as Some(color.as_deref()) when present, None when absent.
             let color_param: Option<Option<&str>> = color.as_ref().map(|c| Some(c.as_str()));
@@ -683,11 +759,29 @@ pub fn handle_request(
                 position,
             )?;
             let role = members::get_role(conn, role_id)?.unwrap();
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::RoleUpdated { role: role.clone() },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            // Only audit when the permissions field was provided AND actually changed.
+            if let Some(new_perms) = perms_bits {
+                if new_perms != prev_perms {
+                    if let Some(audit_evt) = audit_emit(
+                        conn,
+                        member,
+                        None,
+                        "role_perms_changed",
+                        json!({
+                            "role_id": role_id,
+                            "old_permissions": prev_perms.to_string(),
+                            "new_permissions": new_perms.to_string(),
+                        }),
+                    ) {
+                        events.push(audit_evt);
+                    }
+                }
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::DeleteRole { role_id } => {
@@ -698,12 +792,23 @@ pub fn handle_request(
             if let Some(denied) = require_role_hierarchy(conn, member, is_owner, target_role.position)? {
                 return Ok(denied);
             }
+            // Capture name BEFORE delete.
+            let prev_name = target_role.name.clone();
             members::delete_role(conn, role_id)?;
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::RoleDeleted { role_id },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(
+                conn,
+                member,
+                None,
+                "role_deleted",
+                json!({ "role_id": role_id, "role_name": prev_name }),
+            ) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::AssignRole { member_key, role_id } => {
@@ -715,11 +820,21 @@ pub fn handle_request(
                 return Ok(denied);
             }
             members::assign_role(conn, &member_key, role_id)?;
-            let event = BroadcastEvent {
+            let role_name = target_role.name.clone();
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::PermissionsChanged,
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(
+                conn,
+                member,
+                Some(&member_key),
+                "role_assigned",
+                json!({ "role_id": role_id, "role_name": role_name }),
+            ) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::RemoveRole { member_key, role_id } => {
@@ -731,11 +846,21 @@ pub fn handle_request(
                 return Ok(denied);
             }
             members::unassign_role(conn, &member_key, role_id)?;
-            let event = BroadcastEvent {
+            let role_name = target_role.name.clone();
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::PermissionsChanged,
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(
+                conn,
+                member,
+                Some(&member_key),
+                "role_removed",
+                json!({ "role_id": role_id, "role_name": role_name }),
+            ) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         // ----------------------------------------------------------------
@@ -749,13 +874,16 @@ pub fn handle_request(
                 return Ok(denied);
             }
             members::remove_member(conn, &member_key)?;
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberLeft {
-                    public_key: member_key,
+                    public_key: member_key.clone(),
                 },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(conn, member, Some(&member_key), "kick", json!({})) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::BanMember { member_key, reason } => {
@@ -766,14 +894,25 @@ pub fn handle_request(
                 return Ok(denied);
             }
             members::ban_member(conn, &member_key, reason.as_deref())?;
-            let event = BroadcastEvent {
+            let reason_for_audit = reason.clone();
+            let target_for_audit = member_key.clone();
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberBanned {
                     public_key: member_key,
                     reason,
                 },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(
+                conn,
+                member,
+                Some(&target_for_audit),
+                "ban",
+                json!({ "reason": reason_for_audit }),
+            ) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         // ----------------------------------------------------------------
@@ -784,11 +923,14 @@ pub fn handle_request(
                 return Ok(denied);
             }
             members::unban_member(conn, &member_key)?;
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberUnbanned { public_key: member_key.clone() },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(conn, member, Some(&member_key), "unban", json!({})) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::ListBanned => {
@@ -871,11 +1013,25 @@ pub fn handle_request(
                 return err("missing MANAGE_CHANNEL permission");
             }
             channels::set_channel_override(conn, channel_id, role_id, allow, deny)?;
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::PermissionsChanged,
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(
+                conn,
+                member,
+                None,
+                "channel_overrides_changed",
+                json!({
+                    "channel_id": channel_id,
+                    "role_id": role_id,
+                    "allow": allow.to_string(),
+                    "deny": deny.to_string(),
+                }),
+            ) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::SetCategoryOverride {
@@ -1176,15 +1332,26 @@ pub fn handle_request(
                 return err("timeout duration out of range (must be in the future, max 28 days)");
             }
             members::set_timeout(conn, &member_key, until_ms, reason.as_deref())?;
-            let event = BroadcastEvent {
+            let reason_for_audit = reason.clone();
+            let target_for_audit = member_key.clone();
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberTimeoutChanged {
                     public_key: member_key,
                     until_ms: Some(until_ms),
                     reason: reason.clone(),
                 },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(
+                conn,
+                member,
+                Some(&target_for_audit),
+                "timeout",
+                json!({ "until_ms": until_ms, "reason": reason_for_audit }),
+            ) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::RemoveTimeout { member_key } => {
@@ -1195,15 +1362,19 @@ pub fn handle_request(
                 return Ok(denied);
             }
             members::clear_timeout(conn, &member_key)?;
-            let event = BroadcastEvent {
+            let target_for_audit = member_key.clone();
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MemberTimeoutChanged {
                     public_key: member_key,
                     until_ms: None,
                     reason: None,
                 },
-            };
-            ok_with(ServerResponse::Ok, vec![event])
+            }];
+            if let Some(audit_evt) = audit_emit(conn, member, Some(&target_for_audit), "untimeout", json!({})) {
+                events.push(audit_evt);
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::ListAuditEvents { .. } => {
@@ -2068,8 +2239,14 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result.response, ServerResponse::Ok));
-        assert_eq!(result.events.len(), 1);
-        assert!(matches!(result.events[0].event, ServerEvent::MemberUnbanned { .. }));
+        // Expect MemberUnbanned plus an AuditEventCreated row.
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e.event, ServerEvent::MemberUnbanned { .. })),
+            "missing MemberUnbanned event"
+        );
         assert!(crate::members::list_banned(&conn).unwrap().is_empty());
     }
 
@@ -2161,8 +2338,13 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
-        assert_eq!(result.events.len(), 1);
-        match &result.events[0].event {
+        // Expect MemberTimeoutChanged plus an AuditEventCreated row.
+        let timeout_evt = result
+            .events
+            .iter()
+            .find(|e| matches!(e.event, ServerEvent::MemberTimeoutChanged { .. }))
+            .expect("missing MemberTimeoutChanged event");
+        match &timeout_evt.event {
             ServerEvent::MemberTimeoutChanged {
                 until_ms: Some(u),
                 reason: Some(r),
@@ -2196,5 +2378,415 @@ mod tests {
             members::is_timed_out(&conn, &target_pk, current_unix_ms()).unwrap(),
             None
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit event emission tests (Task 7 / P2.7)
+    // -----------------------------------------------------------------------
+
+    use crate::audit;
+
+    fn assert_has_audit_event(events: &[BroadcastEvent]) {
+        let has = events
+            .iter()
+            .any(|e| matches!(e.event, ServerEvent::AuditEventCreated { .. }));
+        assert!(has, "missing AuditEventCreated event in events vec");
+    }
+
+    #[test]
+    fn test_kick_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::KickMember { member_key: target_pk.clone() },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "kick");
+    }
+
+    #[test]
+    fn test_ban_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::BanMember {
+                member_key: target_pk.clone(),
+                reason: Some("spam".into()),
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "ban");
+        assert_eq!(events[0].metadata["reason"], "spam");
+    }
+
+    #[test]
+    fn test_unban_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        members::ban_member(&conn, &target_pk, Some("test")).unwrap();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::UnbanMember { member_key: target_pk.clone() },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "unban");
+    }
+
+    #[test]
+    fn test_timeout_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let until = current_unix_ms() + 60_000;
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::TimeoutMember {
+                member_key: target_pk.clone(),
+                until_ms: until,
+                reason: Some("warning".into()),
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "timeout");
+        assert_eq!(events[0].metadata["until_ms"], until);
+        assert_eq!(events[0].metadata["reason"], "warning");
+    }
+
+    #[test]
+    fn test_untimeout_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        members::set_timeout(&conn, &target_pk, current_unix_ms() + 60_000, None).unwrap();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::RemoveTimeout { member_key: target_pk.clone() },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "untimeout");
+    }
+
+    #[test]
+    fn test_assign_role_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let role_id = members::create_role(
+            &conn,
+            "Helper",
+            permissions::DEFAULT_EVERYONE,
+            None,
+            1,
+            false,
+        )
+        .unwrap();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::AssignRole {
+                member_key: target_pk.clone(),
+                role_id,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "role_assigned");
+        assert_eq!(events[0].metadata["role_id"], role_id);
+        assert_eq!(events[0].metadata["role_name"], "Helper");
+    }
+
+    #[test]
+    fn test_remove_role_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let target_pk = add_member(&conn, "Target");
+        let role_id = members::create_role(
+            &conn,
+            "Helper",
+            permissions::DEFAULT_EVERYONE,
+            None,
+            1,
+            false,
+        )
+        .unwrap();
+        members::assign_role(&conn, &target_pk, role_id).unwrap();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::RemoveRole {
+                member_key: target_pk.clone(),
+                role_id,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "role_removed");
+        assert_eq!(events[0].metadata["role_id"], role_id);
+        assert_eq!(events[0].metadata["role_name"], "Helper");
+    }
+
+    #[test]
+    fn test_create_channel_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::CreateChannel {
+                name: "audit-test".into(),
+                channel_type: ChannelType::Text,
+                category_id: None,
+                position: Some(0),
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "channel_created");
+        assert_eq!(events[0].metadata["channel_name"], "audit-test");
+    }
+
+    #[test]
+    fn test_delete_channel_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let channel_id = channels::create_channel(&conn, "doomed", ChannelType::Text, None, 0).unwrap();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::DeleteChannel { channel_id },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "channel_deleted");
+        assert_eq!(events[0].metadata["channel_id"], channel_id);
+        assert_eq!(events[0].metadata["channel_name"], "doomed");
+    }
+
+    #[test]
+    fn test_update_channel_rename_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let channel_id = channels::create_channel(&conn, "old-name", ChannelType::Text, None, 0).unwrap();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::UpdateChannel {
+                channel_id,
+                name: Some("new-name".into()),
+                topic: None,
+                nsfw: None,
+                slow_mode_secs: None,
+                retention_secs: None,
+                category_id: None,
+                position: None,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "channel_renamed");
+        assert_eq!(events[0].metadata["old_name"], "old-name");
+        assert_eq!(events[0].metadata["new_name"], "new-name");
+
+        // Updating without changing name should NOT emit a new audit row.
+        let _ = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::UpdateChannel {
+                channel_id,
+                name: Some("new-name".into()),
+                topic: Some("topic only".into()),
+                nsfw: None,
+                slow_mode_secs: None,
+                retention_secs: None,
+                category_id: None,
+                position: None,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        let events_after = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events_after.len(), 1, "no-op rename must not emit audit");
+    }
+
+    #[test]
+    fn test_create_role_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::CreateRole {
+                name: "AuditRole".into(),
+                permissions: permissions::MANAGE_MESSAGES,
+                color: None,
+                position: Some(1),
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "role_created");
+        assert_eq!(events[0].metadata["role_name"], "AuditRole");
+        assert_eq!(
+            events[0].metadata["permissions"],
+            permissions::MANAGE_MESSAGES.to_string()
+        );
+    }
+
+    #[test]
+    fn test_delete_role_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let role_id = members::create_role(&conn, "Doomed", 0, None, 1, false).unwrap();
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::DeleteRole { role_id },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "role_deleted");
+        assert_eq!(events[0].metadata["role_id"], role_id);
+        assert_eq!(events[0].metadata["role_name"], "Doomed");
+    }
+
+    #[test]
+    fn test_update_role_perms_changed_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let role_id = members::create_role(&conn, "Changeling", 0, None, 1, false).unwrap();
+        let new_perms = permissions::MANAGE_MESSAGES | permissions::KICK_MEMBERS;
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::UpdateRole {
+                role_id,
+                name: None,
+                permissions: Some(new_perms),
+                color: None,
+                position: None,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "role_perms_changed");
+        assert_eq!(events[0].metadata["old_permissions"], "0");
+        assert_eq!(events[0].metadata["new_permissions"], new_perms.to_string());
+
+        // Calling UpdateRole with same permissions value should NOT emit another row.
+        let _ = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::UpdateRole {
+                role_id,
+                name: None,
+                permissions: Some(new_perms),
+                color: None,
+                position: None,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        let events_after = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events_after.len(), 1, "no-op perms update must not emit audit");
+    }
+
+    #[test]
+    fn test_set_channel_override_emits_audit_event() {
+        let (conn, owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+        let role_id = members::create_role(&conn, "OverrideRole", 0, None, 1, false).unwrap();
+        let allow = permissions::SEND_MESSAGES;
+        let deny = permissions::MANAGE_MESSAGES;
+        let result = handle_request(
+            &conn,
+            &owner_pk,
+            true,
+            ServerRequest::SetChannelOverride {
+                channel_id,
+                role_id,
+                allow,
+                deny,
+            },
+            "/tmp",
+        )
+        .unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_has_audit_event(&result.events);
+        let events = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "channel_overrides_changed");
+        assert_eq!(events[0].metadata["channel_id"], channel_id);
+        assert_eq!(events[0].metadata["role_id"], role_id);
+        assert_eq!(events[0].metadata["allow"], allow.to_string());
+        assert_eq!(events[0].metadata["deny"], deny.to_string());
     }
 }
