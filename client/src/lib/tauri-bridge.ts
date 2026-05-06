@@ -487,3 +487,33 @@ export async function unbanMember(serverId: string, memberKey: string): Promise<
 export async function listBanned(serverId: string): Promise<BannedMember[]> {
   return invoke<BannedMember[]>("list_banned", { serverId });
 }
+
+export interface AuditEvent {
+  id: number;
+  actor: { bytes: number[] };
+  target: { bytes: number[] } | null;
+  action: string;
+  metadata: Record<string, unknown>;
+  timestamp_ms: number;
+}
+
+export async function timeoutMember(
+  serverId: string,
+  memberKey: string,
+  untilMs: number,
+  reason: string | null,
+): Promise<void> {
+  return invoke<void>("timeout_member", { serverId, memberKey, untilMs, reason });
+}
+
+export async function removeTimeout(serverId: string, memberKey: string): Promise<void> {
+  return invoke<void>("remove_timeout", { serverId, memberKey });
+}
+
+export async function listAuditEvents(
+  serverId: string,
+  beforeId: number | null,
+  limit: number,
+): Promise<AuditEvent[]> {
+  return invoke<AuditEvent[]>("list_audit_events", { serverId, beforeId, limit });
+}

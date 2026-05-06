@@ -30,6 +30,8 @@ export interface MemberInfo {
   display_name: string;
   joined_at: number;
   role_ids: number[];
+  timeout_until?: number | null;
+  timeout_reason?: string | null;
 }
 
 export interface AttachmentInfo {

@@ -10,6 +10,7 @@ export const PERMISSIONS = {
   MANAGE_SERVER: 1n << 9n,
   KICK_MEMBERS: 1n << 10n,
   BAN_MEMBERS: 1n << 11n,
+  TIMEOUT_MEMBERS: 1n << 14n,
 } as const;
 
 /** Compute the bitwise OR of all role permissions for the given member. */
