@@ -210,6 +210,47 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Members: add timeout_until + timeout_reason columns (Phase 2 moderation).
+    let has_timeout_until: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "timeout_until")
+    };
+    if !has_timeout_until {
+        conn.execute(
+            "ALTER TABLE members ADD COLUMN timeout_until INTEGER NULL",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE members ADD COLUMN timeout_reason TEXT NULL",
+            [],
+        )?;
+    }
+
+    // Audit events: forever-retention moderator action log (Phase 2).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_pk BLOB NOT NULL,
+            target_pk BLOB,
+            action TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            timestamp_ms INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events(timestamp_ms DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(actor_pk)",
+        [],
+    )?;
+
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
     // supported for virtual tables in older SQLite versions).
     let fts_exists: bool = conn.query_row(
