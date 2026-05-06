@@ -12,6 +12,7 @@ import VoiceRecorder from "./VoiceRecorder";
 import BookBrowser from "./BookBrowser";
 import GifPicker from "./GifPicker";
 import GifSearchOptIn from "./GifSearchOptIn";
+import TimeoutBanner from "./TimeoutBanner";
 
 interface MessageInputProps {
   channelId: number;
@@ -48,6 +49,22 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
 
   const activeServer = useActiveServer();
   const members = activeServer?.members ?? [];
+
+  const [ownPk, setOwnPk] = useState<string | null>(null);
+  useEffect(() => {
+    api.getPublicKey().then(setOwnPk).catch(() => {});
+  }, []);
+
+  const me = ownPk ? activeServer?.members.find(m => publicKeyToString(m.public_key) === ownPk) ?? null : null;
+  const timeoutActive = !!(me?.timeout_until && me.timeout_until > Date.now());
+
+  // Tick once per second while timed out so UI re-renders for the countdown.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!timeoutActive) return;
+    const t = setInterval(() => setNowTick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [timeoutActive]);
 
   const filteredMembers = members.filter(m =>
     m.display_name.toLowerCase().includes(mentionQuery)
@@ -344,6 +361,9 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
           </div>
         )}
         {error && <div className="error-text" style={{ padding: "2px 4px" }}>{error}</div>}
+        {me?.timeout_until != null && me.timeout_until > Date.now() && (
+          <TimeoutBanner untilMs={me.timeout_until} reason={me.timeout_reason ?? null} />
+        )}
         {showVoiceRecorder ? (
           <VoiceRecorder
             onRecorded={handleVoiceRecorded}
@@ -410,7 +430,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
                 onKeyDown={handleKeyDown}
                 placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
                 rows={1}
-                disabled={sending}
+                disabled={sending || timeoutActive}
                 style={{ width: "100%", boxSizing: "border-box" }}
               />
             </div>
@@ -425,7 +445,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
             <button
               className="xp-button"
               onClick={handleSend}
-              disabled={sending || uploading || (!content.trim() && !attachedFileId)}
+              disabled={sending || uploading || timeoutActive || (!content.trim() && !attachedFileId)}
             >
               Send
             </button>
