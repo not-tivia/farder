@@ -5,6 +5,7 @@ import { publicKeyToString } from "../lib/types";
 import { useActiveServer } from "../context/ServerContext";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 import BanConfirmDialog from "./BanConfirmDialog";
+import TimeoutDialog from "./TimeoutDialog";
 import UserProfilePopup from "./UserProfilePopup";
 
 interface Props {
@@ -61,6 +62,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const activeServer = useActiveServer();
   const [showRoleSubmenu, setShowRoleSubmenu] = useState(false);
   const [showBanDialog, setShowBanDialog] = useState(false);
+  const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,6 +78,8 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const canManageRoles = hasPermission(bits, PERMISSIONS.MANAGE_ROLES);
   const canKick = hasPermission(bits, PERMISSIONS.KICK_MEMBERS);
   const canBan = hasPermission(bits, PERMISSIONS.BAN_MEMBERS);
+  const canTimeout = hasPermission(bits, PERMISSIONS.TIMEOUT_MEMBERS);
+  const isTargetTimedOut = !!(target.timeout_until && target.timeout_until > Date.now());
 
   useEffect(() => {
     function handleMouse(e: MouseEvent) {
@@ -135,6 +139,25 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     onClose();
   }
 
+  async function timeoutConfirm(untilMs: number, reason: string | null) {
+    setShowTimeoutDialog(false);
+    try {
+      await api.timeoutMember(serverId, targetPk, untilMs, reason);
+    } catch (e) {
+      setError(String(e));
+    }
+    onClose();
+  }
+
+  async function removeTimeoutConfirm() {
+    try {
+      await api.removeTimeout(serverId, targetPk);
+    } catch (e) {
+      setError(String(e));
+    }
+    onClose();
+  }
+
   async function blockConfirm() {
     if (!window.confirm(`Block ${target.display_name}? You won't see their messages or DMs.`)) return;
     try {
@@ -171,8 +194,15 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     rows.push({ kind: "separator" });
     rows.push({ kind: "submenu", label: "Assign Role…  ▶" });
   }
-  if (!isSelf && (canKick || canBan)) {
+  if (!isSelf && (canKick || canBan || canTimeout)) {
     rows.push({ kind: "separator" });
+    if (canTimeout) {
+      if (isTargetTimedOut) {
+        rows.push({ kind: "item", label: "Remove timeout", onClick: () => void removeTimeoutConfirm() });
+      } else {
+        rows.push({ kind: "item", label: "Timeout…", onClick: () => setShowTimeoutDialog(true) });
+      }
+    }
     if (canKick) rows.push({ kind: "item", label: "Kick", onClick: kickConfirm, danger: true });
     if (canBan) rows.push({ kind: "item", label: "Ban", onClick: () => setShowBanDialog(true), danger: true });
   }
@@ -267,6 +297,13 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
           targetName={target.display_name}
           onCancel={() => setShowBanDialog(false)}
           onConfirm={banConfirm}
+        />
+      )}
+      {showTimeoutDialog && (
+        <TimeoutDialog
+          targetName={target.display_name}
+          onCancel={() => setShowTimeoutDialog(false)}
+          onConfirm={(untilMs, reason) => void timeoutConfirm(untilMs, reason)}
         />
       )}
       {showProfile && (
