@@ -1523,6 +1523,59 @@ pub async fn list_banned(
     }
 }
 
+#[tauri::command]
+pub async fn timeout_member(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    member_key: String,
+    until_ms: u64,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let pk = parse_public_key(&member_key)?;
+    let response = bridge::send_request(&state, &server_id, ServerRequest::TimeoutMember { member_key: pk, until_ms, reason })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_timeout(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    member_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&member_key)?;
+    let response = bridge::send_request(&state, &server_id, ServerRequest::RemoveTimeout { member_key: pk })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_audit_events(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    before_id: Option<u64>,
+    limit: u32,
+) -> Result<Vec<farder_protocol::server::AuditEvent>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::ListAuditEvents { before_id, limit })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::AuditEventsList { events } => Ok(events),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Voice message helper
 // ---------------------------------------------------------------------------
