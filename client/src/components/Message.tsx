@@ -9,6 +9,8 @@ import ReactionPicker from "./ReactionPicker";
 import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
 import RenderedMessageContent from "./RenderedMessageContent";
+import TimedOutBadge from "./TimedOutBadge";
+import { getActorPermissions, isModerator } from "../lib/permissions";
 
 interface MessageProps {
   message: MessageInfo;
@@ -138,6 +140,11 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   const isOwnMessage = ownPk === pkStr;
 
+  const { bits: viewerBits } = ownPk
+    ? getActorPermissions(activeServer?.members ?? [], roles, ownPk, activeServer?.ownerPublicKey ?? null)
+    : { bits: 0n };
+  const showModBadges = isModerator(viewerBits);
+
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
     ? message.content
@@ -232,6 +239,9 @@ export default function Message({ message, memberNames, grouped = false, serverI
           >
             {displayName}
           </span>
+          {showModBadges && member && (
+            <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
+          )}
           <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
           {message.edited_at && <span className="message-edited">(edited)</span>}
         </div>

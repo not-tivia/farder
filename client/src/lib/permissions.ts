@@ -29,6 +29,18 @@ export function hasPermission(bits: bigint, perm: bigint): boolean {
   return (bits & perm) === perm;
 }
 
+/** True if the actor holds any moderation permission. Used to gate visibility
+ *  of mod-only UI affordances (e.g. timed-out indicator next to member names). */
+export function isModerator(bits: bigint): boolean {
+  const modMask =
+    PERMISSIONS.KICK_MEMBERS |
+    PERMISSIONS.BAN_MEMBERS |
+    PERMISSIONS.TIMEOUT_MEMBERS |
+    PERMISSIONS.MANAGE_SERVER |
+    PERMISSIONS.MANAGE_ROLES;
+  return (bits & modMask) !== 0n;
+}
+
 // Bitmask covering every defined permission. Owner short-circuits to this.
 const ALL_BITS: bigint = Object.values(PERMISSIONS).reduce((a, b) => a | b, 0n);
 

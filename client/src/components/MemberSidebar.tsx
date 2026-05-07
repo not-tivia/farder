@@ -5,6 +5,8 @@ import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
+import TimedOutBadge from "./TimedOutBadge";
+import { getActorPermissions, isModerator } from "../lib/permissions";
 
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
@@ -24,6 +26,11 @@ export default function MemberSidebar() {
 
   const members = activeServer?.members ?? [];
   const roles = activeServer?.roles ?? [];
+
+  const { bits: viewerBits } = ownPk
+    ? getActorPermissions(members, roles, ownPk, activeServer?.ownerPublicKey ?? null)
+    : { bits: 0n };
+  const showModBadges = isModerator(viewerBits);
 
   function highestRolePosition(member: MemberInfo): number {
     if (member.role_ids.length === 0) return -1;
@@ -60,6 +67,12 @@ export default function MemberSidebar() {
             <span className="member-avatar-mini">{member.display_name.charAt(0).toUpperCase()}</span>
             <span className="online-dot" />
             <span className="member-name">{member.display_name}</span>
+            {showModBadges && (
+              <TimedOutBadge
+                untilMs={member.timeout_until}
+                reason={member.timeout_reason}
+              />
+            )}
           </div>
         ))}
       </div>
