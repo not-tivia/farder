@@ -106,6 +106,7 @@ async fn main() -> Result<()> {
     }
 
     let _retention = retention::spawn_retention_task(Arc::clone(&state), args.retention_interval);
+    let _voice_ticker = tokio::spawn(farder_server::voice::speaking_state_ticker(Arc::clone(&state)));
 
     let endpoint = make_server_endpoint(args.bind)?;
     info!("Server listening on {}", args.bind);

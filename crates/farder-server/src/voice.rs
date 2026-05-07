@@ -104,6 +104,55 @@ pub fn rewrite_speaker_pk(buf: &mut [u8], pk: &[u8; 32]) -> Result<(), &'static 
     Ok(())
 }
 
+/// 5 Hz tokio task: scans `speaking_last_frame_ms`; for each pk whose state has
+/// flipped (was-speaking vs is-speaking based on a 300 ms inactivity threshold),
+/// broadcasts `VoiceSpeakingChanged`. Transitions only — quiescent state is silent.
+pub async fn speaking_state_ticker(state: std::sync::Arc<crate::state::ServerState>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+    loop {
+        interval.tick().await;
+        let now = now_ms();
+        let last_frames: Vec<([u8; 32], u64)> = state
+            .voice
+            .speaking_last_frame_ms
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        let mut changes: Vec<([u8; 32], bool)> = Vec::new();
+        {
+            let mut speaking_now = state.voice.speaking_now.write().await;
+            for (pk, last) in &last_frames {
+                let is_speaking = now.saturating_sub(*last) < 300;
+                let was_speaking = speaking_now.contains(pk);
+                if is_speaking != was_speaking {
+                    if is_speaking {
+                        speaking_now.insert(*pk);
+                    } else {
+                        speaking_now.remove(pk);
+                    }
+                    changes.push((*pk, is_speaking));
+                }
+            }
+        }
+        if changes.is_empty() {
+            continue;
+        }
+        let speaker_channel = state.voice.speaker_channel.read().await;
+        for (pk_bytes, speaking) in changes {
+            let channel_id = speaker_channel.get(&pk_bytes).copied().unwrap_or(0);
+            let pk = farder_crypto::identity::PublicKey::from_bytes(pk_bytes);
+            let event = farder_protocol::server::ServerEvent::VoiceSpeakingChanged {
+                channel_id,
+                public_key: pk,
+                speaking,
+            };
+            crate::connection::broadcast_event(&state, crate::events::EventTarget::All, event).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
