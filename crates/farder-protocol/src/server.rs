@@ -238,6 +238,10 @@ pub enum ServerRequest {
     JoinVoice { channel_id: u64 },
     LeaveVoice { channel_id: u64 },
     GetVoiceState { channel_id: u64 },
+    StartVoice { channel_id: u64 },
+    StopVoice,
+    SetVoiceMute { muted: bool },
+    SetVoiceDeafen { deafened: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -327,6 +331,19 @@ pub enum ServerEvent {
     DmCreated { channel: ChannelInfo, participant: MemberInfo },
     VoiceJoined { channel_id: u64, public_key: PublicKey, display_name: String },
     VoiceLeft { channel_id: u64, public_key: PublicKey },
+    VoiceCallIncoming {
+        channel_id: u64,
+        caller: PublicKey,
+        caller_name: String,
+    },
+    VoiceCallEnded {
+        channel_id: u64,
+    },
+    VoiceSpeakingChanged {
+        channel_id: u64,
+        public_key: PublicKey,
+        speaking: bool,
+    },
 }
 
 #[cfg(test)]
@@ -518,11 +535,26 @@ mod tests {
             ServerRequest::JoinVoice { channel_id: 1 },
             ServerRequest::LeaveVoice { channel_id: 1 },
             ServerRequest::GetVoiceState { channel_id: 1 },
+            ServerRequest::StartVoice { channel_id: 1 },
+            ServerRequest::StopVoice,
+            ServerRequest::SetVoiceMute { muted: true },
+            ServerRequest::SetVoiceDeafen { deafened: false },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };
             let bytes = codec::encode(&frame).unwrap();
             let _decoded: ClientFrame = codec::decode(&bytes).unwrap();
+        }
+
+        let events = vec![
+            ServerEvent::VoiceCallIncoming { channel_id: 1, caller: kp.public_key(), caller_name: "alice".into() },
+            ServerEvent::VoiceCallEnded { channel_id: 1 },
+            ServerEvent::VoiceSpeakingChanged { channel_id: 1, public_key: kp.public_key(), speaking: true },
+        ];
+        for ev in events {
+            let frame = ServerFrame::Event(ev);
+            let bytes = codec::encode(&frame).unwrap();
+            let _decoded: ServerFrame = codec::decode(&bytes).unwrap();
         }
     }
 

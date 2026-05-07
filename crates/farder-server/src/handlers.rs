@@ -1332,6 +1332,13 @@ pub fn handle_request(
             ok(ServerResponse::VoiceStateResp { participants: voice_members })
         }
 
+        ServerRequest::StartVoice { .. }
+        | ServerRequest::StopVoice
+        | ServerRequest::SetVoiceMute { .. }
+        | ServerRequest::SetVoiceDeafen { .. } => {
+            err("voice not yet implemented") // TODO(VC.6)
+        }
+
         ServerRequest::TimeoutMember { member_key, until_ms, reason } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::TIMEOUT_MEMBERS, "TIMEOUT_MEMBERS")? {
                 return Ok(denied);

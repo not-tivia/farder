@@ -114,6 +114,9 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:voice_joined", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string(), "display_name": display_name })),
         ServerEvent::VoiceLeft { channel_id, public_key } =>
             app.emit("server:voice_left", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string() })),
+        ServerEvent::VoiceCallIncoming { .. }
+        | ServerEvent::VoiceCallEnded { .. }
+        | ServerEvent::VoiceSpeakingChanged { .. } => Ok(()), // TODO(VC.14)
         _ => Ok(()),
     };
 }
