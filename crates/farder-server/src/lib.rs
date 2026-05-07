@@ -15,3 +15,4 @@ pub mod reactions;
 pub mod retention;
 pub mod state;
 pub mod templates;
+pub mod voice;

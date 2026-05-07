@@ -1,4 +1,5 @@
 use crate::db;
+use crate::voice;
 use anyhow::Result;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::ServerEvent;
@@ -61,6 +62,7 @@ pub struct ServerState {
     pub max_file_size: u64,
     pub upload_limiter: RateLimiter,    // 10/min per user
     pub reaction_limiter: RateLimiter,  // 60/min per user
+    pub voice: voice::VoiceState,
 }
 
 impl ServerState {
@@ -77,6 +79,7 @@ impl ServerState {
             max_file_size,
             upload_limiter: RateLimiter::new(10, 60),
             reaction_limiter: RateLimiter::new(60, 60),
+            voice: voice::VoiceState::new(),
         }
     }
 
