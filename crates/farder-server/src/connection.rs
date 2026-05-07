@@ -930,7 +930,49 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
             crate::voice::start_transmit(&state.voice, pk, channel_id).await;
         }
         EventTarget::VoiceStopTransmit { pk } => {
+            // Capture which channel this pk was transmitting in BEFORE we mutate.
+            let prev_channel = state.voice.speaker_channel.read().await.get(&pk).copied();
             crate::voice::stop_transmit(&state.voice, pk).await;
+            // If a DM voice channel just became empty, ring-end the other party.
+            if let Some(channel_id) = prev_channel {
+                let now_empty = state
+                    .voice
+                    .channels
+                    .read()
+                    .await
+                    .get(&channel_id)
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true);
+                if now_empty {
+                    let other_pk_opt: Option<farder_crypto::identity::PublicKey> = {
+                        let conn_lock = state.db.lock().unwrap();
+                        match crate::channels::get_channel(&conn_lock, channel_id) {
+                            Ok(Some(ch))
+                                if ch.channel_type
+                                    == farder_protocol::server::ChannelType::Dm =>
+                            {
+                                let pk_obj = farder_crypto::identity::PublicKey::from_bytes(pk);
+                                crate::channels::list_dm_channels(&conn_lock, &pk_obj)
+                                    .ok()
+                                    .and_then(|dms| {
+                                        dms.into_iter()
+                                            .find(|(c, _)| c.id == channel_id)
+                                            .map(|(_, other)| other)
+                                    })
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(other_pk) = other_pk_opt {
+                        let clients = state.clients.read().await;
+                        if let Some(sender) = clients.get(other_pk.as_bytes()) {
+                            let _ = sender.try_send(
+                                farder_protocol::server::ServerEvent::VoiceCallEnded { channel_id },
+                            );
+                        }
+                    }
+                }
+            }
         }
         EventTarget::VoiceSetMute { pk, muted } => {
             let mut muted_set = state.voice.muted.write().await;

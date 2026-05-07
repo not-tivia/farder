@@ -1314,11 +1314,36 @@ pub fn handle_request(
         }
 
         ServerRequest::LeaveVoice { channel_id } => {
+            let channel = channels::get_channel(conn, channel_id)?;
             channels::leave_voice(conn, channel_id, member)?;
-            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
-                target: EventTarget::All,
-                event: ServerEvent::VoiceLeft { channel_id, public_key: member.clone() },
-            }])
+            let mut events = vec![
+                BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::VoiceLeft { channel_id, public_key: member.clone() },
+                },
+                BroadcastEvent {
+                    target: EventTarget::VoiceStopTransmit { pk: *member.as_bytes() },
+                    event: ServerEvent::VoiceLeft { channel_id, public_key: member.clone() },
+                },
+            ];
+            // If this was a DM and the channel is now empty, ring-end the other party.
+            if let Some(ch) = channel {
+                if ch.channel_type == ChannelType::Dm {
+                    let remaining = channels::get_voice_participants(conn, channel_id)?;
+                    if remaining.is_empty() {
+                        if let Some((_, other_pk)) = channels::list_dm_channels(conn, member)?
+                            .into_iter()
+                            .find(|(c, _)| c.id == channel_id)
+                        {
+                            events.push(BroadcastEvent {
+                                target: EventTarget::Members(vec![other_pk]),
+                                event: ServerEvent::VoiceCallEnded { channel_id },
+                            });
+                        }
+                    }
+                }
+            }
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::GetVoiceState { channel_id } => {
