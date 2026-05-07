@@ -520,6 +520,10 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         let mut clients = state.clients.write().await;
         clients.insert(pk_bytes, event_tx);
     }
+    {
+        let mut voice_conns = state.voice_connections.write().await;
+        voice_conns.insert(pk_bytes, conn.clone());
+    }
 
     // Step 7: Broadcast MemberJoined to all
     let display_name = {
@@ -576,6 +580,19 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         }
     });
 
+    // Voice datagram receive loop. Best-effort, drops invalid frames silently.
+    let voice_state = Arc::clone(&state);
+    let voice_conn = conn.clone();
+    let voice_pk = pk_bytes;
+    let voice_acceptor = tokio::spawn(async move {
+        loop {
+            match voice_conn.read_datagram().await {
+                Ok(datagram) => handle_voice_datagram(&voice_state, voice_pk, datagram).await,
+                Err(_) => break,  // connection closed
+            }
+        }
+    });
+
     // Step 10: Enter main loop
     let loop_result = main_loop(
         Arc::clone(&state),
@@ -589,6 +606,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 
     // Abort the stream acceptor on disconnect
     stream_acceptor.abort();
+    voice_acceptor.abort();
 
     // Step 11: Cleanup on disconnect.
     // Only remove from the clients map if WE'RE still the registered sender —
@@ -604,6 +622,9 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
             clients.remove(&pk_bytes);
         }
     }
+    state.voice_connections.write().await.remove(&pk_bytes);
+    // Also stop_transmit so any in-flight voice state for this pk is cleared.
+    crate::voice::stop_transmit(&state.voice, pk_bytes).await;
     {
         let mut subs = state.subscriptions.write().await;
         for (_channel_id, subscribers) in subs.iter_mut() {
@@ -797,6 +818,60 @@ async fn main_loop(
                     }
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Voice datagram fanout
+// ---------------------------------------------------------------------------
+
+/// Validate an inbound voice frame and fan it out to other channel members.
+/// Drops invalid frames silently (anti-DoS — never log on bad input).
+async fn handle_voice_datagram(
+    state: &ServerState,
+    authenticated_pk: [u8; 32],
+    datagram: bytes::Bytes,
+) {
+    let frame = match crate::voice::parse_voice_frame(&datagram) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    // Anti-spoof: speaker_pk must equal the connection's authenticated identity.
+    if frame.speaker_pk != authenticated_pk { return; }
+
+    let channel_id = match state.voice.speaker_channel.read().await.get(&authenticated_pk) {
+        Some(c) => *c,
+        None => return,  // not in StartVoice state
+    };
+
+    // Update last-frame timestamp for the speaking ticker.
+    state.voice.speaking_last_frame_ms.write().await.insert(authenticated_pk, crate::voice::now_ms());
+
+    // Determine recipients: all voice-channel participants except self and deafened.
+    // Listeners include both transmitters (in voice.channels) and pure listeners
+    // (joined via JoinVoice but not StartVoice — fetched from DB).
+    let transmitters: std::collections::HashSet<[u8; 32]> = state.voice.channels.read().await
+        .get(&channel_id).cloned().unwrap_or_default();
+    let pure_listeners: Vec<[u8; 32]> = {
+        let conn = state.db.lock().unwrap();
+        crate::channels::get_voice_participants(&conn, channel_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(pk, _)| *pk.as_bytes())
+            .collect()
+    };
+    let mut all_recipients: std::collections::HashSet<[u8; 32]> = transmitters;
+    all_recipients.extend(pure_listeners);
+    all_recipients.remove(&authenticated_pk);
+
+    let deafened = state.voice.deafened.read().await.clone();
+    let voice_conns = state.voice_connections.read().await;
+    for listener_pk in all_recipients {
+        if deafened.contains(&listener_pk) { continue; }
+        if let Some(conn) = voice_conns.get(&listener_pk) {
+            // Best-effort: Bytes is cheaply cloneable, send_datagram returns Result we discard.
+            let _ = conn.send_datagram(datagram.clone());
         }
     }
 }
