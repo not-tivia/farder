@@ -8,6 +8,7 @@ mod state;
 mod server_manager;
 mod themes;
 mod tls;
+mod translation;
 mod tray;
 
 use state::AppState;
@@ -150,6 +151,8 @@ fn main() {
             tenor::tenor_trending,
             tenor::get_gif_search_settings,
             tenor::set_gif_search_settings,
+            translation::get_translation_settings,
+            translation::set_translation_settings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
