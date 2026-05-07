@@ -2022,6 +2022,7 @@ pub async fn create_local_server(
             channels,
             categories,
             roles,
+            owner_public_key,
         } => {
             *server_conn.server_name.lock().unwrap() = srv_name.clone();
             Ok(serde_json::json!({
@@ -2031,6 +2032,7 @@ pub async fn create_local_server(
                 "channels": channels,
                 "categories": categories,
                 "roles": roles,
+                "owner_public_key": owner_public_key,
             }))
         }
         ServerResponse::Error { reason } => Err(reason),
