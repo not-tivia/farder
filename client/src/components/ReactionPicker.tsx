@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import * as bookApi from "../lib/book/client";
 import type { BookItem } from "../lib/book/types";
 import { resolveBookItemSrc } from "./BookItemTile";
+import { renderUnicodeEmoji } from "../lib/unicodeEmoji";
 
 const COMMON_EMOJI = [
   "👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉",
@@ -98,7 +99,7 @@ export default function ReactionPicker({
             title={emoji}
             style={tileBtn}
           >
-            {emoji}
+            {renderUnicodeEmoji(emoji)}
           </button>
         ))}
       </div>
