@@ -11,6 +11,7 @@ import MemberContextMenu from "./MemberContextMenu";
 import RenderedMessageContent from "./RenderedMessageContent";
 import TimedOutBadge from "./TimedOutBadge";
 import { getActorPermissions, isModerator } from "../lib/permissions";
+import { renderUnicodeEmoji } from "../lib/unicodeEmoji";
 
 interface MessageProps {
   message: MessageInfo;
@@ -540,7 +541,7 @@ function ReactionBadge({
           <span style={{ fontSize: 10 }}>…</span>
         )
       ) : (
-        reaction.emoji
+        renderUnicodeEmoji(reaction.emoji)
       )}
       <span className="reaction-count">{reaction.count}</span>
     </button>
