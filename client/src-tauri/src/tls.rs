@@ -53,6 +53,9 @@ pub fn make_client_endpoint() -> Result<Endpoint> {
         .with_no_client_auth();
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    // Enable QUIC datagrams (used by voice calls in v1).
+    transport.datagram_receive_buffer_size(Some(1 << 20));
+    transport.datagram_send_buffer_size(1 << 20);
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
     ));

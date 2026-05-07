@@ -33,9 +33,14 @@ fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
     let server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?,
     ));
+    // Enable QUIC datagrams (used by voice calls in v1).
+    let mut transport = quinn::TransportConfig::default();
+    transport.datagram_receive_buffer_size(Some(1 << 20));
+    transport.datagram_send_buffer_size(1 << 20);
+    server_config.transport_config(Arc::new(transport));
     Ok(Endpoint::server(server_config, bind_addr)?)
 }
 
