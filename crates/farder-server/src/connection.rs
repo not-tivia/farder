@@ -926,5 +926,27 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
                 }
             }
         }
+        EventTarget::VoiceStartTransmit { pk, channel_id } => {
+            crate::voice::start_transmit(&state.voice, pk, channel_id).await;
+        }
+        EventTarget::VoiceStopTransmit { pk } => {
+            crate::voice::stop_transmit(&state.voice, pk).await;
+        }
+        EventTarget::VoiceSetMute { pk, muted } => {
+            let mut muted_set = state.voice.muted.write().await;
+            if muted {
+                muted_set.insert(pk);
+            } else {
+                muted_set.remove(&pk);
+            }
+        }
+        EventTarget::VoiceSetDeafen { pk, deafened } => {
+            let mut deaf_set = state.voice.deafened.write().await;
+            if deafened {
+                deaf_set.insert(pk);
+            } else {
+                deaf_set.remove(&pk);
+            }
+        }
     }
 }
