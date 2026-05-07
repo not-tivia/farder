@@ -81,7 +81,12 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const canTimeout = hasPermission(bits, PERMISSIONS.TIMEOUT_MEMBERS);
   const isTargetTimedOut = !!(target.timeout_until && target.timeout_until > Date.now());
 
+  // When any modal child (Ban/Timeout/Profile) is open, hide the menu and
+  // disable its outside-click handler so the modal can be interacted with.
+  const dialogOpen = showBanDialog || showTimeoutDialog || showProfile;
+
   useEffect(() => {
+    if (dialogOpen) return;
     function handleMouse(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     }
@@ -94,7 +99,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
       document.removeEventListener("mousedown", handleMouse);
       document.removeEventListener("keydown", handleKey);
     };
-  }, [onClose]);
+  }, [onClose, dialogOpen]);
 
   function viewProfile() {
     setShowProfile(true);
@@ -226,6 +231,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
 
   return (
     <>
+      {!dialogOpen && (
       <div ref={ref} style={{ ...menuStyle, top: position.y, left: position.x }}>
         {cleaned.map((row, i) => {
           if (row.kind === "separator") {
@@ -291,6 +297,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
           </div>
         )}
       </div>
+      )}
 
       {showBanDialog && (
         <BanConfirmDialog
