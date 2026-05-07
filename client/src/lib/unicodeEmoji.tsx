@@ -85,13 +85,63 @@ export function searchShorthand(query: string, limit: number): string[] {
 }
 
 /**
+ * Convert a Unicode emoji string to a Twemoji filename (without `.svg` suffix).
+ *
+ * Rules (matching Twemoji's own naming convention):
+ * - Each codepoint becomes its lowercase hex (e.g. U+1F604 → "1f604").
+ * - Multi-codepoint sequences (ZWJ, regional indicators, skin-tone modifiers)
+ *   join codepoints with "-".
+ * - The variation-selector-16 (U+FE0F) is stripped, since Twemoji's filenames
+ *   omit it (e.g. ❤️ "U+2764 U+FE0F" → "2764", NOT "2764-fe0f").
+ *
+ * Examples:
+ *   "😄" → "1f604"
+ *   "❤️" → "2764"
+ *   "🇺🇸" → "1f1fa-1f1f8"
+ *   "👍🏽" → "1f44d-1f3fd"
+ *   "👨‍👩‍👧" → "1f468-200d-1f469-200d-1f467"
+ */
+export function codepointToTwemojiName(codepoint: string): string {
+  const parts: string[] = [];
+  for (const char of codepoint) {
+    const cp = char.codePointAt(0);
+    if (cp === undefined) continue;
+    if (cp === 0xfe0f) continue; // strip variation selector 16
+    parts.push(cp.toString(16));
+  }
+  return parts.join("-");
+}
+
+/**
  * Render a Unicode emoji codepoint as a React node.
  *
- * SINGLE POINT OF CHANGE for end-game cross-platform-consistent rendering.
- * Today: returns the codepoint as a span (OS renders via system emoji font).
- * Future: swap to <img src={`/emoji/${hex(codepoint)}.svg`} /> for bundled
- * Twemoji or equivalent — every other call site stays the same.
+ * Renders as a Twemoji SVG `<img>` for cross-platform consistency.
+ * Falls back to native rendering (a `<span>` with the codepoint) if the
+ * Twemoji asset is missing — handled inline via onError.
  */
 export function renderUnicodeEmoji(codepoint: string): ReactNode {
-  return <span className="unicode-emoji">{codepoint}</span>;
+  const name = codepointToTwemojiName(codepoint);
+  return (
+    <img
+      src={`/twemoji/svg/${name}.svg`}
+      alt={codepoint}
+      className="unicode-emoji twemoji"
+      draggable={false}
+      style={{
+        height: "1.2em",
+        width: "1.2em",
+        verticalAlign: "-0.2em",
+        userSelect: "none",
+        display: "inline-block",
+      }}
+      onError={(e) => {
+        // Twemoji asset missing — replace with a native-rendering span.
+        const img = e.currentTarget as HTMLImageElement;
+        const span = document.createElement("span");
+        span.className = "unicode-emoji";
+        span.textContent = codepoint;
+        img.replaceWith(span);
+      }}
+    />
+  );
 }
