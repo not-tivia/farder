@@ -76,21 +76,21 @@ The backend search command (`search_messages(serverId, query, channelId?, limit?
 │  [ search query…                                               ] │
 ├──────────────┬───────────────────────────────────────────────────┤
 │              │                                                   │
-│  alice       │  bob          5 min ago    in #general            │
-│  in #general │  > thanks for the link                            │
-│  > thanks…   │                                                   │
-│              │  alice        4 min ago    in #general            │
-│  bob         │  > sure thing, here you go                        │
+│  alice       │  alice       11 min ago   in #general            │
+│  in #general │  > so I was reading about Bergamot               │
+│  > thanks…   │                                                  │
+│              │  bob         10 min ago   in #general            │
+│  bob         │  > oh nice — got a link?                          │
 │  in #random  │                                                   │
-│  > sure thing│  bob          4 min ago    in #general  ◀ MATCH   │
-│              │  > **thanks for the link** ◀ highlighted          │
+│  > sure thing│  alice        9 min ago   in #general            │
+│              │  > yeah here: https://browser.mt/                 │
 │  alice       │                                                   │
-│  in #random  │  alice        3 min ago    in #general            │
-│  > anyway…   │  > anyway, the bug is fixed                       │
+│  in #random  │  …  (10 messages of context above the match)      │
+│  > anyway…   │                                                   │
+│              │  bob          4 min ago   in #general  ◀ MATCH   │
+│              │  > thanks for the link ◀ highlighted              │
 │              │                                                   │
-│              │  bob          2 min ago    in #general            │
-│              │  > great, deploying now                           │
-│              │                                                   │
+│              │  (no "after" context in v1 — see fetch note)      │
 └──────────────┴───────────────────────────────────────────────────┘
 ```
 
