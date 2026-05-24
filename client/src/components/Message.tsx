@@ -12,6 +12,10 @@ import RenderedMessageContent from "./RenderedMessageContent";
 import TimedOutBadge from "./TimedOutBadge";
 import { getActorPermissions, isModerator } from "../lib/permissions";
 import { renderUnicodeEmoji } from "../lib/unicodeEmoji";
+import { TranslatedRow } from "./TranslatedRow";
+import { TranslationDownloadDialog } from "./TranslationDownloadDialog";
+import { translateMessage, subscribe as subscribeTranslation } from "../lib/translation/store";
+import { getTranslationSettings } from "../lib/translation/api";
 
 interface MessageProps {
   message: MessageInfo;
@@ -113,6 +117,18 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
 
+  const [pendingDownload, setPendingDownload] = useState<{
+    pair: { src: string; trg: string };
+    resolve: () => void;
+    reject: (reason: unknown) => void;
+    inProgress: boolean;
+  } | null>(null);
+
+  const [translationSettings, setTranslationSettings] = useState<{
+    enabled: boolean;
+    default_target: string;
+  } | null>(null);
+
   useEffect(() => {
     if (!cachedOwnPk) {
       api.getPublicKey().then((pk) => { cachedOwnPk = pk; setOwnPk(pk); });
@@ -128,6 +144,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
       if (!cancelled) setBookIndex(cachedBookIndex);
     });
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    getTranslationSettings().then((s) =>
+      setTranslationSettings({ enabled: s.enabled, default_target: s.default_target })
+    );
   }, []);
 
   const deleted = isDeletedUser(message.author);
@@ -318,6 +340,17 @@ export default function Message({ message, memberNames, grouped = false, serverI
         </div>
       )}
 
+      <TranslatedRow
+        messageId={String(message.id)}
+        content={message.content}
+        defaultTarget={translationSettings?.default_target ?? "en"}
+        confirmDownload={async (pair) =>
+          new Promise<void>((resolve, reject) => {
+            setPendingDownload({ pair, resolve, reject, inProgress: false });
+          })
+        }
+      />
+
       <div className={`reaction-bar${message.reactions.length === 0 ? " hover-only" : ""}`}>
         {message.reactions.map((r) => (
           <ReactionBadge
@@ -369,6 +402,21 @@ export default function Message({ message, memberNames, grouped = false, serverI
               navigator.clipboard.writeText(message.content);
               setContextMenu(null);
             }}>Copy Text</div>
+            {translationSettings?.enabled && (
+              <div className="context-menu-item" onClick={async () => {
+                setContextMenu(null);
+                if (!translationSettings) return;
+                await translateMessage({
+                  messageId: String(message.id),
+                  content: message.content,
+                  defaultTarget: translationSettings.default_target,
+                  confirmDownload: async (pair) =>
+                    new Promise<void>((resolve, reject) => {
+                      setPendingDownload({ pair, resolve, reject, inProgress: false });
+                    }),
+                });
+              }}>Translate</div>
+            )}
             {!message.thread_id && (
               <div className="context-menu-item" onClick={async () => {
                 try { await api.createThread(serverId, message.id); } catch {}
@@ -384,8 +432,43 @@ export default function Message({ message, memberNames, grouped = false, serverI
           </div>
         </>
       )}
+      {pendingDownload && (
+        <TranslationDownloadDialog
+          pair={pendingDownload.pair}
+          inProgress={pendingDownload.inProgress}
+          onCancel={() => {
+            pendingDownload.reject(new Error("user cancelled"));
+            setPendingDownload(null);
+          }}
+          onConfirm={() => {
+            setPendingDownload({ ...pendingDownload, inProgress: true });
+            pendingDownload.resolve();
+          }}
+        />
+      )}
+      {pendingDownload && pendingDownload.inProgress && (
+        <DismissDialogWhenDone
+          messageId={String(message.id)}
+          onDone={() => setPendingDownload(null)}
+        />
+      )}
     </div>
   );
+}
+
+function DismissDialogWhenDone({ messageId, onDone }: { messageId: string; onDone: () => void }) {
+  useEffect(() => {
+    let active = true;
+    const unsub = subscribeTranslation((m) => {
+      if (!active) return;
+      const s = m.get(messageId);
+      if (s && (s.kind === "translating" || s.kind === "done" || s.kind === "error")) {
+        onDone();
+      }
+    });
+    return () => { active = false; unsub(); };
+  }, [messageId, onDone]);
+  return null;
 }
 
 function AttachmentDisplay({ attachment, messageContent, serverId }: { attachment: AttachmentInfo; messageContent: string; serverId: string }) {
