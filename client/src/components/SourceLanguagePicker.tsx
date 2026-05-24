@@ -107,9 +107,9 @@ export function SourceLanguagePicker({ value, onChange, onClear, target, variant
           style={{
             padding: "4px 8px",
             fontSize: 12,
-            background: "var(--bg, #fff)",
-            color: "var(--text, #000)",
-            border: "1px solid var(--border, #ccc)",
+            background: "var(--xp-window-bg, #ECE9D8)",
+            color: "inherit",
+            border: "1px solid var(--xp-border, #ACA899)",
             borderRadius: 4,
           }}
         >
@@ -134,7 +134,7 @@ export function SourceLanguagePicker({ value, onChange, onClear, target, variant
   return (
     <div style={{ minWidth: 180 }}>
       {installedSources.length === 0 && (
-        <div style={{ padding: "6px 12px", color: "var(--text-muted, #888)", fontSize: 12 }}>
+        <div style={{ padding: "6px 12px", color: "var(--xp-text-muted, #888880)", fontSize: 12 }}>
           No source languages installed.
         </div>
       )}
@@ -151,7 +151,7 @@ export function SourceLanguagePicker({ value, onChange, onClear, target, variant
               alignItems: "center",
               gap: 8,
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = "var(--accent-faded, rgba(0,88,230,0.12))")}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "color-mix(in srgb, var(--xp-blue, #0058E6) 12%, transparent)")}
             onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
           >
             <span style={{ width: 12 }}>{isSelected ? "✓" : ""}</span>
@@ -159,12 +159,12 @@ export function SourceLanguagePicker({ value, onChange, onClear, target, variant
           </div>
         );
       })}
-      <div style={{ height: 1, background: "var(--border, #ccc)", margin: "4px 0" }} />
+      <div style={{ height: 1, background: "var(--xp-border, #ACA899)", margin: "4px 0" }} />
       {onClear && value && (
         <div
           onClick={onClear}
-          style={{ padding: "6px 12px", cursor: "pointer", fontSize: 12, color: "var(--text-muted, #888)" }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = "var(--accent-faded, rgba(0,88,230,0.12))")}
+          style={{ padding: "6px 12px", cursor: "pointer", fontSize: 12, color: "var(--xp-text-muted, #888880)" }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "color-mix(in srgb, var(--xp-blue, #0058E6) 12%, transparent)")}
           onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
         >
           Clear override
@@ -172,8 +172,8 @@ export function SourceLanguagePicker({ value, onChange, onClear, target, variant
       )}
       <div
         onClick={promptForNewLanguage}
-        style={{ padding: "6px 12px", cursor: "pointer", fontSize: 12, color: "var(--text-muted, #888)" }}
-        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--accent-faded, rgba(0,88,230,0.12))")}
+        style={{ padding: "6px 12px", cursor: "pointer", fontSize: 12, color: "var(--xp-text-muted, #888880)" }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = "color-mix(in srgb, var(--xp-blue, #0058E6) 12%, transparent)")}
         onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
         Add a new language…

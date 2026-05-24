@@ -179,9 +179,9 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
         right: 0,
         bottom: 0,
         width: "min(440px, 90vw)",
-        background: "var(--bg-elevated, #fff)",
-        color: "var(--text, #000)",
-        borderLeft: "1px solid var(--border, #ccc)",
+        background: "var(--xp-panel-bg, #ECE9D8)",
+        color: "inherit",
+        borderLeft: "1px solid var(--xp-border, #ACA899)",
         boxShadow: "-4px 0 16px rgba(0, 0, 0, 0.18)",
         display: "flex",
         flexDirection: "column",
@@ -200,7 +200,7 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
         <div
           style={{
             padding: "12px 16px",
-            borderBottom: "1px solid var(--border, #ccc)",
+            borderBottom: "1px solid var(--xp-border, #ACA899)",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
@@ -217,7 +217,7 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
             ×
           </button>
         </div>
-        <div style={{ padding: 12, borderBottom: "1px solid var(--border, #ccc)" }}>
+        <div style={{ padding: 12, borderBottom: "1px solid var(--xp-border, #ACA899)" }}>
           <input
             ref={inputRef}
             type="text"
@@ -239,10 +239,10 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
               width: "100%",
               padding: "8px 12px",
               fontSize: 14,
-              border: "1px solid var(--border, #ccc)",
+              border: "1px solid var(--xp-border, #ACA899)",
               borderRadius: 4,
-              background: "var(--bg, #fff)",
-              color: "var(--text, #000)",
+              background: "var(--xp-window-bg, #ECE9D8)",
+              color: "inherit",
             }}
           />
         </div>
@@ -254,14 +254,14 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
               overflowY: "auto",
               padding: 8,
               fontSize: 12,
-              borderBottom: selectedResult ? "1px solid var(--border, #ccc)" : "none",
+              borderBottom: selectedResult ? "1px solid var(--xp-border, #ACA899)" : "none",
             }}
           >
             {status.kind === "idle" && (
-              <div style={{ color: "var(--text-muted, #888)" }}>Type to search messages.</div>
+              <div style={{ color: "var(--xp-text-muted, #888880)" }}>Type to search messages.</div>
             )}
             {status.kind === "loading" && (
-              <div style={{ color: "var(--text-muted, #888)" }}>Searching…</div>
+              <div style={{ color: "var(--xp-text-muted, #888880)" }}>Searching…</div>
             )}
             {status.kind === "error" && (
               <div style={{ color: "var(--error, #c44)" }}>
@@ -269,7 +269,7 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
               </div>
             )}
             {status.kind === "ready" && results.length === 0 && (
-              <div style={{ color: "var(--text-muted, #888)" }}>
+              <div style={{ color: "var(--xp-text-muted, #888880)" }}>
                 No messages match "{query.trim()}".
               </div>
             )}
@@ -287,11 +287,11 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
                     marginBottom: 4,
                     borderRadius: 4,
                     cursor: "pointer",
-                    background: isSelected ? "var(--accent-faded, rgba(0,88,230,0.12))" : "transparent",
+                    background: isSelected ? "color-mix(in srgb, var(--xp-blue, #0058E6) 12%, transparent)" : "transparent",
                   }}
                 >
                   <div style={{ fontWeight: 600 }}>{authorName}</div>
-                  <div style={{ color: "var(--text-muted, #888)", fontSize: 11 }}>
+                  <div style={{ color: "var(--xp-text-muted, #888880)", fontSize: 11 }}>
                     in #{ch?.name ?? "unknown"}
                   </div>
                   <div
@@ -319,7 +319,7 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
           >
             {!selectedResult && null /* preview pane collapses when nothing selected */}
             {selectedResult && context.status === "loading" && (
-              <div style={{ color: "var(--text-muted, #888)" }}>Loading context…</div>
+              <div style={{ color: "var(--xp-text-muted, #888880)" }}>Loading context…</div>
             )}
             {selectedResult && context.status === "error" && (
               <div style={{ color: "var(--error, #c44)" }}>
