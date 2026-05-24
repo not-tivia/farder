@@ -35,6 +35,7 @@ export interface TranslationSettings {
   enabled: boolean;
   default_target: string;
   seen_first_run: boolean;
+  user_language_overrides: Record<string, string>;
 }
 
 export interface DownloadProgress {

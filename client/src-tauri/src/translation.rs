@@ -36,6 +36,11 @@ pub struct TranslationSettings {
     pub enabled: bool,
     pub default_target: String,
     pub seen_first_run: bool,
+    /// Per-user language overrides, keyed by public-key hex string.
+    /// Value is the ISO 639-1 source language to use for that user's
+    /// messages, bypassing auto-detection.
+    #[serde(default)]
+    pub user_language_overrides: std::collections::HashMap<String, String>,
 }
 
 impl Default for TranslationSettings {
@@ -44,6 +49,7 @@ impl Default for TranslationSettings {
             enabled: true,
             default_target: "en".to_string(),
             seen_first_run: false,
+            user_language_overrides: std::collections::HashMap::new(),
         }
     }
 }
@@ -78,7 +84,10 @@ pub fn get_translation_settings() -> TranslationSettings {
     let seen_first_run = crate::commands::settings_get("translation_seen_first_run")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    TranslationSettings { enabled, default_target, seen_first_run }
+    let user_language_overrides = crate::commands::settings_get("translation_user_overrides")
+        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, String>>(v).ok())
+        .unwrap_or_default();
+    TranslationSettings { enabled, default_target, seen_first_run, user_language_overrides }
 }
 
 #[tauri::command]
@@ -91,6 +100,11 @@ pub fn set_translation_settings(settings: TranslationSettings) -> Result<(), Str
     crate::commands::settings_set(
         "translation_seen_first_run",
         serde_json::Value::Bool(settings.seen_first_run),
+    )?;
+    crate::commands::settings_set(
+        "translation_user_overrides",
+        serde_json::to_value(&settings.user_language_overrides)
+            .map_err(|e| e.to_string())?,
     )?;
     Ok(())
 }
