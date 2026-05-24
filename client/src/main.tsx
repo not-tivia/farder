@@ -20,6 +20,22 @@ async function bootstrap() {
     console.error("[bootstrap] failed to load theme:", e);
   }
 
+  // Search-highlight flash animation. Lives outside theme CSS because it's
+  // theme-independent — themes may override `.search-highlight` to change the
+  // color, but the keyframes themselves are universal.
+  const searchHighlight = document.createElement("style");
+  searchHighlight.id = "search-highlight-keyframes";
+  searchHighlight.textContent = `
+    @keyframes farderSearchFlash {
+      0%   { background-color: rgba(255, 165, 0, 0.45); }
+      100% { background-color: transparent; }
+    }
+    .message.search-highlight {
+      animation: farderSearchFlash 1.2s ease-out;
+    }
+  `;
+  document.head.appendChild(searchHighlight);
+
   // One-time migration of legacy ~/.farder/favorites.json into the new book.
   // No-op after the first successful run (server renames favorites.json → .bak).
   try {
