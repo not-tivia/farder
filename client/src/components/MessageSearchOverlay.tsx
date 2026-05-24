@@ -9,6 +9,10 @@ import { useMessageContext } from "../hooks/useMessageContext";
 
 interface Props {
   open: boolean;
+  /** Bumped each time the overlay should refocus its input — lets Ctrl+K
+   *  refocus when the overlay is already open (which `open` going from true
+   *  to true is a no-op for React state diffing). */
+  openTrigger?: number;
   onClose: () => void;
 }
 
@@ -18,7 +22,7 @@ type SearchStatus =
   | { kind: "ready"; results: MessageInfo[] }
   | { kind: "error"; reason: string };
 
-export function MessageSearchOverlay({ open, onClose }: Props) {
+export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) {
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -29,6 +33,9 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
   // Debounced "stable selection" — what actually drives the preview fetch.
   // Updated 200ms after selectedIndex stops changing.
   const [stableIndex, setStableIndex] = useState(0);
+  // Bumped to retrigger the search effect with the same query (e.g., user hit
+  // Enter on an error state to retry).
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
     if (!open) return;
@@ -38,6 +45,15 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
       prevFocus?.focus?.();
     };
   }, [open]);
+
+  // Refocus the input whenever the parent bumps openTrigger (e.g., Ctrl+K
+  // fired while the overlay was already open). Selects existing text so a
+  // second Ctrl+K behaves like "open fresh search".
+  useEffect(() => {
+    if (!open || openTrigger === 0) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [openTrigger, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -88,7 +104,7 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [query, open, serverId]);
+  }, [query, open, serverId, retryTick]);
 
   // Debounce stableIndex 200ms behind selectedIndex.
   useEffect(() => {
@@ -207,10 +223,14 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && status.kind === "ready" && status.results[selectedIndex]) {
+              if (e.key !== "Enter") return;
+              if (status.kind === "ready" && status.results[selectedIndex]) {
                 e.preventDefault();
                 const sel = status.results[selectedIndex];
                 commit(sel.id, sel.channel_id);
+              } else if (status.kind === "error") {
+                e.preventDefault();
+                setRetryTick((n) => n + 1);
               }
             }}
             placeholder="Type to search messages…"
@@ -243,7 +263,7 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
             )}
             {status.kind === "error" && (
               <div style={{ color: "var(--error, #c44)" }}>
-                Search failed — {status.reason}.
+                Search failed — {status.reason}. Press Enter to retry.
               </div>
             )}
             {status.kind === "ready" && results.length === 0 && (

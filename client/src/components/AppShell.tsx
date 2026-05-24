@@ -24,11 +24,19 @@ export default function AppShell() {
   const serverId = useActiveServerId();
 
   const [searchOpen, setSearchOpen] = useState(false);
+  // Counter that increments every time something tries to open the overlay.
+  // The overlay treats it as a "refocus me" trigger so Ctrl+K refocuses the
+  // input even when the overlay is already mounted (which setSearchOpen(true)
+  // alone wouldn't trigger because React dedups identical state updates).
+  const [openTrigger, setOpenTrigger] = useState(0);
 
   // Register the module-level ref so external callers (e.g. ChatPanel) can open
   // the overlay via openMessageSearch().
   useEffect(() => {
-    openSearchRef = () => setSearchOpen(true);
+    openSearchRef = () => {
+      setSearchOpen(true);
+      setOpenTrigger((n) => n + 1);
+    };
     return () => { openSearchRef = null; };
   }, []);
 
@@ -40,6 +48,7 @@ export default function AppShell() {
       if (modPressed && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setSearchOpen(true);
+        setOpenTrigger((n) => n + 1);
       }
     };
     window.addEventListener("keydown", handler, true);
@@ -124,7 +133,7 @@ export default function AppShell() {
             }}
           />
         )}
-        <MessageSearchOverlay open={searchOpen} onClose={() => setSearchOpen(false)} />
+        <MessageSearchOverlay open={searchOpen} openTrigger={openTrigger} onClose={() => setSearchOpen(false)} />
       </div>
     </>
   );
