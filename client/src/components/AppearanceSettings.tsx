@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import CustomizeModal from "./CustomizeModal";
 import GifSearchSettings from "./GifSearchSettings";
+import { TranslationSettingsTab } from "./TranslationSettingsTab";
 
 interface Props {
   onClose: () => void;
@@ -77,7 +78,7 @@ export default function AppearanceSettings({ onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [customizing, setCustomizing] = useState<{ themeId: string; name: string } | null>(null);
-  const [activeTab, setActiveTab] = useState<"appearance" | "gif">("appearance");
+  const [activeTab, setActiveTab] = useState<"appearance" | "gif" | "translation">("appearance");
 
   async function refresh() {
     setLoading(true);
@@ -257,7 +258,7 @@ export default function AppearanceSettings({ onClose }: Props) {
             background: "var(--xp-window-bg, #ECE9D8)",
           }}
         >
-          {(["appearance", "gif"] as const).map((tab) => (
+          {(["appearance", "gif", "translation"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -274,7 +275,7 @@ export default function AppearanceSettings({ onClose }: Props) {
                 cursor: "pointer",
               }}
             >
-              {tab === "appearance" ? "Appearance" : "GIF Search"}
+              {tab === "appearance" ? "Appearance" : tab === "gif" ? "GIF Search" : "Translation"}
             </button>
           ))}
         </div>
@@ -292,6 +293,7 @@ export default function AppearanceSettings({ onClose }: Props) {
           }}
         >
           {activeTab === "gif" && <GifSearchSettings />}
+          {activeTab === "translation" && <TranslationSettingsTab />}
           {activeTab === "appearance" && (
             <>
           {loading && <div>Loading themes…</div>}
