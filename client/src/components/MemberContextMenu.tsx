@@ -7,6 +7,8 @@ import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissi
 import BanConfirmDialog from "./BanConfirmDialog";
 import TimeoutDialog from "./TimeoutDialog";
 import UserProfilePopup from "./UserProfilePopup";
+import { getTranslationSettings, setTranslationSettings } from "../lib/translation/api";
+import { SourceLanguagePicker } from "./SourceLanguagePicker";
 
 interface Props {
   target: MemberInfo;
@@ -61,6 +63,9 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const ref = useRef<HTMLDivElement | null>(null);
   const activeServer = useActiveServer();
   const [showRoleSubmenu, setShowRoleSubmenu] = useState(false);
+  const [showLanguageSubmenu, setShowLanguageSubmenu] = useState(false);
+  const [overrideValue, setOverrideValue] = useState<string | null>(null);
+  const [translationTarget, setTranslationTarget] = useState<string>("en");
   const [showBanDialog, setShowBanDialog] = useState(false);
   const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -100,6 +105,18 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
       document.removeEventListener("keydown", handleKey);
     };
   }, [onClose, dialogOpen]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const settings = await getTranslationSettings();
+        setTranslationTarget(settings.default_target);
+        setOverrideValue(settings.user_language_overrides[targetPk] ?? null);
+      } catch {
+        // silent: settings fetch failures fall through to defaults
+      }
+    })();
+  }, [targetPk]);
 
   function viewProfile() {
     setShowProfile(true);
@@ -186,7 +203,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   // Build the items conditionally to compute which separators are needed.
   type Row =
     | { kind: "item"; label: string; onClick: () => void; danger?: boolean }
-    | { kind: "submenu"; label: string }
+    | { kind: "submenu"; label: string; submenuKind?: "role" | "language" }
     | { kind: "separator" };
   const rows: Row[] = [];
 
@@ -218,6 +235,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   rows.push({ kind: "separator" });
   rows.push({ kind: "item", label: "Copy ID", onClick: copyId });
   rows.push({ kind: "item", label: "Copy mention", onClick: copyMention });
+  rows.push({ kind: "submenu", label: "Set language…  ▶", submenuKind: "language" });
 
   // Drop leading separator and consecutive separators.
   const cleaned: Row[] = [];
@@ -238,37 +256,85 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
             return <div key={`sep-${i}`} style={separatorStyle} />;
           }
           if (row.kind === "submenu") {
+            const isLanguage = row.submenuKind === "language";
+            const isOpen = isLanguage ? showLanguageSubmenu : showRoleSubmenu;
+            const setIsOpen = isLanguage ? setShowLanguageSubmenu : setShowRoleSubmenu;
             return (
               <div
                 key={`sub-${i}`}
-                onMouseEnter={() => setShowRoleSubmenu(true)}
-                onMouseLeave={() => setShowRoleSubmenu(false)}
+                onMouseEnter={() => setIsOpen(true)}
+                onMouseLeave={() => setIsOpen(false)}
                 style={{ position: "relative" }}
               >
                 <button
                   style={itemStyle}
-                  onClick={() => setShowRoleSubmenu((s) => !s)}
+                  onClick={() => setIsOpen((s) => !s)}
                 >
                   {row.label}
                 </button>
-                {showRoleSubmenu && (
+                {isOpen && (
                   <div style={submenuStyle}>
-                    {roles.map((r) => {
-                      const has = target.role_ids?.includes(r.id) ?? false;
-                      return (
-                        <button
-                          key={r.id}
-                          style={itemStyle}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void toggleRole(r.id);
-                          }}
-                        >
-                          {has ? "✓ " : "  "}
-                          <span style={{ color: r.color ?? "inherit" }}>●</span> {r.name}
-                        </button>
-                      );
-                    })}
+                    {isLanguage ? (
+                      <SourceLanguagePicker
+                        variant="menu"
+                        target={translationTarget}
+                        value={overrideValue}
+                        onChange={async (src) => {
+                          try {
+                            const settings = await getTranslationSettings();
+                            const next = {
+                              ...settings,
+                              user_language_overrides: {
+                                ...settings.user_language_overrides,
+                                [targetPk]: src,
+                              },
+                            };
+                            await setTranslationSettings(next);
+                            setOverrideValue(src);
+                          } catch (e) {
+                            // eslint-disable-next-line no-console
+                            console.error("[member-menu] set language failed:", e);
+                          } finally {
+                            setShowLanguageSubmenu(false);
+                            onClose();
+                          }
+                        }}
+                        onClear={async () => {
+                          try {
+                            const settings = await getTranslationSettings();
+                            const { [targetPk]: _removed, ...rest } = settings.user_language_overrides;
+                            await setTranslationSettings({
+                              ...settings,
+                              user_language_overrides: rest,
+                            });
+                            setOverrideValue(null);
+                          } catch (e) {
+                            // eslint-disable-next-line no-console
+                            console.error("[member-menu] clear language failed:", e);
+                          } finally {
+                            setShowLanguageSubmenu(false);
+                            onClose();
+                          }
+                        }}
+                      />
+                    ) : (
+                      roles.map((r) => {
+                        const has = target.role_ids?.includes(r.id) ?? false;
+                        return (
+                          <button
+                            key={r.id}
+                            style={itemStyle}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void toggleRole(r.id);
+                            }}
+                          >
+                            {has ? "✓ " : "  "}
+                            <span style={{ color: r.color ?? "inherit" }}>●</span> {r.name}
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
                 )}
               </div>
