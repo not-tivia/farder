@@ -79,15 +79,20 @@ async function getTranslator(): Promise<LatencyTranslatorLike> {
           const paths = await getModelPaths({ src: opts.from, trg: opts.to });
           const fetchAB = (p: string) =>
             fetch(convertFileSrc(p)).then((r) => r.arrayBuffer());
-          const [model, vocab, lex] = await Promise.all([
+          // Bergamot accepts either one shared vocab or [srcVocab, trgVocab].
+          // We pick based on which paths the Rust side resolved on disk.
+          const vocabPromises: Promise<ArrayBuffer>[] = paths.vocab
+            ? [fetchAB(paths.vocab)]
+            : [fetchAB(paths.src_vocab!), fetchAB(paths.trg_vocab!)];
+          const [model, lex, ...vocabs] = await Promise.all([
             fetchAB(paths.model),
-            fetchAB(paths.vocab),
             fetchAB(paths.lex),
+            ...vocabPromises,
           ]);
           return {
             model,
             shortlist: lex,
-            vocabs: [vocab],
+            vocabs,
             qualityModel: null,
             config: {},
           };

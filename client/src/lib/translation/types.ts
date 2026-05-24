@@ -14,7 +14,13 @@ export interface LocalModel {
 
 export interface ModelPaths {
   model: string;
-  vocab: string;
+  /** Single shared vocab. Present when the model uses one vocabulary for both
+   *  source and target. Mutually exclusive with src_vocab/trg_vocab. */
+  vocab?: string;
+  /** Source vocab for split-vocab models (en-zh, en-ja, en-ko, etc.). */
+  src_vocab?: string;
+  /** Target vocab for split-vocab models. */
+  trg_vocab?: string;
   lex: string;
 }
 

@@ -17,7 +17,17 @@ pub struct LocalModel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPaths {
     pub model: String,
-    pub vocab: String,
+    /// Single shared vocab. Present when the model uses one vocabulary for
+    /// both source and target. Mutually exclusive with `src_vocab`/`trg_vocab`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocab: Option<String>,
+    /// Source vocab for split-vocab models (e.g., en-zh, en-ja, en-ko).
+    /// Always paired with `trg_vocab`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_vocab: Option<String>,
+    /// Target vocab for split-vocab models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trg_vocab: Option<String>,
     pub lex: String,
 }
 
@@ -103,8 +113,36 @@ pub struct RegistryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct RegistryFiles {
     pub model: RegistryFile,
-    pub vocab: RegistryFile,
+    /// Single shared vocab (most language pairs).
+    #[serde(default)]
+    pub vocab: Option<RegistryFile>,
+    /// Source vocab for split-vocab pairs (en-zh, en-ja, en-ko, etc.).
+    /// Mozilla's registry uses camelCase: `srcVocab`.
+    #[serde(default)]
+    pub src_vocab: Option<RegistryFile>,
+    /// Target vocab for split-vocab pairs (`trgVocab` in the registry JSON).
+    #[serde(default)]
+    pub trg_vocab: Option<RegistryFile>,
     pub lexical_shortlist: RegistryFile,
+}
+
+impl RegistryFiles {
+    /// Returns Some(vocab files) if this entry has a usable vocabulary layout
+    /// (either single `vocab` OR both `src_vocab` and `trg_vocab`).
+    fn vocab_layout(&self) -> Option<VocabLayout<'_>> {
+        if let Some(v) = &self.vocab {
+            Some(VocabLayout::Single(v))
+        } else if let (Some(s), Some(t)) = (&self.src_vocab, &self.trg_vocab) {
+            Some(VocabLayout::Split(s, t))
+        } else {
+            None
+        }
+    }
+}
+
+enum VocabLayout<'a> {
+    Single(&'a RegistryFile),
+    Split(&'a RegistryFile, &'a RegistryFile),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -143,14 +181,24 @@ async fn fetch_registry() -> Result<RegistryRoot, String> {
 }
 
 /// Pick the best registry entry for a pair: prefer `releaseStatus == "Release"`,
-/// then prefer `architecture == "base-memory"`. Fall back to first available.
+/// then prefer `architecture == "base-memory"`. Only considers entries with a
+/// usable vocab layout (either single `vocab` or both `srcVocab` + `trgVocab`).
+/// Returns None if no entry has a usable vocab.
 fn pick_entry(entries: &[RegistryEntry]) -> Option<&RegistryEntry> {
-    let released: Vec<&RegistryEntry> = entries
+    let usable: Vec<&RegistryEntry> = entries
+        .iter()
+        .filter(|e| e.files.vocab_layout().is_some())
+        .collect();
+    if usable.is_empty() {
+        return None;
+    }
+    let released: Vec<&RegistryEntry> = usable
         .iter()
         .filter(|e| e.release_status.as_deref() == Some("Release"))
+        .copied()
         .collect();
     if released.is_empty() {
-        return entries.first();
+        return usable.first().copied();
     }
     released
         .iter()
@@ -167,8 +215,14 @@ pub async fn list_available_pairs() -> Result<Vec<AvailablePair>, String> {
         let parts: Vec<&str> = key.split('-').collect();
         if parts.len() != 2 { continue; }
         let Some(entry) = pick_entry(entries) else { continue };
+        let vocab_size = match entry.files.vocab_layout() {
+            Some(VocabLayout::Single(v)) => v.uncompressed_size.unwrap_or(0),
+            Some(VocabLayout::Split(s, t)) =>
+                s.uncompressed_size.unwrap_or(0) + t.uncompressed_size.unwrap_or(0),
+            None => continue, // pick_entry filtered these out; defensive.
+        };
         let size = entry.files.model.uncompressed_size.unwrap_or(0)
-            + entry.files.vocab.uncompressed_size.unwrap_or(0)
+            + vocab_size
             + entry.files.lexical_shortlist.uncompressed_size.unwrap_or(0);
         out.push(AvailablePair {
             src: parts[0].to_string(),
@@ -209,10 +263,19 @@ pub async fn download_model(
         .ok_or_else(|| format!("no models for {key}"))?;
     let entry = pick_entry(entries).ok_or_else(|| format!("no usable entry for {key}"))?;
 
+    // Determine vocab layout (single or split) and assemble the list of files
+    // we'll download. Slot names also dictate the on-disk file names.
+    let vocab_layout = entry.files.vocab_layout()
+        .ok_or_else(|| format!("no usable vocab for {key}"))?;
+    let vocab_files: Vec<(&str, &RegistryFile)> = match vocab_layout {
+        VocabLayout::Single(v) => vec![("vocab.spm", v)],
+        VocabLayout::Split(s, t) => vec![("src_vocab.spm", s), ("trg_vocab.spm", t)],
+    };
+
     // Compute total size for progress reporting (sum of compressed sizes is unknown ahead of HEAD;
     // use uncompressed as a UX-acceptable approximation).
-    let approx_total = entry.files.model.uncompressed_size.unwrap_or(0)
-        + entry.files.vocab.uncompressed_size.unwrap_or(0)
+    let approx_total: u64 = entry.files.model.uncompressed_size.unwrap_or(0)
+        + vocab_files.iter().map(|(_, f)| f.uncompressed_size.unwrap_or(0)).sum::<u64>()
         + entry.files.lexical_shortlist.uncompressed_size.unwrap_or(0);
 
     let dir = pair_dir(&pair);
@@ -247,11 +310,10 @@ pub async fn download_model(
     };
 
     let mut cumulative = 0u64;
-    for (slot, file_meta) in [
-        ("model.bin", &entry.files.model),
-        ("vocab.spm", &entry.files.vocab),
-        ("lex.bin", &entry.files.lexical_shortlist),
-    ] {
+    let mut all_files: Vec<(&str, &RegistryFile)> = vec![("model.bin", &entry.files.model)];
+    all_files.extend(vocab_files.iter().copied());
+    all_files.push(("lex.bin", &entry.files.lexical_shortlist));
+    for (slot, file_meta) in all_files {
         let url = format!("{}/{}", registry.base_url, file_meta.path);
         emit("downloading", cumulative, Some(slot));
         let resp = client
@@ -351,9 +413,10 @@ pub fn list_local_models() -> Result<Vec<LocalModel>, String> {
         let version = meta.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let downloaded_at = meta.get("downloaded_at").and_then(|v| v.as_u64()).unwrap_or(0);
         if src.is_empty() || trg.is_empty() { continue; }
-        // Sum file sizes for the three model files
+        // Sum file sizes — model + lex are always present; vocab is either
+        // single (vocab.spm) or split (src_vocab.spm + trg_vocab.spm).
         let mut size = 0u64;
-        for slot in ["model.bin", "vocab.spm", "lex.bin"] {
+        for slot in ["model.bin", "vocab.spm", "src_vocab.spm", "trg_vocab.spm", "lex.bin"] {
             if let Ok(meta) = std::fs::metadata(path.join(slot)) {
                 size += meta.len();
             }
@@ -391,9 +454,21 @@ pub fn get_model_paths(pair: LangPair) -> Result<ModelPaths, String> {
         // absolute path; TS resolves via `convertFileSrc` on the renderer side.
         p.to_string_lossy().to_string()
     };
+    let single_vocab = dir.join("vocab.spm");
+    let src_vocab = dir.join("src_vocab.spm");
+    let trg_vocab = dir.join("trg_vocab.spm");
+    let (vocab, src_vocab_path, trg_vocab_path) = if single_vocab.exists() {
+        (Some(to_path(single_vocab)), None, None)
+    } else if src_vocab.exists() && trg_vocab.exists() {
+        (None, Some(to_path(src_vocab)), Some(to_path(trg_vocab)))
+    } else {
+        return Err(format!("model {}-{} missing vocab file(s) on disk", pair.src, pair.trg));
+    };
     Ok(ModelPaths {
         model: to_path(dir.join("model.bin")),
-        vocab: to_path(dir.join("vocab.spm")),
+        vocab,
+        src_vocab: src_vocab_path,
+        trg_vocab: trg_vocab_path,
         lex: to_path(dir.join("lex.bin")),
     })
 }
@@ -410,7 +485,9 @@ mod tests {
             release_status: status.map(String::from),
             files: RegistryFiles {
                 model: RegistryFile { path: "m".into(), uncompressed_size: None, uncompressed_hash: None },
-                vocab: RegistryFile { path: "v".into(), uncompressed_size: None, uncompressed_hash: None },
+                vocab: Some(RegistryFile { path: "v".into(), uncompressed_size: None, uncompressed_hash: None }),
+                src_vocab: None,
+                trg_vocab: None,
                 lexical_shortlist: RegistryFile { path: "l".into(), uncompressed_size: None, uncompressed_hash: None },
             },
             model_statistics: None,
