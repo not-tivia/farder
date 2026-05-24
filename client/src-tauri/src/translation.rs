@@ -170,6 +170,126 @@ pub async fn list_available_pairs() -> Result<Vec<AvailablePair>, String> {
     Ok(out)
 }
 
+use std::io::{Read, Write};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadProgress {
+    pub pair: LangPair,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub stage: String,  // "downloading" | "decompressing" | "verifying" | "saving" | "done" | "error"
+    pub message: Option<String>,
+}
+
+#[tauri::command]
+pub async fn download_model(
+    pair: LangPair,
+    app: tauri::AppHandle,
+) -> Result<LocalModel, String> {
+    use sha2::{Digest, Sha256};
+    use tauri::Emitter;
+
+    let registry = fetch_registry().await?;
+    let key = format!("{}-{}", pair.src, pair.trg);
+    let entries = registry
+        .models
+        .get(&key)
+        .ok_or_else(|| format!("no models for {key}"))?;
+    let entry = pick_entry(entries).ok_or_else(|| format!("no usable entry for {key}"))?;
+
+    // Compute total size for progress reporting (sum of compressed sizes is unknown ahead of HEAD;
+    // use uncompressed as a UX-acceptable approximation).
+    let approx_total = entry.files.model.uncompressed_size.unwrap_or(0)
+        + entry.files.vocab.uncompressed_size.unwrap_or(0)
+        + entry.files.lexical_shortlist.uncompressed_size.unwrap_or(0);
+
+    let dir = pair_dir(&pair);
+    let tmp_dir = dir.with_extension("tmp");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let emit = |stage: &str, done: u64, msg: Option<&str>| {
+        let _ = app.emit(
+            "translation:progress",
+            DownloadProgress {
+                pair: pair.clone(),
+                bytes_done: done,
+                bytes_total: approx_total,
+                stage: stage.to_string(),
+                message: msg.map(String::from),
+            },
+        );
+    };
+
+    let mut cumulative = 0u64;
+    for (slot, file_meta) in [
+        ("model.bin", &entry.files.model),
+        ("vocab.spm", &entry.files.vocab),
+        ("lex.bin", &entry.files.lexical_shortlist),
+    ] {
+        let url = format!("{}/{}", registry.base_url, file_meta.path);
+        emit("downloading", cumulative, Some(slot));
+        let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let compressed = resp.bytes().await.map_err(|e| e.to_string())?;
+        emit("decompressing", cumulative, Some(slot));
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).map_err(|e| format!("gunzip {slot}: {e}"))?;
+
+        if let Some(expected_hash) = file_meta.uncompressed_hash.as_deref() {
+            emit("verifying", cumulative, Some(slot));
+            let mut hasher = Sha256::new();
+            hasher.update(&out);
+            let got = hex::encode(hasher.finalize());
+            if got != expected_hash.to_lowercase() {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return Err(format!("sha256 mismatch on {slot}"));
+            }
+        }
+
+        emit("saving", cumulative, Some(slot));
+        let mut f = std::fs::File::create(tmp_dir.join(slot)).map_err(|e| e.to_string())?;
+        f.write_all(&out).map_err(|e| e.to_string())?;
+        cumulative += out.len() as u64;
+    }
+
+    // Write meta.json
+    let meta = serde_json::json!({
+        "version": format!("{}-{}", entry.architecture, entry.release_status.as_deref().unwrap_or("?")),
+        "downloaded_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0),
+        "src": pair.src,
+        "trg": pair.trg,
+    });
+    std::fs::write(tmp_dir.join("meta.json"), serde_json::to_vec_pretty(&meta).unwrap())
+        .map_err(|e| e.to_string())?;
+
+    // Atomic rename
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp_dir, &dir).map_err(|e| e.to_string())?;
+
+    emit("done", cumulative, None);
+    Ok(LocalModel {
+        pair,
+        disk_size_bytes: cumulative,
+        downloaded_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        version: format!("{}-{}", entry.architecture, entry.release_status.as_deref().unwrap_or("?")),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

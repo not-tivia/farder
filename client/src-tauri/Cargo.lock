@@ -1366,6 +1366,7 @@ dependencies = [
  "farder-crypto",
  "farder-node",
  "farder-protocol",
+ "flate2",
  "hex",
  "hound",
  "image",
