@@ -169,31 +169,32 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
   if (!open) return null;
 
   return (
+    // Right-docked side panel. No backdrop, no click-outside-to-close — the
+    // user wants the chat to remain interactive while searching. Close via
+    // Esc, the × button, or by clicking a result.
     <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
       style={{
         position: "fixed",
-        inset: 0,
-        background: "rgba(0, 0, 0, 0.5)",
+        top: 0,
+        right: 0,
+        bottom: 0,
+        width: "min(440px, 90vw)",
+        background: "var(--bg-elevated, #fff)",
+        color: "var(--text, #000)",
+        borderLeft: "1px solid var(--border, #ccc)",
+        boxShadow: "-4px 0 16px rgba(0, 0, 0, 0.18)",
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        overflow: "hidden",
         zIndex: 1200,
       }}
     >
       <div
         style={{
-          background: "var(--bg-elevated, #fff)",
-          color: "var(--text, #000)",
-          width: "min(960px, 90vw)",
-          height: "min(640px, 80vh)",
-          borderRadius: 8,
+          flex: 1,
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
-          boxShadow: "0 8px 32px rgba(0, 0, 0, 0.35)",
         }}
       >
         <div
@@ -245,14 +246,15 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
             }}
           />
         </div>
-        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
           <div
             style={{
-              width: 320,
-              borderRight: "1px solid var(--border, #ccc)",
+              flex: selectedResult ? "1 1 50%" : "1 1 auto",
+              minHeight: 0,
               overflowY: "auto",
               padding: 8,
               fontSize: 12,
+              borderBottom: selectedResult ? "1px solid var(--border, #ccc)" : "none",
             }}
           >
             {status.kind === "idle" && (
@@ -308,17 +310,14 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
           </div>
           <div
             style={{
-              flex: 1,
+              flex: selectedResult ? "1 1 50%" : "0 0 0",
+              minHeight: 0,
               overflowY: "auto",
-              padding: 12,
+              padding: selectedResult ? 12 : 0,
               fontSize: 12,
             }}
           >
-            {!selectedResult && (
-              <div style={{ color: "var(--text-muted, #888)" }}>
-                Hover a result to preview.
-              </div>
-            )}
+            {!selectedResult && null /* preview pane collapses when nothing selected */}
             {selectedResult && context.status === "loading" && (
               <div style={{ color: "var(--text-muted, #888)" }}>Loading context…</div>
             )}
