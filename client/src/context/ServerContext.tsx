@@ -20,6 +20,7 @@ export interface PerServerState {
   voiceStates: Record<number, { publicKey: string; displayName: string }[]>;
   currentVoiceChannelId: number | null;
   ownerPublicKey: string | null;
+  highlightMessageId: number | null;
 }
 
 export interface AppState {
@@ -51,6 +52,7 @@ const initialPerServerState: PerServerState = {
   voiceStates: {},
   currentVoiceChannelId: null,
   ownerPublicKey: null,
+  highlightMessageId: null,
 };
 
 const initialAppState: AppState = {
@@ -78,6 +80,7 @@ export type AppAction =
   | { type: "RECONNECTED"; serverId: string }
   | { type: "SET_MEMBERS"; serverId: string; payload: MemberInfo[] }
   | { type: "SELECT_CHANNEL"; serverId: string; payload: number }
+  | { type: "HIGHLIGHT_MESSAGE"; serverId: string; payload: { messageId: number | null } }
   | { type: "SET_MESSAGES"; serverId: string; payload: { channelId: number; messages: MessageInfo[] } }
   | { type: "PREPEND_MESSAGES"; serverId: string; payload: { channelId: number; messages: MessageInfo[] } }
   | { type: "NEW_MESSAGE"; serverId: string; payload: MessageInfo }
@@ -156,6 +159,8 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         : state.readState;
       return { ...state, currentChannelId: action.payload, threadChannelId: null, readState: newReadState };
     }
+    case "HIGHLIGHT_MESSAGE":
+      return { ...state, highlightMessageId: action.payload.messageId };
     case "SET_MESSAGES":
       return {
         ...state,
