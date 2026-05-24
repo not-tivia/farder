@@ -5,9 +5,11 @@
 
 ## Goal
 
-Press `Ctrl+K` (`Cmd+K` on macOS) → centered search overlay opens → type a query → results stream in within ~300 ms. Hovering or arrow-keying a result shows a preview of the message in context (5 messages before, the match, 5 after). Clicking or pressing Enter jumps to that message in its channel, briefly highlighting it.
+Click the search icon in the channel header (or press `Ctrl+K` / `Cmd+K`) → centered search overlay opens → type a query → results stream in within ~300 ms. Hovering or arrow-keying a result shows a preview of the message in context. Clicking or pressing Enter jumps to that message in its channel, briefly highlighting it.
 
 The backend search command (`search_messages(serverId, query, channelId?, limit?)`) already exists and returns `Vec<MessageInfo>`. This spec is entirely client-side.
+
+**Replaces** the existing primitive search in `ChatPanel.tsx` (`?`-button toggle + inline search bar + channel-scoped raw results list, c. early Farder). The discoverable trigger is preserved (moves from `?` to a magnifying-glass icon, same channel-header location), but the post-click experience is the new overlay.
 
 ## Non-Goals
 
@@ -52,12 +54,14 @@ The backend search command (`search_messages(serverId, query, channelId?, limit?
             (existing) search_messages, fetch_history commands
 ```
 
-### Why a centered overlay (not a sidebar or title-bar box)
+### Why a visible button + a centered overlay
 
-- Doesn't steal screen real-estate when not in use
+- Most users never learn keyboard shortcuts; a visible affordance in the channel header is the primary entry. The existing `?` button proves the channel header is the natural location (Discord, Slack, Teams all agree).
+- The overlay itself doesn't steal screen real-estate when not in use
 - Familiar pattern (Discord, Slack, VS Code)
 - Two-column layout fits comfortably in 800×600 and scales up
 - Closes on Esc / outside-click without disturbing the channel view
+- Ctrl+K stays as a power-user shortcut — same opening behavior, no other functional difference
 
 ### Why hover-previews + click-to-jump
 
@@ -98,11 +102,29 @@ The backend search command (`search_messages(serverId, query, channelId?, limit?
 - **Right pane** (fills remaining width): renders the context window (see "About fetching context around a message" below — v1 ships 10 before + the match, no after) using the existing `<Message>` component in a slim variant. The match has a subtle highlighted background and a small "MATCH" pill in the corner.
 - Header shows the server name (search is server-scoped, makes scope obvious).
 
+### Trigger button
+
+In `ChatPanel.tsx`'s `channel-header`, the existing `<button className="search-toggle">?</button>` is replaced by a magnifying-glass icon button. Tooltip: "Search messages (Ctrl+K)". Same DOM position so existing CSS positioning carries over.
+
+```tsx
+<button
+  className="search-toggle"
+  onClick={() => setSearchOpen(true)}
+  title="Search messages (Ctrl+K)"
+  aria-label="Search messages"
+>
+  🔍
+</button>
+```
+
+(Emoji glyph is a placeholder; existing project convention is fine — Twemoji rendering already handles it. Swap to an SVG icon if a Phosphor/Heroicons asset is preferred; keep it tight inline.)
+
 ### Interactions
 
 | Action | Effect |
 |---|---|
-| Ctrl+K / Cmd+K | Opens overlay; if already open, refocuses the input |
+| Click search button in channel header | Opens overlay; input auto-focused |
+| Ctrl+K / Cmd+K | Same as button — opens overlay; if already open, refocuses the input |
 | Esc | Closes overlay, returns focus to whatever had it before |
 | Click overlay backdrop | Closes overlay |
 | Type in input | Debounced 300 ms → fires `searchMessages(serverId, query, undefined, 50)` |
@@ -167,9 +189,9 @@ This compromise is called out in the spec's testing section so the reviewer know
 - (No new CSS file.) Overlay styling uses inline `style={{...}}` consistent with existing components (e.g., `TranslationDownloadDialog.tsx`); the `.search-highlight` keyframes go into the existing `client/src/index.css` (or whichever stylesheet currently holds global keyframes).
 
 **Modified:**
-- `client/src/components/AppShell.tsx` — register the global Ctrl+K / Cmd+K listener; mount the overlay when open. Renders `null` if not connected to a server.
+- `client/src/components/AppShell.tsx` — register the global Ctrl+K / Cmd+K listener; mount the overlay when open. Renders `null` if not connected to a server. Overlay open state lives here (or in ServerContext) so the keyboard shortcut and the button in `ChatPanel.tsx` can both toggle it.
+- `client/src/components/ChatPanel.tsx` — **removes** the existing inline search UI (the `?`-button-toggle + inline search bar + inline results list block, ~50 lines around the channel-header). Replaces the `?` button with a magnifying-glass button that opens the new overlay. Removes the now-unused `searchQuery` / `searchResults` / `showSearch` / `searching` local state and the `handleSearch` function. Adds the `useEffect` on `highlightMessageId` that scrolls the matched message into view and clears the highlight after `ttlMs`.
 - `client/src/context/ServerContext.tsx` — add `highlightMessageId: number | null` to state; add `HIGHLIGHT_MESSAGE` reducer action; the existing `SELECT_CHANNEL` action does NOT clear highlight (so it survives the channel switch).
-- `client/src/components/ChatPanel.tsx` — `useEffect` on `highlightMessageId` that scrolls the matched message into view; clears the highlight after `ttlMs` via a follow-up dispatch.
 - `client/src/components/Message.tsx` — render a stable `id={`msg-${message.id}`}` attribute on the outer wrapper, and apply `search-highlight` class when `message.id === highlightMessageId` (props passed down from ChatPanel).
 - `client/src/index.css` (or theme CSS) — add the `.search-highlight` keyframes.
 
