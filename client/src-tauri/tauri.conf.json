@@ -10,7 +10,13 @@
   },
   "app": {
     "windows": [{ "title": "Farder", "width": 1200, "height": 800 }],
-    "security": { "csp": null }
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$HOME/.farder/**"]
+      }
+    }
   },
   "bundle": {
     "externalBin": ["binaries/farder-server"]
