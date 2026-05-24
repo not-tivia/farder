@@ -46,6 +46,17 @@ fn pair_dir(pair: &LangPair) -> std::path::PathBuf {
     translation_models_dir().join(format!("{}-{}", pair.src, pair.trg))
 }
 
+fn validate_pair(pair: &LangPair) -> Result<(), String> {
+    fn ok(s: &str) -> bool {
+        let len = s.len();
+        (2..=8).contains(&len) && s.chars().all(|c| c.is_ascii_lowercase())
+    }
+    if !ok(&pair.src) || !ok(&pair.trg) {
+        return Err(format!("invalid language pair: {}-{}", pair.src, pair.trg));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_translation_settings() -> TranslationSettings {
     let enabled = crate::commands::settings_get("translation_enabled")
@@ -189,6 +200,7 @@ pub async fn download_model(
     use sha2::{Digest, Sha256};
     use tauri::Emitter;
 
+    validate_pair(&pair)?;
     let registry = fetch_registry().await?;
     let key = format!("{}-{}", pair.src, pair.trg);
     let entries = registry
@@ -322,11 +334,17 @@ pub fn list_local_models() -> Result<Vec<LocalModel>, String> {
         if !meta_path.exists() { continue; }
         let meta_bytes = match std::fs::read(&meta_path) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("[translation] skipping {}: {}", path.display(), e);
+                continue;
+            }
         };
         let meta: serde_json::Value = match serde_json::from_slice(&meta_bytes) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("[translation] skipping {}: invalid meta.json: {}", path.display(), e);
+                continue;
+            }
         };
         let src = meta.get("src").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let trg = meta.get("trg").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -354,6 +372,7 @@ pub fn list_local_models() -> Result<Vec<LocalModel>, String> {
 
 #[tauri::command]
 pub fn delete_model(pair: LangPair) -> Result<(), String> {
+    validate_pair(&pair)?;
     let dir = pair_dir(&pair);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -363,20 +382,19 @@ pub fn delete_model(pair: LangPair) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_model_paths(pair: LangPair) -> Result<ModelPaths, String> {
+    validate_pair(&pair)?;
     let dir = pair_dir(&pair);
     if !dir.exists() {
         return Err(format!("model not present: {}-{}", pair.src, pair.trg));
     }
-    let to_url = |p: std::path::PathBuf| -> String {
-        // Tauri 2: use file:// URLs which the WebView can fetch via convertFileSrc
-        // on the TS side. Here we just return the absolute path; TS resolves via
-        // @tauri-apps/api/core convertFileSrc.
+    let to_path = |p: std::path::PathBuf| -> String {
+        // absolute path; TS resolves via `convertFileSrc` on the renderer side.
         p.to_string_lossy().to_string()
     };
     Ok(ModelPaths {
-        model: to_url(dir.join("model.bin")),
-        vocab: to_url(dir.join("vocab.spm")),
-        lex: to_url(dir.join("lex.bin")),
+        model: to_path(dir.join("model.bin")),
+        vocab: to_path(dir.join("vocab.spm")),
+        lex: to_path(dir.join("lex.bin")),
     })
 }
 
@@ -418,6 +436,11 @@ mod tests {
         assert_eq!(picked.architecture, "base");
     }
 
+    // NOTE: This test mutates FARDER_DATA process-globally. New tests in this
+    // module that depend on the real ~/.farder path must not run concurrently
+    // with this one. Cargo runs tests in parallel within a binary; if collisions
+    // appear, consider serial_test or factoring list_local_models to take an
+    // explicit base dir.
     #[test]
     fn list_local_models_skips_invalid_dirs() {
         // Set up a temp models dir
@@ -454,5 +477,26 @@ mod tests {
         // Deleting a non-existent pair should succeed.
         let pair = LangPair { src: "xx".into(), trg: "yy".into() };
         delete_model(pair).expect("idempotent delete");
+    }
+
+    #[test]
+    fn validate_pair_rejects_traversal_and_garbage() {
+        let bad_inputs = [
+            ("..", "en"),
+            ("../foo", "en"),
+            ("en", "/etc"),
+            ("EN", "es"),       // uppercase rejected
+            ("e1", "es"),       // digits rejected
+            ("", "es"),         // empty rejected
+            ("toolongtoolong", "es"),
+        ];
+        for (s, t) in bad_inputs {
+            let p = LangPair { src: s.into(), trg: t.into() };
+            assert!(validate_pair(&p).is_err(), "should reject {s:?}/{t:?}");
+        }
+        let good = LangPair { src: "en".into(), trg: "es".into() };
+        assert!(validate_pair(&good).is_ok());
+        let good3 = LangPair { src: "ces".into(), trg: "eng".into() };  // ISO 639-3 also allowed
+        assert!(validate_pair(&good3).is_ok());
     }
 }
