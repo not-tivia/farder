@@ -14,7 +14,7 @@ import { getActorPermissions, isModerator } from "../lib/permissions";
 import { renderUnicodeEmoji } from "../lib/unicodeEmoji";
 import { TranslatedRow } from "./TranslatedRow";
 import { TranslationDownloadDialog } from "./TranslationDownloadDialog";
-import { translateMessage, subscribe as subscribeTranslation } from "../lib/translation/store";
+import { translateMessage, subscribe as subscribeTranslation, dismiss as dismissTranslation } from "../lib/translation/store";
 import { getTranslationSettings } from "../lib/translation/api";
 
 interface MessageProps {
@@ -439,9 +439,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
           onCancel={() => {
             pendingDownload.reject(new Error("user cancelled"));
             setPendingDownload(null);
+            // Clear the translation row too — the user explicitly opted out,
+            // so a lingering "Translation failed: user cancelled" error is wrong.
+            dismissTranslation(String(message.id));
           }}
           onConfirm={() => {
-            setPendingDownload({ ...pendingDownload, inProgress: true });
+            setPendingDownload((prev) => (prev ? { ...prev, inProgress: true } : null));
             pendingDownload.resolve();
           }}
         />
