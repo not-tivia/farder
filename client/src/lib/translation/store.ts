@@ -2,6 +2,7 @@
 
 import { detect } from "./detect";
 import { ensureModel, translate } from "./engine";
+import { getTranslationSettings } from "./api";
 import type { TranslationStatus } from "./types";
 
 type Listener = (state: Map<string, TranslationStatus>) => void;
@@ -33,6 +34,10 @@ export interface TranslateOptions {
   messageId: string;
   content: string;
   defaultTarget: string;
+  /** Hex public-key of the message author. When present, the store looks up
+   *  per-user language overrides before running detection. Pass empty/omit to
+   *  bypass the override lookup. */
+  authorPublicKeyHex?: string;
   /**
    * Called when a model needs to be downloaded. The UI must show a privacy
    * disclosure dialog and either resolve (user accepted) or throw (user cancelled).
@@ -41,7 +46,31 @@ export interface TranslateOptions {
 }
 
 export async function translateMessage(opts: TranslateOptions): Promise<void> {
-  const { messageId, content, defaultTarget, confirmDownload } = opts;
+  const { messageId, content, defaultTarget, confirmDownload, authorPublicKeyHex } = opts;
+
+  // Check per-user language override first — if present, skip detection and
+  // route directly through translateMessageWithSource. A blank string is
+  // treated as "no override lookup".
+  if (authorPublicKeyHex) {
+    try {
+      const settings = await getTranslationSettings();
+      const override = settings.user_language_overrides[authorPublicKeyHex];
+      if (override && override !== defaultTarget) {
+        return translateMessageWithSource({ ...opts, src: override });
+      }
+      if (override && override === defaultTarget) {
+        state.set(messageId, { kind: "already-in-target", lang: defaultTarget });
+        emit();
+        return;
+      }
+    } catch (e) {
+      // If settings fetch fails, fall through to detection — don't block the
+      // user on a corrupt settings file.
+      // eslint-disable-next-line no-console
+      console.error("[translate] override lookup failed:", e);
+    }
+  }
+
   state.set(messageId, { kind: "detecting" });
   emit();
 
