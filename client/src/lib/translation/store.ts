@@ -48,6 +48,15 @@ export interface TranslateOptions {
 export async function translateMessage(opts: TranslateOptions): Promise<void> {
   const { messageId, content, defaultTarget, confirmDownload, authorPublicKeyHex } = opts;
 
+  // Idempotency guard — auto-translate (Message.tsx useEffect) can re-fire
+  // this on re-render. If we've already kicked off / finished translation
+  // for this message, just return. Only the "idle" implicit state OR an
+  // explicit "error" should retry.
+  const existing = state.get(messageId);
+  if (existing && existing.kind !== "error") {
+    return;
+  }
+
   // Check per-user language override first — if present, skip detection and
   // route directly through translateMessageWithSource. A blank string is
   // treated as "no override lookup".

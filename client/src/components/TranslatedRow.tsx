@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { subscribe, dismiss, translateMessageWithSource } from "../lib/translation/store";
+import { getTranslationSettings, setTranslationSettings } from "../lib/translation/api";
 import { displayName } from "../lib/translation/lang";
 import type { TranslationStatus } from "../lib/translation/types";
 import { SourceLanguagePicker } from "./SourceLanguagePicker";
@@ -16,6 +17,7 @@ interface Props {
 
 export function TranslatedRow({ messageId, content, defaultTarget, authorPublicKeyHex, confirmDownload }: Props) {
   const [status, setStatus] = useState<TranslationStatus>({ kind: "idle" });
+  const [overrideForAuthor, setOverrideForAuthor] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = subscribe((m) => {
@@ -23,6 +25,35 @@ export function TranslatedRow({ messageId, content, defaultTarget, authorPublicK
     });
     return unsub;
   }, [messageId]);
+
+  // Load the current override for this author (so we can decide whether to
+  // show the "Always translate…" button). Re-read after status changes too,
+  // in case the user just clicked it.
+  useEffect(() => {
+    if (!authorPublicKeyHex) return;
+    getTranslationSettings()
+      .then((s) => {
+        setOverrideForAuthor(s.user_language_overrides[authorPublicKeyHex] ?? null);
+      })
+      .catch(() => {});
+  }, [authorPublicKeyHex, status.kind]);
+
+  async function setAlwaysTranslate(src: string) {
+    try {
+      const settings = await getTranslationSettings();
+      await setTranslationSettings({
+        ...settings,
+        user_language_overrides: {
+          ...settings.user_language_overrides,
+          [authorPublicKeyHex]: src,
+        },
+      });
+      setOverrideForAuthor(src);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[translated-row] set always-translate failed:", e);
+    }
+  }
 
   if (status.kind === "idle") return null;
 
@@ -55,8 +86,25 @@ export function TranslatedRow({ messageId, content, defaultTarget, authorPublicK
         {status.kind === "done" && (
           <>
             <div>{status.text}</div>
-            <div style={{ fontSize: "0.8em", marginTop: 2 }}>
-              ↳ Translated from {displayName(status.src)}
+            <div style={{ fontSize: "0.8em", marginTop: 2, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span>↳ Translated from {displayName(status.src)}</span>
+              {overrideForAuthor !== status.src && authorPublicKeyHex && (
+                <button
+                  onClick={() => void setAlwaysTranslate(status.src)}
+                  style={{
+                    background: "none",
+                    border: "1px solid var(--border, #ccc)",
+                    borderRadius: 3,
+                    color: "inherit",
+                    cursor: "pointer",
+                    fontSize: "inherit",
+                    padding: "1px 6px",
+                  }}
+                  title={`Auto-translate every future message from this user from ${displayName(status.src)}.`}
+                >
+                  Always translate {displayName(status.src)} for this user
+                </button>
+              )}
             </div>
           </>
         )}

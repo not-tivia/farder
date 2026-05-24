@@ -128,6 +128,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const [translationSettings, setTranslationSettings] = useState<{
     enabled: boolean;
     default_target: string;
+    user_language_overrides: Record<string, string>;
   } | null>(null);
 
   useEffect(() => {
@@ -149,7 +150,11 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   useEffect(() => {
     getTranslationSettings().then((s) =>
-      setTranslationSettings({ enabled: s.enabled, default_target: s.default_target })
+      setTranslationSettings({
+        enabled: s.enabled,
+        default_target: s.default_target,
+        user_language_overrides: s.user_language_overrides,
+      })
     );
   }, []);
 
@@ -161,6 +166,25 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const color = deleted ? "#999" : authorColor(pkStr);
   const member = deleted ? null : (activeServer?.members.find((m) => publicKeyToString(m.public_key) === pkStr) ?? null);
   const roles = activeServer?.roles ?? [];
+
+  // Auto-translate: when this message's author has a per-user language
+  // override set (different from the target), fire translateMessage on mount.
+  // The store's idempotency guard prevents re-translation on re-renders.
+  useEffect(() => {
+    if (!translationSettings?.enabled || !serverId) return;
+    const override = translationSettings.user_language_overrides[pkStr];
+    if (!override || override === translationSettings.default_target) return;
+    translateMessage({
+      messageId: String(message.id),
+      content: message.content,
+      defaultTarget: translationSettings.default_target,
+      authorPublicKeyHex: pkStr,
+      confirmDownload: async (pair) =>
+        new Promise<void>((resolve, reject) => {
+          setPendingDownload({ pair, resolve, reject, inProgress: false });
+        }),
+    });
+  }, [translationSettings, pkStr, message.id, message.content, serverId]);
 
   const isOwnMessage = ownPk === pkStr;
 
