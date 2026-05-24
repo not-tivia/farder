@@ -29,7 +29,7 @@ import type { LangPair } from "./types";
 // ---------------------------------------------------------------------------
 
 interface BergamotTranslator {
-  translate(text: string, pair: LangPair): Promise<string>;
+  translate(text: string): Promise<string>;
   free(): void;
 }
 
@@ -104,28 +104,23 @@ export async function getOrCreateTranslator(
   const cached = translatorPool.get(key);
   if (cached) return cached;
 
-  // Resolve local model paths (used by the custom TranslatorBacking in Task 14).
-  // convertFileSrc converts an absolute FS path to a tauri:// asset URL.
-  const paths = await getModelPaths(pair);
-  const localUrls = {
-    model: convertFileSrc(paths.model),
-    vocab: convertFileSrc(paths.vocab),
-    lex: convertFileSrc(paths.lex),
-  };
+  // TODO(Task 14): convert getModelPaths(pair) to tauri:// asset URLs via
+  // convertFileSrc and feed them to a custom TranslatorBacking subclass so
+  // the WASM engine loads from local disk instead of fetching Mozilla's
+  // registry over the network. The closure below already has access to
+  // `pair`; Task 14 should resolve `paths` here and pass them through.
+  void convertFileSrc; void getModelPaths;
 
   // Obtain the shared engine instance.
   const engine = await getSharedInstance();
 
-  // Wrap the shared instance in a pair-scoped BergamotTranslator.
-  // localUrls is captured here so Task 14 can pass them to a custom
-  // TranslatorBacking.loadTranslationModel override without changing this API.
+  // Wrap the shared instance in a pair-scoped BergamotTranslator. The
+  // closure-captured src/trg drive each translate() call.
   const src = pair.src;
   const trg = pair.trg;
 
   const translator: BergamotTranslator = {
     async translate(text: string): Promise<string> {
-      // localUrls captured for Task 14 TranslatorBacking wiring.
-      void localUrls;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await (engine as any).translate({ from: src, to: trg, text });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -146,7 +141,7 @@ export async function getOrCreateTranslator(
  */
 export async function translate(text: string, pair: LangPair): Promise<string> {
   const translator = await getOrCreateTranslator(pair);
-  return translator.translate(text, pair);
+  return translator.translate(text);
 }
 
 /**
