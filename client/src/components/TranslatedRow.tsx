@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { subscribe, dismiss, translateMessageWithSource } from "../lib/translation/store";
 import { displayName } from "../lib/translation/lang";
 import type { TranslationStatus } from "../lib/translation/types";
+import { SourceLanguagePicker } from "./SourceLanguagePicker";
 
 interface Props {
   messageId: string;
@@ -13,7 +14,7 @@ interface Props {
   confirmDownload: (pair: { src: string; trg: string }) => Promise<void>;
 }
 
-export function TranslatedRow({ messageId, content, defaultTarget, authorPublicKeyHex: _authorPublicKeyHex, confirmDownload }: Props) {
+export function TranslatedRow({ messageId, content, defaultTarget, authorPublicKeyHex, confirmDownload }: Props) {
   const [status, setStatus] = useState<TranslationStatus>({ kind: "idle" });
 
   useEffect(() => {
@@ -63,25 +64,24 @@ export function TranslatedRow({ messageId, content, defaultTarget, authorPublicK
           <span>Already in {displayName(status.lang)}</span>
         )}
         {status.kind === "low-confidence" && (
-          <span>
-            Couldn't detect language.{" "}
-            <button
-              onClick={() => {
-                const src = prompt("Source language code (en, es, zh, …)?", status.suggested ?? "en");
-                if (src) {
-                  translateMessageWithSource({
-                    messageId,
-                    content,
-                    src,
-                    defaultTarget,
-                    confirmDownload,
-                  });
-                }
-              }}
-            >
-              Pick source…
-            </button>
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span>Couldn't detect language. Source:</span>
+            <SourceLanguagePicker
+              variant="select"
+              target={defaultTarget}
+              value={status.suggested ?? null}
+              onChange={(src) =>
+                translateMessageWithSource({
+                  messageId,
+                  content,
+                  src,
+                  defaultTarget,
+                  authorPublicKeyHex,
+                  confirmDownload,
+                })
+              }
+            />
+          </div>
         )}
         {status.kind === "error" && (
           <span style={{ color: "var(--error, #c44)" }}>Translation failed: {status.reason}</span>
