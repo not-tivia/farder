@@ -346,6 +346,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
         messageId={String(message.id)}
         content={message.content}
         defaultTarget={translationSettings?.default_target ?? "en"}
+        authorPublicKeyHex={pkStr}
         confirmDownload={async (pair) =>
           new Promise<void>((resolve, reject) => {
             setPendingDownload({ pair, resolve, reject, inProgress: false });
@@ -412,6 +413,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
                   messageId: String(message.id),
                   content: message.content,
                   defaultTarget: translationSettings.default_target,
+                  authorPublicKeyHex: pkStr,
                   confirmDownload: async (pair) =>
                     new Promise<void>((resolve, reject) => {
                       setPendingDownload({ pair, resolve, reject, inProgress: false });

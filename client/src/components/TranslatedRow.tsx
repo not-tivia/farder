@@ -9,10 +9,11 @@ interface Props {
   messageId: string;
   content: string;
   defaultTarget: string;
+  authorPublicKeyHex: string;
   confirmDownload: (pair: { src: string; trg: string }) => Promise<void>;
 }
 
-export function TranslatedRow({ messageId, content, defaultTarget, confirmDownload }: Props) {
+export function TranslatedRow({ messageId, content, defaultTarget, authorPublicKeyHex: _authorPublicKeyHex, confirmDownload }: Props) {
   const [status, setStatus] = useState<TranslationStatus>({ kind: "idle" });
 
   useEffect(() => {
