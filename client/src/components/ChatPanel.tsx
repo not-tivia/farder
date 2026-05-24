@@ -51,6 +51,25 @@ export default function ChatPanel() {
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
 
+  const highlightMessageId = activeServer?.highlightMessageId ?? null;
+  useEffect(() => {
+    if (highlightMessageId === null) return;
+    // Wait one tick so the message is in the DOM if the channel just switched.
+    const t = setTimeout(() => {
+      const el = document.getElementById(`msg-${highlightMessageId}`);
+      el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 50);
+    // Clear after the flash animation completes (1.2s in CSS).
+    const clear = setTimeout(() => {
+      if (!serverId) return;
+      dispatch({ type: "HIGHLIGHT_MESSAGE", serverId, payload: { messageId: null } });
+    }, 1300);
+    return () => {
+      clearTimeout(t);
+      clearTimeout(clear);
+    };
+  }, [highlightMessageId, serverId, dispatch]);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [channelMessages.length]);
@@ -170,7 +189,7 @@ export default function ChatPanel() {
           const withinWindow = prev &&
             (msg.timestamp - prev.timestamp) < 300;
           const grouped = !!(sameAuthor && withinWindow);
-          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} onReply={(msg) => setReplyTo(msg)} />;
+          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} onReply={(msg) => setReplyTo(msg)} />;
         })}
         <div ref={bottomRef} />
       </div>
