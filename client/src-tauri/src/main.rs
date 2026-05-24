@@ -153,6 +153,7 @@ fn main() {
             tenor::set_gif_search_settings,
             translation::get_translation_settings,
             translation::set_translation_settings,
+            translation::list_available_pairs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
