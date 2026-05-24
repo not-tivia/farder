@@ -307,6 +307,79 @@ pub async fn download_model(
     })
 }
 
+#[tauri::command]
+pub fn list_local_models() -> Result<Vec<LocalModel>, String> {
+    let dir = translation_models_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        let meta_path = path.join("meta.json");
+        if !meta_path.exists() { continue; }
+        let meta_bytes = match std::fs::read(&meta_path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let meta: serde_json::Value = match serde_json::from_slice(&meta_bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let src = meta.get("src").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let trg = meta.get("trg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let version = meta.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let downloaded_at = meta.get("downloaded_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        if src.is_empty() || trg.is_empty() { continue; }
+        // Sum file sizes for the three model files
+        let mut size = 0u64;
+        for slot in ["model.bin", "vocab.spm", "lex.bin"] {
+            if let Ok(meta) = std::fs::metadata(path.join(slot)) {
+                size += meta.len();
+            }
+        }
+        out.push(LocalModel {
+            pair: LangPair { src, trg },
+            disk_size_bytes: size,
+            downloaded_at,
+            version,
+        });
+    }
+    out.sort_by(|a, b| (a.pair.src.clone(), a.pair.trg.clone())
+        .cmp(&(b.pair.src.clone(), b.pair.trg.clone())));
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn delete_model(pair: LangPair) -> Result<(), String> {
+    let dir = pair_dir(&pair);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_model_paths(pair: LangPair) -> Result<ModelPaths, String> {
+    let dir = pair_dir(&pair);
+    if !dir.exists() {
+        return Err(format!("model not present: {}-{}", pair.src, pair.trg));
+    }
+    let to_url = |p: std::path::PathBuf| -> String {
+        // Tauri 2: use file:// URLs which the WebView can fetch via convertFileSrc
+        // on the TS side. Here we just return the absolute path; TS resolves via
+        // @tauri-apps/api/core convertFileSrc.
+        p.to_string_lossy().to_string()
+    };
+    Ok(ModelPaths {
+        model: to_url(dir.join("model.bin")),
+        vocab: to_url(dir.join("vocab.spm")),
+        lex: to_url(dir.join("lex.bin")),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +416,43 @@ mod tests {
         let v = vec![entry("base", None), entry("base-memory", None)];
         let picked = pick_entry(&v).unwrap();
         assert_eq!(picked.architecture, "base");
+    }
+
+    #[test]
+    fn list_local_models_skips_invalid_dirs() {
+        // Set up a temp models dir
+        let tmp = std::env::temp_dir().join(format!("farder-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("translation-models").join("en-es")).unwrap();
+        std::fs::create_dir_all(tmp.join("translation-models").join("not-a-pair-no-meta")).unwrap();
+
+        let valid_meta = serde_json::json!({
+            "src": "en", "trg": "es", "version": "test", "downloaded_at": 1
+        });
+        std::fs::write(
+            tmp.join("translation-models").join("en-es").join("meta.json"),
+            serde_json::to_vec(&valid_meta).unwrap(),
+        ).unwrap();
+
+        // Override data dir for this scope by temporarily setting FARDER_DATA env var.
+        // (commands::farder_data_dir reads FARDER_DATA — see the existing helper.)
+        let prev = std::env::var("FARDER_DATA").ok();
+        std::env::set_var("FARDER_DATA", &tmp);
+        let result = list_local_models().unwrap();
+        if let Some(p) = prev { std::env::set_var("FARDER_DATA", p); }
+        else { std::env::remove_var("FARDER_DATA"); }
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pair.src, "en");
+        assert_eq!(result[0].pair.trg, "es");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn delete_model_idempotent() {
+        // Deleting a non-existent pair should succeed.
+        let pair = LangPair { src: "xx".into(), trg: "yy".into() };
+        delete_model(pair).expect("idempotent delete");
     }
 }

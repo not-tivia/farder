@@ -155,6 +155,9 @@ fn main() {
             translation::set_translation_settings,
             translation::list_available_pairs,
             translation::download_model,
+            translation::list_local_models,
+            translation::delete_model,
+            translation::get_model_paths,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
