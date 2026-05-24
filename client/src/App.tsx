@@ -4,6 +4,7 @@ import { AppProvider, useApp } from "./context/ServerContext";
 import { useServerEvents } from "./hooks/useServerEvents";
 import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
+import { TranslationFirstRunModal } from "./components/TranslationFirstRunModal";
 import * as api from "./lib/tauri-bridge";
 
 // Module-level guard: React StrictMode in dev mounts the root twice, which
@@ -102,7 +103,12 @@ function AppInner() {
   }
 
   // Show main app shell
-  return <AppShell />;
+  return (
+    <>
+      <AppShell />
+      <TranslationFirstRunModal />
+    </>
+  );
 }
 
 export default function App() {
