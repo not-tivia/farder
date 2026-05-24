@@ -1,20 +1,16 @@
 // client/src/lib/translation/engine.ts
 //
-// Bergamot WASM adapter + per-pair translator pool.
+// Bergamot WASM adapter + local-file TranslatorBacking.
 //
-// @browsermt/bergamot-translator v0.4.9 does NOT export a `loadModel` factory.
-// Its real API is:
-//   new LatencyOptimisedTranslator(opts?) → translator
-//   translator.translate({ from, to, text }) → Promise<{ target: { text } }>
-//   translator.delete() → void
+// We subclass @browsermt/bergamot-translator's TranslatorBacking so the
+// engine reads model files from ~/.farder/translation-models/<pair>/ (via
+// the Rust `get_model_paths` command + Tauri's asset:// protocol) instead
+// of fetching from Bergamot's default GCS bucket. No model bytes ever
+// leave the device, and a translate() call won't trigger any outbound
+// network request once the model is on disk.
 //
-// The BergamotTranslator / BergamotEngine interfaces below are internal adapter
-// contracts that normalise the real package into the shape the rest of the
-// codebase depends on.  The actual wiring to loadTranslationModel (loading
-// ArrayBuffers from the local file paths returned by getModelPaths) happens in
-// Task 14 (smoke-test / runtime adaptation). At this stage the adapter is a
-// correct stub — it compiles cleanly, exports the right symbols, and the pool
-// plumbing is wired. See design spec §Adapter for details.
+// One LatencyOptimisedTranslator instance is shared across all pairs;
+// Bergamot's worker queues requests and loads each pair's model lazily.
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -25,50 +21,86 @@ import {
 import type { LangPair } from "./types";
 
 // ---------------------------------------------------------------------------
-// Internal adapter interfaces
+// Bergamot package shape
+//
+// The package ships without TypeScript declarations, so we declare a minimal
+// surface we depend on. Anything else we touch goes through `any` casts.
 // ---------------------------------------------------------------------------
 
-interface BergamotTranslator {
-  translate(text: string): Promise<string>;
-  free(): void;
+interface BergamotResponse {
+  target: { text: string };
+}
+
+interface LatencyTranslatorLike {
+  translate(req: { from: string; to: string; text: string }): Promise<BergamotResponse>;
+  delete(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
-// Single shared LatencyOptimisedTranslator instance
-//
-// The real package manages model downloads itself; for Farder we will supply
-// a custom TranslatorBacking (Task 14) that loads from local ArrayBuffers.
-// Until then, a lazily-constructed instance is sufficient for compilation.
+// Lazy single-instance translator
 // ---------------------------------------------------------------------------
 
-let sharedInstance: unknown | null = null;
-let instancePromise: Promise<unknown> | null = null;
+let translatorPromise: Promise<LatencyTranslatorLike> | null = null;
 
-async function getSharedInstance(): Promise<unknown> {
-  if (!instancePromise) {
-    instancePromise = (async () => {
+async function getTranslator(): Promise<LatencyTranslatorLike> {
+  if (!translatorPromise) {
+    translatorPromise = (async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mod = await import("@browsermt/bergamot-translator" as any);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { LatencyOptimisedTranslator } = mod as any;
-      sharedInstance = new LatencyOptimisedTranslator();
-      return sharedInstance;
+      const bergamot: any = await import(
+        "@browsermt/bergamot-translator/translator.js"
+      );
+      const LatencyOptimisedTranslator = bergamot.LatencyOptimisedTranslator;
+      const TranslatorBacking = bergamot.TranslatorBacking;
+
+      class FarderBacking extends TranslatorBacking {
+        constructor() {
+          // pivotLanguage: null disables pivoting (v1 supports direct pairs only).
+          // registryUrl is unused once loadModelRegistery is overridden, but we
+          // set it to a value that will fail fast if the parent path is ever hit.
+          super({ pivotLanguage: null, registryUrl: "about:blank" });
+        }
+
+        // Bergamot calls this once at construction to populate this.registry.
+        // We return the list of locally-downloaded pairs in the minimal shape
+        // findModels() needs (only `from` / `to` are read).
+        async loadModelRegistery() {
+          const local = await listLocalModels();
+          return local.map((m) => ({
+            from: m.pair.src,
+            to: m.pair.trg,
+            files: {},
+          }));
+        }
+
+        // Bergamot calls this per pair, lazily, when translate() needs the
+        // model for that pair. We resolve the local file paths via Tauri's
+        // asset protocol and fetch the ArrayBuffers in parallel.
+        async loadTranslationModel(opts: { from: string; to: string }) {
+          const paths = await getModelPaths({ src: opts.from, trg: opts.to });
+          const fetchAB = (p: string) =>
+            fetch(convertFileSrc(p)).then((r) => r.arrayBuffer());
+          const [model, vocab, lex] = await Promise.all([
+            fetchAB(paths.model),
+            fetchAB(paths.vocab),
+            fetchAB(paths.lex),
+          ]);
+          return {
+            model,
+            shortlist: lex,
+            vocabs: [vocab],
+            qualityModel: null,
+            config: {},
+          };
+        }
+      }
+
+      return new LatencyOptimisedTranslator(
+        { pivotLanguage: null },
+        new FarderBacking(),
+      ) as LatencyTranslatorLike;
     })();
   }
-  return instancePromise;
-}
-
-// ---------------------------------------------------------------------------
-// Per-pair translator pool
-//
-// Each entry wraps the shared instance with a pair-scoped translate() that
-// passes {from, to} through to the real bergamot API.
-// ---------------------------------------------------------------------------
-
-const translatorPool = new Map<string, BergamotTranslator>();
-
-function pairKey(pair: LangPair): string {
-  return `${pair.src}-${pair.trg}`;
+  return translatorPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,83 +108,63 @@ function pairKey(pair: LangPair): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Ensures the local model for `pair` is present. If not, calls `onNotPresent`
- * (which should show UI confirmation + progress), then triggers the download.
+ * Ensures the local model for `pair` is on disk. If not, calls `onNotPresent`
+ * (which should show UI confirmation), triggers the Rust download, then tears
+ * down the shared translator so the next translate() call rebuilds the
+ * backing with a registry that includes the new pair.
  */
 export async function ensureModel(
   pair: LangPair,
-  onNotPresent: () => Promise<void>, // called if model needs download (UI confirms)
+  onNotPresent: () => Promise<void>,
 ): Promise<void> {
   const local = await listLocalModels();
   const present = local.some(
     (m) => m.pair.src === pair.src && m.pair.trg === pair.trg,
   );
   if (!present) {
-    await onNotPresent(); // UI shows confirm + download progress
+    await onNotPresent();
     await downloadModel(pair);
+    // Invalidate the cached translator so the next translate() rebuilds the
+    // backing with a registry that now includes the new pair. Tearing down
+    // is simpler than poking at private caches and only costs one worker
+    // re-spawn per fresh download.
+    await clearPool();
   }
 }
 
 /**
- * Returns a cached BergamotTranslator for `pair`, creating one if needed.
- * Loads model files from the paths provided by the Rust backend.
+ * Translates `text` between `pair.src` and `pair.trg`. The shared translator
+ * loads the pair's model lazily on first use.
  */
-export async function getOrCreateTranslator(
+export async function translate(
+  text: string,
   pair: LangPair,
-): Promise<BergamotTranslator> {
-  const key = pairKey(pair);
-  const cached = translatorPool.get(key);
-  if (cached) return cached;
-
-  // TODO(Task 14): convert getModelPaths(pair) to tauri:// asset URLs via
-  // convertFileSrc and feed them to a custom TranslatorBacking subclass so
-  // the WASM engine loads from local disk instead of fetching Mozilla's
-  // registry over the network. The closure below already has access to
-  // `pair`; Task 14 should resolve `paths` here and pass them through.
-  void convertFileSrc; void getModelPaths;
-
-  // Obtain the shared engine instance.
-  const engine = await getSharedInstance();
-
-  // Wrap the shared instance in a pair-scoped BergamotTranslator. The
-  // closure-captured src/trg drive each translate() call.
-  const src = pair.src;
-  const trg = pair.trg;
-
-  const translator: BergamotTranslator = {
-    async translate(text: string): Promise<string> {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await (engine as any).translate({ from: src, to: trg, text });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (result as any).target.text as string;
-    },
-    free(): void {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (engine as any).delete?.();
-    },
-  };
-
-  translatorPool.set(key, translator);
-  return translator;
+): Promise<string> {
+  const translator = await getTranslator();
+  const result = await translator.translate({
+    from: pair.src,
+    to: pair.trg,
+    text,
+  });
+  return result.target.text;
 }
 
 /**
- * Translates `text` for the given language pair.
+ * Tears down the shared translator + worker. Next translate() call will
+ * lazily re-instantiate. Call on translation-disable or after installing a
+ * new model so the registry is re-read.
  */
-export async function translate(text: string, pair: LangPair): Promise<string> {
-  const translator = await getOrCreateTranslator(pair);
-  return translator.translate(text);
-}
-
-/**
- * Frees all cached translators and resets the pool. Call on session end or
- * when the user disables translation.
- */
-export function clearPool(): void {
-  for (const t of translatorPool.values()) {
-    t.free();
+export async function clearPool(): Promise<void> {
+  if (translatorPromise) {
+    const t = await translatorPromise.catch(() => null);
+    translatorPromise = null;
+    if (t) {
+      try {
+        await t.delete();
+      } catch {
+        // delete() can throw if the worker never finished booting; safe to
+        // swallow — the worker reference is gone either way.
+      }
+    }
   }
-  translatorPool.clear();
-  sharedInstance = null;
-  instancePromise = null;
 }
