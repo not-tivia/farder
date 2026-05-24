@@ -1,7 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import TitleBar from "./TitleBar";
 import ChannelSidebar from "./ChannelSidebar";
 import ChatPanel from "./ChatPanel";
+import { MessageSearchOverlay } from "./MessageSearchOverlay";
 import MemberSidebar from "./MemberSidebar";
 import DmPanel from "./DmPanel";
 import ServerStrip from "./ServerStrip";
@@ -9,10 +10,41 @@ import KickedBannedDialog from "./KickedBannedDialog";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 
+let openSearchRef: (() => void) | null = null;
+
+/** Called from outside AppShell (e.g., ChatPanel's search button) to open the
+ *  message-search overlay. No-op until AppShell mounts. */
+export function openMessageSearch(): void {
+  openSearchRef?.();
+}
+
 export default function AppShell() {
   const { state, dispatch } = useApp();
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
+
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  // Register the module-level ref so external callers (e.g. ChatPanel) can open
+  // the overlay via openMessageSearch().
+  useEffect(() => {
+    openSearchRef = () => setSearchOpen(true);
+    return () => { openSearchRef = null; };
+  }, []);
+
+  // Global Ctrl+K (Cmd+K on macOS) opens / refocuses the search overlay.
+  useEffect(() => {
+    const isMac = navigator.platform.toUpperCase().startsWith("MAC");
+    const handler = (e: KeyboardEvent) => {
+      const modPressed = isMac ? e.metaKey : e.ctrlKey;
+      if (modPressed && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, []);
 
   // Subscribe to all active channels whenever they change
   useEffect(() => {
@@ -92,6 +124,7 @@ export default function AppShell() {
             }}
           />
         )}
+        <MessageSearchOverlay open={searchOpen} onClose={() => setSearchOpen(false)} />
       </div>
     </>
   );
