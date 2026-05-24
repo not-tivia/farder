@@ -1,6 +1,6 @@
 // client/src/components/MessageSearchOverlay.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useActiveServer, useActiveServerId } from "../context/ServerContext";
+import { useActiveServer, useActiveServerId, useApp } from "../context/ServerContext";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { MessageInfo } from "../lib/types";
@@ -115,6 +115,19 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
     return () => window.removeEventListener("keydown", handler, true);
   }, [open, status]);
 
+  const { dispatch } = useApp();
+
+  function commit(messageId: number, channelId: number) {
+    if (!serverId) return;
+    onClose();
+    dispatch({ type: "SELECT_CHANNEL", serverId, payload: channelId });
+    dispatch({
+      type: "HIGHLIGHT_MESSAGE",
+      serverId,
+      payload: { messageId },
+    });
+  }
+
   const results = status.kind === "ready" ? status.results : [];
   const selectedResult = results[stableIndex] ?? null;
 
@@ -193,6 +206,13 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && status.kind === "ready" && status.results[selectedIndex]) {
+                e.preventDefault();
+                const sel = status.results[selectedIndex];
+                commit(sel.id, sel.channel_id);
+              }
+            }}
             placeholder="Type to search messages…"
             style={{
               width: "100%",
@@ -239,6 +259,7 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
                 <div
                   key={msg.id}
                   onMouseEnter={() => setSelectedIndex(i)}
+                  onClick={() => commit(msg.id, msg.channel_id)}
                   style={{
                     padding: 8,
                     marginBottom: 4,
