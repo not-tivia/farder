@@ -206,14 +206,20 @@ pub async fn download_model(
     let dir = pair_dir(&pair);
     let tmp_dir = dir.with_extension("tmp");
     if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&tmp_dir).map_err(|e| format!("remove stale tmp: {e}"))?;
     }
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("create tmp dir: {e}"))?;
+
+    // Helper: clean up the staging dir before propagating any error.
+    let cleanup = |e: String| -> String {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        e
+    };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| cleanup(e.to_string()))?;
 
     let emit = |stage: &str, done: u64, msg: Option<&str>| {
         let _ = app.emit(
@@ -236,12 +242,21 @@ pub async fn download_model(
     ] {
         let url = format!("{}/{}", registry.base_url, file_meta.path);
         emit("downloading", cumulative, Some(slot));
-        let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
-        let compressed = resp.bytes().await.map_err(|e| e.to_string())?;
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| cleanup(format!("fetch {slot}: {e}")))?;
+        let compressed = resp
+            .bytes()
+            .await
+            .map_err(|e| cleanup(format!("read {slot}: {e}")))?;
         emit("decompressing", cumulative, Some(slot));
         let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
         let mut out = Vec::new();
-        decoder.read_to_end(&mut out).map_err(|e| format!("gunzip {slot}: {e}"))?;
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| cleanup(format!("gunzip {slot}: {e}")))?;
 
         if let Some(expected_hash) = file_meta.uncompressed_hash.as_deref() {
             emit("verifying", cumulative, Some(slot));
@@ -255,8 +270,10 @@ pub async fn download_model(
         }
 
         emit("saving", cumulative, Some(slot));
-        let mut f = std::fs::File::create(tmp_dir.join(slot)).map_err(|e| e.to_string())?;
-        f.write_all(&out).map_err(|e| e.to_string())?;
+        let mut f = std::fs::File::create(tmp_dir.join(slot))
+            .map_err(|e| cleanup(format!("create {slot}: {e}")))?;
+        f.write_all(&out)
+            .map_err(|e| cleanup(format!("write {slot}: {e}")))?;
         cumulative += out.len() as u64;
     }
 
@@ -270,13 +287,13 @@ pub async fn download_model(
         "trg": pair.trg,
     });
     std::fs::write(tmp_dir.join("meta.json"), serde_json::to_vec_pretty(&meta).unwrap())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| cleanup(format!("write meta.json: {e}")))?;
 
     // Atomic rename
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&dir).map_err(|e| cleanup(e.to_string()))?;
     }
-    std::fs::rename(&tmp_dir, &dir).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp_dir, &dir).map_err(|e| cleanup(format!("rename tmp -> final: {e}")))?;
 
     emit("done", cumulative, None);
     Ok(LocalModel {
