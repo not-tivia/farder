@@ -92,6 +92,71 @@ async function getTranslator(): Promise<LatencyTranslatorLike> {
             config: {},
           };
         }
+
+        // The upstream loadWorker constructs the worker via
+        //   `new Worker(new URL('./worker/translator-worker.js', import.meta.url))`
+        // which doesn't reliably resolve after Vite bundles a node_modules
+        // package. vite.config.ts copies the worker triple into /bergamot/;
+        // here we override loadWorker so the Worker is constructed from that
+        // known absolute path. The rest of the message-passing setup is the
+        // same shape as upstream's loadWorker (translator.js around L117).
+        async loadWorker() {
+          const worker = new Worker("/bergamot/translator-worker.js");
+          let serial = 0;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const pending = new Map<number, { accept: (v: any) => void; reject: (e: Error) => void; callsite: { message: string; stack?: string } }>();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const call = (name: string, ...args: any[]) =>
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            new Promise<any>((accept, reject) => {
+              const id = ++serial;
+              pending.set(id, {
+                accept,
+                reject,
+                callsite: {
+                  message: `${name}(${args.map(String).join(", ")})`,
+                  stack: new Error().stack,
+                },
+              });
+              worker.postMessage({ id, name, args });
+            });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          worker.addEventListener("message", (evt: MessageEvent<any>) => {
+            const { id, result, error } = evt.data;
+            const entry = pending.get(id);
+            if (!entry) return;
+            pending.delete(id);
+            if (error !== undefined) {
+              const err = Object.assign(new Error(), error, {
+                message: `${error.message} (response to ${entry.callsite.message})`,
+                stack: error.stack
+                  ? `${error.stack}\n${entry.callsite.stack ?? ""}`
+                  : entry.callsite.stack,
+              });
+              entry.reject(err);
+            } else {
+              entry.accept(result);
+            }
+          });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          worker.addEventListener("error", (this as any).onerror.bind(this));
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await call("initialize", (this as any).options);
+          return {
+            worker,
+            exports: new Proxy(
+              {},
+              {
+                get(_target, name) {
+                  if (name !== "then") {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    return (...args: any[]) => call(name as string, ...args);
+                  }
+                },
+              },
+            ),
+          };
+        }
       }
 
       return new LatencyOptimisedTranslator(
