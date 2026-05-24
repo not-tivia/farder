@@ -1,9 +1,11 @@
 // client/src/components/MessageSearchOverlay.tsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { MessageInfo } from "../lib/types";
+import Message from "./Message";
+import { useMessageContext } from "../hooks/useMessageContext";
 
 interface Props {
   open: boolean;
@@ -23,6 +25,10 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
 
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<SearchStatus>({ kind: "idle" });
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  // Debounced "stable selection" — what actually drives the preview fetch.
+  // Updated 200ms after selectedIndex stops changing.
+  const [stableIndex, setStableIndex] = useState(0);
 
   useEffect(() => {
     if (!open) return;
@@ -45,15 +51,15 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
     return () => window.removeEventListener("keydown", handler, true);
   }, [open, onClose]);
 
-  // Reset state when overlay closes — fresh start next time.
   useEffect(() => {
     if (!open) {
       setQuery("");
       setStatus({ kind: "idle" });
+      setSelectedIndex(0);
+      setStableIndex(0);
     }
   }, [open]);
 
-  // Debounced search: 300ms after last keystroke.
   useEffect(() => {
     if (!open || !serverId) return;
     const trimmed = query.trim();
@@ -68,6 +74,8 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
         const results = await api.searchMessages(serverId, trimmed, undefined, 50);
         if (cancelled) return;
         setStatus({ kind: "ready", results });
+        setSelectedIndex(0);
+        setStableIndex(0);
       } catch (e) {
         if (cancelled) return;
         setStatus({
@@ -82,13 +90,52 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
     };
   }, [query, open, serverId]);
 
-  const channelsById = new Map(
-    (activeServer?.channels ?? []).map((c) => [c.id, c]),
+  // Debounce stableIndex 200ms behind selectedIndex.
+  useEffect(() => {
+    const t = setTimeout(() => setStableIndex(selectedIndex), 200);
+    return () => clearTimeout(t);
+  }, [selectedIndex]);
+
+  // ↑ / ↓ keyboard nav.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (status.kind !== "ready" || status.results.length === 0) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((i) => (i + 1) % status.results.length);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((i) =>
+          (i - 1 + status.results.length) % status.results.length,
+        );
+      }
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [open, status]);
+
+  const results = status.kind === "ready" ? status.results : [];
+  const selectedResult = results[stableIndex] ?? null;
+
+  const context = useMessageContext(
+    serverId,
+    selectedResult?.channel_id ?? null,
+    selectedResult?.id ?? null,
   );
-  const memberNames: Record<string, string> = {};
-  for (const m of activeServer?.members ?? []) {
-    memberNames[publicKeyToString(m.public_key)] = m.display_name;
-  }
+
+  const channelsById = useMemo(
+    () => new Map((activeServer?.channels ?? []).map((c) => [c.id, c])),
+    [activeServer?.channels],
+  );
+
+  const memberNames: Record<string, string> = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const m of activeServer?.members ?? []) {
+      out[publicKeyToString(m.public_key)] = m.display_name;
+    }
+    return out;
+  }, [activeServer?.members]);
 
   if (!open) return null;
 
@@ -179,23 +226,25 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
                 Search failed — {status.reason}.
               </div>
             )}
-            {status.kind === "ready" && status.results.length === 0 && (
+            {status.kind === "ready" && results.length === 0 && (
               <div style={{ color: "var(--text-muted, #888)" }}>
                 No messages match "{query.trim()}".
               </div>
             )}
-            {status.kind === "ready" && status.results.map((msg) => {
+            {results.map((msg, i) => {
               const ch = channelsById.get(msg.channel_id);
               const authorName = memberNames[publicKeyToString(msg.author)] ?? "unknown";
+              const isSelected = i === selectedIndex;
               return (
                 <div
                   key={msg.id}
+                  onMouseEnter={() => setSelectedIndex(i)}
                   style={{
                     padding: 8,
                     marginBottom: 4,
                     borderRadius: 4,
                     cursor: "pointer",
-                    background: "transparent",
+                    background: isSelected ? "var(--accent-faded, rgba(0,88,230,0.12))" : "transparent",
                   }}
                 >
                   <div style={{ fontWeight: 600 }}>{authorName}</div>
@@ -222,10 +271,36 @@ export function MessageSearchOverlay({ open, onClose }: Props) {
               overflowY: "auto",
               padding: 12,
               fontSize: 12,
-              color: "var(--text-muted, #888)",
             }}
           >
-            Hover a result to preview.
+            {!selectedResult && (
+              <div style={{ color: "var(--text-muted, #888)" }}>
+                Hover a result to preview.
+              </div>
+            )}
+            {selectedResult && context.status === "loading" && (
+              <div style={{ color: "var(--text-muted, #888)" }}>Loading context…</div>
+            )}
+            {selectedResult && context.status === "error" && (
+              <div style={{ color: "var(--error, #c44)" }}>
+                Couldn't load context — {context.error}.
+              </div>
+            )}
+            {selectedResult && context.status === "ready" && serverId && (
+              <div>
+                {context.messages.map((m) => (
+                  <Message
+                    key={m.id}
+                    message={m}
+                    memberNames={memberNames}
+                    grouped={false}
+                    serverId={serverId}
+                    highlighted={m.id === selectedResult.id}
+                    onReply={() => {}}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
