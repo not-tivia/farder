@@ -22,6 +22,7 @@ interface MessageProps {
   memberNames: Record<string, string>;
   grouped?: boolean;
   serverId: string;
+  highlighted?: boolean;
   onReply?: (message: MessageInfo) => void;
 }
 
@@ -103,7 +104,7 @@ function renderContent(text: string, memberNames: Record<string, string>, ownDis
   });
 }
 
-export default function Message({ message, memberNames, grouped = false, serverId, onReply }: MessageProps) {
+export default function Message({ message, memberNames, grouped = false, serverId, highlighted = false, onReply }: MessageProps) {
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const [showPicker, setShowPicker] = useState(false);
@@ -236,7 +237,8 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   return (
     <div
-      className={`message${grouped ? " grouped" : ""}`}
+      id={`msg-${message.id}`}
+      className={`message${grouped ? " grouped" : ""}${highlighted ? " search-highlight" : ""}`}
       onContextMenu={(e) => {
         e.preventDefault();
         if (!deleted) setContextMenu({ x: e.clientX, y: e.clientY });
