@@ -143,7 +143,7 @@ pub struct StreamState {
 pub struct ServerSession {
     /// The QUIC connection that owns this session. Used to authenticate
     /// frames (a frame's session_id must match the receiving connection).
-    pub connection_token: u64,
+    pub connection_pk: [u8; 32],
     pub channel_id: u64,
     /// Long-term identity bound at JoinStream time. Used for emitting
     /// StreamJoined events (so peers learn session_id → public_key) but
@@ -220,7 +220,7 @@ pub enum DropReason {
 pub fn on_frame_ingress(
     state: &mut StreamState,
     config: &MediaConfig,
-    sending_connection_token: u64,
+    sending_connection_pk: &[u8; 32],
     raw: &[u8],
     now_ms: u64,
 ) -> IngressDecision {
@@ -234,7 +234,7 @@ pub fn on_frame_ingress(
         None => return IngressDecision::Drop(DropReason::UnknownSession),
     };
 
-    if session.connection_token != sending_connection_token {
+    if session.connection_pk != *sending_connection_pk {
         return IngressDecision::Drop(DropReason::SessionConnectionMismatch);
     }
     if !session.active_tracks.contains(&frame.kind) {
@@ -331,18 +331,18 @@ pub fn compute_activity_transitions(
     (transitions, new_active)
 }
 
-use tokio::sync::RwLock as TokioRwLock;
+use std::sync::RwLock as StdRwLock;
 
 /// Process-wide map of per-channel media stream state.
 /// One `StreamState` per active voice/media channel.
 pub struct MediaStateMap {
-    pub channels: TokioRwLock<HashMap<u64, StreamState>>,
+    pub channels: StdRwLock<HashMap<u64, StreamState>>,
 }
 
 impl MediaStateMap {
     pub fn new() -> Self {
         Self {
-            channels: TokioRwLock::new(HashMap::new()),
+            channels: StdRwLock::new(HashMap::new()),
         }
     }
 }
@@ -448,17 +448,17 @@ mod tests {
     fn install_session(
         state: &mut StreamState,
         session_id: SessionId,
-        connection_token: u64,
+        connection_pk: [u8; 32],
         channel_id: u64,
         with_audio: bool,
     ) {
         let mut tracks = HashSet::new();
         if with_audio { tracks.insert(TrackKind::Audio); }
         state.sessions.insert(session_id, ServerSession {
-            connection_token,
+            connection_pk,
             channel_id,
-            public_key: fake_pubkey(connection_token as u8),
-            display_name: format!("user{}", connection_token),
+            public_key: fake_pubkey(connection_pk[0]),
+            display_name: format!("user{}", connection_pk[0]),
             active_tracks: tracks,
             buckets: HashMap::new(),
             last_audio_frame_ms: None,
@@ -472,7 +472,7 @@ mod tests {
         let config = MediaConfig::default();
         let bogus = [99u8; 16];
         let frame = build_media_frame(TrackKind::Audio, 1, &bogus, b"x");
-        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+        match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Drop(DropReason::UnknownSession) => {}
             _ => panic!("expected UnknownSession drop"),
         }
@@ -483,9 +483,9 @@ mod tests {
         let mut state = StreamState::new();
         let config = MediaConfig::default();
         let session = [1u8; 16];
-        install_session(&mut state, session, 1, 100, true);
+        install_session(&mut state, session, [1u8; 32], 100, true);
         let frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
-        match on_frame_ingress(&mut state, &config, 2, &frame, 0) {
+        match on_frame_ingress(&mut state, &config, &[2u8; 32], &frame, 0) {
             IngressDecision::Drop(DropReason::SessionConnectionMismatch) => {}
             _ => panic!("expected SessionConnectionMismatch drop"),
         }
@@ -496,9 +496,9 @@ mod tests {
         let mut state = StreamState::new();
         let config = MediaConfig::default();
         let session = [1u8; 16];
-        install_session(&mut state, session, 1, 100, false); // no audio
+        install_session(&mut state, session, [1u8; 32], 100, false); // no audio
         let frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
-        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+        match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Drop(DropReason::TrackNotEnabled) => {}
             _ => panic!("expected TrackNotEnabled drop"),
         }
@@ -511,11 +511,11 @@ mod tests {
         let sender = [1u8; 16];
         let other = [2u8; 16];
         let other_channel = [3u8; 16];
-        install_session(&mut state, sender, 1, 100, true);
-        install_session(&mut state, other, 2, 100, true);
-        install_session(&mut state, other_channel, 3, 999, true);
+        install_session(&mut state, sender, [1u8; 32], 100, true);
+        install_session(&mut state, other, [2u8; 32], 100, true);
+        install_session(&mut state, other_channel, [3u8; 32], 999, true);
         let frame = build_media_frame(TrackKind::Audio, 1, &sender, b"x");
-        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+        match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Forward { recipients } => {
                 assert_eq!(recipients, vec![other]);
             }
@@ -529,11 +529,11 @@ mod tests {
         let config = MediaConfig::default();
         let sender = [1u8; 16];
         let other = [2u8; 16];
-        install_session(&mut state, sender, 1, 100, true);
-        install_session(&mut state, other, 2, 100, true);
+        install_session(&mut state, sender, [1u8; 32], 100, true);
+        install_session(&mut state, other, [2u8; 32], 100, true);
         state.deafened.insert(other);
         let frame = build_media_frame(TrackKind::Audio, 1, &sender, b"x");
-        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+        match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Forward { recipients } => assert!(recipients.is_empty()),
             _ => panic!("expected Forward"),
         }
@@ -543,7 +543,7 @@ mod tests {
     fn activity_transition_inactive_to_active() {
         let mut state = StreamState::new();
         let session = [1u8; 16];
-        install_session(&mut state, session, 1, 100, true);
+        install_session(&mut state, session, [1u8; 32], 100, true);
         state.sessions.get_mut(&session).unwrap().last_audio_frame_ms = Some(1000);
         let prev = HashMap::new();
         let (transitions, _new) = compute_activity_transitions(&state, &prev, 1100);
@@ -557,7 +557,7 @@ mod tests {
     fn activity_transition_active_to_inactive() {
         let mut state = StreamState::new();
         let session = [1u8; 16];
-        install_session(&mut state, session, 1, 100, true);
+        install_session(&mut state, session, [1u8; 32], 100, true);
         state.sessions.get_mut(&session).unwrap().last_audio_frame_ms = Some(0);
         let mut prev = HashMap::new();
         prev.insert((session, TrackKind::Audio), true);
@@ -571,7 +571,7 @@ mod tests {
     fn activity_no_transition_when_state_stable() {
         let mut state = StreamState::new();
         let session = [1u8; 16];
-        install_session(&mut state, session, 1, 100, true);
+        install_session(&mut state, session, [1u8; 32], 100, true);
         state.sessions.get_mut(&session).unwrap().last_audio_frame_ms = Some(1000);
         let mut prev = HashMap::new();
         prev.insert((session, TrackKind::Audio), true);

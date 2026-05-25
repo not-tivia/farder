@@ -2,12 +2,14 @@ use crate::{
     audit, channels,
     events::{BroadcastEvent, EventTarget},
     invites, members, messages, permissions,
+    state::ServerState,
 };
 use anyhow::Result;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::*;
 use rusqlite::Connection;
 use serde_json::json;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Output type
@@ -289,6 +291,7 @@ pub fn handle_request(
     is_owner: bool,
     request: ServerRequest,
     storage_dir: &str,
+    state: &Arc<ServerState>,
 ) -> Result<HandleResult> {
     match request {
         // ----------------------------------------------------------------
@@ -1590,14 +1593,149 @@ pub fn handle_request(
             ok(ServerResponse::MediaStateResp { participants: voice_members })
         }
 
-        // Temporary catch-all for stream/track arms — implemented in MST-10b.
-        ServerRequest::JoinStream { .. }
-        | ServerRequest::LeaveStream
-        | ServerRequest::EnableTrack { .. }
-        | ServerRequest::DisableTrack { .. }
-        | ServerRequest::SetDeafen { .. }
-        | ServerRequest::OfferStreamKey { .. } => {
-            ok(ServerResponse::Error { reason: "media stream/track arm not yet implemented (MST-10b)".into() })
+        ServerRequest::JoinStream { channel_id } => {
+            use crate::media_stream::{StreamState, ServerSession};
+            let member_bytes = *member.as_bytes();
+            let display_name = members::get_member(conn, member)?
+                .map(|m| m.display_name).unwrap_or_default();
+            let mut channels_map = state.media.channels.write().unwrap();
+            let stream_state = channels_map.entry(channel_id).or_insert_with(StreamState::new);
+            let session_id = stream_state.allocate_session_id();
+            stream_state.sessions.insert(session_id, ServerSession {
+                connection_pk: member_bytes,
+                channel_id,
+                public_key: member.clone(),
+                display_name: display_name.clone(),
+                active_tracks: std::collections::HashSet::new(),
+                buckets: std::collections::HashMap::new(),
+                last_audio_frame_ms: None,
+                last_video_frame_ms: None,
+            });
+            drop(channels_map);
+
+            let events = vec![BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::StreamJoined {
+                    channel_id,
+                    public_key: member.clone(),
+                    display_name,
+                    session_id,
+                    active_tracks: vec![],
+                },
+            }];
+            ok_with(ServerResponse::StreamSessionStarted { session_id }, events)
+        }
+
+        ServerRequest::LeaveStream => {
+            let member_bytes = *member.as_bytes();
+            let mut channels_map = state.media.channels.write().unwrap();
+            let mut events: Vec<BroadcastEvent> = Vec::new();
+            for (ch_id, stream_state) in channels_map.iter_mut() {
+                let to_remove: Vec<_> = stream_state.sessions.iter()
+                    .filter(|(_, s)| s.connection_pk == member_bytes)
+                    .map(|(sid, _)| *sid).collect();
+                for sid in to_remove {
+                    stream_state.sessions.remove(&sid);
+                    stream_state.deafened.remove(&sid);
+                    events.push(BroadcastEvent {
+                        target: EventTarget::All,
+                        event: ServerEvent::StreamLeft { channel_id: *ch_id, session_id: sid },
+                    });
+                }
+            }
+            drop(channels_map);
+            ok_with(ServerResponse::Ok, events)
+        }
+
+        ServerRequest::EnableTrack { kind } => {
+            let member_bytes = *member.as_bytes();
+            let mut channels_map = state.media.channels.write().unwrap();
+            let mut events: Vec<BroadcastEvent> = Vec::new();
+            for (ch_id, stream_state) in channels_map.iter_mut() {
+                for (sid, session) in stream_state.sessions.iter_mut() {
+                    if session.connection_pk == member_bytes {
+                        session.active_tracks.insert(kind);
+                        events.push(BroadcastEvent {
+                            target: EventTarget::All,
+                            event: ServerEvent::TrackEnabled {
+                                channel_id: *ch_id, session_id: *sid, kind,
+                            },
+                        });
+                    }
+                }
+            }
+            drop(channels_map);
+            ok_with(ServerResponse::Ok, events)
+        }
+
+        ServerRequest::DisableTrack { kind } => {
+            let member_bytes = *member.as_bytes();
+            let mut channels_map = state.media.channels.write().unwrap();
+            let mut events: Vec<BroadcastEvent> = Vec::new();
+            for (ch_id, stream_state) in channels_map.iter_mut() {
+                for (sid, session) in stream_state.sessions.iter_mut() {
+                    if session.connection_pk == member_bytes {
+                        session.active_tracks.remove(&kind);
+                        events.push(BroadcastEvent {
+                            target: EventTarget::All,
+                            event: ServerEvent::TrackDisabled {
+                                channel_id: *ch_id, session_id: *sid, kind,
+                            },
+                        });
+                    }
+                }
+            }
+            drop(channels_map);
+            ok_with(ServerResponse::Ok, events)
+        }
+
+        ServerRequest::SetDeafen { deafened } => {
+            let member_bytes = *member.as_bytes();
+            let mut channels_map = state.media.channels.write().unwrap();
+            for stream_state in channels_map.values_mut() {
+                let session_ids: Vec<_> = stream_state.sessions.iter()
+                    .filter(|(_, s)| s.connection_pk == member_bytes)
+                    .map(|(sid, _)| *sid).collect();
+                for sid in session_ids {
+                    if deafened { stream_state.deafened.insert(sid); }
+                    else { stream_state.deafened.remove(&sid); }
+                }
+            }
+            drop(channels_map);
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::OfferStreamKey { kind, wrapped_keys } => {
+            let member_bytes = *member.as_bytes();
+            let channels_map = state.media.channels.read().unwrap();
+            let mut sender_info: Option<(u64, [u8; 16])> = None;
+            for (ch_id, stream_state) in channels_map.iter() {
+                if let Some((sid, _)) = stream_state.sessions.iter()
+                    .find(|(_, s)| s.connection_pk == member_bytes)
+                {
+                    sender_info = Some((*ch_id, *sid));
+                    break;
+                }
+            }
+            drop(channels_map);
+            let (channel_id, session_id) = match sender_info {
+                Some(x) => x,
+                None => return err("must call JoinStream before OfferStreamKey"),
+            };
+
+            let events: Vec<BroadcastEvent> = wrapped_keys.into_iter()
+                .map(|(peer_pk, wrapped_key)| BroadcastEvent {
+                    target: EventTarget::Members(vec![peer_pk]),
+                    event: ServerEvent::StreamKeyOffer {
+                        channel_id,
+                        sender: member.clone(),
+                        session_id,
+                        kind,
+                        wrapped_key,
+                    },
+                })
+                .collect();
+            ok_with(ServerResponse::Ok, events)
         }
     }
 }
@@ -1647,6 +1785,10 @@ mod tests {
         channels::create_channel(conn, "general", ChannelType::Text, None, 0).unwrap()
     }
 
+    fn fake_state() -> Arc<ServerState> {
+        Arc::new(ServerState::new_for_test().unwrap())
+    }
+
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
@@ -1667,6 +1809,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1705,6 +1848,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1739,6 +1883,7 @@ mod tests {
                 limit: 50,
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1765,6 +1910,7 @@ mod tests {
                 position: Some(0),
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1796,6 +1942,7 @@ mod tests {
                 position: Some(1),
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1825,6 +1972,7 @@ mod tests {
                 target_channel: None,
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1847,6 +1995,7 @@ mod tests {
             true,
             ServerRequest::GetServerInfo,
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1882,6 +2031,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1900,6 +2050,7 @@ mod tests {
                 new_content: "Edited content".to_string(),
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1931,6 +2082,7 @@ mod tests {
                 limit: 50,
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1963,6 +2115,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
 
@@ -1988,6 +2141,7 @@ mod tests {
                 reason: None,
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -2015,7 +2169,7 @@ mod tests {
             permissions: permissions::ALL_PERMISSIONS,
             color: None,
             position: Some(3),
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Error { .. } => {}
             other => panic!("expected Error, got {:?}", other),
@@ -2038,7 +2192,7 @@ mod tests {
         // Mod tries to kick Admin — should fail (admin position 3 > mod position 2)
         let result = handle_request(&conn, &moderator, false, ServerRequest::KickMember {
             member_key: admin.clone(),
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Error { .. } => {}
             other => panic!("expected Error, got {:?}", other),
@@ -2048,7 +2202,7 @@ mod tests {
         let regular = add_member(&conn, "Regular");
         let result = handle_request(&conn, &moderator, false, ServerRequest::KickMember {
             member_key: regular.clone(),
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
@@ -2064,7 +2218,7 @@ mod tests {
             permissions: 0xFF,
             color: None,
             position: Some(999),
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
@@ -2088,7 +2242,7 @@ mod tests {
             content: "check this".to_string(),
             reply_to: None,
             attachment_ids: vec![file_id],
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::MessageSent { id, .. } => {
                 let msg = messages::get_message(&conn, id, &owner).unwrap().unwrap();
@@ -2111,7 +2265,7 @@ mod tests {
             content: "too many".to_string(),
             reply_to: None,
             attachment_ids: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Error { .. } => {}
             other => panic!("expected Error, got {:?}", other),
@@ -2125,7 +2279,7 @@ mod tests {
         let msg_id = messages::insert_message(&conn, ch_id, &owner, "thread me", None).unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::CreateThread {
             message_id: msg_id, name: Some("discussion".to_string()),
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
         assert!(!result.events.is_empty());
     }
@@ -2137,7 +2291,7 @@ mod tests {
         let msg_id = messages::insert_message(&conn, ch_id, &owner, "react", None).unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::AddReaction {
             message_id: msg_id, emoji: "👍".to_string(), file_id: None,
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
         let msg = messages::get_message(&conn, msg_id, &owner).unwrap().unwrap();
         assert_eq!(msg.reactions.len(), 1);
@@ -2151,7 +2305,7 @@ mod tests {
         crate::reactions::add_reaction(&conn, msg_id, &owner, "👍", None).unwrap();
         let result = handle_request(&conn, &owner, true, ServerRequest::RemoveReaction {
             message_id: msg_id, emoji: "👍".to_string(), file_id: None,
-        }, "").unwrap();
+        }, "", &fake_state()).unwrap();
         match result.response { ServerResponse::Ok => {} other => panic!("expected Ok, got {:?}", other) }
     }
 
@@ -2160,7 +2314,7 @@ mod tests {
         let (conn, _owner_pk) = setup();
         let member = add_member(&conn, "Alice");
 
-        let result = handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "").unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
@@ -2176,7 +2330,7 @@ mod tests {
     fn test_handle_request_deletion_owner_rejected() {
         let (conn, owner_pk) = setup();
 
-        let result = handle_request(&conn, &owner_pk, true, ServerRequest::RequestDeletion, "").unwrap();
+        let result = handle_request(&conn, &owner_pk, true, ServerRequest::RequestDeletion, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Error { reason } => {
                 assert!(reason.contains("owner"), "error should mention owner: {}", reason);
@@ -2191,10 +2345,10 @@ mod tests {
         let member = add_member(&conn, "Bob");
 
         // Request deletion first
-        handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "").unwrap();
+        handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "", &fake_state()).unwrap();
 
         // Cancel deletion
-        let result = handle_request(&conn, &member, false, ServerRequest::CancelDeletion, "").unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::CancelDeletion, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Ok => {}
             other => panic!("expected Ok for CancelDeletion, got {:?}", other),
@@ -2212,7 +2366,7 @@ mod tests {
         let member = add_member(&conn, "Carol");
 
         // Before requesting deletion: not pending
-        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus, "").unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::DeletionStatusResp { status } => {
                 assert!(!status.pending);
@@ -2223,8 +2377,8 @@ mod tests {
         }
 
         // After requesting deletion: pending
-        handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "").unwrap();
-        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus, "").unwrap();
+        handle_request(&conn, &member, false, ServerRequest::RequestDeletion, "", &fake_state()).unwrap();
+        let result = handle_request(&conn, &member, false, ServerRequest::GetDeletionStatus, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::DeletionStatusResp { status } => {
                 assert!(status.pending);
@@ -2250,6 +2404,7 @@ mod tests {
             true,
             ServerRequest::OpenDm { target_key: alice.clone() },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -2279,6 +2434,7 @@ mod tests {
             true,
             ServerRequest::OpenDm { target_key: alice.clone() },
             "",
+            &fake_state(),
         )
         .unwrap();
         let r2 = handle_request(
@@ -2287,6 +2443,7 @@ mod tests {
             true,
             ServerRequest::OpenDm { target_key: alice.clone() },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -2310,10 +2467,10 @@ mod tests {
         let bob = add_member(&conn, "Bob");
 
         // Open two DMs.
-        handle_request(&conn, &owner_pk, true, ServerRequest::OpenDm { target_key: alice }, "").unwrap();
-        handle_request(&conn, &owner_pk, true, ServerRequest::OpenDm { target_key: bob }, "").unwrap();
+        handle_request(&conn, &owner_pk, true, ServerRequest::OpenDm { target_key: alice }, "", &fake_state()).unwrap();
+        handle_request(&conn, &owner_pk, true, ServerRequest::OpenDm { target_key: bob }, "", &fake_state()).unwrap();
 
-        let result = handle_request(&conn, &owner_pk, true, ServerRequest::ListDms, "").unwrap();
+        let result = handle_request(&conn, &owner_pk, true, ServerRequest::ListDms, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::DmList { dms } => {
                 assert_eq!(dms.len(), 2);
@@ -2334,6 +2491,7 @@ mod tests {
             true,
             ServerRequest::OpenDm { target_key: alice.clone() },
             "",
+            &fake_state(),
         )
         .unwrap();
         let dm_channel_id = match open_result.response {
@@ -2342,7 +2500,7 @@ mod tests {
         };
 
         // Block alice.
-        handle_request(&conn, &owner_pk, true, ServerRequest::BlockUser { target_key: alice.clone() }, "").unwrap();
+        handle_request(&conn, &owner_pk, true, ServerRequest::BlockUser { target_key: alice.clone() }, "", &fake_state()).unwrap();
 
         // Sending a message in that DM should now fail.
         let result = handle_request(
@@ -2356,6 +2514,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
+            &fake_state(),
         )
         .unwrap();
         match result.response {
@@ -2378,6 +2537,7 @@ mod tests {
             true,
             ServerRequest::OpenDm { target_key: alice.clone() },
             "",
+            &fake_state(),
         )
         .unwrap();
         let dm_channel_id = match open_result.response {
@@ -2397,6 +2557,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
+            &fake_state(),
         )
         .unwrap();
         match result.response {
@@ -2419,6 +2580,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
+            &fake_state(),
         )
         .unwrap();
         match result2.response {
@@ -2444,6 +2606,7 @@ mod tests {
                 reason: Some("test".to_string()),
             },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -2454,6 +2617,7 @@ mod tests {
             true,
             ServerRequest::UnbanMember { member_key: victim.clone() },
             "",
+            &fake_state(),
         )
         .unwrap();
 
@@ -2484,6 +2648,7 @@ mod tests {
                 reason: None,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         match result.response {
@@ -2511,6 +2676,7 @@ mod tests {
                 reason: None,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(
@@ -2531,6 +2697,7 @@ mod tests {
                 reason: None,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(
@@ -2554,6 +2721,7 @@ mod tests {
                 reason: Some("warning".into()),
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2590,6 +2758,7 @@ mod tests {
                 member_key: target_pk.clone(),
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2622,6 +2791,7 @@ mod tests {
             true,
             ServerRequest::KickMember { member_key: target_pk.clone() },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2644,6 +2814,7 @@ mod tests {
                 reason: Some("spam".into()),
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2664,6 +2835,7 @@ mod tests {
             true,
             ServerRequest::KickMember { member_key: target_pk.clone() },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         let has_targeted_kick = result.events.iter().any(|e| {
@@ -2686,6 +2858,7 @@ mod tests {
                 reason: Some("spam".into()),
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         let has_targeted_ban = result.events.iter().any(|e| {
@@ -2706,6 +2879,7 @@ mod tests {
             true,
             ServerRequest::UnbanMember { member_key: target_pk.clone() },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2730,6 +2904,7 @@ mod tests {
                 reason: Some("warning".into()),
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2752,6 +2927,7 @@ mod tests {
             true,
             ServerRequest::RemoveTimeout { member_key: target_pk.clone() },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2783,6 +2959,7 @@ mod tests {
                 role_id,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2817,6 +2994,7 @@ mod tests {
                 role_id,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2842,6 +3020,7 @@ mod tests {
                 position: Some(0),
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2862,6 +3041,7 @@ mod tests {
             true,
             ServerRequest::DeleteChannel { channel_id },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2892,6 +3072,7 @@ mod tests {
                 position: None,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2918,6 +3099,7 @@ mod tests {
                 position: None,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         let events_after = audit::list(&conn, None, 10).unwrap();
@@ -2938,6 +3120,7 @@ mod tests {
                 position: Some(1),
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2962,6 +3145,7 @@ mod tests {
             true,
             ServerRequest::DeleteRole { role_id },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -2990,6 +3174,7 @@ mod tests {
                 position: None,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -3013,6 +3198,7 @@ mod tests {
                 position: None,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         let events_after = audit::list(&conn, None, 10).unwrap();
@@ -3037,6 +3223,7 @@ mod tests {
                 deny,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -3067,6 +3254,7 @@ mod tests {
                 limit: 10,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         match result.response {
@@ -3092,6 +3280,7 @@ mod tests {
                 limit: 2,
             },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         match result.response {
@@ -3116,6 +3305,7 @@ mod tests {
             true,
             ServerRequest::JoinVoice { channel_id: ch_id },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         let result = handle_request(
@@ -3124,6 +3314,7 @@ mod tests {
             true,
             ServerRequest::StartVoice { channel_id: ch_id },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -3138,6 +3329,7 @@ mod tests {
             true,
             ServerRequest::StopVoice,
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -3154,6 +3346,7 @@ mod tests {
             true,
             ServerRequest::StartVoice { channel_id: ch_id },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
@@ -3175,6 +3368,7 @@ mod tests {
             true,
             ServerRequest::StartVoice { channel_id: ch_id },
             "/tmp",
+            &fake_state(),
         )
         .unwrap();
         assert!(matches!(result.response, ServerResponse::Error { .. }));

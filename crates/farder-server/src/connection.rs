@@ -748,7 +748,7 @@ async fn main_loop(
                                 // Lock db, call handler, drop lock before await
                                 let handle_result = {
                                     let conn = state.db.lock().unwrap();
-                                    handlers::handle_request(&conn, &member_key, is_owner, request, &state.storage_dir)
+                                    handlers::handle_request(&conn, &member_key, is_owner, request, &state.storage_dir, &state)
                                 };
 
                                 match handle_result {
