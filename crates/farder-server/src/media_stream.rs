@@ -275,6 +275,62 @@ pub fn on_frame_ingress(
     IngressDecision::Forward { recipients }
 }
 
+/// Per-track activity threshold: a track is considered "active" if a frame
+/// has been forwarded within the last 300 ms. Same heuristic as the existing
+/// voice speaking ticker.
+pub const ACTIVITY_TIMEOUT_MS: u64 = 300;
+
+/// Diff between "previous active tracks" and "current active tracks"
+/// across all sessions. Caller (the 5 Hz tick loop in the async dispatcher)
+/// uses this to emit TrackActivityChanged events only on transitions.
+#[derive(Debug, PartialEq)]
+pub struct ActivityTransition {
+    pub session_id: SessionId,
+    pub channel_id: u64,
+    pub kind: TrackKind,
+    pub active: bool,
+}
+
+/// Walk all sessions and produce transitions vs the supplied previous state.
+///
+/// `prev_active` is a snapshot from the previous tick: (session, kind) → was_active.
+/// Returns the list of transitions to emit AND the new snapshot for next tick.
+pub fn compute_activity_transitions(
+    state: &StreamState,
+    prev_active: &HashMap<(SessionId, TrackKind), bool>,
+    now_ms: u64,
+) -> (Vec<ActivityTransition>, HashMap<(SessionId, TrackKind), bool>) {
+    let mut transitions = Vec::new();
+    let mut new_active = HashMap::new();
+
+    for (sid, session) in &state.sessions {
+        for kind in [TrackKind::Audio, TrackKind::Video] {
+            if !session.active_tracks.contains(&kind) {
+                continue;
+            }
+            let last_ms = match kind {
+                TrackKind::Audio => session.last_audio_frame_ms,
+                TrackKind::Video => session.last_video_frame_ms,
+            };
+            let is_active = match last_ms {
+                Some(t) => now_ms.saturating_sub(t) < ACTIVITY_TIMEOUT_MS,
+                None => false,
+            };
+            new_active.insert((*sid, kind), is_active);
+            let was_active = prev_active.get(&(*sid, kind)).copied().unwrap_or(false);
+            if was_active != is_active {
+                transitions.push(ActivityTransition {
+                    session_id: *sid,
+                    channel_id: session.channel_id,
+                    kind,
+                    active: is_active,
+                });
+            }
+        }
+    }
+    (transitions, new_active)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +515,45 @@ mod tests {
             IngressDecision::Forward { recipients } => assert!(recipients.is_empty()),
             _ => panic!("expected Forward"),
         }
+    }
+
+    #[test]
+    fn activity_transition_inactive_to_active() {
+        let mut state = StreamState::new();
+        let session = [1u8; 16];
+        install_session(&mut state, session, 1, 100, true);
+        state.sessions.get_mut(&session).unwrap().last_audio_frame_ms = Some(1000);
+        let prev = HashMap::new();
+        let (transitions, _new) = compute_activity_transitions(&state, &prev, 1100);
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].session_id, session);
+        assert_eq!(transitions[0].kind, TrackKind::Audio);
+        assert!(transitions[0].active);
+    }
+
+    #[test]
+    fn activity_transition_active_to_inactive() {
+        let mut state = StreamState::new();
+        let session = [1u8; 16];
+        install_session(&mut state, session, 1, 100, true);
+        state.sessions.get_mut(&session).unwrap().last_audio_frame_ms = Some(0);
+        let mut prev = HashMap::new();
+        prev.insert((session, TrackKind::Audio), true);
+        // 500ms after last frame — should be inactive (threshold 300ms)
+        let (transitions, _new) = compute_activity_transitions(&state, &prev, 500);
+        assert_eq!(transitions.len(), 1);
+        assert!(!transitions[0].active);
+    }
+
+    #[test]
+    fn activity_no_transition_when_state_stable() {
+        let mut state = StreamState::new();
+        let session = [1u8; 16];
+        install_session(&mut state, session, 1, 100, true);
+        state.sessions.get_mut(&session).unwrap().last_audio_frame_ms = Some(1000);
+        let mut prev = HashMap::new();
+        prev.insert((session, TrackKind::Audio), true);
+        let (transitions, _new) = compute_activity_transitions(&state, &prev, 1100);
+        assert!(transitions.is_empty(), "no transition expected");
     }
 }
