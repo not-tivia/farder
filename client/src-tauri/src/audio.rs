@@ -13,6 +13,21 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use std::collections::HashSet;
+use std::sync::OnceLock;
+
+/// Log a message at most once per process, keyed by `tag`. Used by factory
+/// functions to warn-on-fallback without spamming. When display.rs lands
+/// (Task 9), promote this to a shared utility module.
+fn log_once(tag: &'static str, message: &str) {
+    static SEEN: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = seen.lock().expect("log_once mutex poisoned");
+    if guard.insert(tag) {
+        eprintln!("{message}");
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AudioInputDevice {
     pub id: String,
@@ -253,6 +268,25 @@ impl AudioBackend for MockAudioBackend {
     }
     fn backend_name(&self) -> &'static str {
         "mock"
+    }
+}
+
+/// Construct an AudioBackend based on the FARDER_AUDIO_BACKEND env var.
+/// - "mock" → MockAudioBackend
+/// - anything else (or unset) → real backend if shipped, else mock-with-warn
+///
+/// The voice (Phase 3) sub-project replaces the fallback arm with a real
+/// cpal/audiopus-backed implementation.
+pub fn make_audio_backend() -> Box<dyn AudioBackend> {
+    match std::env::var("FARDER_AUDIO_BACKEND").as_deref() {
+        Ok("mock") => Box::new(MockAudioBackend::new()),
+        _ => {
+            log_once(
+                "audio.real_not_shipped",
+                "[audio] real backend not yet shipped; using mock",
+            );
+            Box::new(MockAudioBackend::new())
+        }
     }
 }
 
