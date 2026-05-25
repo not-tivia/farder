@@ -80,6 +80,54 @@ pub fn media_frame_header_aad(buf: &[u8]) -> &[u8] {
     &buf[..MEDIA_FRAME_HEADER_LEN]
 }
 
+use std::time::Instant;
+
+/// Per-(session, track_kind) bandwidth cap via classic token bucket.
+///
+/// `cap_bps` is the rate in bytes per second. The bucket fills at that rate
+/// up to a maximum equal to half a second's worth of capacity (so a quiet
+/// stream can burst briefly without dropping). Each admitted frame consumes
+/// `frame_len` bytes from the bucket; an empty bucket means the frame is
+/// dropped.
+pub struct TokenBucket {
+    cap_bps: u64,
+    tokens: u64,
+    max_tokens: u64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    pub fn new(cap_bps: u64) -> Self {
+        let max_tokens = cap_bps / 2; // half a second of slack
+        Self {
+            cap_bps,
+            tokens: max_tokens,
+            max_tokens,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed_secs = now.duration_since(self.last_refill).as_secs_f64();
+        let add = (elapsed_secs * self.cap_bps as f64) as u64;
+        if add > 0 {
+            self.tokens = (self.tokens + add).min(self.max_tokens);
+            self.last_refill = now;
+        }
+    }
+
+    /// Try to admit a frame of `frame_len` bytes. Returns true if admitted.
+    pub fn try_consume(&mut self, frame_len: u64) -> bool {
+        self.refill(Instant::now());
+        if self.tokens >= frame_len {
+            self.tokens -= frame_len;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +186,31 @@ mod tests {
         assert_eq!(aad.len(), MEDIA_FRAME_HEADER_LEN);
         assert_eq!(aad[0], MEDIA_FRAME_VERSION);
         assert_eq!(aad[1], MEDIA_FRAME_TYPE_AUDIO);
+    }
+
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    #[test]
+    fn bucket_admits_under_cap() {
+        let mut b = TokenBucket::new(10_000); // 10 KB/s, max 5000 tokens
+        assert!(b.try_consume(1000));
+        assert!(b.try_consume(1000));
+    }
+
+    #[test]
+    fn bucket_drops_when_drained() {
+        let mut b = TokenBucket::new(1000); // 1 KB/s, max 500 tokens
+        assert!(b.try_consume(500));
+        assert!(!b.try_consume(1000), "second large consume should be denied");
+    }
+
+    #[test]
+    fn bucket_refills_over_time() {
+        let mut b = TokenBucket::new(10_000);
+        while b.try_consume(100) {}
+        sleep(Duration::from_millis(100));
+        assert!(b.try_consume(500),
+            "should have refilled at least 500 bytes after 100ms at 10KB/s");
     }
 }
