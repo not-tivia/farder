@@ -13,6 +13,14 @@ pub enum EventTarget {
     VoiceStopTransmit { pk: [u8; 32] },
     VoiceSetMute { pk: [u8; 32], muted: bool },
     VoiceSetDeafen { pk: [u8; 32], deafened: bool },
+    // Media-stream targets (new). Coexist with the Voice* variants during
+    // the MST migration; Voice* are removed in MST-11 once handlers no
+    // longer reference them.
+    MediaStreamJoin { session_id: [u8; 16], channel_id: u64, public_key: [u8; 32] },
+    MediaStreamLeave { session_id: [u8; 16] },
+    MediaTrackEnabled { session_id: [u8; 16], channel_id: u64, kind: farder_protocol::server::TrackKind },
+    MediaTrackDisabled { session_id: [u8; 16], channel_id: u64, kind: farder_protocol::server::TrackKind },
+    MediaSetDeafen { session_id: [u8; 16], deafened: bool },
 }
 
 #[derive(Debug)]

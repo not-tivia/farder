@@ -990,5 +990,11 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
                 deaf_set.remove(&pk);
             }
         }
+        // Media-stream targets — dispatching implemented in MST-10.
+        EventTarget::MediaStreamJoin { .. } => {}
+        EventTarget::MediaStreamLeave { .. } => {}
+        EventTarget::MediaTrackEnabled { .. } => {}
+        EventTarget::MediaTrackDisabled { .. } => {}
+        EventTarget::MediaSetDeafen { .. } => {}
     }
 }

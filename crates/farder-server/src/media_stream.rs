@@ -128,6 +128,59 @@ impl TokenBucket {
     }
 }
 
+use std::collections::{HashMap, HashSet};
+use farder_crypto::identity::PublicKey;
+
+/// Per-channel state for the media-stream router. The server keeps one of
+/// these per active voice/media channel.
+pub struct StreamState {
+    /// session_id → metadata for active streams
+    pub sessions: HashMap<SessionId, ServerSession>,
+    /// session_id → deafened flag (suppresses fanout TO this session)
+    pub deafened: HashSet<SessionId>,
+}
+
+pub struct ServerSession {
+    /// The QUIC connection that owns this session. Used to authenticate
+    /// frames (a frame's session_id must match the receiving connection).
+    pub connection_token: u64,
+    pub channel_id: u64,
+    /// Long-term identity bound at JoinStream time. Used for emitting
+    /// StreamJoined events (so peers learn session_id → public_key) but
+    /// NEVER referenced in per-frame routing or written to frame-rate logs.
+    pub public_key: PublicKey,
+    pub display_name: String,
+    pub active_tracks: HashSet<TrackKind>,
+    pub buckets: HashMap<TrackKind, TokenBucket>,
+    pub last_audio_frame_ms: Option<u64>,
+    pub last_video_frame_ms: Option<u64>,
+}
+
+impl StreamState {
+    pub fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            deafened: HashSet::new(),
+        }
+    }
+
+    pub fn allocate_session_id(&self) -> SessionId {
+        // Random 16 bytes. Collision probability is 2^-128 per call.
+        loop {
+            let id: SessionId = rand::random();
+            if !self.sessions.contains_key(&id) {
+                return id;
+            }
+        }
+    }
+}
+
+impl Default for StreamState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
