@@ -84,10 +84,18 @@ impl Default for MockAudioBackend {
 
 impl AudioBackend for MockAudioBackend {
     fn enumerate_input_devices(&self) -> Result<Vec<AudioInputDevice>, String> {
-        Err("not yet implemented".into())
+        Ok(vec![AudioInputDevice {
+            id: "mock-input".into(),
+            name: "Mock Input (sine wave)".into(),
+            is_default: true,
+        }])
     }
     fn enumerate_output_devices(&self) -> Result<Vec<AudioOutputDevice>, String> {
-        Err("not yet implemented".into())
+        Ok(vec![AudioOutputDevice {
+            id: "mock-output".into(),
+            name: "Mock Output (discard)".into(),
+            is_default: true,
+        }])
     }
     fn start_capture(
         &self,
@@ -111,5 +119,25 @@ impl AudioBackend for MockAudioBackend {
     }
     fn backend_name(&self) -> &'static str {
         "mock"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_enumerate_returns_one_input_one_output() {
+        let backend = MockAudioBackend::new();
+
+        let inputs = backend.enumerate_input_devices().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].id, "mock-input");
+        assert!(inputs[0].is_default);
+
+        let outputs = backend.enumerate_output_devices().unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].id, "mock-output");
+        assert!(outputs[0].is_default);
     }
 }
