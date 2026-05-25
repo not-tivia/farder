@@ -1517,6 +1517,22 @@ pub fn handle_request(
             let events = audit::list(conn, before_id, limit)?;
             ok(ServerResponse::AuditEventsList { events })
         }
+
+        // Temporary catch-all for the new media-stream arms (JoinStream,
+        // EnableTrack, OfferStreamKey, JoinChannelMedia, etc.) added in
+        // MST-3. Real handlers ship in MST-10; this stub keeps the
+        // workspace building until then.
+        ServerRequest::JoinStream { .. }
+        | ServerRequest::LeaveStream
+        | ServerRequest::EnableTrack { .. }
+        | ServerRequest::DisableTrack { .. }
+        | ServerRequest::SetDeafen { .. }
+        | ServerRequest::OfferStreamKey { .. }
+        | ServerRequest::JoinChannelMedia { .. }
+        | ServerRequest::LeaveChannelMedia { .. }
+        | ServerRequest::GetMediaState { .. } => {
+            ok(ServerResponse::Error { reason: "media-stream arm not yet implemented".into() })
+        }
     }
 }
 
