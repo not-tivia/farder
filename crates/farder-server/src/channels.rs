@@ -698,7 +698,7 @@ pub fn leave_voice(conn: &Connection, channel_id: u64, user_key: &farder_crypto:
 }
 
 pub fn leave_all_voice(conn: &Connection, user_key: &farder_crypto::identity::PublicKey) -> Result<Vec<u64>> {
-    // Returns channel_ids the user was in (for broadcasting VoiceLeft)
+    // Returns channel_ids the user was in (removes all voice_state rows for this user)
     let mut stmt = conn.prepare("SELECT channel_id FROM voice_state WHERE user_key = ?1")?;
     let ids: Vec<u64> = stmt.query_map(params![user_key.as_bytes().as_slice()], |row| {
         Ok(row.get::<_, i64>(0)? as u64)

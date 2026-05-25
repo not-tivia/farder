@@ -241,13 +241,6 @@ pub enum ServerRequest {
     ListDms,
     BlockUser { target_key: PublicKey },
     UnblockUser { target_key: PublicKey },
-    JoinVoice { channel_id: u64 },
-    LeaveVoice { channel_id: u64 },
-    GetVoiceState { channel_id: u64 },
-    StartVoice { channel_id: u64 },
-    StopVoice,
-    SetVoiceMute { muted: bool },
-    SetVoiceDeafen { deafened: bool },
     JoinStream { channel_id: u64 },
     LeaveStream,
     EnableTrack { kind: TrackKind },
@@ -297,7 +290,6 @@ pub enum ServerResponse {
     UrlFetched { file_id: u64 },
     DmOpened { channel: ChannelInfo, participant: MemberInfo },
     DmList { dms: Vec<DmEntry> },
-    VoiceStateResp { participants: Vec<VoiceMember> },
     StreamSessionStarted { session_id: [u8; 16] },
     MediaStateResp { participants: Vec<VoiceMember> },
 }
@@ -349,21 +341,6 @@ pub enum ServerEvent {
     DeletionCancelled { public_key: PublicKey },
     DeletionExecuted { public_key: PublicKey },
     DmCreated { channel: ChannelInfo, participant: MemberInfo },
-    VoiceJoined { channel_id: u64, public_key: PublicKey, display_name: String },
-    VoiceLeft { channel_id: u64, public_key: PublicKey },
-    VoiceCallIncoming {
-        channel_id: u64,
-        caller: PublicKey,
-        caller_name: String,
-    },
-    VoiceCallEnded {
-        channel_id: u64,
-    },
-    VoiceSpeakingChanged {
-        channel_id: u64,
-        public_key: PublicKey,
-        speaking: bool,
-    },
     MediaJoined  { channel_id: u64, public_key: PublicKey, display_name: String },
     MediaLeft    { channel_id: u64, public_key: PublicKey },
     StreamJoined {
@@ -586,13 +563,6 @@ mod tests {
             ServerRequest::ListDms,
             ServerRequest::BlockUser { target_key: kp.public_key() },
             ServerRequest::UnblockUser { target_key: kp.public_key() },
-            ServerRequest::JoinVoice { channel_id: 1 },
-            ServerRequest::LeaveVoice { channel_id: 1 },
-            ServerRequest::GetVoiceState { channel_id: 1 },
-            ServerRequest::StartVoice { channel_id: 1 },
-            ServerRequest::StopVoice,
-            ServerRequest::SetVoiceMute { muted: true },
-            ServerRequest::SetVoiceDeafen { deafened: false },
             ServerRequest::JoinStream { channel_id: 7 },
             ServerRequest::LeaveStream,
             ServerRequest::EnableTrack { kind: TrackKind::Audio },
@@ -613,9 +583,6 @@ mod tests {
         }
 
         let events = vec![
-            ServerEvent::VoiceCallIncoming { channel_id: 1, caller: kp.public_key(), caller_name: "alice".into() },
-            ServerEvent::VoiceCallEnded { channel_id: 1 },
-            ServerEvent::VoiceSpeakingChanged { channel_id: 1, public_key: kp.public_key(), speaking: true },
             ServerEvent::MediaJoined { channel_id: 1, public_key: kp.public_key(), display_name: "alice".into() },
             ServerEvent::MediaLeft   { channel_id: 1, public_key: kp.public_key() },
             ServerEvent::StreamJoined {

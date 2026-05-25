@@ -580,19 +580,6 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         }
     });
 
-    // Voice datagram receive loop. Best-effort, drops invalid frames silently.
-    let voice_state = Arc::clone(&state);
-    let voice_conn = conn.clone();
-    let voice_pk = pk_bytes;
-    let voice_acceptor = tokio::spawn(async move {
-        loop {
-            match voice_conn.read_datagram().await {
-                Ok(datagram) => handle_voice_datagram(&voice_state, voice_pk, datagram).await,
-                Err(_) => break,  // connection closed
-            }
-        }
-    });
-
     // Step 10: Enter main loop
     let loop_result = main_loop(
         Arc::clone(&state),
@@ -606,7 +593,6 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 
     // Abort the stream acceptor on disconnect
     stream_acceptor.abort();
-    voice_acceptor.abort();
 
     // Step 11: Cleanup on disconnect.
     // Only remove from the clients map if WE'RE still the registered sender —
@@ -623,26 +609,12 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         }
     }
     state.voice_connections.write().await.remove(&pk_bytes);
-    // Also stop_transmit so any in-flight voice state for this pk is cleared.
-    crate::voice::stop_transmit(&state.voice, pk_bytes).await;
     {
         let mut subs = state.subscriptions.write().await;
         for (_channel_id, subscribers) in subs.iter_mut() {
             subscribers.remove(&pk_bytes);
         }
     }
-    // Leave voice channels on disconnect
-    let left_voice_channels = {
-        let db = state.db.lock().unwrap();
-        channels::leave_all_voice(&db, &public_key).unwrap_or_default()
-    };
-    for ch_id in left_voice_channels {
-        broadcast_event(&state, EventTarget::All, ServerEvent::VoiceLeft {
-            channel_id: ch_id,
-            public_key: public_key.clone(),
-        }).await;
-    }
-
     broadcast_event(
         &state,
         EventTarget::All,
@@ -823,60 +795,6 @@ async fn main_loop(
 }
 
 // ---------------------------------------------------------------------------
-// Voice datagram fanout
-// ---------------------------------------------------------------------------
-
-/// Validate an inbound voice frame and fan it out to other channel members.
-/// Drops invalid frames silently (anti-DoS — never log on bad input).
-async fn handle_voice_datagram(
-    state: &ServerState,
-    authenticated_pk: [u8; 32],
-    datagram: bytes::Bytes,
-) {
-    let frame = match crate::voice::parse_voice_frame(&datagram) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    // Anti-spoof: speaker_pk must equal the connection's authenticated identity.
-    if frame.speaker_pk != authenticated_pk { return; }
-
-    let channel_id = match state.voice.speaker_channel.read().await.get(&authenticated_pk) {
-        Some(c) => *c,
-        None => return,  // not in StartVoice state
-    };
-
-    // Update last-frame timestamp for the speaking ticker.
-    state.voice.speaking_last_frame_ms.write().await.insert(authenticated_pk, crate::voice::now_ms());
-
-    // Determine recipients: all voice-channel participants except self and deafened.
-    // Listeners include both transmitters (in voice.channels) and pure listeners
-    // (joined via JoinVoice but not StartVoice — fetched from DB).
-    let transmitters: std::collections::HashSet<[u8; 32]> = state.voice.channels.read().await
-        .get(&channel_id).cloned().unwrap_or_default();
-    let pure_listeners: Vec<[u8; 32]> = {
-        let conn = state.db.lock().unwrap();
-        crate::channels::get_voice_participants(&conn, channel_id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(pk, _)| *pk.as_bytes())
-            .collect()
-    };
-    let mut all_recipients: std::collections::HashSet<[u8; 32]> = transmitters;
-    all_recipients.extend(pure_listeners);
-    all_recipients.remove(&authenticated_pk);
-
-    let deafened = state.voice.deafened.read().await.clone();
-    let voice_conns = state.voice_connections.read().await;
-    for listener_pk in all_recipients {
-        if deafened.contains(&listener_pk) { continue; }
-        if let Some(conn) = voice_conns.get(&listener_pk) {
-            // Best-effort: Bytes is cheaply cloneable, send_datagram returns Result we discard.
-            let _ = conn.send_datagram(datagram.clone());
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Broadcasting (public)
 // ---------------------------------------------------------------------------
 
@@ -924,70 +842,6 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
                         let _ = sender.try_send(event.clone());
                     }
                 }
-            }
-        }
-        EventTarget::VoiceStartTransmit { pk, channel_id } => {
-            crate::voice::start_transmit(&state.voice, pk, channel_id).await;
-        }
-        EventTarget::VoiceStopTransmit { pk } => {
-            // Capture which channel this pk was transmitting in BEFORE we mutate.
-            let prev_channel = state.voice.speaker_channel.read().await.get(&pk).copied();
-            crate::voice::stop_transmit(&state.voice, pk).await;
-            // If a DM voice channel just became empty, ring-end the other party.
-            if let Some(channel_id) = prev_channel {
-                let now_empty = state
-                    .voice
-                    .channels
-                    .read()
-                    .await
-                    .get(&channel_id)
-                    .map(|s| s.is_empty())
-                    .unwrap_or(true);
-                if now_empty {
-                    let other_pk_opt: Option<farder_crypto::identity::PublicKey> = {
-                        let conn_lock = state.db.lock().unwrap();
-                        match crate::channels::get_channel(&conn_lock, channel_id) {
-                            Ok(Some(ch))
-                                if ch.channel_type
-                                    == farder_protocol::server::ChannelType::Dm =>
-                            {
-                                let pk_obj = farder_crypto::identity::PublicKey::from_bytes(pk);
-                                crate::channels::list_dm_channels(&conn_lock, &pk_obj)
-                                    .ok()
-                                    .and_then(|dms| {
-                                        dms.into_iter()
-                                            .find(|(c, _)| c.id == channel_id)
-                                            .map(|(_, other)| other)
-                                    })
-                            }
-                            _ => None,
-                        }
-                    };
-                    if let Some(other_pk) = other_pk_opt {
-                        let clients = state.clients.read().await;
-                        if let Some(sender) = clients.get(other_pk.as_bytes()) {
-                            let _ = sender.try_send(
-                                farder_protocol::server::ServerEvent::VoiceCallEnded { channel_id },
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        EventTarget::VoiceSetMute { pk, muted } => {
-            let mut muted_set = state.voice.muted.write().await;
-            if muted {
-                muted_set.insert(pk);
-            } else {
-                muted_set.remove(&pk);
-            }
-        }
-        EventTarget::VoiceSetDeafen { pk, deafened } => {
-            let mut deaf_set = state.voice.deafened.write().await;
-            if deafened {
-                deaf_set.insert(pk);
-            } else {
-                deaf_set.remove(&pk);
             }
         }
         // Media-stream targets — dispatching implemented in MST-10.
