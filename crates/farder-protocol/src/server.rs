@@ -19,7 +19,7 @@ pub enum ChannelType {
     Voice,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TrackKind {
     Audio,
     Video,

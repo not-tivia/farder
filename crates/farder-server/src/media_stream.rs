@@ -181,6 +181,100 @@ impl Default for StreamState {
     }
 }
 
+pub struct MediaConfig {
+    pub audio_max_bps: u64,
+    pub video_max_bps: u64,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            audio_max_bps: 64_000,
+            video_max_bps: 2_000_000,
+        }
+    }
+}
+
+/// Result of inspecting an incoming media datagram.
+pub enum IngressDecision {
+    /// Frame is valid, authenticated, under-cap; forward to these session_ids.
+    Forward { recipients: Vec<SessionId> },
+    /// Frame must be dropped silently (with an ops counter increment).
+    Drop(DropReason),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DropReason {
+    UnknownSession,
+    SessionConnectionMismatch,
+    TrackNotEnabled,
+    BandwidthCap,
+    ParseError(MediaFrameError),
+}
+
+/// Inspect an inbound media datagram and return who to fan it out to.
+///
+/// Does NOT actually send anything — pure decision function. The caller
+/// (the QUIC datagram receive loop in connection.rs) iterates the returned
+/// recipients and writes the frame bytes to each.
+pub fn on_frame_ingress(
+    state: &mut StreamState,
+    config: &MediaConfig,
+    sending_connection_token: u64,
+    raw: &[u8],
+    now_ms: u64,
+) -> IngressDecision {
+    let frame = match parse_media_frame(raw) {
+        Ok(f) => f,
+        Err(e) => return IngressDecision::Drop(DropReason::ParseError(e)),
+    };
+
+    let session = match state.sessions.get_mut(&frame.session_id) {
+        Some(s) => s,
+        None => return IngressDecision::Drop(DropReason::UnknownSession),
+    };
+
+    if session.connection_token != sending_connection_token {
+        return IngressDecision::Drop(DropReason::SessionConnectionMismatch);
+    }
+    if !session.active_tracks.contains(&frame.kind) {
+        return IngressDecision::Drop(DropReason::TrackNotEnabled);
+    }
+
+    // Per-track token bucket lookup (lazy-init on first frame of a kind).
+    let cap = match frame.kind {
+        TrackKind::Audio => config.audio_max_bps,
+        TrackKind::Video => config.video_max_bps,
+    };
+    let bucket = session.buckets.entry(frame.kind).or_insert_with(|| TokenBucket::new(cap));
+
+    if !bucket.try_consume(raw.len() as u64) {
+        return IngressDecision::Drop(DropReason::BandwidthCap);
+    }
+
+    match frame.kind {
+        TrackKind::Audio => session.last_audio_frame_ms = Some(now_ms),
+        TrackKind::Video => session.last_video_frame_ms = Some(now_ms),
+    }
+
+    let channel_id = session.channel_id;
+    let sender_session = frame.session_id;
+    let recipients: Vec<SessionId> = state.sessions.iter()
+        .filter_map(|(sid, s)| {
+            if *sid != sender_session
+                && s.channel_id == channel_id
+                && !state.deafened.contains(sid)
+            {
+                Some(*sid)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    IngressDecision::Forward { recipients }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +359,105 @@ mod tests {
         sleep(Duration::from_millis(100));
         assert!(b.try_consume(500),
             "should have refilled at least 500 bytes after 100ms at 10KB/s");
+    }
+
+    use farder_crypto::identity::PublicKey;
+
+    fn fake_pubkey(n: u8) -> PublicKey {
+        PublicKey::from_bytes([n; 32])
+    }
+
+    fn install_session(
+        state: &mut StreamState,
+        session_id: SessionId,
+        connection_token: u64,
+        channel_id: u64,
+        with_audio: bool,
+    ) {
+        let mut tracks = HashSet::new();
+        if with_audio { tracks.insert(TrackKind::Audio); }
+        state.sessions.insert(session_id, ServerSession {
+            connection_token,
+            channel_id,
+            public_key: fake_pubkey(connection_token as u8),
+            display_name: format!("user{}", connection_token),
+            active_tracks: tracks,
+            buckets: HashMap::new(),
+            last_audio_frame_ms: None,
+            last_video_frame_ms: None,
+        });
+    }
+
+    #[test]
+    fn ingress_drops_unknown_session() {
+        let mut state = StreamState::new();
+        let config = MediaConfig::default();
+        let bogus = [99u8; 16];
+        let frame = build_media_frame(TrackKind::Audio, 1, &bogus, b"x");
+        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+            IngressDecision::Drop(DropReason::UnknownSession) => {}
+            _ => panic!("expected UnknownSession drop"),
+        }
+    }
+
+    #[test]
+    fn ingress_drops_session_connection_mismatch() {
+        let mut state = StreamState::new();
+        let config = MediaConfig::default();
+        let session = [1u8; 16];
+        install_session(&mut state, session, 1, 100, true);
+        let frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
+        match on_frame_ingress(&mut state, &config, 2, &frame, 0) {
+            IngressDecision::Drop(DropReason::SessionConnectionMismatch) => {}
+            _ => panic!("expected SessionConnectionMismatch drop"),
+        }
+    }
+
+    #[test]
+    fn ingress_drops_track_not_enabled() {
+        let mut state = StreamState::new();
+        let config = MediaConfig::default();
+        let session = [1u8; 16];
+        install_session(&mut state, session, 1, 100, false); // no audio
+        let frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
+        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+            IngressDecision::Drop(DropReason::TrackNotEnabled) => {}
+            _ => panic!("expected TrackNotEnabled drop"),
+        }
+    }
+
+    #[test]
+    fn ingress_forwards_to_other_sessions_in_channel() {
+        let mut state = StreamState::new();
+        let config = MediaConfig::default();
+        let sender = [1u8; 16];
+        let other = [2u8; 16];
+        let other_channel = [3u8; 16];
+        install_session(&mut state, sender, 1, 100, true);
+        install_session(&mut state, other, 2, 100, true);
+        install_session(&mut state, other_channel, 3, 999, true);
+        let frame = build_media_frame(TrackKind::Audio, 1, &sender, b"x");
+        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+            IngressDecision::Forward { recipients } => {
+                assert_eq!(recipients, vec![other]);
+            }
+            _ => panic!("expected Forward"),
+        }
+    }
+
+    #[test]
+    fn ingress_skips_deafened_recipients() {
+        let mut state = StreamState::new();
+        let config = MediaConfig::default();
+        let sender = [1u8; 16];
+        let other = [2u8; 16];
+        install_session(&mut state, sender, 1, 100, true);
+        install_session(&mut state, other, 2, 100, true);
+        state.deafened.insert(other);
+        let frame = build_media_frame(TrackKind::Audio, 1, &sender, b"x");
+        match on_frame_ingress(&mut state, &config, 1, &frame, 0) {
+            IngressDecision::Forward { recipients } => assert!(recipients.is_empty()),
+            _ => panic!("expected Forward"),
+        }
     }
 }
