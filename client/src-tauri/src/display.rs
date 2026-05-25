@@ -104,7 +104,13 @@ impl Default for MockDisplayBackend {
 
 impl DisplayBackend for MockDisplayBackend {
     fn enumerate_sources(&self) -> Result<Vec<DisplaySource>, String> {
-        Err("not yet implemented".into())
+        Ok(vec![DisplaySource {
+            id: "mock-display".into(),
+            kind: DisplaySourceKind::Screen,
+            label: "Mock Display 1280×720".into(),
+            width: 1280,
+            height: 720,
+        }])
     }
     fn start_capture(
         &self,
@@ -118,5 +124,21 @@ impl DisplayBackend for MockDisplayBackend {
     }
     fn backend_name(&self) -> &'static str {
         "mock"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_enumerate_returns_one_source() {
+        let backend = MockDisplayBackend::new();
+        let sources = backend.enumerate_sources().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].id, "mock-display");
+        assert_eq!(sources[0].width, 1280);
+        assert_eq!(sources[0].height, 720);
+        assert!(matches!(sources[0].kind, DisplaySourceKind::Screen));
     }
 }
