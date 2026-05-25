@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 /// Log a message at most once per process, keyed by `tag`. Used by factory
 /// functions to warn-on-fallback without spamming. When display.rs lands
 /// (Task 9), promote this to a shared utility module.
-fn log_once(tag: &'static str, message: &str) {
+pub(crate) fn log_once(tag: &'static str, message: &str) {
     static SEEN: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = seen.lock().expect("log_once mutex poisoned");

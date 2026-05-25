@@ -284,6 +284,25 @@ impl DisplayBackend for MockDisplayBackend {
     }
 }
 
+/// Construct a DisplayBackend based on the FARDER_DISPLAY_BACKEND env var.
+/// - "mock" → MockDisplayBackend
+/// - anything else (or unset) → real backend if shipped, else mock-with-warn
+///
+/// The screensharing sub-project replaces the fallback arm with a real
+/// scrap/native-backed implementation.
+pub fn make_display_backend() -> Box<dyn DisplayBackend> {
+    match std::env::var("FARDER_DISPLAY_BACKEND").as_deref() {
+        Ok("mock") => Box::new(MockDisplayBackend::new()),
+        _ => {
+            crate::audio::log_once(
+                "display.real_not_shipped",
+                "[display] real backend not yet shipped; using mock",
+            );
+            Box::new(MockDisplayBackend::new())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
