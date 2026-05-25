@@ -19,6 +19,12 @@ pub enum ChannelType {
     Voice,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackKind {
+    Audio,
+    Video,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct VoiceMember {
     pub public_key: PublicKey,
@@ -242,6 +248,18 @@ pub enum ServerRequest {
     StopVoice,
     SetVoiceMute { muted: bool },
     SetVoiceDeafen { deafened: bool },
+    JoinStream { channel_id: u64 },
+    LeaveStream,
+    EnableTrack { kind: TrackKind },
+    DisableTrack { kind: TrackKind },
+    SetDeafen { deafened: bool },
+    OfferStreamKey {
+        kind: TrackKind,
+        wrapped_keys: Vec<(PublicKey, Vec<u8>)>,
+    },
+    JoinChannelMedia { channel_id: u64 },
+    LeaveChannelMedia { channel_id: u64 },
+    GetMediaState { channel_id: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -280,6 +298,8 @@ pub enum ServerResponse {
     DmOpened { channel: ChannelInfo, participant: MemberInfo },
     DmList { dms: Vec<DmEntry> },
     VoiceStateResp { participants: Vec<VoiceMember> },
+    StreamSessionStarted { session_id: [u8; 16] },
+    MediaStateResp { participants: Vec<VoiceMember> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -539,6 +559,18 @@ mod tests {
             ServerRequest::StopVoice,
             ServerRequest::SetVoiceMute { muted: true },
             ServerRequest::SetVoiceDeafen { deafened: false },
+            ServerRequest::JoinStream { channel_id: 7 },
+            ServerRequest::LeaveStream,
+            ServerRequest::EnableTrack { kind: TrackKind::Audio },
+            ServerRequest::DisableTrack { kind: TrackKind::Video },
+            ServerRequest::SetDeafen { deafened: true },
+            ServerRequest::OfferStreamKey {
+                kind: TrackKind::Audio,
+                wrapped_keys: vec![(kp.public_key(), vec![1, 2, 3, 4])],
+            },
+            ServerRequest::JoinChannelMedia { channel_id: 7 },
+            ServerRequest::LeaveChannelMedia { channel_id: 7 },
+            ServerRequest::GetMediaState { channel_id: 7 },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };
