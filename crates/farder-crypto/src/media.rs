@@ -51,6 +51,75 @@ pub fn unwrap_stream_key(
     Ok(key)
 }
 
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, KeyInit};
+use chacha20poly1305::aead::{Aead, Payload};
+
+pub const SESSION_ID_LEN: usize = 16;
+pub type SessionId = [u8; SESSION_ID_LEN];
+
+/// Derive the 12-byte AEAD nonce for a media frame.
+///
+/// `nonce[0..4]  = session_id[0..4]`  — ties nonce to session
+/// `nonce[4..12] = seq.to_be_bytes()` — monotonic per stream
+///
+/// Unique by construction provided `seq` is monotonic per session (u64
+/// wraps after 18 quintillion frames — practically never).
+pub fn media_frame_nonce(session_id: &SessionId, seq: u64) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[0..4].copy_from_slice(&session_id[0..4]);
+    nonce[4..12].copy_from_slice(&seq.to_be_bytes());
+    nonce
+}
+
+/// Seal one media frame.
+///
+/// Encrypts `speaker_pk || codec_payload` under `key` with deterministic
+/// nonce and AAD = `header_aad` (the 28 header bytes — binds the header
+/// to the ciphertext). Returns ciphertext including the 16-byte AEAD tag.
+pub fn seal_media_frame(
+    key: &[u8; 32],
+    seq: u64,
+    session_id: &SessionId,
+    header_aad: &[u8],
+    speaker_pk: &[u8; 32],
+    codec_payload: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let nonce_bytes = media_frame_nonce(session_id, seq);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let mut plaintext = Vec::with_capacity(32 + codec_payload.len());
+    plaintext.extend_from_slice(speaker_pk);
+    plaintext.extend_from_slice(codec_payload);
+
+    cipher.encrypt(nonce, Payload { msg: &plaintext, aad: header_aad })
+        .map_err(|e| anyhow!("AEAD encrypt: {e}"))
+}
+
+/// Open and verify one media frame. Returns `(speaker_pk, codec_payload)`.
+pub fn open_media_frame(
+    key: &[u8; 32],
+    seq: u64,
+    session_id: &SessionId,
+    header_aad: &[u8],
+    ciphertext: &[u8],
+) -> Result<([u8; 32], Vec<u8>)> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let nonce_bytes = media_frame_nonce(session_id, seq);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let plaintext = cipher.decrypt(nonce, Payload { msg: ciphertext, aad: header_aad })
+        .map_err(|_| anyhow!("AEAD decrypt failed (wrong key / nonce / aad / tampered ciphertext)"))?;
+
+    if plaintext.len() < 32 {
+        return Err(anyhow!("plaintext too short to contain speaker_pk"));
+    }
+    let mut speaker_pk = [0u8; 32];
+    speaker_pk.copy_from_slice(&plaintext[..32]);
+    let codec_payload = plaintext[32..].to_vec();
+    Ok((speaker_pk, codec_payload))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +176,92 @@ mod tests {
             &alice_pk,
         );
         assert!(result.is_err(), "charlie should not be able to unwrap Bob's key");
+    }
+
+    fn fixed_session_id() -> SessionId {
+        [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    }
+
+    fn fixed_speaker_pk() -> [u8; 32] {
+        [42u8; 32]
+    }
+
+    fn fake_header_aad() -> Vec<u8> {
+        // 28 bytes — version | type | track_id | codec_id | seq | session_id
+        vec![
+            0x02, 0x01, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 5,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+        ]
+    }
+
+    #[test]
+    fn seal_open_roundtrip() {
+        let key = derive_stream_key();
+        let session = fixed_session_id();
+        let speaker = fixed_speaker_pk();
+        let aad = fake_header_aad();
+        let payload = b"hello opus";
+
+        let ct = seal_media_frame(&key, 5, &session, &aad, &speaker, payload).unwrap();
+        let (got_speaker, got_payload) = open_media_frame(&key, 5, &session, &aad, &ct).unwrap();
+        assert_eq!(got_speaker, speaker);
+        assert_eq!(got_payload, payload);
+    }
+
+    #[test]
+    fn open_rejects_tampered_ciphertext() {
+        let key = derive_stream_key();
+        let session = fixed_session_id();
+        let speaker = fixed_speaker_pk();
+        let aad = fake_header_aad();
+
+        let mut ct = seal_media_frame(&key, 5, &session, &aad, &speaker, b"hi").unwrap();
+        ct[0] ^= 0xff;
+        assert!(open_media_frame(&key, 5, &session, &aad, &ct).is_err());
+    }
+
+    #[test]
+    fn open_rejects_tampered_aad() {
+        let key = derive_stream_key();
+        let session = fixed_session_id();
+        let speaker = fixed_speaker_pk();
+        let aad = fake_header_aad();
+
+        let ct = seal_media_frame(&key, 5, &session, &aad, &speaker, b"hi").unwrap();
+        let mut bad_aad = aad.clone();
+        bad_aad[1] = 0x02;
+        assert!(open_media_frame(&key, 5, &session, &bad_aad, &ct).is_err());
+    }
+
+    #[test]
+    fn open_rejects_wrong_key() {
+        let key = derive_stream_key();
+        let other_key = derive_stream_key();
+        let session = fixed_session_id();
+        let speaker = fixed_speaker_pk();
+        let aad = fake_header_aad();
+
+        let ct = seal_media_frame(&key, 5, &session, &aad, &speaker, b"hi").unwrap();
+        assert!(open_media_frame(&other_key, 5, &session, &aad, &ct).is_err());
+    }
+
+    #[test]
+    fn open_rejects_wrong_seq() {
+        let key = derive_stream_key();
+        let session = fixed_session_id();
+        let speaker = fixed_speaker_pk();
+        let aad = fake_header_aad();
+
+        let ct = seal_media_frame(&key, 5, &session, &aad, &speaker, b"hi").unwrap();
+        assert!(open_media_frame(&key, 6, &session, &aad, &ct).is_err());
+    }
+
+    #[test]
+    fn nonce_derivation_is_unique_per_seq() {
+        let session = fixed_session_id();
+        let n1 = media_frame_nonce(&session, 1);
+        let n2 = media_frame_nonce(&session, 2);
+        assert_ne!(n1, n2);
     }
 }
