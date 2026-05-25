@@ -8,6 +8,7 @@ pub mod db;
 pub mod events;
 pub mod handlers;
 pub mod invites;
+pub mod media_stream;
 pub mod members;
 pub mod messages;
 pub mod permissions;
