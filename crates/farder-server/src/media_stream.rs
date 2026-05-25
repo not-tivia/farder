@@ -331,6 +331,28 @@ pub fn compute_activity_transitions(
     (transitions, new_active)
 }
 
+use tokio::sync::RwLock as TokioRwLock;
+
+/// Process-wide map of per-channel media stream state.
+/// One `StreamState` per active voice/media channel.
+pub struct MediaStateMap {
+    pub channels: TokioRwLock<HashMap<u64, StreamState>>,
+}
+
+impl MediaStateMap {
+    pub fn new() -> Self {
+        Self {
+            channels: TokioRwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for MediaStateMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

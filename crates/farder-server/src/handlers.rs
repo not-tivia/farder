@@ -1518,20 +1518,86 @@ pub fn handle_request(
             ok(ServerResponse::AuditEventsList { events })
         }
 
-        // Temporary catch-all for the new media-stream arms (JoinStream,
-        // EnableTrack, OfferStreamKey, JoinChannelMedia, etc.) added in
-        // MST-3. Real handlers ship in MST-10; this stub keeps the
-        // workspace building until then.
+        // Lobby-presence arms (mirrors JoinVoice/LeaveVoice/GetVoiceState,
+        // verbatim copy with Voice→Media rename on emitted events).
+        ServerRequest::JoinChannelMedia { channel_id } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let channel = channels::get_channel(conn, channel_id)?
+                .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+            if channel.channel_type != ChannelType::Voice {
+                return err("not a voice channel");
+            }
+            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::CONNECT) {
+                return err("missing CONNECT permission");
+            }
+            let left_channels = channels::leave_all_voice(conn, member)?;
+            let mut events: Vec<BroadcastEvent> = Vec::new();
+            for left_ch in left_channels {
+                events.push(BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::MediaLeft { channel_id: left_ch, public_key: member.clone() },
+                });
+            }
+            channels::join_voice(conn, channel_id, member)?;
+            let display_name = members::get_member(conn, member)?
+                .map(|m| m.display_name).unwrap_or_default();
+            events.push(BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::MediaJoined { channel_id, public_key: member.clone(), display_name },
+            });
+            ok_with(ServerResponse::Ok, events)
+        }
+
+        ServerRequest::LeaveChannelMedia { channel_id } => {
+            let channel = channels::get_channel(conn, channel_id)?;
+            channels::leave_voice(conn, channel_id, member)?;
+            let mut events = vec![
+                BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::MediaLeft { channel_id, public_key: member.clone() },
+                },
+            ];
+            if let Some(ch) = channel {
+                if ch.channel_type == ChannelType::Dm {
+                    let remaining = channels::get_voice_participants(conn, channel_id)?;
+                    if remaining.is_empty() {
+                        if let Some((_, other_pk)) = channels::list_dm_channels(conn, member)?
+                            .into_iter()
+                            .find(|(c, _)| c.id == channel_id)
+                        {
+                            events.push(BroadcastEvent {
+                                target: EventTarget::Members(vec![other_pk]),
+                                event: ServerEvent::StreamCallEnded { channel_id },
+                            });
+                        }
+                    }
+                }
+            }
+            ok_with(ServerResponse::Ok, events)
+        }
+
+        ServerRequest::GetMediaState { channel_id } => {
+            let participants = channels::get_voice_participants(conn, channel_id)?;
+            let mut voice_members = Vec::new();
+            for (pk, joined_at) in participants {
+                let name = members::get_member(conn, &pk)?
+                    .map(|m| m.display_name).unwrap_or_default();
+                voice_members.push(VoiceMember { public_key: pk, display_name: name, joined_at });
+            }
+            ok(ServerResponse::MediaStateResp { participants: voice_members })
+        }
+
+        // Temporary catch-all for stream/track arms — implemented in MST-10b.
         ServerRequest::JoinStream { .. }
         | ServerRequest::LeaveStream
         | ServerRequest::EnableTrack { .. }
         | ServerRequest::DisableTrack { .. }
         | ServerRequest::SetDeafen { .. }
-        | ServerRequest::OfferStreamKey { .. }
-        | ServerRequest::JoinChannelMedia { .. }
-        | ServerRequest::LeaveChannelMedia { .. }
-        | ServerRequest::GetMediaState { .. } => {
-            ok(ServerResponse::Error { reason: "media-stream arm not yet implemented".into() })
+        | ServerRequest::OfferStreamKey { .. } => {
+            ok(ServerResponse::Error { reason: "media stream/track arm not yet implemented (MST-10b)".into() })
         }
     }
 }
