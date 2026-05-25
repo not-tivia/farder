@@ -194,12 +194,62 @@ impl AudioBackend for MockAudioBackend {
     fn start_playback(
         &self,
         _device_id: Option<&str>,
-        _format: AudioFormat,
+        format: AudioFormat,
     ) -> Result<mpsc::SyncSender<PcmChunk>, String> {
-        Err("not yet implemented".into())
+        let mut playback_slot = self.playback.lock().map_err(|e| e.to_string())?;
+        if playback_slot.is_some() {
+            return Err("playback already active".into());
+        }
+
+        if format.channels == 0 || format.samples_per_chunk == 0 {
+            return Err(format!("invalid AudioFormat: {:?}", format));
+        }
+        // SyncSender buffer sized for ~500ms of audio at the requested format.
+        // chunks_per_500ms = (sample_rate * 0.5) / (samples_per_chunk / channels)
+        let frames_per_chunk = format.samples_per_chunk / format.channels as usize;
+        let chunks_per_500ms = ((format.sample_rate as f32 * 0.5)
+            / frames_per_chunk.max(1) as f32)
+            .ceil() as usize;
+        let buffer = chunks_per_500ms.max(2);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let (tx, rx) = mpsc::sync_channel::<PcmChunk>(buffer);
+
+        let handle = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                // Drain with a short timeout so the stop flag is honoured promptly.
+                match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(_chunk) => {
+                        // Mock discards. Future: increment a counter for stats.
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+
+        *playback_slot = Some(handle);
+        *self.playback_stop.lock().map_err(|e| e.to_string())? = Some(stop);
+        Ok(tx)
     }
+
     fn stop_playback(&self) -> Result<(), String> {
-        Err("not yet implemented".into())
+        if let Some(stop) = self.playback_stop.lock().map_err(|e| e.to_string())?.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = self.playback.lock().map_err(|e| e.to_string())?.take() {
+            let (done_tx, done_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = handle.join();
+                let _ = done_tx.send(());
+            });
+            match done_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(()) => {}
+                Err(_) => eprintln!("[audio] mock playback thread did not join within 200ms"),
+            }
+        }
+        Ok(())
     }
     fn backend_name(&self) -> &'static str {
         "mock"
