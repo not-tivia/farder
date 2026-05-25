@@ -364,6 +364,40 @@ pub enum ServerEvent {
         public_key: PublicKey,
         speaking: bool,
     },
+    MediaJoined  { channel_id: u64, public_key: PublicKey, display_name: String },
+    MediaLeft    { channel_id: u64, public_key: PublicKey },
+    StreamJoined {
+        channel_id: u64,
+        public_key: PublicKey,
+        display_name: String,
+        session_id: [u8; 16],
+        active_tracks: Vec<TrackKind>,
+    },
+    StreamLeft {
+        channel_id: u64,
+        session_id: [u8; 16],
+    },
+    TrackEnabled  { channel_id: u64, session_id: [u8; 16], kind: TrackKind },
+    TrackDisabled { channel_id: u64, session_id: [u8; 16], kind: TrackKind },
+    TrackActivityChanged {
+        channel_id: u64,
+        session_id: [u8; 16],
+        kind: TrackKind,
+        active: bool,
+    },
+    StreamCallIncoming {
+        channel_id: u64,
+        caller: PublicKey,
+        caller_name: String,
+    },
+    StreamCallEnded { channel_id: u64 },
+    StreamKeyOffer {
+        channel_id: u64,
+        sender: PublicKey,
+        session_id: [u8; 16],
+        kind: TrackKind,
+        wrapped_key: Vec<u8>,
+    },
 }
 
 #[cfg(test)]
@@ -582,6 +616,32 @@ mod tests {
             ServerEvent::VoiceCallIncoming { channel_id: 1, caller: kp.public_key(), caller_name: "alice".into() },
             ServerEvent::VoiceCallEnded { channel_id: 1 },
             ServerEvent::VoiceSpeakingChanged { channel_id: 1, public_key: kp.public_key(), speaking: true },
+            ServerEvent::MediaJoined { channel_id: 1, public_key: kp.public_key(), display_name: "alice".into() },
+            ServerEvent::MediaLeft   { channel_id: 1, public_key: kp.public_key() },
+            ServerEvent::StreamJoined {
+                channel_id: 1,
+                public_key: kp.public_key(),
+                display_name: "alice".into(),
+                session_id: [9u8; 16],
+                active_tracks: vec![TrackKind::Audio],
+            },
+            ServerEvent::StreamLeft { channel_id: 1, session_id: [9u8; 16] },
+            ServerEvent::TrackEnabled  { channel_id: 1, session_id: [9u8; 16], kind: TrackKind::Audio },
+            ServerEvent::TrackDisabled { channel_id: 1, session_id: [9u8; 16], kind: TrackKind::Video },
+            ServerEvent::TrackActivityChanged {
+                channel_id: 1, session_id: [9u8; 16], kind: TrackKind::Audio, active: true,
+            },
+            ServerEvent::StreamCallIncoming {
+                channel_id: 1, caller: kp.public_key(), caller_name: "alice".into(),
+            },
+            ServerEvent::StreamCallEnded { channel_id: 1 },
+            ServerEvent::StreamKeyOffer {
+                channel_id: 1,
+                sender: kp.public_key(),
+                session_id: [9u8; 16],
+                kind: TrackKind::Audio,
+                wrapped_key: vec![10, 11, 12],
+            },
         ];
         for ev in events {
             let frame = ServerFrame::Event(ev);
