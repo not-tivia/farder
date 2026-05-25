@@ -5,6 +5,7 @@ mod tenor;
 mod bridge;
 mod commands;
 mod connection;
+mod display;
 mod state;
 mod server_manager;
 mod themes;
