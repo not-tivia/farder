@@ -470,6 +470,7 @@ async fn test_e2e_server_bootstrap_and_chat() {
     send_request(&mut user_send, 4, ServerRequest::AddReaction {
         message_id: msg_id,
         emoji: "👍".to_string(),
+        file_id: None,
     }).await;
     let (_, resp) = recv_response(&mut user_recv).await;
     match resp {
@@ -481,6 +482,7 @@ async fn test_e2e_server_bootstrap_and_chat() {
     send_request(&mut owner_send, 7, ServerRequest::AddReaction {
         message_id: msg_id,
         emoji: "❤️".to_string(),
+        file_id: None,
     }).await;
     let (_, resp) = recv_response(&mut owner_recv).await;
     match resp {
