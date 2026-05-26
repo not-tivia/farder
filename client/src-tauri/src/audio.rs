@@ -272,20 +272,30 @@ impl AudioBackend for MockAudioBackend {
 }
 
 /// Construct an AudioBackend based on the FARDER_AUDIO_BACKEND env var.
-/// - "mock" → MockAudioBackend
-/// - anything else (or unset) → real backend if shipped, else mock-with-warn
-///
-/// The voice (Phase 3) sub-project replaces the fallback arm with a real
-/// cpal/audiopus-backed implementation.
+/// - "mock"  → MockAudioBackend (forced)
+/// - "real"  → CpalAudioBackend (forced)
+/// - unset   → auto-detect: CpalAudioBackend if at least one input device
+///             exists, else MockAudioBackend with a one-time warning.
 pub fn make_audio_backend() -> Box<dyn AudioBackend> {
+    use cpal::traits::HostTrait;
     match std::env::var("FARDER_AUDIO_BACKEND").as_deref() {
         Ok("mock") => Box::new(MockAudioBackend::new()),
+        Ok("real") => Box::new(crate::audio_cpal::CpalAudioBackend::new()),
         _ => {
-            log_once(
-                "audio.real_not_shipped",
-                "[audio] real backend not yet shipped; using mock",
-            );
-            Box::new(MockAudioBackend::new())
+            // Auto-detect: real if there's at least one input device, else mock.
+            let host = cpal::default_host();
+            let has_input = host.input_devices()
+                .map(|mut it| it.next().is_some())
+                .unwrap_or(false);
+            if has_input {
+                Box::new(crate::audio_cpal::CpalAudioBackend::new())
+            } else {
+                log_once(
+                    "audio.no_input_devices",
+                    "[audio] no input devices found; falling back to mock",
+                );
+                Box::new(MockAudioBackend::new())
+            }
         }
     }
 }
@@ -444,5 +454,18 @@ mod tests {
             measured_hz >= lo && measured_hz <= hi,
             "measured Hz {measured_hz} outside [{lo}, {hi}]",
         );
+    }
+
+    #[test]
+    fn make_audio_backend_mock_env_returns_mock() {
+        let prev = std::env::var("FARDER_AUDIO_BACKEND").ok();
+        std::env::set_var("FARDER_AUDIO_BACKEND", "mock");
+        let backend = make_audio_backend();
+        // Restore env var before assertion to avoid leaking on test failure.
+        match prev {
+            Some(v) => std::env::set_var("FARDER_AUDIO_BACKEND", v),
+            None => std::env::remove_var("FARDER_AUDIO_BACKEND"),
+        }
+        assert_eq!(backend.backend_name(), "mock");
     }
 }
