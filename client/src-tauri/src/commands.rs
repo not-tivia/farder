@@ -1839,12 +1839,12 @@ pub fn dm_decrypt(
 }
 
 // ---------------------------------------------------------------------------
-// Voice channel commands
+// Media stream commands (replaces the old voice arms)
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn join_voice(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<(), String> {
-    let response = bridge::send_request(&state, &server_id, ServerRequest::JoinVoice { channel_id })
+pub async fn join_channel_media(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::JoinChannelMedia { channel_id })
         .await.map_err(|e| e.to_string())?;
     match response {
         ServerResponse::Ok => Ok(()),
@@ -1854,8 +1854,8 @@ pub async fn join_voice(state: State<'_, Arc<AppState>>, server_id: String, chan
 }
 
 #[tauri::command]
-pub async fn leave_voice(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<(), String> {
-    let response = bridge::send_request(&state, &server_id, ServerRequest::LeaveVoice { channel_id })
+pub async fn leave_channel_media(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::LeaveChannelMedia { channel_id })
         .await.map_err(|e| e.to_string())?;
     match response {
         ServerResponse::Ok => Ok(()),
@@ -1865,13 +1865,103 @@ pub async fn leave_voice(state: State<'_, Arc<AppState>>, server_id: String, cha
 }
 
 #[tauri::command]
-pub async fn get_voice_state(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<serde_json::Value, String> {
-    let response = bridge::send_request(&state, &server_id, ServerRequest::GetVoiceState { channel_id })
+pub async fn get_media_state(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<serde_json::Value, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetMediaState { channel_id })
         .await.map_err(|e| e.to_string())?;
     match response {
-        ServerResponse::VoiceStateResp { participants } => {
-            Ok(serde_json::to_value(participants).unwrap())
-        }
+        ServerResponse::MediaStateResp { participants } => Ok(serde_json::to_value(participants).unwrap()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn join_stream(state: State<'_, Arc<AppState>>, server_id: String, channel_id: u64) -> Result<Vec<u8>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::JoinStream { channel_id })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::StreamSessionStarted { session_id } => Ok(session_id.to_vec()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn leave_stream(state: State<'_, Arc<AppState>>, server_id: String) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::LeaveStream)
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+fn parse_track_kind(kind: &str) -> Result<farder_protocol::server::TrackKind, String> {
+    match kind {
+        "audio" | "Audio" => Ok(farder_protocol::server::TrackKind::Audio),
+        "video" | "Video" => Ok(farder_protocol::server::TrackKind::Video),
+        other => Err(format!("invalid track kind: {other}")),
+    }
+}
+
+#[tauri::command]
+pub async fn enable_track(state: State<'_, Arc<AppState>>, server_id: String, kind: String) -> Result<(), String> {
+    let kind = parse_track_kind(&kind)?;
+    let response = bridge::send_request(&state, &server_id, ServerRequest::EnableTrack { kind })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn disable_track(state: State<'_, Arc<AppState>>, server_id: String, kind: String) -> Result<(), String> {
+    let kind = parse_track_kind(&kind)?;
+    let response = bridge::send_request(&state, &server_id, ServerRequest::DisableTrack { kind })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn set_deafen(state: State<'_, Arc<AppState>>, server_id: String, deafened: bool) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::SetDeafen { deafened })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn offer_stream_key(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    kind: String,
+    wrapped_keys: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<(), String> {
+    use farder_crypto::identity::PublicKey;
+    let kind = parse_track_kind(&kind)?;
+    let wrapped: Vec<(PublicKey, Vec<u8>)> = wrapped_keys.into_iter()
+        .map(|(pk_bytes, wrapped)| {
+            if pk_bytes.len() != 32 { return Err("pubkey must be 32 bytes".to_string()); }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&pk_bytes);
+            Ok((PublicKey::from_bytes(arr), wrapped))
+        })
+        .collect::<Result<_, _>>()?;
+    let response = bridge::send_request(&state, &server_id,
+        ServerRequest::OfferStreamKey { kind, wrapped_keys: wrapped })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected: {:?}", other)),
     }

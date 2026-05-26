@@ -110,13 +110,16 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:role_deleted", serde_json::json!({ "server_id": sid, "role_id": role_id })),
         ServerEvent::RoleUpdated { role } =>
             app.emit("server:role_updated", serde_json::json!({ "server_id": sid, "role": role })),
-        ServerEvent::VoiceJoined { channel_id, public_key, display_name } =>
-            app.emit("server:voice_joined", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string(), "display_name": display_name })),
-        ServerEvent::VoiceLeft { channel_id, public_key } =>
-            app.emit("server:voice_left", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string() })),
-        ServerEvent::VoiceCallIncoming { .. }
-        | ServerEvent::VoiceCallEnded { .. }
-        | ServerEvent::VoiceSpeakingChanged { .. } => Ok(()), // TODO(VC.14)
+        ServerEvent::MediaJoined { .. }
+        | ServerEvent::MediaLeft { .. }
+        | ServerEvent::StreamJoined { .. }
+        | ServerEvent::StreamLeft { .. }
+        | ServerEvent::TrackEnabled { .. }
+        | ServerEvent::TrackDisabled { .. }
+        | ServerEvent::TrackActivityChanged { .. }
+        | ServerEvent::StreamCallIncoming { .. }
+        | ServerEvent::StreamCallEnded { .. }
+        | ServerEvent::StreamKeyOffer { .. } => Ok(()), // TODO(MST UI)
         _ => Ok(()),
     };
 }
