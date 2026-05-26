@@ -37,10 +37,39 @@ impl Default for CpalAudioBackend {
 
 impl AudioBackend for CpalAudioBackend {
     fn enumerate_input_devices(&self) -> Result<Vec<AudioInputDevice>, String> {
-        Err("not yet implemented".into())
+        let devices = self.host.input_devices()
+            .map_err(|e| format!("input_devices: {e}"))?;
+        let default = self.host.default_input_device()
+            .and_then(|d| d.name().ok());
+        let mut out = Vec::new();
+        for (i, dev) in devices.enumerate() {
+            let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
+            let is_default = default.as_deref() == Some(name.as_str());
+            out.push(AudioInputDevice {
+                id: name.clone(),
+                name: name.clone(),
+                is_default,
+            });
+        }
+        Ok(out)
     }
+
     fn enumerate_output_devices(&self) -> Result<Vec<AudioOutputDevice>, String> {
-        Err("not yet implemented".into())
+        let devices = self.host.output_devices()
+            .map_err(|e| format!("output_devices: {e}"))?;
+        let default = self.host.default_output_device()
+            .and_then(|d| d.name().ok());
+        let mut out = Vec::new();
+        for (i, dev) in devices.enumerate() {
+            let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
+            let is_default = default.as_deref() == Some(name.as_str());
+            out.push(AudioOutputDevice {
+                id: name.clone(),
+                name: name.clone(),
+                is_default,
+            });
+        }
+        Ok(out)
     }
     fn start_capture(
         &self,
@@ -64,5 +93,33 @@ impl AudioBackend for CpalAudioBackend {
     }
     fn backend_name(&self) -> &'static str {
         "cpal"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpal_backend_constructs_without_panicking() {
+        let _backend = CpalAudioBackend::new();
+    }
+
+    #[test]
+    fn cpal_backend_name_is_cpal() {
+        let backend = CpalAudioBackend::new();
+        assert_eq!(backend.backend_name(), "cpal");
+    }
+
+    #[test]
+    fn cpal_enumerate_input_devices_returns_vec() {
+        let backend = CpalAudioBackend::new();
+        let _devices = backend.enumerate_input_devices().expect("enumerate input");
+    }
+
+    #[test]
+    fn cpal_enumerate_output_devices_returns_vec() {
+        let backend = CpalAudioBackend::new();
+        let _devices = backend.enumerate_output_devices().expect("enumerate output");
     }
 }
