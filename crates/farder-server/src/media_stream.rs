@@ -578,4 +578,134 @@ mod tests {
         let (transitions, _new) = compute_activity_transitions(&state, &prev, 1100);
         assert!(transitions.is_empty(), "no transition expected");
     }
+
+    /// Sealed-sender invariant: a media frame's plaintext header bytes
+    /// must NEVER contain any participant's pubkey.
+    ///
+    /// This is the key privacy guarantee — server logs at the frame-routing
+    /// layer should never expose who-said-what. The speaker_pk is inside
+    /// the encrypted ciphertext (verified via the AEAD), not in the routing
+    /// header.
+    #[test]
+    fn sealed_sender_no_pubkey_in_frame_header() {
+        let mut state = StreamState::new();
+        let config = MediaConfig::default();
+        let alice_pk = farder_crypto::identity::PublicKey::from_bytes([0xaa; 32]);
+        let bob_pk = farder_crypto::identity::PublicKey::from_bytes([0xbb; 32]);
+        let alice_session = [1u8; 16];
+        let bob_session = [2u8; 16];
+
+        // Install Alice and Bob in the same channel; both have Audio enabled.
+        let alice_conn = [0xaa; 32];
+        let bob_conn = [0xbb; 32];
+        let mut alice_tracks = HashSet::new();
+        alice_tracks.insert(TrackKind::Audio);
+        state.sessions.insert(alice_session, ServerSession {
+            connection_pk: alice_conn,
+            channel_id: 99,
+            public_key: alice_pk.clone(),
+            display_name: "alice".into(),
+            active_tracks: alice_tracks,
+            buckets: HashMap::new(),
+            last_audio_frame_ms: None,
+            last_video_frame_ms: None,
+        });
+        let mut bob_tracks = HashSet::new();
+        bob_tracks.insert(TrackKind::Audio);
+        state.sessions.insert(bob_session, ServerSession {
+            connection_pk: bob_conn,
+            channel_id: 99,
+            public_key: bob_pk.clone(),
+            display_name: "bob".into(),
+            active_tracks: bob_tracks,
+            buckets: HashMap::new(),
+            last_audio_frame_ms: None,
+            last_video_frame_ms: None,
+        });
+
+        // Alice builds an audio frame. The ciphertext bytes here are opaque
+        // (representing what the AEAD would produce in real flow).
+        let frame = build_media_frame(
+            TrackKind::Audio, 1, &alice_session, b"opaque-ciphertext-bytes",
+        );
+
+        // The 28-byte header MUST NOT contain Alice's pubkey anywhere.
+        let header = &frame[..MEDIA_FRAME_HEADER_LEN];
+        let alice_pk_bytes = alice_pk.as_bytes();
+        for window_start in 0..header.len().saturating_sub(32) {
+            assert_ne!(
+                &header[window_start..window_start + 32],
+                alice_pk_bytes,
+                "frame header must not contain alice's pubkey (sealed sender invariant)",
+            );
+        }
+        let bob_pk_bytes = bob_pk.as_bytes();
+        for window_start in 0..header.len().saturating_sub(32) {
+            assert_ne!(
+                &header[window_start..window_start + 32],
+                bob_pk_bytes,
+                "frame header must not contain bob's pubkey",
+            );
+        }
+
+        // Routing decision: Alice's frame goes to Bob (and only Bob).
+        let decision = on_frame_ingress(&mut state, &config, &alice_conn, &frame, 0);
+        match decision {
+            IngressDecision::Forward { recipients } => {
+                assert_eq!(recipients.len(), 1);
+                assert_eq!(recipients[0], bob_session);
+            }
+            _ => panic!("expected Forward, got Drop"),
+        }
+    }
+
+    /// Multi-track lifecycle: same session can enable Audio first then Video.
+    #[test]
+    fn multi_track_lifecycle_audio_then_video() {
+        let mut state = StreamState::new();
+        let config = MediaConfig::default();
+        let session = [1u8; 16];
+        let conn = [0xaa; 32];
+        // Install with NO active tracks yet.
+        state.sessions.insert(session, ServerSession {
+            connection_pk: conn,
+            channel_id: 100,
+            public_key: farder_crypto::identity::PublicKey::from_bytes([0xaa; 32]),
+            display_name: "alice".into(),
+            active_tracks: HashSet::new(),
+            buckets: HashMap::new(),
+            last_audio_frame_ms: None,
+            last_video_frame_ms: None,
+        });
+
+        // Frame for audio -- dropped because Audio isn't enabled yet.
+        let audio_frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
+        match on_frame_ingress(&mut state, &config, &conn, &audio_frame, 0) {
+            IngressDecision::Drop(DropReason::TrackNotEnabled) => {}
+            _ => panic!("expected TrackNotEnabled drop for audio"),
+        }
+
+        // Enable Audio.
+        state.sessions.get_mut(&session).unwrap().active_tracks.insert(TrackKind::Audio);
+
+        // Audio now admitted (and there are no other recipients in channel 100).
+        match on_frame_ingress(&mut state, &config, &conn, &audio_frame, 0) {
+            IngressDecision::Forward { recipients } => assert!(recipients.is_empty()),
+            _ => panic!("expected Forward (empty) for audio"),
+        }
+
+        // Video frame still dropped -- Video not yet enabled.
+        let video_frame = build_media_frame(TrackKind::Video, 1, &session, b"y");
+        match on_frame_ingress(&mut state, &config, &conn, &video_frame, 0) {
+            IngressDecision::Drop(DropReason::TrackNotEnabled) => {}
+            _ => panic!("expected TrackNotEnabled drop for video"),
+        }
+
+        // Enable Video. Both kinds now flow.
+        state.sessions.get_mut(&session).unwrap().active_tracks.insert(TrackKind::Video);
+        match on_frame_ingress(&mut state, &config, &conn, &video_frame, 0) {
+            IngressDecision::Forward { .. } => {}
+            _ => panic!("expected Forward for video"),
+        }
+    }
 }
