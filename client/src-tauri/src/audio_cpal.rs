@@ -81,6 +81,47 @@ fn build_input_config(
     Ok(chosen.with_sample_rate(want_sr).config())
 }
 
+fn pick_output_device(host: &cpal::Host, device_id: Option<&str>) -> Result<cpal::Device, String> {
+    match device_id {
+        None => host.default_output_device()
+            .ok_or_else(|| "no default output device".to_string()),
+        Some(name) => host.output_devices()
+            .map_err(|e| format!("output_devices: {e}"))?
+            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+            .ok_or_else(|| format!("output device not found: {name}")),
+    }
+}
+
+fn build_output_config(
+    device: &cpal::Device,
+    format: &AudioFormat,
+) -> Result<cpal::StreamConfig, String> {
+    use cpal::SampleRate;
+    let want_sr = SampleRate(format.sample_rate);
+    let want_channels = format.channels;
+    let configs = device.supported_output_configs()
+        .map_err(|e| format!("supported_output_configs: {e}"))?;
+    let mut exact_match: Option<cpal::SupportedStreamConfigRange> = None;
+    let mut stereo_match: Option<cpal::SupportedStreamConfigRange> = None;
+    for cfg in configs {
+        if cfg.sample_format() != cpal::SampleFormat::F32 {
+            continue;
+        }
+        if cfg.min_sample_rate() <= want_sr && want_sr <= cfg.max_sample_rate() {
+            if cfg.channels() == want_channels {
+                exact_match = Some(cfg);
+                break;
+            }
+            if want_channels == 1 && cfg.channels() == 2 && stereo_match.is_none() {
+                stereo_match = Some(cfg);
+            }
+        }
+    }
+    let chosen = exact_match.or(stereo_match)
+        .ok_or_else(|| format!("no supported output config for {format:?}"))?;
+    Ok(chosen.with_sample_rate(want_sr).config())
+}
+
 impl AudioBackend for CpalAudioBackend {
     fn enumerate_input_devices(&self) -> Result<Vec<AudioInputDevice>, String> {
         let devices = self.host.input_devices()
@@ -187,13 +228,77 @@ impl AudioBackend for CpalAudioBackend {
     }
     fn start_playback(
         &self,
-        _device_id: Option<&str>,
-        _format: AudioFormat,
+        device_id: Option<&str>,
+        format: AudioFormat,
     ) -> Result<mpsc::SyncSender<PcmChunk>, String> {
-        Err("not yet implemented".into())
+        let mut slot = self.playback_stream.lock()
+            .map_err(|e| format!("playback lock: {e}"))?;
+        if slot.is_some() {
+            return Err("playback already active".into());
+        }
+        if format.channels == 0 || format.samples_per_chunk == 0 {
+            return Err(format!("invalid AudioFormat: {format:?}"));
+        }
+
+        let device = pick_output_device(&self.host, device_id)?;
+        let cpal_config = build_output_config(&device, &format)?;
+        let dev_channels = cpal_config.channels as usize;
+        let want_channels = format.channels as usize;
+
+        // Buffer sized for ~500ms of audio (matches the mock's behavior).
+        let frames_per_chunk = (format.samples_per_chunk / want_channels).max(1);
+        let chunks_per_500ms = ((format.sample_rate as f32 * 0.5)
+            / frames_per_chunk as f32).ceil() as usize;
+        let buf = chunks_per_500ms.max(2);
+        let (tx, rx) = mpsc::sync_channel::<PcmChunk>(buf);
+
+        let mut pending: Vec<f32> = Vec::new();
+
+        let stream = device.build_output_stream(
+            &cpal_config,
+            move |out: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                // Refill `pending` from the channel as needed.
+                while pending.len() < out.len() {
+                    match rx.try_recv() {
+                        Ok(chunk) => {
+                            if dev_channels == want_channels {
+                                pending.extend_from_slice(&chunk.samples);
+                            } else if want_channels == 1 && dev_channels == 2 {
+                                // Mono -> stereo: duplicate each sample.
+                                for &s in &chunk.samples {
+                                    pending.push(s);
+                                    pending.push(s);
+                                }
+                            } else {
+                                pending.extend_from_slice(&chunk.samples);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let take = pending.len().min(out.len());
+                out[..take].copy_from_slice(&pending[..take]);
+                pending.drain(..take);
+                // Underrun -> silence.
+                for s in &mut out[take..] {
+                    *s = 0.0;
+                }
+            },
+            |err| eprintln!("[audio] cpal playback error: {err}"),
+            None,
+        ).map_err(|e| format!("build_output_stream: {e}"))?;
+
+        use cpal::traits::StreamTrait;
+        stream.play().map_err(|e| format!("stream.play: {e}"))?;
+        *slot = Some(SendWrapper::new(stream));
+        Ok(tx)
     }
+
     fn stop_playback(&self) -> Result<(), String> {
-        Err("not yet implemented".into())
+        let mut slot = self.playback_stream.lock()
+            .map_err(|e| format!("playback lock: {e}"))?;
+        slot.take();
+        Ok(())
     }
     fn backend_name(&self) -> &'static str {
         "cpal"
