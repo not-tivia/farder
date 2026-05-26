@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod audio;
+mod audio_cpal;
 mod book;
 mod tenor;
 mod bridge;
