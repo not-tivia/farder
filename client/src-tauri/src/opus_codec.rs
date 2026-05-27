@@ -6,8 +6,10 @@
 
 use audiopus::{
     coder::{Decoder, Encoder},
-    Application, Bitrate, Channels, SampleRate,
+    packet::Packet,
+    Application, Bitrate, Channels, MutSignals, SampleRate,
 };
+use std::convert::TryInto;
 
 pub const OPUS_SAMPLE_RATE: u32 = 48_000;
 /// Samples per 20 ms frame at 48 kHz, MONO. For stereo, the buffer
@@ -121,12 +123,33 @@ impl OpusDecoder {
         })
     }
 
-    pub fn decode(&mut self, _packet: &[u8]) -> Result<Vec<f32>, String> {
-        Err("not yet implemented".into())
+    pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<f32>, String> {
+        if packet.is_empty() {
+            return Err("empty packet; use decode_plc for loss concealment".into());
+        }
+        let pkt = Packet::try_from(packet)
+            .map_err(|e| format!("opus packet parse: {e}"))?;
+        let out: MutSignals<'_, f32> = (&mut self.out_buf[..])
+            .try_into()
+            .map_err(|e| format!("opus mutsig: {e}"))?;
+        let n = self
+            .inner
+            .decode_float(Some(pkt), out, false)
+            .map_err(|e| format!("opus decode: {e}"))?;
+        let samples = n * self.channels as usize;
+        Ok(self.out_buf[..samples].to_vec())
     }
 
     pub fn decode_plc(&mut self) -> Result<Vec<f32>, String> {
-        Err("not yet implemented".into())
+        let out: MutSignals<'_, f32> = (&mut self.out_buf[..])
+            .try_into()
+            .map_err(|e| format!("opus mutsig: {e}"))?;
+        let n = self
+            .inner
+            .decode_float(None, out, false)
+            .map_err(|e| format!("opus PLC: {e}"))?;
+        let samples = n * self.channels as usize;
+        Ok(self.out_buf[..samples].to_vec())
     }
 }
 
@@ -181,5 +204,81 @@ mod tests {
         let bad_ch = OpusDecoder::new(OPUS_SAMPLE_RATE, 3);
         assert!(bad_rate.is_err(), "44.1 kHz should be rejected");
         assert!(bad_ch.is_err(), "3 channels should be rejected");
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_returns_frame_of_correct_length() {
+        let mut enc =
+            OpusEncoder::new(OPUS_SAMPLE_RATE, 1, OPUS_DEFAULT_BITRATE_BPS).expect("encoder ok");
+        let mut dec = OpusDecoder::new(OPUS_SAMPLE_RATE, 1).expect("decoder ok");
+
+        // 440 Hz sine -- clearly audible signal, not silence (avoids DTX).
+        let pcm: Vec<f32> = (0..OPUS_FRAME_SAMPLES_MONO)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / OPUS_SAMPLE_RATE as f32).sin() * 0.5)
+            .collect();
+        let pkt = enc.encode(&pcm).expect("encode ok");
+        assert!(!pkt.is_empty());
+
+        let decoded = dec.decode(&pkt).expect("decode ok");
+        assert_eq!(decoded.len(), OPUS_FRAME_SAMPLES_MONO,
+                   "mono 20ms must round-trip to {} samples; got {}",
+                   OPUS_FRAME_SAMPLES_MONO, decoded.len());
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_preserves_signal_envelope() {
+        // Opus is lossy, so we can't compare sample-by-sample. RMS envelope
+        // should be in the same ballpark after roundtrip.
+        let mut enc =
+            OpusEncoder::new(OPUS_SAMPLE_RATE, 1, OPUS_DEFAULT_BITRATE_BPS).expect("encoder ok");
+        let mut dec = OpusDecoder::new(OPUS_SAMPLE_RATE, 1).expect("decoder ok");
+
+        let pcm: Vec<f32> = (0..OPUS_FRAME_SAMPLES_MONO)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / OPUS_SAMPLE_RATE as f32).sin() * 0.5)
+            .collect();
+        let pkt = enc.encode(&pcm).expect("encode ok");
+
+        // Prime the decoder -- first frame after init carries codec startup transient
+        // (silence / very low energy). Feed two frames; assert on the second.
+        let _ = dec.decode(&pkt).expect("warmup decode ok");
+        let pkt2 = enc.encode(&pcm).expect("encode ok 2");
+        let decoded = dec.decode(&pkt2).expect("decode ok 2");
+
+        let rms_in: f32 = (pcm.iter().map(|x| x * x).sum::<f32>() / pcm.len() as f32).sqrt();
+        let rms_out: f32 = (decoded.iter().map(|x| x * x).sum::<f32>() / decoded.len() as f32).sqrt();
+
+        // Generous bounds: codec startup + low-bitrate Voip mode can attenuate.
+        assert!(rms_out > rms_in * 0.2,
+                "output RMS {rms_out} unreasonably low vs input {rms_in}");
+        assert!(rms_out < rms_in * 2.0,
+                "output RMS {rms_out} unreasonably high vs input {rms_in}");
+    }
+
+    #[test]
+    fn decode_rejects_empty_packet() {
+        let mut dec = OpusDecoder::new(OPUS_SAMPLE_RATE, 1).expect("decoder ok");
+        assert!(dec.decode(&[]).is_err(), "empty packet must error");
+    }
+
+    #[test]
+    fn decode_rejects_garbage() {
+        let mut dec = OpusDecoder::new(OPUS_SAMPLE_RATE, 1).expect("decoder ok");
+        // Random bytes -- should not crash; should either error or produce something.
+        // We accept "either" because some byte sequences happen to be valid Opus.
+        // The contract here is "doesn't panic". If it errors, great. If it succeeds
+        // with garbage output, also acceptable.
+        let _ = dec.decode(&[0xFF; 16]);
+        let _ = dec.decode(&[0x00; 4]);
+        // Pure noise -- large packet of mostly-zeros is more likely to fail than tiny.
+        let _ = dec.decode(&[0x55; 200]);
+        // Test exits cleanly if no panic.
+    }
+
+    #[test]
+    fn decode_plc_returns_concealment_frame() {
+        let mut dec = OpusDecoder::new(OPUS_SAMPLE_RATE, 1).expect("decoder ok");
+        let plc = dec.decode_plc().expect("PLC ok");
+        assert_eq!(plc.len(), OPUS_FRAME_SAMPLES_MONO,
+                   "PLC frame must be one full 20ms frame");
     }
 }
