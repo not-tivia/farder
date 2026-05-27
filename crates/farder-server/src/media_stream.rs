@@ -6,16 +6,25 @@
 // Per spec (2026-05-25-media-stream-transport-design.md): server sees
 // ciphertext only; routes by opaque session_id; per-(session, kind)
 // token-bucket bandwidth caps.
+//
+// Wire-format layout constants (MEDIA_FRAME_VERSION, MEDIA_FRAME_TYPE_AUDIO,
+// MEDIA_FRAME_TYPE_VIDEO, MEDIA_FRAME_HEADER_LEN), SessionId/SESSION_ID_LEN,
+// MediaFrameError, and media_frame_header_aad now live in farder-crypto::media
+// and are re-exported here so existing server-side consumers compile unchanged.
 
 use farder_protocol::server::TrackKind;
 
-pub const MEDIA_FRAME_VERSION: u8 = 0x02;
-pub const MEDIA_FRAME_TYPE_AUDIO: u8 = 0x01;
-pub const MEDIA_FRAME_TYPE_VIDEO: u8 = 0x02;
-pub const MEDIA_FRAME_HEADER_LEN: usize = 28;
-pub const SESSION_ID_LEN: usize = 16;
-
-pub type SessionId = [u8; SESSION_ID_LEN];
+// Re-export shared layout constants and types from farder-crypto.
+pub use farder_crypto::media::{
+    MEDIA_FRAME_VERSION,
+    MEDIA_FRAME_TYPE_AUDIO,
+    MEDIA_FRAME_TYPE_VIDEO,
+    MEDIA_FRAME_HEADER_LEN,
+    SESSION_ID_LEN,
+    SessionId,
+    MediaFrameError,
+    media_frame_header_aad,
+};
 
 #[derive(Debug, PartialEq)]
 pub struct MediaFrame<'a> {
@@ -25,13 +34,6 @@ pub struct MediaFrame<'a> {
     /// Opaque AEAD ciphertext (includes the 16-byte authenticator tag).
     /// The server NEVER decrypts this.
     pub ciphertext: &'a [u8],
-}
-
-#[derive(Debug, PartialEq)]
-pub enum MediaFrameError {
-    TooShort,
-    BadVersion(u8),
-    BadType(u8),
 }
 
 pub fn parse_media_frame(buf: &[u8]) -> Result<MediaFrame<'_>, MediaFrameError> {
@@ -72,12 +74,6 @@ pub fn build_media_frame(
     buf.extend_from_slice(session_id);
     buf.extend_from_slice(ciphertext);
     buf
-}
-
-/// Extract just the 28-byte header (the AEAD AAD for the crypto helpers).
-/// Caller must ensure `buf` is at least that long.
-pub fn media_frame_header_aad(buf: &[u8]) -> &[u8] {
-    &buf[..MEDIA_FRAME_HEADER_LEN]
 }
 
 use std::time::Instant;

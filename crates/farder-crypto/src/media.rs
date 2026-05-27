@@ -4,6 +4,12 @@
 // per-peer key wrap (using the existing DM E2EE primitive), and
 // AEAD seal/open for individual media frames (added in MST-2).
 //
+// Also contains the wire-format layout constants and error types that are
+// shared between the server (farder-server::media_stream) and the client.
+// The higher-level frame builders/parsers that depend on TrackKind from
+// farder-protocol live in farder-server::media_stream to avoid a circular
+// dependency (farder-protocol already depends on farder-crypto).
+//
 // Consumed by `farder-server::media_stream` and the client.
 
 use crate::key_exchange::derive_dm_shared_secret;
@@ -54,8 +60,44 @@ pub fn unwrap_stream_key(
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, KeyInit};
 use chacha20poly1305::aead::{Aead, Payload};
 
+// ── Wire-format layout constants ────────────────────────────────────────────
+//
+// These are re-exported by farder-server::media_stream so that existing
+// server-side consumers continue to compile without changes.
+
+/// Version byte written as buf[0] in every media frame.
+pub const MEDIA_FRAME_VERSION: u8 = 0x02;
+/// Type byte for an audio track (buf[1]).
+pub const MEDIA_FRAME_TYPE_AUDIO: u8 = 0x01;
+/// Type byte for a video track (buf[1]).
+pub const MEDIA_FRAME_TYPE_VIDEO: u8 = 0x02;
+/// Total byte length of the fixed media-frame header that precedes the
+/// AEAD ciphertext: version(1) + type(1) + track_id(1) + codec_id(1) +
+/// seq(8) + session_id(16) = 28 bytes.
+pub const MEDIA_FRAME_HEADER_LEN: usize = 28;
+
 pub const SESSION_ID_LEN: usize = 16;
 pub type SessionId = [u8; SESSION_ID_LEN];
+
+// ── Frame-parse error ────────────────────────────────────────────────────────
+//
+// Moved here from farder-server::media_stream so the client can use it.
+// farder-server re-exports this type unchanged.
+
+#[derive(Debug, PartialEq)]
+pub enum MediaFrameError {
+    TooShort,
+    BadVersion(u8),
+    BadType(u8),
+}
+
+// ── AAD helper ───────────────────────────────────────────────────────────────
+
+/// Extract just the 28-byte header (the AEAD AAD for the crypto helpers).
+/// Caller must ensure `buf` is at least `MEDIA_FRAME_HEADER_LEN` bytes long.
+pub fn media_frame_header_aad(buf: &[u8]) -> &[u8] {
+    &buf[..MEDIA_FRAME_HEADER_LEN]
+}
 
 /// Derive the 12-byte AEAD nonce for a media frame.
 ///
@@ -118,6 +160,83 @@ pub fn open_media_frame(
     speaker_pk.copy_from_slice(&plaintext[..32]);
     let codec_payload = plaintext[32..].to_vec();
     Ok((speaker_pk, codec_payload))
+}
+
+// ── High-level wire-frame helpers ────────────────────────────────────────────
+//
+// These combine the header layout with seal/open so callers don't have to
+// manually coordinate the two-step pattern. They work at the raw byte level
+// (no TrackKind) — Audio is hard-coded because that is the only track the
+// client send/recv paths deal with directly.
+//
+// NOTE: build_media_frame and parse_media_frame (which take/return TrackKind
+// from farder-protocol) live in farder-server::media_stream because
+// farder-protocol already depends on this crate and we cannot create a
+// circular dependency.
+
+/// Build a 28-byte audio media-frame header:
+///   version(1) | AUDIO type(1) | track_id=0(1) | codec_id=0(1) |
+///   seq(8 BE) | session_id(16)
+fn build_audio_header(seq: u64, session_id: &SessionId) -> [u8; MEDIA_FRAME_HEADER_LEN] {
+    let mut hdr = [0u8; MEDIA_FRAME_HEADER_LEN];
+    hdr[0] = MEDIA_FRAME_VERSION;
+    hdr[1] = MEDIA_FRAME_TYPE_AUDIO;
+    // hdr[2] = track_id = 0 (reserved)
+    // hdr[3] = codec_id = 0 (reserved)
+    hdr[4..12].copy_from_slice(&seq.to_be_bytes());
+    hdr[12..28].copy_from_slice(session_id);
+    hdr
+}
+
+/// One-shot: seal an Opus packet and produce the complete audio wire frame.
+///
+/// Wire layout: `header(28) || ciphertext+tag`.
+///
+/// The header is used as AEAD AAD so any tampering of seq, session_id, or
+/// type is detected at open time.
+///
+/// This is the hot-path helper used by `voice::send::SendTask`.
+pub fn seal_audio_packet_to_wire(
+    key: &[u8; 32],
+    seq: u64,
+    session_id: &SessionId,
+    speaker_pk: &[u8; 32],
+    opus_packet: &[u8],
+) -> Result<Vec<u8>> {
+    let hdr = build_audio_header(seq, session_id);
+    let ciphertext = seal_media_frame(key, seq, session_id, &hdr, speaker_pk, opus_packet)?;
+    let mut wire = Vec::with_capacity(MEDIA_FRAME_HEADER_LEN + ciphertext.len());
+    wire.extend_from_slice(&hdr);
+    wire.extend_from_slice(&ciphertext);
+    Ok(wire)
+}
+
+/// One-shot: open and verify a full audio wire frame received from the network.
+///
+/// Returns `(seq, speaker_pk, opus_packet)`.
+///
+/// Used by `voice::recv::RecvTask` (VOICE-8).
+pub fn open_audio_wire_frame(
+    key: &[u8; 32],
+    wire: &[u8],
+) -> Result<(u64, [u8; 32], Vec<u8>)> {
+    if wire.len() < MEDIA_FRAME_HEADER_LEN {
+        return Err(anyhow!("audio wire frame too short: {} bytes", wire.len()));
+    }
+    if wire[0] != MEDIA_FRAME_VERSION {
+        return Err(anyhow!("bad media frame version: 0x{:02x}", wire[0]));
+    }
+    if wire[1] != MEDIA_FRAME_TYPE_AUDIO {
+        return Err(anyhow!("expected audio frame type 0x{:02x}, got 0x{:02x}",
+            MEDIA_FRAME_TYPE_AUDIO, wire[1]));
+    }
+    let seq = u64::from_be_bytes(wire[4..12].try_into().unwrap());
+    let mut session_id = [0u8; SESSION_ID_LEN];
+    session_id.copy_from_slice(&wire[12..28]);
+    let header_aad = &wire[..MEDIA_FRAME_HEADER_LEN];
+    let ciphertext = &wire[MEDIA_FRAME_HEADER_LEN..];
+    let (speaker_pk, opus_packet) = open_media_frame(key, seq, &session_id, header_aad, ciphertext)?;
+    Ok((seq, speaker_pk, opus_packet))
 }
 
 #[cfg(test)]
