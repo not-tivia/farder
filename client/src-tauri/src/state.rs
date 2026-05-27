@@ -1,3 +1,4 @@
+use crate::voice::MediaInboundDispatcher;
 use farder_protocol::server::ServerResponse;
 use quinn::{Connection, Endpoint, SendStream};
 use std::collections::HashMap;
@@ -14,6 +15,9 @@ pub struct ServerConnection {
     pub pending_requests: Mutex<HashMap<u32, tokio::sync::oneshot::Sender<ServerResponse>>>,
     pub event_reader_handle: Mutex<Option<JoinHandle<()>>>,
     pub server_name: Mutex<String>,
+    /// Dispatcher for inbound QUIC media datagrams; fed by the datagram recv
+    /// loop spawned in commands.rs immediately after authentication.
+    pub media_dispatcher: Arc<MediaInboundDispatcher>,
 }
 
 impl ServerConnection {

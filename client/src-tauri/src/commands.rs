@@ -349,6 +349,24 @@ pub async fn connect_server(
             .await
             .map_err(|e| e.to_string())?;
 
+    let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
+    {
+        let dispatcher_for_loop = media_dispatcher.clone();
+        let conn_for_loop = conn.clone();
+        tokio::spawn(async move {
+            loop {
+                match conn_for_loop.read_datagram().await {
+                    Ok(bytes) => dispatcher_for_loop.dispatch(bytes).await,
+                    Err(quinn::ConnectionError::ApplicationClosed { .. })
+                    | Err(quinn::ConnectionError::ConnectionClosed { .. })
+                    | Err(quinn::ConnectionError::LocallyClosed)
+                    | Err(quinn::ConnectionError::TimedOut) => break,
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
     let server_conn = Arc::new(ServerConnection {
         endpoint,
         connection: conn,
@@ -357,6 +375,7 @@ pub async fn connect_server(
         pending_requests: Mutex::new(HashMap::new()),
         event_reader_handle: Mutex::new(None),
         server_name: Mutex::new(String::new()),
+        media_dispatcher,
     });
 
     let handle = bridge::spawn_event_reader(app, address.clone(), Arc::clone(&server_conn), recv);
@@ -2060,6 +2079,24 @@ pub async fn create_local_server(
             .await
             .map_err(|e| e.to_string())?;
 
+    let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
+    {
+        let dispatcher_for_loop = media_dispatcher.clone();
+        let conn_for_loop = conn.clone();
+        tokio::spawn(async move {
+            loop {
+                match conn_for_loop.read_datagram().await {
+                    Ok(bytes) => dispatcher_for_loop.dispatch(bytes).await,
+                    Err(quinn::ConnectionError::ApplicationClosed { .. })
+                    | Err(quinn::ConnectionError::ConnectionClosed { .. })
+                    | Err(quinn::ConnectionError::LocallyClosed)
+                    | Err(quinn::ConnectionError::TimedOut) => break,
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
     // Store connection
     let server_conn = Arc::new(ServerConnection {
         endpoint,
@@ -2069,6 +2106,7 @@ pub async fn create_local_server(
         pending_requests: Mutex::new(HashMap::new()),
         event_reader_handle: Mutex::new(None),
         server_name: Mutex::new(name.clone()),
+        media_dispatcher,
     });
 
     let handle = bridge::spawn_event_reader(app.clone(), address.clone(), Arc::clone(&server_conn), recv);
