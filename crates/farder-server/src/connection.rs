@@ -580,6 +580,133 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         }
     });
 
+    // Step 9b: Spawn per-connection QUIC datagram fanout loop.
+    //
+    // For each inbound datagram:
+    //   1. Call on_frame_ingress — pure decision function (forward / drop).
+    //   2. On Forward: look up each recipient's connection via SessionId →
+    //      connection_pk (from media.channels) → quinn::Connection
+    //      (from voice_connections), then send_datagram.
+    //   3. On Drop: silently discard.
+    let conn_for_dg = conn.clone();
+    let state_for_dg = Arc::clone(&state);
+    let media_config = crate::media_stream::MediaConfig::default();
+    let datagram_task = tokio::spawn(async move {
+        loop {
+            match conn_for_dg.read_datagram().await {
+                Ok(bytes) => {
+                    // Determine the sending connection's pk bytes (used to
+                    // authenticate the frame against the registered session).
+                    let sending_pk: [u8; 32] = pk_bytes;
+
+                    let now_ms = {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64
+                    };
+
+                    // Obtain routing decision.  on_frame_ingress needs a
+                    // &mut StreamState, which lives inside
+                    // state.media.channels (one StreamState per channel_id).
+                    // The session_id in the frame header tells us which
+                    // channel to look in, so we must parse just the session_id
+                    // first, then call into the matching StreamState.
+                    //
+                    // parse_media_frame validates the full header; if the buf
+                    // is too short the call below returns Drop(ParseError).
+                    let raw: &[u8] = &bytes;
+
+                    // Fast path: identify the channel from the session_id
+                    // embedded in the raw frame (bytes 12..28).
+                    let channel_id_opt: Option<u64> = if raw.len()
+                        >= crate::media_stream::MEDIA_FRAME_HEADER_LEN
+                    {
+                        let mut sid = [0u8; crate::media_stream::SESSION_ID_LEN];
+                        sid.copy_from_slice(
+                            &raw[12..12 + crate::media_stream::SESSION_ID_LEN],
+                        );
+                        let channels = state_for_dg.media.channels.read().unwrap();
+                        channels
+                            .iter()
+                            .find(|(_ch, st)| st.sessions.contains_key(&sid))
+                            .map(|(ch, _)| *ch)
+                    } else {
+                        None
+                    };
+
+                    let channel_id = match channel_id_opt {
+                        Some(c) => c,
+                        None => {
+                            // Frame too short or session unknown — drop silently.
+                            tracing::trace!("[media] datagram dropped: session not found");
+                            continue;
+                        }
+                    };
+
+                    let decision = {
+                        let mut channels =
+                            state_for_dg.media.channels.write().unwrap();
+                        if let Some(stream_state) = channels.get_mut(&channel_id) {
+                            crate::media_stream::on_frame_ingress(
+                                stream_state,
+                                &media_config,
+                                &sending_pk,
+                                raw,
+                                now_ms,
+                            )
+                        } else {
+                            crate::media_stream::IngressDecision::Drop(
+                                crate::media_stream::DropReason::UnknownSession,
+                            )
+                        }
+                    };
+
+                    match decision {
+                        crate::media_stream::IngressDecision::Forward { recipients } => {
+                            // Map each recipient SessionId → connection_pk →
+                            // quinn::Connection, then send the datagram.
+                            let voice_conns =
+                                state_for_dg.voice_connections.read().await;
+                            let channels =
+                                state_for_dg.media.channels.read().unwrap();
+                            if let Some(stream_state) = channels.get(&channel_id) {
+                                for sid in recipients {
+                                    if let Some(session) =
+                                        stream_state.sessions.get(&sid)
+                                    {
+                                        let conn_pk = &session.connection_pk;
+                                        if let Some(peer_conn) =
+                                            voice_conns.get(conn_pk)
+                                        {
+                                            let _ = peer_conn
+                                                .send_datagram(bytes.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        crate::media_stream::IngressDecision::Drop(_reason) => {
+                            tracing::trace!(
+                                "[media] datagram dropped: {:?}",
+                                _reason
+                            );
+                        }
+                    }
+                }
+                Err(quinn::ConnectionError::ApplicationClosed { .. })
+                | Err(quinn::ConnectionError::ConnectionClosed { .. })
+                | Err(quinn::ConnectionError::LocallyClosed)
+                | Err(quinn::ConnectionError::TimedOut) => break,
+                Err(e) => {
+                    tracing::debug!("[media] datagram read error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
     // Step 10: Enter main loop
     let loop_result = main_loop(
         Arc::clone(&state),
@@ -591,8 +718,9 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     )
     .await;
 
-    // Abort the stream acceptor on disconnect
+    // Abort background tasks on disconnect
     stream_acceptor.abort();
+    datagram_task.abort();
 
     // Step 11: Cleanup on disconnect.
     // Only remove from the clients map if WE'RE still the registered sender —
