@@ -281,4 +281,29 @@ mod tests {
         assert_eq!(plc.len(), OPUS_FRAME_SAMPLES_MONO,
                    "PLC frame must be one full 20ms frame");
     }
+
+    #[test]
+    fn dtx_silence_produces_small_packet() {
+        let mut enc =
+            OpusEncoder::new(OPUS_SAMPLE_RATE, 1, OPUS_DEFAULT_BITRATE_BPS).expect("encoder ok");
+
+        // Pure silence — DTX should kick in once the encoder stabilizes.
+        let silence = vec![0.0f32; OPUS_FRAME_SAMPLES_MONO];
+
+        // Loop a generous warmup. libopus typically needs a few frames of
+        // confirmed silence before emitting SID frames (~3 bytes).
+        let mut last_pkt_len = usize::MAX;
+        for _ in 0..20 {
+            let pkt = enc.encode(&silence).expect("encode silence ok");
+            last_pkt_len = pkt.len();
+        }
+
+        // DTX SID packets are <= ~10 bytes; pad budget to 15 for safety.
+        // A non-DTX 20ms voice packet at 24 kbps would be ~60 bytes, so
+        // 15 is a clear discriminator.
+        assert!(
+            last_pkt_len <= 15,
+            "expected DTX SID packet (small); got {last_pkt_len} bytes after warmup",
+        );
+    }
 }
