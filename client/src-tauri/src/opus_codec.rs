@@ -85,6 +85,7 @@ impl OpusEncoder {
 }
 
 /// Voice-optimized Opus decoder. One instance per incoming audio track.
+#[derive(Debug)]
 pub struct OpusDecoder {
     inner: Decoder,
     channels: u16,
@@ -93,8 +94,31 @@ pub struct OpusDecoder {
 }
 
 impl OpusDecoder {
-    pub fn new(_sample_rate: u32, _channels: u16) -> Result<Self, String> {
-        Err("not yet implemented".into())
+    pub fn new(sample_rate: u32, channels: u16) -> Result<Self, String> {
+        if sample_rate != OPUS_SAMPLE_RATE {
+            return Err(format!(
+                "only {} Hz supported; got {sample_rate}",
+                OPUS_SAMPLE_RATE,
+            ));
+        }
+        if channels != 1 && channels != 2 {
+            return Err(format!(
+                "only mono or stereo supported; got channels={channels}",
+            ));
+        }
+        let sr = SampleRate::Hz48000;
+        let ch = match channels {
+            1 => Channels::Mono,
+            2 => Channels::Stereo,
+            _ => unreachable!(),
+        };
+        let inner = Decoder::new(sr, ch).map_err(|e| format!("opus decoder init: {e}"))?;
+        let buf_capacity = OPUS_FRAME_SAMPLES_MONO * channels as usize;
+        Ok(Self {
+            inner,
+            channels,
+            out_buf: vec![0.0f32; buf_capacity],
+        })
     }
 
     pub fn decode(&mut self, _packet: &[u8]) -> Result<Vec<f32>, String> {
@@ -146,5 +170,16 @@ mod tests {
         let exact = vec![0.0f32; OPUS_FRAME_SAMPLES_MONO];
         let pkt = enc.encode(&exact).expect("mono 20ms frame must encode");
         assert!(!pkt.is_empty(), "non-empty packet expected");
+    }
+
+    #[test]
+    fn decoder_constructs_with_sane_defaults() {
+        let dec = OpusDecoder::new(OPUS_SAMPLE_RATE, 1);
+        assert!(dec.is_ok(), "decoder construction should succeed; got {:?}", dec.err());
+
+        let bad_rate = OpusDecoder::new(44_100, 1);
+        let bad_ch = OpusDecoder::new(OPUS_SAMPLE_RATE, 3);
+        assert!(bad_rate.is_err(), "44.1 kHz should be rejected");
+        assert!(bad_ch.is_err(), "3 channels should be rejected");
     }
 }
