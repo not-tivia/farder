@@ -67,8 +67,20 @@ impl OpusEncoder {
         })
     }
 
-    pub fn encode(&mut self, _pcm: &[f32]) -> Result<Vec<u8>, String> {
-        Err("not yet implemented".into())
+    pub fn encode(&mut self, pcm: &[f32]) -> Result<Vec<u8>, String> {
+        let expected = OPUS_FRAME_SAMPLES_MONO * self.channels as usize;
+        if pcm.len() != expected {
+            return Err(format!(
+                "expected {expected} samples for {ch}-channel 20ms frame; got {got}",
+                ch = self.channels,
+                got = pcm.len(),
+            ));
+        }
+        let n = self
+            .inner
+            .encode_float(pcm, &mut self.out_buf)
+            .map_err(|e| format!("opus encode: {e}"))?;
+        Ok(self.out_buf[..n].to_vec())
     }
 }
 
@@ -118,5 +130,21 @@ mod tests {
         let r3 = OpusEncoder::new(OPUS_SAMPLE_RATE, 3, OPUS_DEFAULT_BITRATE_BPS);
         assert!(r0.is_err(), "0 channels should be rejected");
         assert!(r3.is_err(), "3 channels should be rejected");
+    }
+
+    #[test]
+    fn encoder_rejects_wrong_frame_size() {
+        let mut enc =
+            OpusEncoder::new(OPUS_SAMPLE_RATE, 1, OPUS_DEFAULT_BITRATE_BPS).expect("encoder ok");
+
+        let too_short = vec![0.0f32; OPUS_FRAME_SAMPLES_MONO - 1];
+        let too_long = vec![0.0f32; OPUS_FRAME_SAMPLES_MONO + 1];
+
+        assert!(enc.encode(&too_short).is_err(), "short frame must error");
+        assert!(enc.encode(&too_long).is_err(), "long frame must error");
+
+        let exact = vec![0.0f32; OPUS_FRAME_SAMPLES_MONO];
+        let pkt = enc.encode(&exact).expect("mono 20ms frame must encode");
+        assert!(!pkt.is_empty(), "non-empty packet expected");
     }
 }
