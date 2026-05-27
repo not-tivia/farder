@@ -14,6 +14,7 @@ mod themes;
 mod tls;
 mod translation;
 mod tray;
+mod voice;
 
 use state::AppState;
 use std::sync::Arc;
