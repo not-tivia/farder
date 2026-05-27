@@ -28,7 +28,6 @@ cpal = "0.15"
 hound = "3.5"
 tauri-plugin-shell = "2"
 uuid = { version = "1", features = ["v4"] }
-webrtc-audio-processing = "2.1.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2"
