@@ -1405,6 +1405,7 @@ name = "farder-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "audiopus",
  "base64 0.22.1",
  "bytes",
