@@ -356,6 +356,59 @@ export async function getVoiceState(serverId: string, channelId: number): Promis
   return invoke("get_voice_state", { serverId, channelId });
 }
 
+// ── Voice pipeline (sub-project #3.3) ────────────────────────────────────────
+//
+// Distinct from the older `joinVoice` / `getVoiceState` helpers above, which
+// only manipulate channel-membership state on the server. The `voice*`
+// commands below drive the local audio pipeline (`VoiceController`): they
+// open the QUIC stream session, derive + wrap the per-call stream key,
+// spawn the send / mixer / recv tasks, and toggle mute/deafen on the
+// local audio path.
+
+export interface VoicePeer {
+  pubkey: { bytes: number[] };
+  speaking: boolean;
+}
+
+export interface VoiceState {
+  /// Present iff a call is active. 16-byte channel identifier serialized as
+  /// a Vec<u8> (raw bytes), matching the controller's `ChannelId` type.
+  channel_id: number[] | null;
+  muted: boolean;
+  deafened: boolean;
+  peers: VoicePeer[];
+}
+
+export interface VoiceLocalSpeakingPayload {
+  speaking: boolean;
+}
+
+export interface VoicePeerSpeakingPayload {
+  session_id: number[];
+  pubkey: string;
+  active: boolean;
+}
+
+export async function voiceJoin(serverId: string, channelId: number): Promise<void> {
+  return invoke("voice_join", { serverId, channelId });
+}
+
+export async function voiceLeave(): Promise<void> {
+  return invoke("voice_leave");
+}
+
+export async function voiceSetMute(muted: boolean): Promise<void> {
+  return invoke("voice_set_mute", { muted });
+}
+
+export async function voiceSetDeafen(deafened: boolean): Promise<void> {
+  return invoke("voice_set_deafen", { deafened });
+}
+
+export async function voiceGetState(): Promise<VoiceState> {
+  return invoke("voice_get_state");
+}
+
 // ---------------------------------------------------------------------------
 // Local server management
 // ---------------------------------------------------------------------------

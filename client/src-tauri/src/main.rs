@@ -15,6 +15,7 @@ mod tls;
 mod translation;
 mod tray;
 mod voice;
+mod voice_bridge;
 
 use state::AppState;
 use std::sync::Arc;
@@ -37,6 +38,11 @@ fn main() {
         .manage(server_manager::ServerProcesses::new())
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
+            // Voice controller is a single global (one active call at a time).
+            // Constructed here because it needs an AppHandle for event emission.
+            let voice_controller = Arc::new(voice::VoiceController::new(app.handle().clone()));
+            app.manage(voice_controller);
+
             if let Some(url) = deep_link_url {
                 // Emit after a short delay so the frontend has time to mount
                 // its event listener before the event fires.
@@ -133,6 +139,11 @@ fn main() {
             commands::disable_track,
             commands::set_deafen,
             commands::offer_stream_key,
+            commands::voice_join,
+            commands::voice_leave,
+            commands::voice_set_mute,
+            commands::voice_set_deafen,
+            commands::voice_get_state,
             commands::create_local_server,
             commands::stop_local_server,
             commands::get_local_servers,

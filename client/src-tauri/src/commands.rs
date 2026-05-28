@@ -1987,6 +1987,62 @@ pub async fn offer_stream_key(
 }
 
 // ---------------------------------------------------------------------------
+// Voice controller commands (sub-project #3.3 Task 11)
+//
+// Thin wrappers around `VoiceController`. The controller owns the audio
+// pipeline + per-peer recv tasks; these commands just translate frontend
+// invocations into controller calls and (for `voice_join`) construct the
+// per-call `QuinnServerSession` adapter that wraps the right
+// `ServerConnection` from `AppState::servers`.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn voice_join(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+) -> Result<(), String> {
+    let session = crate::voice_bridge::QuinnServerSession::new(
+        Arc::clone(&state),
+        server_id,
+    )?;
+    voice
+        .join(channel_id, Arc::new(session) as Arc<dyn crate::voice::ServerSession>)
+        .await
+}
+
+#[tauri::command]
+pub async fn voice_leave(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+) -> Result<(), String> {
+    voice.leave().await
+}
+
+#[tauri::command]
+pub async fn voice_set_mute(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+    muted: bool,
+) -> Result<(), String> {
+    voice.set_mute(muted).await
+}
+
+#[tauri::command]
+pub async fn voice_set_deafen(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+    deafened: bool,
+) -> Result<(), String> {
+    voice.set_deafen(deafened).await
+}
+
+#[tauri::command]
+pub async fn voice_get_state(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+) -> Result<crate::voice::VoiceState, String> {
+    Ok(voice.state().await)
+}
+
+// ---------------------------------------------------------------------------
 // Local server management commands
 // ---------------------------------------------------------------------------
 

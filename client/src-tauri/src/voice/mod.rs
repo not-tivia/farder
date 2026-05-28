@@ -375,6 +375,20 @@ impl VoiceController {
         self.inner.lock().await.state.clone()
     }
 
+    /// Look up the peer's long-lived public key for a given session_id.
+    ///
+    /// Used by bridge.rs to bridge `TrackEnabled` (which only carries
+    /// session_id) into `on_peer_track_enabled` (which needs the pubkey to
+    /// register the peer for UI / state tracking). The pubkey is populated
+    /// by the matching `StreamKeyOffer` that always precedes `TrackEnabled`.
+    pub async fn peer_pubkey_for(&self, session_id: &SessionId) -> Option<PublicKey> {
+        let inner = self.inner.lock().await;
+        inner
+            .active
+            .as_ref()
+            .and_then(|c| c.peer_keys.get(session_id).map(|(_, pk)| pk.clone()))
+    }
+
     pub async fn join(
         &self,
         channel_id: u64,

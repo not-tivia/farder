@@ -6,7 +6,7 @@ use farder_protocol::{
 };
 use quinn::RecvStream;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::JoinHandle;
 
 /// Send a request to the server identified by `server_id` and await the response.
@@ -110,16 +110,74 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:role_deleted", serde_json::json!({ "server_id": sid, "role_id": role_id })),
         ServerEvent::RoleUpdated { role } =>
             app.emit("server:role_updated", serde_json::json!({ "server_id": sid, "role": role })),
+        ServerEvent::StreamKeyOffer { session_id, sender, wrapped_key, .. } => {
+            if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
+                let ctrl = (*ctrl).clone();
+                tokio::spawn(async move {
+                    ctrl.on_stream_key_offer(session_id, sender, wrapped_key).await;
+                });
+            }
+            Ok(())
+        }
+        ServerEvent::TrackEnabled { session_id, kind, .. } => {
+            if !matches!(kind, farder_protocol::server::TrackKind::Audio) {
+                return;
+            }
+            // We need the peer's PublicKey to register/display them. The
+            // StreamKeyOffer that precedes TrackEnabled carries `sender`,
+            // which the controller has already stashed in `peer_keys` keyed
+            // by session_id. Look it up there.
+            if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
+                let ctrl = (*ctrl).clone();
+                tokio::spawn(async move {
+                    let peer_pk = ctrl.peer_pubkey_for(&session_id).await;
+                    if let Some(pk) = peer_pk {
+                        ctrl.on_peer_track_enabled(session_id, pk, kind).await;
+                    } else {
+                        eprintln!(
+                            "[voice] TrackEnabled before StreamKeyOffer for session {:?}; skipping",
+                            session_id
+                        );
+                    }
+                });
+            }
+            Ok(())
+        }
+        ServerEvent::TrackDisabled { session_id, kind, .. } => {
+            if !matches!(kind, farder_protocol::server::TrackKind::Audio) {
+                return;
+            }
+            if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
+                let ctrl = (*ctrl).clone();
+                tokio::spawn(async move {
+                    ctrl.on_peer_track_disabled(session_id).await;
+                });
+            }
+            Ok(())
+        }
+        ServerEvent::StreamLeft { session_id, .. } => {
+            if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
+                let ctrl = (*ctrl).clone();
+                tokio::spawn(async move {
+                    ctrl.on_peer_stream_left(session_id).await;
+                });
+            }
+            Ok(())
+        }
+        ServerEvent::TrackActivityChanged { session_id, kind, active, .. } => {
+            if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
+                let ctrl = (*ctrl).clone();
+                tokio::spawn(async move {
+                    ctrl.on_peer_activity(session_id, kind, active).await;
+                });
+            }
+            Ok(())
+        }
         ServerEvent::MediaJoined { .. }
         | ServerEvent::MediaLeft { .. }
         | ServerEvent::StreamJoined { .. }
-        | ServerEvent::StreamLeft { .. }
-        | ServerEvent::TrackEnabled { .. }
-        | ServerEvent::TrackDisabled { .. }
-        | ServerEvent::TrackActivityChanged { .. }
         | ServerEvent::StreamCallIncoming { .. }
-        | ServerEvent::StreamCallEnded { .. }
-        | ServerEvent::StreamKeyOffer { .. } => Ok(()), // TODO(MST UI)
+        | ServerEvent::StreamCallEnded { .. } => Ok(()), // surfaced by future UI events
         _ => Ok(()),
     };
 }
