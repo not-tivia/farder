@@ -219,6 +219,14 @@ struct AudioPipelineHandle {
 
 impl VoicePipelineHandle for AudioPipelineHandle {
     fn stop(self: Box<Self>) {
+        // Explicit teardown. Drop impl provides the same safety net for
+        // non-explicit paths (window close, panic).
+        drop(self);
+    }
+}
+
+impl Drop for AudioPipelineHandle {
+    fn drop(&mut self) {
         let _ = self.backend.stop_capture();
         let _ = self.backend.stop_playback();
         // Send + mixer threads observe their channel closure and exit.
@@ -383,7 +391,7 @@ impl VoiceController {
 
         // 2. Derive stream key + wrap for each remote participant.
         let stream_key = farder_crypto::media::derive_stream_key();
-        let participants = server.get_media_state(channel_id).await.unwrap_or_default();
+        let participants = server.get_media_state(channel_id).await?;
         let keypair = server.my_keypair();
         let my_sk = *keypair.signing_key_bytes();
         let my_pk_bytes = *keypair.public_key().as_bytes();
@@ -457,28 +465,39 @@ impl VoiceController {
     }
 
     pub async fn leave(&self) -> Result<(), String> {
+        // Phase 1: pull the active call out while holding the lock briefly.
+        // Between here and Phase 3, inner.active is None — any concurrent
+        // join() that checks active.is_some() will not see an active call.
+        let call = self.inner.lock().await.active.take();
+
+        if let Some(mut call) = call {
+            // Phase 2: all network I/O + audio teardown outside the lock so
+            // concurrent set_mute / on_peer_activity callers are not stalled
+            // during these round-trips.
+
+            // Best-effort protocol shutdown; ignore errors so leave is
+            // robust against a broken connection.
+            let _ = call.server.disable_track(TrackKind::Audio).await;
+            let _ = call.server.leave_stream().await;
+            // Stop the audio pipeline (closes channels → send/mixer exit).
+            if let Some(p) = call.pipeline.take() {
+                p.stop();
+            }
+            // Abort every peer recv task and unregister its dispatcher route.
+            let dispatcher = call.server.dispatcher();
+            for (sid, peer) in call.peers.drain() {
+                peer.recv_handle.abort();
+                let d = dispatcher.clone();
+                tokio::spawn(async move {
+                    d.unregister(&sid).await;
+                });
+            }
+            call.peer_rings.lock().expect("peer_rings poisoned").clear();
+        }
+
+        // Phase 3: re-lock to commit the cleared state, then emit.
         let snap = {
             let mut inner = self.inner.lock().await;
-            if let Some(mut call) = inner.active.take() {
-                // Best-effort protocol shutdown; ignore errors so leave is
-                // robust against a broken connection.
-                let _ = call.server.disable_track(TrackKind::Audio).await;
-                let _ = call.server.leave_stream().await;
-                // Stop the audio pipeline (closes channels → send/mixer exit).
-                if let Some(p) = call.pipeline.take() {
-                    p.stop();
-                }
-                // Abort every peer recv task and unregister its dispatcher route.
-                let dispatcher = call.server.dispatcher();
-                for (sid, peer) in call.peers.drain() {
-                    peer.recv_handle.abort();
-                    let d = dispatcher.clone();
-                    tokio::spawn(async move {
-                        d.unregister(&sid).await;
-                    });
-                }
-                call.peer_rings.lock().expect("peer_rings poisoned").clear();
-            }
             inner.state = VoiceState {
                 channel_id: None,
                 muted: false,
