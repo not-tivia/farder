@@ -246,6 +246,7 @@ pub enum ServerRequest {
     EnableTrack { kind: TrackKind },
     DisableTrack { kind: TrackKind },
     SetDeafen { deafened: bool },
+    SetMute { muted: bool },
     OfferStreamKey {
         kind: TrackKind,
         wrapped_keys: Vec<(PublicKey, Vec<u8>)>,
@@ -349,6 +350,8 @@ pub enum ServerEvent {
         display_name: String,
         session_id: [u8; 16],
         active_tracks: Vec<TrackKind>,
+        muted: bool,
+        deafened: bool,
     },
     StreamLeft {
         channel_id: u64,
@@ -361,6 +364,12 @@ pub enum ServerEvent {
         session_id: [u8; 16],
         kind: TrackKind,
         active: bool,
+    },
+    StreamStateChanged {
+        channel_id: u64,
+        session_id: [u8; 16],
+        muted: bool,
+        deafened: bool,
     },
     StreamCallIncoming {
         channel_id: u64,
@@ -591,6 +600,8 @@ mod tests {
                 display_name: "alice".into(),
                 session_id: [9u8; 16],
                 active_tracks: vec![TrackKind::Audio],
+                muted: false,
+                deafened: false,
             },
             ServerEvent::StreamLeft { channel_id: 1, session_id: [9u8; 16] },
             ServerEvent::TrackEnabled  { channel_id: 1, session_id: [9u8; 16], kind: TrackKind::Audio },
