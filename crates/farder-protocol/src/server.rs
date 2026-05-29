@@ -577,6 +577,7 @@ mod tests {
             ServerRequest::EnableTrack { kind: TrackKind::Audio },
             ServerRequest::DisableTrack { kind: TrackKind::Video },
             ServerRequest::SetDeafen { deafened: true },
+            ServerRequest::SetMute { muted: true },
             ServerRequest::OfferStreamKey {
                 kind: TrackKind::Audio,
                 wrapped_keys: vec![(kp.public_key(), vec![1, 2, 3, 4])],
