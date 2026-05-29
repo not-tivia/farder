@@ -120,6 +120,28 @@ impl ServerSession for QuinnServerSession {
         }
     }
 
+    async fn set_mute(&self, muted: bool) -> Result<(), String> {
+        let resp = send_request(&self.state, &self.server_id, ServerRequest::SetMute { muted })
+            .await
+            .map_err(|e| e.to_string())?;
+        match resp {
+            ServerResponse::Ok => Ok(()),
+            ServerResponse::Error { reason } => Err(reason),
+            other => Err(format!("unexpected response to SetMute: {:?}", other)),
+        }
+    }
+
+    async fn set_deafen(&self, deafened: bool) -> Result<(), String> {
+        let resp = send_request(&self.state, &self.server_id, ServerRequest::SetDeafen { deafened })
+            .await
+            .map_err(|e| e.to_string())?;
+        match resp {
+            ServerResponse::Ok => Ok(()),
+            ServerResponse::Error { reason } => Err(reason),
+            other => Err(format!("unexpected response to SetDeafen: {:?}", other)),
+        }
+    }
+
     fn send_datagram(&self, bytes: Bytes) -> Result<(), String> {
         self.conn.connection.send_datagram(bytes).map_err(|e| e.to_string())
     }

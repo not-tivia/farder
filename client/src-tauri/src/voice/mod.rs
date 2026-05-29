@@ -145,6 +145,10 @@ pub trait ServerSession: Send + Sync {
     ) -> Result<(), String>;
     async fn enable_track(&self, kind: TrackKind) -> Result<(), String>;
     async fn disable_track(&self, kind: TrackKind) -> Result<(), String>;
+    /// Tell the server we (un)muted, so it can relay the state to peers.
+    async fn set_mute(&self, muted: bool) -> Result<(), String>;
+    /// Tell the server we (un)deafened (relayed to peers + suppresses fanout to us).
+    async fn set_deafen(&self, deafened: bool) -> Result<(), String>;
     /// Send one wire-format media datagram on the QUIC connection.
     fn send_datagram(&self, bytes: Bytes) -> Result<(), String>;
     /// Our long-lived signing keypair (used to wrap stream keys for peers).
@@ -759,12 +763,13 @@ mod controller_tests {
 
     // ── FakeServerSession ────────────────────────────────────────────────
 
-    #[derive(Default)]
     struct FakeServerSession {
         keypair: Option<Arc<Keypair>>,
         dispatcher: Arc<MediaInboundDispatcher>,
         calls: StdMutex<Vec<String>>,
         canned_session_id: SessionId,
+        set_mute_calls: StdMutex<Vec<bool>>,
+        set_deafen_calls: StdMutex<Vec<bool>>,
     }
 
     impl FakeServerSession {
@@ -774,6 +779,8 @@ mod controller_tests {
                 dispatcher: Arc::new(MediaInboundDispatcher::default()),
                 calls: StdMutex::new(Vec::new()),
                 canned_session_id: [9u8; 16],
+                set_mute_calls: StdMutex::new(Vec::new()),
+                set_deafen_calls: StdMutex::new(Vec::new()),
             })
         }
         fn new_with_sid(sid: SessionId) -> Arc<Self> {
@@ -782,6 +789,8 @@ mod controller_tests {
                 dispatcher: Arc::new(MediaInboundDispatcher::default()),
                 calls: StdMutex::new(Vec::new()),
                 canned_session_id: sid,
+                set_mute_calls: StdMutex::new(Vec::new()),
+                set_deafen_calls: StdMutex::new(Vec::new()),
             })
         }
         fn calls(&self) -> Vec<String> {
@@ -823,6 +832,14 @@ mod controller_tests {
         }
         async fn disable_track(&self, _k: TrackKind) -> Result<(), String> {
             self.log("disable_track");
+            Ok(())
+        }
+        async fn set_mute(&self, muted: bool) -> Result<(), String> {
+            self.set_mute_calls.lock().unwrap().push(muted);
+            Ok(())
+        }
+        async fn set_deafen(&self, deafened: bool) -> Result<(), String> {
+            self.set_deafen_calls.lock().unwrap().push(deafened);
             Ok(())
         }
         fn send_datagram(&self, _b: Bytes) -> Result<(), String> {
