@@ -3189,4 +3189,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_set_mute_preserves_existing_deafen_flag() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        handle_request(&conn, &owner, true,
+            ServerRequest::JoinStream { channel_id: 7 }, "", &state).unwrap();
+        handle_request(&conn, &owner, true,
+            ServerRequest::SetDeafen { deafened: true }, "", &state).unwrap();
+
+        // Muting while already deafened must broadcast BOTH flags set, not clobber deafen.
+        let result = handle_request(&conn, &owner, true,
+            ServerRequest::SetMute { muted: true }, "", &state).unwrap();
+
+        assert_eq!(result.events.len(), 1, "SetMute should broadcast one event");
+        match &result.events[0].event {
+            ServerEvent::StreamStateChanged { muted, deafened, .. } => {
+                assert!(*muted, "muted flag should be true");
+                assert!(*deafened, "deafened flag must be preserved");
+            }
+            o => panic!("expected StreamStateChanged, got {:?}", o),
+        }
+    }
+
 }
