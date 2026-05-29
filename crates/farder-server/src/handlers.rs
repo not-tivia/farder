@@ -1445,6 +1445,8 @@ pub fn handle_request(
                     display_name,
                     session_id,
                     active_tracks: vec![],
+                    muted: false,
+                    deafened: false,
                 },
             }];
             ok_with(ServerResponse::StreamSessionStarted { session_id }, events)
@@ -1461,6 +1463,7 @@ pub fn handle_request(
                 for sid in to_remove {
                     stream_state.sessions.remove(&sid);
                     stream_state.deafened.remove(&sid);
+                    stream_state.muted.remove(&sid);
                     events.push(BroadcastEvent {
                         target: EventTarget::All,
                         event: ServerEvent::StreamLeft { channel_id: *ch_id, session_id: sid },
@@ -1516,17 +1519,49 @@ pub fn handle_request(
         ServerRequest::SetDeafen { deafened } => {
             let member_bytes = *member.as_bytes();
             let mut channels_map = state.media.channels.write().unwrap();
-            for stream_state in channels_map.values_mut() {
+            let mut events: Vec<BroadcastEvent> = Vec::new();
+            for (ch_id, stream_state) in channels_map.iter_mut() {
                 let session_ids: Vec<_> = stream_state.sessions.iter()
                     .filter(|(_, s)| s.connection_pk == member_bytes)
                     .map(|(sid, _)| *sid).collect();
                 for sid in session_ids {
                     if deafened { stream_state.deafened.insert(sid); }
                     else { stream_state.deafened.remove(&sid); }
+                    let muted = stream_state.muted.contains(&sid);
+                    events.push(BroadcastEvent {
+                        target: EventTarget::All,
+                        event: ServerEvent::StreamStateChanged {
+                            channel_id: *ch_id, session_id: sid, muted, deafened,
+                        },
+                    });
                 }
             }
             drop(channels_map);
-            ok(ServerResponse::Ok)
+            ok_with(ServerResponse::Ok, events)
+        }
+
+        ServerRequest::SetMute { muted } => {
+            let member_bytes = *member.as_bytes();
+            let mut channels_map = state.media.channels.write().unwrap();
+            let mut events: Vec<BroadcastEvent> = Vec::new();
+            for (ch_id, stream_state) in channels_map.iter_mut() {
+                let session_ids: Vec<_> = stream_state.sessions.iter()
+                    .filter(|(_, s)| s.connection_pk == member_bytes)
+                    .map(|(sid, _)| *sid).collect();
+                for sid in session_ids {
+                    if muted { stream_state.muted.insert(sid); }
+                    else { stream_state.muted.remove(&sid); }
+                    let deafened = stream_state.deafened.contains(&sid);
+                    events.push(BroadcastEvent {
+                        target: EventTarget::All,
+                        event: ServerEvent::StreamStateChanged {
+                            channel_id: *ch_id, session_id: sid, muted, deafened,
+                        },
+                    });
+                }
+            }
+            drop(channels_map);
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::OfferStreamKey { kind, wrapped_keys } => {
@@ -3112,6 +3147,45 @@ mod tests {
                 assert_eq!(events.len(), 2);
             }
             other => panic!("expected AuditEventsList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_set_mute_broadcasts_stream_state_changed() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        handle_request(&conn, &owner, true,
+            ServerRequest::JoinStream { channel_id: 7 }, "", &state).unwrap();
+
+        let result = handle_request(&conn, &owner, true,
+            ServerRequest::SetMute { muted: true }, "", &state).unwrap();
+
+        match result.response { ServerResponse::Ok => {} o => panic!("expected Ok, got {:?}", o) }
+        assert_eq!(result.events.len(), 1, "SetMute should broadcast one event");
+        match &result.events[0].event {
+            ServerEvent::StreamStateChanged { session_id: _, muted, deafened, channel_id } => {
+                assert_eq!(*channel_id, 7);
+                assert!(*muted, "muted flag should be true");
+                assert!(!*deafened, "deafened should remain false");
+            }
+            o => panic!("expected StreamStateChanged, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn test_set_deafen_broadcasts_stream_state_changed() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        handle_request(&conn, &owner, true,
+            ServerRequest::JoinStream { channel_id: 7 }, "", &state).unwrap();
+
+        let result = handle_request(&conn, &owner, true,
+            ServerRequest::SetDeafen { deafened: true }, "", &state).unwrap();
+
+        assert_eq!(result.events.len(), 1, "SetDeafen should broadcast one event");
+        match &result.events[0].event {
+            ServerEvent::StreamStateChanged { deafened, .. } => assert!(*deafened),
+            o => panic!("expected StreamStateChanged, got {:?}", o),
         }
     }
 

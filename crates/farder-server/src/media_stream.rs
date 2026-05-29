@@ -134,6 +134,8 @@ pub struct StreamState {
     pub sessions: HashMap<SessionId, ServerSession>,
     /// session_id → deafened flag (suppresses fanout TO this session)
     pub deafened: HashSet<SessionId>,
+    /// session_id → self-muted flag (display-only; relayed to peers)
+    pub muted: HashSet<SessionId>,
 }
 
 pub struct ServerSession {
@@ -157,6 +159,7 @@ impl StreamState {
         Self {
             sessions: HashMap::new(),
             deafened: HashSet::new(),
+            muted: HashSet::new(),
         }
     }
 
