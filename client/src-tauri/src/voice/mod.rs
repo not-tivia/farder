@@ -705,6 +705,9 @@ impl VoiceController {
                     Some(c) => c,
                     None => return,
                 };
+                // Drop any mute/deafen seed for this session so it can't leak or
+                // seed a rebuilt VoicePeer with stale state if the id recurs.
+                call.peer_status.remove(&session_id);
                 if let Some(peer) = call.peers.remove(&session_id) {
                     peer.recv_handle.abort();
                     call.peer_rings
@@ -1191,5 +1194,41 @@ mod controller_tests {
             .expect("peer present");
         assert!(peer.muted, "seeded mute must carry into the new VoicePeer");
         assert!(peer.deafened, "seeded deafen must carry into the new VoicePeer");
+    }
+
+    #[tokio::test]
+    async fn peer_leave_clears_mute_deafen_seed() {
+        let (ctrl, fake, _emitter) = setup_joined_call().await;
+        let sid: SessionId = [9u8; 16];
+        let pk = PublicKey::from_bytes([5u8; 32]);
+
+        // Seed mute+deafen, then the peer leaves before ever registering. The
+        // seed must be cleared so a later re-registration on the same session_id
+        // does not inherit the stale state.
+        ctrl.on_peer_stream_joined(sid, true, true).await;
+        ctrl.on_peer_stream_left(sid).await;
+
+        let peer_kp = Keypair::generate();
+        let our_kp = fake.my_keypair();
+        let key = farder_crypto::media::derive_stream_key();
+        let wrapped = farder_crypto::media::wrap_stream_key_for_peer(
+            &key,
+            peer_kp.signing_key_bytes(),
+            our_kp.public_key().as_bytes(),
+        )
+        .unwrap();
+        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped)
+            .await;
+        ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio)
+            .await;
+
+        let state = ctrl.state().await;
+        let peer = state
+            .peers
+            .iter()
+            .find(|p| p.pubkey == pk)
+            .expect("peer present");
+        assert!(!peer.muted, "stale mute seed must not survive a leave");
+        assert!(!peer.deafened, "stale deafen seed must not survive a leave");
     }
 }
