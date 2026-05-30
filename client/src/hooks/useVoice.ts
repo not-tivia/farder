@@ -53,6 +53,8 @@ export function useVoice(): UseVoice {
   useEffect(() => {
     let cleanupRan = false;
     const unlisten: Array<() => void> = [];
+    // If cleanup already ran before a listen() promise resolved (StrictMode
+    // double-mount), unlisten immediately instead of leaking the handler.
     const safePush = (u: () => void) => { if (cleanupRan) u(); else unlisten.push(u); };
 
     api.voiceGetState().then(applyState).catch(() => {});
@@ -61,6 +63,8 @@ export function useVoice(): UseVoice {
     listen<api.VoiceLocalSpeakingPayload>("voice://local-speaking", (e) =>
       setLocalSpeaking(e.payload.speaking)).then(safePush);
     listen<api.VoicePeerSpeakingPayload>("voice://peer-speaking", (e) => {
+      // If the peer isn't seeded yet (event raced ahead of state-changed),
+      // this is a no-op; the next state-changed fills in the speaking flag.
       setPeers((prev) => prev.map((p) =>
         p.pubkey === e.payload.pubkey ? { ...p, speaking: e.payload.active } : p));
     }).then(safePush);
