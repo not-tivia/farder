@@ -21,6 +21,8 @@ pub type SessionId = [u8; 16];
 pub struct VoicePeer {
     pub pubkey: PublicKey,
     pub speaking: bool,
+    pub muted: bool,
+    pub deafened: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -324,6 +326,9 @@ struct ActiveCall {
     /// Stored separately from `peers` because the offer typically arrives
     /// before the matching TrackEnabled.
     peer_keys: HashMap<SessionId, ([u8; 32], PublicKey)>,
+    /// session_id → (muted, deafened) learned from StreamJoined / StreamStateChanged.
+    /// Seeds VoicePeer when the matching TrackEnabled registers the peer.
+    peer_status: HashMap<SessionId, (bool, bool)>,
 }
 
 struct PeerEntry {
@@ -474,6 +479,7 @@ impl VoiceController {
                 peer_rings,
                 peers: HashMap::new(),
                 peer_keys: HashMap::new(),
+                peer_status: HashMap::new(),
             });
             inner.state.clone()
         };
@@ -533,19 +539,25 @@ impl VoiceController {
     }
 
     pub async fn set_mute(&self, muted: bool) -> Result<(), String> {
-        let snap = {
+        let (snap, server) = {
             let mut inner = self.inner.lock().await;
             inner.muted.store(muted, Ordering::Release);
             inner.state.muted = muted;
-            inner.state.clone()
+            let server = inner.active.as_ref().map(|c| c.server.clone());
+            (inner.state.clone(), server)
         };
+        if let Some(server) = server {
+            if let Err(e) = server.set_mute(muted).await {
+                eprintln!("[voice] set_mute server notify failed: {e}");
+            }
+        }
         self.emitter
             .emit("voice://state-changed", serde_json::to_value(&snap).unwrap_or_default());
         Ok(())
     }
 
     pub async fn set_deafen(&self, deafened: bool) -> Result<(), String> {
-        let snap = {
+        let (snap, server) = {
             let mut inner = self.inner.lock().await;
             if deafened {
                 inner.pre_deafen_muted = inner.muted.load(Ordering::Acquire);
@@ -558,8 +570,14 @@ impl VoiceController {
             }
             inner.state.muted = inner.muted.load(Ordering::Acquire);
             inner.state.deafened = deafened;
-            inner.state.clone()
+            let server = inner.active.as_ref().map(|c| c.server.clone());
+            (inner.state.clone(), server)
         };
+        if let Some(server) = server {
+            if let Err(e) = server.set_deafen(deafened).await {
+                eprintln!("[voice] set_deafen server notify failed: {e}");
+            }
+        }
         self.emitter
             .emit("voice://state-changed", serde_json::to_value(&snap).unwrap_or_default());
         Ok(())
@@ -658,10 +676,17 @@ impl VoiceController {
                 datagram_tx: tx,
             },
         );
+        let (m, d) = call
+            .peer_status
+            .get(&session_id)
+            .copied()
+            .unwrap_or((false, false));
         if !inner.state.peers.iter().any(|p| p.pubkey == peer_pubkey) {
             inner.state.peers.push(VoicePeer {
                 pubkey: peer_pubkey,
                 speaking: false,
+                muted: m,
+                deafened: d,
             });
         }
         let snap = inner.state.clone();
@@ -710,6 +735,42 @@ impl VoiceController {
     /// same controller-side cleanup).
     pub async fn on_peer_stream_left(&self, session_id: SessionId) {
         self.on_peer_track_disabled(session_id).await;
+    }
+
+    /// A peer's StreamJoined arrived — remember their initial mute/deafen so
+    /// it seeds the VoicePeer when their TrackEnabled registers them.
+    pub async fn on_peer_stream_joined(&self, session_id: SessionId, muted: bool, deafened: bool) {
+        let mut inner = self.inner.lock().await;
+        if let Some(call) = inner.active.as_mut() {
+            call.peer_status.insert(session_id, (muted, deafened));
+        }
+    }
+
+    /// A peer toggled mute/deafen — update the live peer (if registered) and
+    /// the seed map, then re-emit the full state snapshot.
+    pub async fn on_peer_stream_state(&self, session_id: SessionId, muted: bool, deafened: bool) {
+        let snap = {
+            let mut inner = self.inner.lock().await;
+            let pk = inner
+                .active
+                .as_ref()
+                .and_then(|c| c.peers.get(&session_id).map(|p| p.pubkey.clone()));
+            if let Some(call) = inner.active.as_mut() {
+                call.peer_status.insert(session_id, (muted, deafened));
+            }
+            if let Some(pk) = pk {
+                for peer in inner.state.peers.iter_mut() {
+                    if peer.pubkey == pk {
+                        peer.muted = muted;
+                        peer.deafened = deafened;
+                        break;
+                    }
+                }
+            }
+            inner.state.clone()
+        };
+        self.emitter
+            .emit("voice://state-changed", serde_json::to_value(&snap).unwrap_or_default());
     }
 
     /// Server forwarded a TrackActivityChanged event — flip the speaking
@@ -915,6 +976,17 @@ mod controller_tests {
         (ctrl, emitter)
     }
 
+    /// Spin up a controller and join a call, returning the controller, the
+    /// fake server session (for asserting set_mute/set_deafen relays), and
+    /// the emitter. Drains the join emit by leaving callers to account for it.
+    async fn setup_joined_call(
+    ) -> (Arc<VoiceController>, Arc<FakeServerSession>, Arc<MockEmitter>) {
+        let (ctrl, emitter) = make_controller();
+        let server = FakeServerSession::new();
+        ctrl.join(7, server.clone()).await.unwrap();
+        (ctrl, server, emitter)
+    }
+
     // ── Tests ────────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1039,5 +1111,85 @@ mod controller_tests {
         // No public accessor to peek peer_keys, but if we got here without
         // panicking, the unwrap path is exercised.
         ctrl.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_mute_notifies_server_and_emits_state() {
+        let (ctrl, fake, emitter) = setup_joined_call().await;
+        ctrl.set_mute(true).await.unwrap();
+        assert_eq!(fake.set_mute_calls.lock().unwrap().as_slice(), &[true]);
+        assert!(emitter.count("voice://state-changed") >= 1);
+    }
+
+    #[tokio::test]
+    async fn on_peer_stream_state_updates_peer_and_emits() {
+        let (ctrl, _fake, emitter) = setup_joined_call().await;
+        let sid: SessionId = [9u8; 16];
+        let pk = PublicKey::from_bytes([3u8; 32]);
+
+        // Register the peer first: offer a stream key (so peer_keys has the
+        // session_id), then TrackEnabled registers the VoicePeer. The wrapped
+        // key must round-trip against the fake server's keypair.
+        let peer_kp = Keypair::generate();
+        let our_kp = _fake.my_keypair();
+        let key = farder_crypto::media::derive_stream_key();
+        let wrapped = farder_crypto::media::wrap_stream_key_for_peer(
+            &key,
+            peer_kp.signing_key_bytes(),
+            our_kp.public_key().as_bytes(),
+        )
+        .unwrap();
+        // We register with `pk` as the peer pubkey for the UI VoicePeer; the
+        // key offer's sender pubkey only matters for the unwrap round-trip.
+        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped)
+            .await;
+        ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio)
+            .await;
+
+        ctrl.on_peer_stream_state(sid, true, false).await;
+
+        let state = ctrl.state().await;
+        let peer = state
+            .peers
+            .iter()
+            .find(|p| p.pubkey == pk)
+            .expect("peer present");
+        assert!(peer.muted);
+        assert!(!peer.deafened);
+        assert!(emitter.count("voice://state-changed") >= 1);
+    }
+
+    #[tokio::test]
+    async fn on_peer_stream_joined_seeds_late_registered_peer() {
+        let (ctrl, fake, _emitter) = setup_joined_call().await;
+        let sid: SessionId = [9u8; 16];
+        let pk = PublicKey::from_bytes([4u8; 32]);
+
+        // StreamJoined arrives BEFORE the peer's TrackEnabled — its mute/deafen
+        // must be remembered and applied when the VoicePeer is later created.
+        ctrl.on_peer_stream_joined(sid, true, true).await;
+
+        let peer_kp = Keypair::generate();
+        let our_kp = fake.my_keypair();
+        let key = farder_crypto::media::derive_stream_key();
+        let wrapped = farder_crypto::media::wrap_stream_key_for_peer(
+            &key,
+            peer_kp.signing_key_bytes(),
+            our_kp.public_key().as_bytes(),
+        )
+        .unwrap();
+        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped)
+            .await;
+        ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio)
+            .await;
+
+        let state = ctrl.state().await;
+        let peer = state
+            .peers
+            .iter()
+            .find(|p| p.pubkey == pk)
+            .expect("peer present");
+        assert!(peer.muted, "seeded mute must carry into the new VoicePeer");
+        assert!(peer.deafened, "seeded deafen must carry into the new VoicePeer");
     }
 }
