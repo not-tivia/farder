@@ -10,6 +10,8 @@ import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
 import AppearanceSettings from "./AppearanceSettings";
+import VoiceControlBar from "./VoiceControlBar";
+import { useVoice } from "../hooks/useVoice";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
   const serverId = useActiveServerId();
@@ -117,6 +119,8 @@ export default function ChannelSidebar() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
+
+  const voice = useVoice();
 
   const channels = activeServer?.channels ?? [];
   const categories = activeServer?.categories ?? [];
@@ -290,6 +294,7 @@ export default function ChannelSidebar() {
   function renderVoiceChannel(ch: ChannelInfo) {
     const isInThisChannel = activeServer?.currentVoiceChannelId === ch.id;
     const participants = activeServer?.voiceStates[ch.id] ?? [];
+    const liveByPk = new Map(voice.peers.map((p) => [p.pubkey, p]));
     return (
       <div key={ch.id}>
         <div
@@ -299,11 +304,13 @@ export default function ChannelSidebar() {
           onClick={async () => {
             if (!serverId) return;
             if (isInThisChannel) {
+              await voice.leave().catch(() => {});
               await api.leaveVoice(serverId, ch.id);
               dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
             } else {
               await api.joinVoice(serverId, ch.id);
               dispatch({ type: "JOIN_VOICE_CHANNEL", serverId, payload: ch.id });
+              await voice.join(serverId, ch.id).catch((e) => console.error("[voice] join", e));
               try {
                 const vs = await api.getVoiceState(serverId, ch.id);
                 const simplified = (vs || []).filter((v: any) => v && v.public_key).map((v: any) => ({
@@ -328,12 +335,21 @@ export default function ChannelSidebar() {
         </div>
         {participants.length > 0 && (
           <div className="voice-participants">
-            {participants.map(p => (
-              <div key={p.publicKey} className="voice-participant">
-                <span className="voice-participant-dot">*</span>
-                <span>{p.displayName}</span>
-              </div>
-            ))}
+            {participants.map((p) => {
+              const live = liveByPk.get(p.publicKey);
+              const initial = (p.displayName || "?").charAt(0).toUpperCase();
+              return (
+                <div key={p.publicKey} className={`voice-participant${live?.speaking ? " speaking" : ""}`}>
+                  <span className={`voice-avatar${live?.speaking ? " speaking" : ""}`}>{initial}</span>
+                  <span className="voice-participant-name">{p.displayName}</span>
+                  {live?.deafened
+                    ? <span className="voice-participant-status" title="Deafened">&#x1F507;</span>
+                    : live?.muted
+                    ? <span className="voice-participant-status" title="Muted">&#x1F507;</span>
+                    : null}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -424,15 +440,11 @@ export default function ChannelSidebar() {
           )}
         </div>
         {activeServer?.currentVoiceChannelId != null && (
-          <div className="voice-status-bar">
-            <span>~ {channels.find(c => c.id === activeServer.currentVoiceChannelId)?.name ?? "Voice"}</span>
-            <button className="voice-disconnect-btn" onClick={async () => {
-              if (serverId && activeServer.currentVoiceChannelId != null) {
-                await api.leaveVoice(serverId, activeServer.currentVoiceChannelId);
-                dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
-              }
-            }}>Disconnect</button>
-          </div>
+          <VoiceControlBar
+            voice={voice}
+            channelName={channels.find((c) => c.id === activeServer.currentVoiceChannelId)?.name ?? "Voice"}
+            selfInitial={"Y"}
+          />
         )}
         <div className="user-footer">
           <UserFooter members={members} roles={roles} />
