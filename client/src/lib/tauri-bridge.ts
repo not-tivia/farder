@@ -368,6 +368,8 @@ export async function getVoiceState(serverId: string, channelId: number): Promis
 export interface VoicePeer {
   pubkey: { bytes: number[] };
   speaking: boolean;
+  muted: boolean;
+  deafened: boolean;
 }
 
 export interface VoiceState {
