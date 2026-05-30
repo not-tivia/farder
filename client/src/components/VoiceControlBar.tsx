@@ -23,11 +23,13 @@ export default function VoiceControlBar({ voice, channelName, selfInitial }: Pro
         <button
           className={`vcb-btn${voice.muted ? " active" : ""}`}
           title={voice.muted ? "Unmute" : "Mute"}
+          aria-pressed={voice.muted}
           onClick={() => voice.setMute(!voice.muted)}
         >{voice.muted ? <span>&#x1F507;</span> : <span>&#x1F399;</span>}</button>
         <button
           className={`vcb-btn${voice.deafened ? " active" : ""}`}
           title={voice.deafened ? "Undeafen" : "Deafen"}
+          aria-pressed={voice.deafened}
           onClick={() => voice.setDeafen(!voice.deafened)}
         ><span>&#x1F3A7;</span></button>
         <button className="vcb-btn leave" title="Disconnect" onClick={() => voice.leave()}><span>&#x2716;</span></button>
