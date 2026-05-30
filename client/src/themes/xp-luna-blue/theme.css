@@ -2085,6 +2085,41 @@ body {
   background: rgba(255,0,0,0.1);
 }
 
+/* ── Voice avatars + live state ── */
+.voice-avatar {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--xp-panel-bg, #F1EFE2);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--xp-blue-dark, #003C74); flex: 0 0 auto;
+}
+.voice-avatar.speaking { box-shadow: 0 0 0 2px var(--xp-blue, #0058E6); }
+.voice-participant { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.voice-participant.speaking .voice-participant-name { color: var(--xp-blue, #0058E6); }
+.voice-participant-name { flex: 1; font-size: 12px; }
+.voice-participant-status { font-size: 11px; }
+
+/* ── In-call control bar (style C) ── */
+.voice-control-bar {
+  background: var(--xp-panel-bg, #F1EFE2);
+  border-top: 1px solid var(--xp-border, #ACA899);
+  padding: 9px 11px;
+}
+.vcb-head { display: flex; align-items: center; gap: 6px; color: var(--xp-blue, #0058E6); font-size: 12px; font-weight: 600; }
+.vcb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--xp-blue, #0058E6); }
+.vcb-channel { color: var(--xp-text-muted, #888880); font-weight: 400; }
+.vcb-self { display: flex; align-items: center; gap: 8px; padding: 7px 0 3px; font-size: 12px; color: var(--xp-text-secondary, #555550); }
+.vcb-self-name { flex: 1; }
+.vcb-self-status { color: var(--xp-text-muted, #888880); font-size: 11px; }
+.vcb-buttons { display: flex; gap: 6px; margin-top: 6px; }
+.vcb-btn {
+  flex: 1; background: var(--xp-white, #FFFFFF); border: 1px solid var(--xp-border, #ACA899); border-radius: 5px;
+  color: var(--xp-blue-dark, #003C74); padding: 8px 0; font-size: 15px; cursor: pointer;
+}
+.vcb-btn:hover { background: var(--xp-window-bg, #ECE9D8); }
+.vcb-btn.active { background: rgba(204,0,0,0.14); color: #cc0000; border-color: rgba(204,0,0,0.4); }
+.vcb-btn.leave { flex: 0 0 40px; background: rgba(204,0,0,0.10); color: #cc0000; border-color: rgba(204,0,0,0.4); }
+.vcb-e2e { display: flex; align-items: center; gap: 5px; color: var(--xp-text-secondary, #555550); font-size: 10px; margin-top: 8px; }
+
 /* ── Server Choice Screen ──────────────────────────────────── */
 .server-choice {
   display: flex;
