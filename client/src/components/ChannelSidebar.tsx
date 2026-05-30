@@ -351,7 +351,7 @@ export default function ChannelSidebar() {
                   <span className={`voice-avatar${live?.speaking ? " speaking" : ""}`}>{initial}</span>
                   <span className="voice-participant-name">{p.displayName}</span>
                   {live?.deafened
-                    ? <span className="voice-participant-status" title="Deafened">&#x1F507;</span>
+                    ? <span className="voice-participant-status" title="Deafened">&#x1F3A7;</span>
                     : live?.muted
                     ? <span className="voice-participant-status" title="Muted">&#x1F507;</span>
                     : null}
