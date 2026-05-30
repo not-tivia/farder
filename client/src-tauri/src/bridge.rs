@@ -173,9 +173,26 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             }
             Ok(())
         }
+        ServerEvent::StreamStateChanged { session_id, muted, deafened, .. } => {
+            if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
+                let ctrl = (*ctrl).clone();
+                tokio::spawn(async move {
+                    ctrl.on_peer_stream_state(session_id, muted, deafened).await;
+                });
+            }
+            Ok(())
+        }
+        ServerEvent::StreamJoined { session_id, muted, deafened, .. } => {
+            if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
+                let ctrl = (*ctrl).clone();
+                tokio::spawn(async move {
+                    ctrl.on_peer_stream_joined(session_id, muted, deafened).await;
+                });
+            }
+            Ok(())
+        }
         ServerEvent::MediaJoined { .. }
         | ServerEvent::MediaLeft { .. }
-        | ServerEvent::StreamJoined { .. }
         | ServerEvent::StreamCallIncoming { .. }
         | ServerEvent::StreamCallEnded { .. } => Ok(()), // surfaced by future UI events
         _ => Ok(()),
