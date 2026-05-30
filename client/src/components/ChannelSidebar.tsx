@@ -122,6 +122,16 @@ export default function ChannelSidebar() {
 
   const voice = useVoice();
 
+  // Full voice-channel teardown: stop the audio engine AND clear presence
+  // state. Shared by the channel-row toggle and the control-bar disconnect so
+  // both paths leave the channel completely (not just stop audio).
+  const leaveVoiceChannel = async (channelId: number) => {
+    if (!serverId) return;
+    await voice.leave().catch(() => {});
+    await api.leaveVoice(serverId, channelId);
+    dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
+  };
+
   const channels = activeServer?.channels ?? [];
   const categories = activeServer?.categories ?? [];
   const currentChannelId = activeServer?.currentChannelId ?? null;
@@ -304,9 +314,7 @@ export default function ChannelSidebar() {
           onClick={async () => {
             if (!serverId) return;
             if (isInThisChannel) {
-              await voice.leave().catch(() => {});
-              await api.leaveVoice(serverId, ch.id);
-              dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
+              await leaveVoiceChannel(ch.id);
             } else {
               await api.joinVoice(serverId, ch.id);
               dispatch({ type: "JOIN_VOICE_CHANNEL", serverId, payload: ch.id });
@@ -444,6 +452,7 @@ export default function ChannelSidebar() {
             voice={voice}
             channelName={channels.find((c) => c.id === activeServer.currentVoiceChannelId)?.name ?? "Voice"}
             selfInitial={"Y"}
+            onDisconnect={() => leaveVoiceChannel(activeServer.currentVoiceChannelId!)}
           />
         )}
         <div className="user-footer">
