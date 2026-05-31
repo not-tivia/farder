@@ -122,6 +122,35 @@ export default function ChannelSidebar() {
 
   const voice = useVoice();
 
+  // PTT mic mode + bound key, loaded from settings on mount. Read once here
+  // (mode is applied at join; v1 does not hot-swap mid-call per the spec).
+  const [micMode, setMicMode] = useState<string>("OpenMic");
+  const [pttKey, setPttKey] = useState<string>("Backquote");
+  useEffect(() => {
+    api.getVoiceMode().then(setMicMode).catch(() => {});
+    api.getPttKey().then(setPttKey).catch(() => {});
+  }, []);
+
+  // Window-level PTT keydown listener: active only while in a call AND mode is
+  // PushToTalk. Ignores key repeats and typing in inputs/textareas/editables.
+  const inCall = voice.inCall;
+  const toggleTransmit = voice.toggleTransmit;
+  useEffect(() => {
+    if (!inCall || micMode !== "PushToTalk") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || t?.isContentEditable) return;
+      if (e.code === pttKey) {
+        e.preventDefault();
+        void toggleTransmit();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [inCall, micMode, pttKey, toggleTransmit]);
+
   // Full voice-channel teardown: stop the audio engine AND clear presence
   // state. Shared by the channel-row toggle and the control-bar disconnect so
   // both paths leave the channel completely (not just stop audio).

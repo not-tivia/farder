@@ -14,12 +14,15 @@ export interface UseVoice {
   inCall: boolean;
   muted: boolean;
   deafened: boolean;
+  transmitting: boolean;
   localSpeaking: boolean;
   peers: VoiceUiPeer[];
   join: (serverId: string, channelId: number) => Promise<void>;
   leave: () => Promise<void>;
   setMute: (muted: boolean) => Promise<void>;
   setDeafen: (deafened: boolean) => Promise<void>;
+  toggleTransmit: () => Promise<void>;
+  connectionQuality: { rttMs: number; lossPct: number } | null;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -38,16 +41,24 @@ export function useVoice(): UseVoice {
   const [inCall, setInCall] = useState(false);
   const [muted, setMutedState] = useState(false);
   const [deafened, setDeafenedState] = useState(false);
+  const [transmitting, setTransmitting] = useState(false);
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [peers, setPeers] = useState<VoiceUiPeer[]>([]);
+  const [connectionQuality, setConnectionQuality] =
+    useState<{ rttMs: number; lossPct: number } | null>(null);
 
   const applyState = useCallback((s: api.VoiceState) => {
     const n = normalize(s);
     setInCall(n.inCall);
     setMutedState(s.muted);
     setDeafenedState(s.deafened);
+    setTransmitting(s.transmitting);
     setPeers(n.peers);
-    if (!n.inCall) setLocalSpeaking(false);
+    if (!n.inCall) {
+      setLocalSpeaking(false);
+      setTransmitting(false);
+      setConnectionQuality(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -68,6 +79,8 @@ export function useVoice(): UseVoice {
       setPeers((prev) => prev.map((p) =>
         p.pubkey === e.payload.pubkey ? { ...p, speaking: e.payload.active } : p));
     }).then(safePush);
+    listen<api.ConnectionQualityPayload>("voice://connection-quality", (e) =>
+      setConnectionQuality({ rttMs: e.payload.rtt_ms, lossPct: e.payload.loss_pct })).then(safePush);
 
     return () => { cleanupRan = true; unlisten.forEach((u) => u()); };
   }, [applyState]);
@@ -76,6 +89,10 @@ export function useVoice(): UseVoice {
   const leave = useCallback(() => api.voiceLeave(), []);
   const setMute = useCallback((m: boolean) => api.voiceSetMute(m), []);
   const setDeafen = useCallback((d: boolean) => api.voiceSetDeafen(d), []);
+  const toggleTransmit = useCallback(async () => {
+    await api.voiceToggleTransmit();
+    // State refreshes via the existing voice://state-changed listener.
+  }, []);
 
-  return { inCall, muted, deafened, localSpeaking, peers, join, leave, setMute, setDeafen };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality };
 }

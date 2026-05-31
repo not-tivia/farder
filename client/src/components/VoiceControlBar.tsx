@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
 import type { UseVoice } from "../hooks/useVoice";
+import { getVoiceMode, getPttKey } from "../lib/tauri-bridge";
+import { classifyQuality } from "../lib/connectionQuality";
 
 interface Props {
   voice: UseVoice;
@@ -9,18 +12,54 @@ interface Props {
 }
 
 export default function VoiceControlBar({ voice, channelName, selfInitial, onDisconnect }: Props) {
+  const [micMode, setMicMode] = useState<string>("OpenMic");
+  const [pttKey, setPttKey] = useState<string>("Backquote");
+
+  useEffect(() => {
+    void getVoiceMode().then(setMicMode).catch(() => {});
+    void getPttKey().then(setPttKey).catch(() => {});
+  }, []);
+
   if (!voice.inCall) return null;
+
+  const q = voice.connectionQuality;
+  const tier = q ? classifyQuality(q.rttMs, q.lossPct) : "unknown";
+  const qualityTitle = q
+    ? `Ping: ${Math.round(q.rttMs)} ms · Loss: ${q.lossPct.toFixed(1)}%`
+    : "Measuring connection…";
+
   return (
     <div className="voice-control-bar">
       <div className="vcb-head">
         <span className="vcb-dot" /> Voice Connected
         <span className="vcb-channel"> &middot; {channelName}</span>
+        <span
+          className={`vcb-signal vcb-signal-${tier}`}
+          title={qualityTitle}
+          aria-label={qualityTitle}
+        >
+          <span className="vcb-signal-bar vcb-signal-bar-1" />
+          <span className="vcb-signal-bar vcb-signal-bar-2" />
+          <span className="vcb-signal-bar vcb-signal-bar-3" />
+          <span className="vcb-signal-bar vcb-signal-bar-4" />
+        </span>
       </div>
       <div className="vcb-self">
         <span className={`voice-avatar${voice.localSpeaking ? " speaking" : ""}`}>{selfInitial}</span>
         <span className="vcb-self-name">You</span>
         {voice.localSpeaking && <span className="vcb-self-status">speaking</span>}
       </div>
+      {micMode === "PushToTalk" && (
+        <button
+          type="button"
+          className={voice.transmitting ? "vcb-ptt vcb-ptt-on" : "vcb-ptt vcb-ptt-off"}
+          onClick={() => { void voice.toggleTransmit(); }}
+          title={voice.transmitting ? "Transmitting" : `Mic off · tap ${pttKey} to talk`}
+        >
+          <span className="vcb-ptt-dot" />
+          {voice.transmitting ? "Transmitting" : `Tap ${pttKey} to talk`}
+        </button>
+      )}
       <div className="vcb-buttons">
         <button
           className={`vcb-btn${voice.muted ? " active" : ""}`}

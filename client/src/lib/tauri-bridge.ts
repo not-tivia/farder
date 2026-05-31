@@ -378,6 +378,7 @@ export interface VoiceState {
   channel_id: number[] | null;
   muted: boolean;
   deafened: boolean;
+  transmitting: boolean;
   peers: VoicePeer[];
 }
 
@@ -409,6 +410,39 @@ export async function voiceSetDeafen(deafened: boolean): Promise<void> {
 
 export async function voiceGetState(): Promise<VoiceState> {
   return invoke("voice_get_state");
+}
+
+export interface ConnectionQualityPayload {
+  rtt_ms: number;
+  loss_pct: number;
+}
+
+export async function voiceToggleTransmit(): Promise<boolean> {
+  return invoke<boolean>("voice_toggle_transmit");
+}
+
+export async function voiceSetPeerVolume(pubkeyHex: string, volume: number): Promise<void> {
+  return invoke<void>("voice_set_peer_volume", { pubkeyHex, volume });
+}
+
+export async function getVoiceMode(): Promise<string> {
+  return invoke<string>("get_voice_mode");
+}
+
+export async function setVoiceMode(mode: string): Promise<void> {
+  return invoke<void>("set_voice_mode", { mode });
+}
+
+export async function getPttKey(): Promise<string> {
+  return invoke<string>("get_ptt_key");
+}
+
+export async function setPttKey(key: string): Promise<void> {
+  return invoke<void>("set_ptt_key", { key });
+}
+
+export async function getPeerVolumes(): Promise<Record<string, number>> {
+  return invoke<Record<string, number>>("get_peer_volumes");
 }
 
 // ---------------------------------------------------------------------------
