@@ -30,7 +30,54 @@ pub struct VoiceState {
     pub channel_id: Option<ChannelId>,
     pub muted: bool,
     pub deafened: bool,
+    pub transmitting: bool,
     pub peers: Vec<VoicePeer>,
+}
+
+/// Mic transmission mode, read from settings at join time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoiceMode {
+    OpenMic,
+    PushToTalk,
+}
+
+impl Default for VoiceMode {
+    fn default() -> Self {
+        VoiceMode::OpenMic
+    }
+}
+
+/// Choose the send-path gate for a mode. PTT uses the shared transmit flag;
+/// Open Mic ignores it and always passes.
+pub fn gate_for_mode(
+    mode: VoiceMode,
+    transmit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> crate::voice::gate::GateMode {
+    match mode {
+        VoiceMode::OpenMic => crate::voice::gate::GateMode::Open,
+        VoiceMode::PushToTalk => crate::voice::gate::GateMode::Ptt(transmit),
+    }
+}
+
+/// Convert raw QUIC path stats into (rtt_ms, loss_pct). Cumulative estimate;
+/// loss = lost / max(1, sent) * 100. Display-only. Pure so it is unit-testable
+/// without a live connection.
+pub fn quality_from_stats(rtt: std::time::Duration, lost: u64, sent: u64) -> (f64, f64) {
+    let rtt_ms = rtt.as_secs_f64() * 1000.0;
+    let loss_pct = (lost as f64 / sent.max(1) as f64) * 100.0;
+    (rtt_ms, loss_pct)
+}
+
+/// Per-join configuration resolved from settings by the command layer.
+/// Kept separate from `join`'s args so tests can inject it directly.
+#[derive(Clone, Default)]
+pub struct JoinConfig {
+    pub mode: VoiceMode,
+    /// pubkey hex -> gain (1.0 = 100%). Absent peer = 1.0.
+    pub peer_volumes: std::collections::HashMap<String, f32>,
+    /// QUIC connection for the connection-quality poller. `None` (e.g. in
+    /// tests) means no poller is spawned. Cheaply clonable.
+    pub connection: Option<quinn::Connection>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -200,6 +247,7 @@ pub struct PipelineParams {
     pub speaker_pk: [u8; 32],
     pub peer_rings: crate::voice::mixer::PeerRings,
     pub muted: Arc<std::sync::atomic::AtomicBool>,
+    pub gate: crate::voice::gate::GateMode,
     pub local_speaking_tx: tokio::sync::watch::Sender<bool>,
     pub datagram_sink: Box<dyn Fn(Bytes) + Send + Sync + 'static>,
 }
@@ -271,6 +319,7 @@ impl VoicePipelineFactory for AudioPipelineFactory {
         let stream_key = params.stream_key;
         let speaker_pk = params.speaker_pk;
         let muted = params.muted;
+        let gate = params.gate;
         let speak_tx = params.local_speaking_tx;
         let datagram_sink = params.datagram_sink;
         tokio::task::spawn_blocking(move || {
@@ -278,7 +327,7 @@ impl VoicePipelineFactory for AudioPipelineFactory {
                 crate::voice::send::SendTaskConfig {
                     pcm_rx,
                     apm: crate::voice::apm::AudioProcessor::new(),
-                    gate: crate::voice::gate::GateMode::Open,
+                    gate,
                     session_id,
                     stream_key,
                     speaker_pk,
@@ -312,6 +361,7 @@ struct Inner {
     state: VoiceState,
     muted: Arc<AtomicBool>,
     deafened: Arc<AtomicBool>,
+    transmit: Arc<AtomicBool>,
     pre_deafen_muted: bool,
     /// Set while a call is active.
     active: Option<ActiveCall>,
@@ -329,6 +379,10 @@ struct ActiveCall {
     /// session_id → (muted, deafened) learned from StreamJoined / StreamStateChanged.
     /// Seeds VoicePeer when the matching TrackEnabled registers the peer.
     peer_status: HashMap<SessionId, (bool, bool)>,
+    /// pubkey hex -> gain, snapshotted from settings at join. Seeds new peers.
+    #[allow(dead_code)]
+    peer_volumes: HashMap<String, f32>,
+    gate_is_ptt: bool,
 }
 
 struct PeerEntry {
@@ -368,10 +422,12 @@ impl VoiceController {
                     channel_id: None,
                     muted: false,
                     deafened: false,
+                    transmitting: false,
                     peers: vec![],
                 },
                 muted: Arc::new(AtomicBool::new(false)),
                 deafened: Arc::new(AtomicBool::new(false)),
+                transmit: Arc::new(AtomicBool::new(false)),
                 pre_deafen_muted: false,
                 active: None,
             })),
@@ -382,6 +438,17 @@ impl VoiceController {
 
     pub async fn state(&self) -> VoiceState {
         self.inner.lock().await.state.clone()
+    }
+
+    #[cfg(test)]
+    pub async fn current_gate_is_ptt(&self) -> bool {
+        self.inner
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|c| c.gate_is_ptt)
+            .unwrap_or(false)
     }
 
     /// Look up the peer's long-lived public key for a given session_id.
@@ -398,10 +465,21 @@ impl VoiceController {
             .and_then(|c| c.peer_keys.get(session_id).map(|(_, pk)| pk.clone()))
     }
 
+    /// Back-compat join used by existing tests: Open Mic, no saved volumes.
     pub async fn join(
         &self,
         channel_id: u64,
         server: Arc<dyn ServerSession>,
+    ) -> Result<(), String> {
+        self.join_with_config(channel_id, server, JoinConfig::default())
+            .await
+    }
+
+    pub async fn join_with_config(
+        &self,
+        channel_id: u64,
+        server: Arc<dyn ServerSession>,
+        config: JoinConfig,
     ) -> Result<(), String> {
         // Auto-leave any existing call first.
         let has_active = self.inner.lock().await.active.is_some();
@@ -440,6 +518,7 @@ impl VoiceController {
         // 3. Spawn audio pipeline (mixer + send + I/O).
         let peer_rings: crate::voice::mixer::PeerRings = Default::default();
         let muted_flag = self.inner.lock().await.muted.clone();
+        let transmit_flag = self.inner.lock().await.transmit.clone();
         let (speak_tx, mut speak_rx) = tokio::sync::watch::channel(false);
         let server_for_sink = server.clone();
         let pipeline = self.pipeline_factory.spawn(PipelineParams {
@@ -448,6 +527,7 @@ impl VoiceController {
             speaker_pk: my_pk_bytes,
             peer_rings: peer_rings.clone(),
             muted: muted_flag,
+            gate: gate_for_mode(config.mode, transmit_flag),
             local_speaking_tx: speak_tx,
             datagram_sink: Box::new(move |b: Bytes| {
                 let _ = server_for_sink.send_datagram(b);
@@ -469,6 +549,27 @@ impl VoiceController {
             }
         });
 
+        // 5b. Connection-quality poller (only when a real connection is
+        // supplied). Samples QUIC path stats ~1/s and emits the tier numbers.
+        // Aborted in leave().
+        let quality_poller = config.connection.as_ref().map(|conn| {
+            let conn = conn.clone();
+            let emitter = self.emitter.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                loop {
+                    tick.tick().await;
+                    let p = conn.stats().path;
+                    let (rtt_ms, loss_pct) =
+                        quality_from_stats(p.rtt, p.lost_packets, p.sent_packets);
+                    emitter.emit(
+                        "voice://connection-quality",
+                        serde_json::json!({ "rtt_ms": rtt_ms, "loss_pct": loss_pct }),
+                    );
+                }
+            })
+        });
+
         // 6. Commit state + emit.
         let snap = {
             let mut inner = self.inner.lock().await;
@@ -480,6 +581,9 @@ impl VoiceController {
                 peers: HashMap::new(),
                 peer_keys: HashMap::new(),
                 peer_status: HashMap::new(),
+                peer_volumes: config.peer_volumes.clone(),
+                gate_is_ptt: matches!(config.mode, VoiceMode::PushToTalk),
+                quality_poller,
             });
             inner.state.clone()
         };
@@ -507,6 +611,10 @@ impl VoiceController {
             if let Some(p) = call.pipeline.take() {
                 p.stop();
             }
+            // Stop the connection-quality poller.
+            if let Some(h) = call.quality_poller.take() {
+                h.abort();
+            }
             // Abort every peer recv task and unregister its dispatcher route.
             let dispatcher = call.server.dispatcher();
             for (sid, peer) in call.peers.drain() {
@@ -526,10 +634,12 @@ impl VoiceController {
                 channel_id: None,
                 muted: false,
                 deafened: false,
+                transmitting: false,
                 peers: vec![],
             };
             inner.muted.store(false, Ordering::Release);
             inner.deafened.store(false, Ordering::Release);
+            inner.transmit.store(false, Ordering::Release);
             inner.pre_deafen_muted = false;
             inner.state.clone()
         };
@@ -581,6 +691,31 @@ impl VoiceController {
         self.emitter
             .emit("voice://state-changed", serde_json::to_value(&snap).unwrap_or_default());
         Ok(())
+    }
+
+    /// Set the PTT transmit flag explicitly and re-emit state.
+    pub async fn set_transmitting(&self, transmitting: bool) -> Result<(), String> {
+        let snap = {
+            let mut inner = self.inner.lock().await;
+            inner.transmit.store(transmitting, Ordering::Release);
+            inner.state.transmitting = transmitting;
+            inner.state.clone()
+        };
+        self.emitter.emit(
+            "voice://state-changed",
+            serde_json::to_value(&snap).unwrap_or_default(),
+        );
+        Ok(())
+    }
+
+    /// Toggle the PTT transmit flag and return the new value.
+    pub async fn toggle_transmit(&self) -> bool {
+        let new_val = {
+            let inner = self.inner.lock().await;
+            !inner.transmit.load(Ordering::Acquire)
+        };
+        let _ = self.set_transmitting(new_val).await;
+        new_val
     }
 
     // ── Inbound media-event handlers (Task 11 wires server events to these) ──
@@ -1089,6 +1224,114 @@ mod controller_tests {
         ctrl.leave().await.unwrap();
         assert!(ctrl.state().await.channel_id.is_none());
         assert_eq!(emitter.count("voice://state-changed"), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_controller_reports_not_transmitting() {
+        let (ctrl, _emitter) = make_controller();
+        let st = ctrl.state().await;
+        assert!(!st.transmitting, "fresh controller must not be transmitting");
+    }
+
+    #[test]
+    fn gate_for_mode_picks_ptt_only_when_push_to_talk() {
+        let flag = Arc::new(AtomicBool::new(false));
+        // Open mic -> Open (always passes), transmit flag ignored.
+        let g_open = super::gate_for_mode(super::VoiceMode::OpenMic, flag.clone());
+        assert!(g_open.pass(&[0.0; 960]));
+        // PTT -> Ptt(flag); closed blocks, open passes.
+        let g_ptt = super::gate_for_mode(super::VoiceMode::PushToTalk, flag.clone());
+        assert!(!g_ptt.pass(&[0.0; 960]));
+        flag.store(true, Ordering::Release);
+        assert!(g_ptt.pass(&[0.0; 960]));
+    }
+
+    #[tokio::test]
+    async fn toggle_transmit_flips_state_and_emits() {
+        let (ctrl, server, emitter) = setup_joined_call().await;
+        let _ = server; // server relay not needed for transmit
+        let before = emitter.count("voice://state-changed");
+
+        let now_on = ctrl.toggle_transmit().await;
+        assert!(now_on, "first toggle turns transmit on");
+        assert!(ctrl.state().await.transmitting);
+
+        let now_off = ctrl.toggle_transmit().await;
+        assert!(!now_off, "second toggle turns transmit off");
+        assert!(!ctrl.state().await.transmitting);
+
+        assert_eq!(
+            emitter.count("voice://state-changed"),
+            before + 2,
+            "each toggle re-emits state"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_with_ptt_mode_selects_ptt_gate() {
+        let (ctrl, _emitter) = make_controller();
+        let server = FakeServerSession::new();
+        ctrl.join_with_config(
+            7,
+            server.clone(),
+            super::JoinConfig {
+                mode: super::VoiceMode::PushToTalk,
+                peer_volumes: std::collections::HashMap::new(),
+                connection: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(ctrl.current_gate_is_ptt().await, "PTT mode selects Ptt gate");
+        ctrl.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn join_with_open_mic_mode_selects_open_gate() {
+        let (ctrl, _emitter) = make_controller();
+        let server = FakeServerSession::new();
+        ctrl.join_with_config(
+            7,
+            server.clone(),
+            super::JoinConfig {
+                mode: super::VoiceMode::OpenMic,
+                peer_volumes: std::collections::HashMap::new(),
+                connection: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!ctrl.current_gate_is_ptt().await, "Open Mic selects Open gate");
+        ctrl.leave().await.unwrap();
+    }
+
+    #[test]
+    fn quality_from_stats_computes_ms_and_loss_pct() {
+        use std::time::Duration;
+        // 50 ms rtt, 3 lost of 100 sent => 50.0 ms, 3.0%.
+        let (rtt_ms, loss_pct) = super::quality_from_stats(Duration::from_millis(50), 3, 100);
+        assert!((rtt_ms - 50.0).abs() < 1e-6);
+        assert!((loss_pct - 3.0).abs() < 1e-6);
+        // 10 lost of 1000 sent => 1.0%.
+        let (_, loss1) = super::quality_from_stats(Duration::from_millis(50), 10, 1000);
+        assert!((loss1 - 1.0).abs() < 1e-6);
+        // Zero sent must not divide-by-zero: max(1, sent) => 0.0% loss.
+        let (_, loss0) = super::quality_from_stats(Duration::from_millis(10), 0, 0);
+        assert_eq!(loss0, 0.0);
+    }
+
+    // Join/leave with a `None` connection (the only path testable on this
+    // mock/WSL box) must not spawn a poller and must round-trip cleanly.
+    #[tokio::test]
+    async fn join_with_config_none_connection_round_trips() {
+        let (ctrl, _emitter) = make_controller();
+        let server = FakeServerSession::new();
+        ctrl.join_with_config(7, server.clone(), super::JoinConfig::default())
+            .await
+            .unwrap();
+        assert!(ctrl.state().await.channel_id.is_some());
+        ctrl.leave().await.unwrap();
+        assert!(ctrl.state().await.channel_id.is_none());
     }
 
     // Sanity: the canned session_id flows through to the controller's

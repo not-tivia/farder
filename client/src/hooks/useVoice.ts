@@ -23,8 +23,6 @@ export interface UseVoice {
   setDeafen: (deafened: boolean) => Promise<void>;
   toggleTransmit: () => Promise<void>;
   connectionQuality: { rttMs: number; lossPct: number } | null;
-  peerVolume: (pubkey: string) => number;
-  setPeerVolume: (pubkey: string, v: number) => Promise<void>;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -48,7 +46,6 @@ export function useVoice(): UseVoice {
   const [peers, setPeers] = useState<VoiceUiPeer[]>([]);
   const [connectionQuality, setConnectionQuality] =
     useState<{ rttMs: number; lossPct: number } | null>(null);
-  const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>({});
 
   const applyState = useCallback((s: api.VoiceState) => {
     const n = normalize(s);

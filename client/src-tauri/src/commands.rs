@@ -262,6 +262,59 @@ pub fn get_last_server() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Voice settings (mic mode, PTT key, per-peer volumes)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn read_voice_mode() -> String {
+    settings_get("voice_mode")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "OpenMic".to_string())
+}
+
+pub(crate) fn read_ptt_key() -> String {
+    settings_get("ptt_key")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "Backquote".to_string())
+}
+
+pub(crate) fn read_peer_volumes() -> std::collections::HashMap<String, f32> {
+    settings_get("peer_volumes")
+        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, f32>>(v).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn get_voice_mode() -> String {
+    read_voice_mode()
+}
+
+#[tauri::command]
+pub fn set_voice_mode(mode: String) -> Result<(), String> {
+    // Accept only the two known values; default unknown to OpenMic.
+    let normalized = if mode == "PushToTalk" {
+        "PushToTalk"
+    } else {
+        "OpenMic"
+    };
+    settings_set("voice_mode", serde_json::Value::String(normalized.to_string()))
+}
+
+#[tauri::command]
+pub fn get_ptt_key() -> String {
+    read_ptt_key()
+}
+
+#[tauri::command]
+pub fn set_ptt_key(key: String) -> Result<(), String> {
+    settings_set("ptt_key", serde_json::Value::String(key))
+}
+
+#[tauri::command]
+pub fn get_peer_volumes() -> std::collections::HashMap<String, f32> {
+    read_peer_volumes()
+}
+
+// ---------------------------------------------------------------------------
 // Saved servers list
 // ---------------------------------------------------------------------------
 
@@ -2007,9 +2060,28 @@ pub async fn voice_join(
         Arc::clone(&state),
         server_id,
     )?;
+    let config = crate::voice::JoinConfig {
+        mode: if read_voice_mode() == "PushToTalk" {
+            crate::voice::VoiceMode::PushToTalk
+        } else {
+            crate::voice::VoiceMode::OpenMic
+        },
+        peer_volumes: read_peer_volumes(),
+    };
     voice
-        .join(channel_id, Arc::new(session) as Arc<dyn crate::voice::ServerSession>)
+        .join_with_config(
+            channel_id,
+            Arc::new(session) as Arc<dyn crate::voice::ServerSession>,
+            config,
+        )
         .await
+}
+
+#[tauri::command]
+pub async fn voice_toggle_transmit(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+) -> Result<bool, String> {
+    Ok(voice.toggle_transmit().await)
 }
 
 #[tauri::command]
@@ -2367,4 +2439,52 @@ pub fn restart_local_servers(
 // Public re-export so other modules can resolve paths under ~/.farder/.
 pub(crate) fn farder_data_dir_pub() -> std::path::PathBuf {
     farder_data_dir()
+}
+
+#[cfg(test)]
+mod voice_settings_tests {
+    use super::*;
+
+    // Settings I/O is process-global (a single ~/.farder/settings.json keyed
+    // off the FARDER_DATA env var), so serialize tests that mutate it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Point FARDER_DATA at a fresh temp dir for the duration of `f`, so the
+    /// real `read_settings`/`write_settings` helpers operate on an isolated
+    /// settings.json. Mirrors how the crate already isolates `farder_data_dir`.
+    fn with_temp_config<F: FnOnce()>(f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("FARDER_DATA").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "farder-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("FARDER_DATA", &tmp);
+        let _ = std::fs::remove_file(settings_path());
+        f();
+        let _ = std::fs::remove_dir_all(&tmp);
+        match prev {
+            Some(v) => std::env::set_var("FARDER_DATA", v),
+            None => std::env::remove_var("FARDER_DATA"),
+        }
+    }
+
+    #[test]
+    fn voice_mode_defaults_to_open_mic_and_round_trips() {
+        with_temp_config(|| {
+            assert_eq!(read_voice_mode(), "OpenMic");
+            assert_eq!(read_ptt_key(), "Backquote");
+
+            // set_voice_mode normalizes unknown values to OpenMic.
+            set_voice_mode("PushToTalk".to_string()).unwrap();
+            assert_eq!(read_voice_mode(), "PushToTalk");
+            set_voice_mode("garbage".to_string()).unwrap();
+            assert_eq!(read_voice_mode(), "OpenMic");
+
+            set_ptt_key("KeyV".to_string()).unwrap();
+            assert_eq!(read_ptt_key(), "KeyV");
+        });
+    }
 }
