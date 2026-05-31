@@ -3,6 +3,7 @@ import * as api from "../lib/tauri-bridge";
 import CustomizeModal from "./CustomizeModal";
 import GifSearchSettings from "./GifSearchSettings";
 import { TranslationSettingsTab } from "./TranslationSettingsTab";
+import VoiceSettings from "./VoiceSettings";
 
 interface Props {
   onClose: () => void;
@@ -78,7 +79,7 @@ export default function AppearanceSettings({ onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [customizing, setCustomizing] = useState<{ themeId: string; name: string } | null>(null);
-  const [activeTab, setActiveTab] = useState<"appearance" | "gif" | "translation">("appearance");
+  const [activeTab, setActiveTab] = useState<"appearance" | "gif" | "translation" | "voice">("appearance");
 
   async function refresh() {
     setLoading(true);
@@ -258,7 +259,7 @@ export default function AppearanceSettings({ onClose }: Props) {
             background: "var(--xp-window-bg, #ECE9D8)",
           }}
         >
-          {(["appearance", "gif", "translation"] as const).map((tab) => (
+          {(["appearance", "gif", "translation", "voice"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -275,7 +276,7 @@ export default function AppearanceSettings({ onClose }: Props) {
                 cursor: "pointer",
               }}
             >
-              {tab === "appearance" ? "Appearance" : tab === "gif" ? "GIF Search" : "Translation"}
+              {tab === "appearance" ? "Appearance" : tab === "gif" ? "GIF Search" : tab === "translation" ? "Translation" : "Voice"}
             </button>
           ))}
         </div>
@@ -294,6 +295,8 @@ export default function AppearanceSettings({ onClose }: Props) {
         >
           {activeTab === "gif" && <GifSearchSettings />}
           {activeTab === "translation" && <TranslationSettingsTab />}
+          {activeTab === "voice" && <VoiceSettings />}
+          {activeTab === "voice" && <VoiceSettings />}
           {activeTab === "appearance" && (
             <>
           {loading && <div>Loading themes…</div>}

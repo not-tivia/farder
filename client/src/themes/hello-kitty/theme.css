@@ -2097,6 +2097,16 @@ body {
 .vcb-head { display: flex; align-items: center; gap: 6px; color: var(--xp-blue-dark, #E91E63); font-size: 12px; font-weight: 600; }
 .vcb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--xp-blue-dark, #E91E63); }
 .vcb-channel { color: var(--xp-text-muted, #A87687); font-weight: 400; }
+  .vcb-signal { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; margin-left: 6px; cursor: default; }
+  .vcb-signal-bar { width: 3px; border-radius: 2px; background: #c98aa6; opacity: 0.4; }
+  .vcb-signal-bar-1 { height: 4px; }
+  .vcb-signal-bar-2 { height: 7px; }
+  .vcb-signal-bar-3 { height: 10px; }
+  .vcb-signal-bar-4 { height: 12px; }
+  .vcb-signal-good .vcb-signal-bar { background: #5cc98a; opacity: 1; }
+  .vcb-signal-fair .vcb-signal-bar { background: #f5b942; opacity: 1; }
+  .vcb-signal-poor .vcb-signal-bar { background: #e23b6f; opacity: 1; }
+  .vcb-signal-unknown .vcb-signal-bar { background: #c98aa6; opacity: 0.4; }
 .vcb-self { display: flex; align-items: center; gap: 8px; padding: 7px 0 3px; font-size: 12px; color: var(--xp-text-normal, #4A2937); }
 .vcb-self-name { flex: 1; }
 .vcb-self-status { color: var(--xp-text-muted, #A87687); font-size: 11px; }

@@ -445,6 +445,34 @@ export async function getPeerVolumes(): Promise<Record<string, number>> {
   return invoke<Record<string, number>>("get_peer_volumes");
 }
 
+export async function voiceToggleTransmit(): Promise<boolean> {
+  return invoke<boolean>("voice_toggle_transmit");
+}
+
+export async function voiceSetPeerVolume(pubkeyHex: string, volume: number): Promise<void> {
+  return invoke<void>("voice_set_peer_volume", { pubkeyHex, volume });
+}
+
+export async function getVoiceMode(): Promise<string> {
+  return invoke<string>("get_voice_mode");
+}
+
+export async function setVoiceMode(mode: string): Promise<void> {
+  return invoke<void>("set_voice_mode", { mode });
+}
+
+export async function getPttKey(): Promise<string> {
+  return invoke<string>("get_ptt_key");
+}
+
+export async function setPttKey(key: string): Promise<void> {
+  return invoke<void>("set_ptt_key", { key });
+}
+
+export async function getPeerVolumes(): Promise<Record<string, number>> {
+  return invoke<Record<string, number>>("get_peer_volumes");
+}
+
 // ---------------------------------------------------------------------------
 // Local server management
 // ---------------------------------------------------------------------------
