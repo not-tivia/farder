@@ -380,9 +380,11 @@ struct ActiveCall {
     /// Seeds VoicePeer when the matching TrackEnabled registers the peer.
     peer_status: HashMap<SessionId, (bool, bool)>,
     /// pubkey hex -> gain, snapshotted from settings at join. Seeds new peers.
-    #[allow(dead_code)]
     peer_volumes: HashMap<String, f32>,
     gate_is_ptt: bool,
+    /// Connection-quality poller task; aborted on leave. `None` when no
+    /// QUIC connection was supplied (e.g. tests).
+    quality_poller: Option<JoinHandle<()>>,
 }
 
 struct PeerEntry {
@@ -718,6 +720,26 @@ impl VoiceController {
         new_val
     }
 
+    /// Clamp a per-peer volume (keyed by pubkey hex) and, if that peer is
+    /// currently in the call, update its live mixer gain. Persistence is
+    /// handled by the command layer so the controller stays independent of
+    /// the settings file in tests.
+    pub async fn set_peer_volume(&self, pubkey_hex: String, volume: f32) -> Result<(), String> {
+        let clamped = volume.clamp(0.0, 2.0);
+        let inner = self.inner.lock().await;
+        if let Some(call) = inner.active.as_ref() {
+            let rings = call.peer_rings.lock().expect("peer_rings poisoned");
+            for (sid, (_, gain)) in rings.iter() {
+                if let Some(entry) = call.peers.get(sid) {
+                    if entry.pubkey.to_string() == pubkey_hex {
+                        gain.store(clamped.to_bits(), Ordering::Release);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── Inbound media-event handlers (Task 11 wires server events to these) ──
 
     /// Server told us a peer offered us a wrapped stream key. Unwrap it with
@@ -780,10 +802,18 @@ impl VoiceController {
             }
         };
         let ring = Arc::new(PeerPcmRing::new(10));
+        let pubkey_hex = peer_pubkey.to_string();
+        let seed_gain = call
+            .peer_volumes
+            .get(&pubkey_hex)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 2.0);
+        let gain = Arc::new(std::sync::atomic::AtomicU32::new(seed_gain.to_bits()));
         call.peer_rings
             .lock()
             .expect("peer_rings poisoned")
-            .insert(session_id, ring.clone());
+            .insert(session_id, (ring.clone(), gain));
 
         let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
         let dispatcher = call.server.dispatcher();
@@ -1473,5 +1503,63 @@ mod controller_tests {
             .expect("peer present");
         assert!(!peer.muted, "stale mute seed must not survive a leave");
         assert!(!peer.deafened, "stale deafen seed must not survive a leave");
+    }
+
+    async fn live_gain_for(ctrl: &VoiceController, sid: &SessionId) -> Option<f32> {
+        let inner = ctrl.inner.lock().await;
+        inner.active.as_ref().and_then(|c| {
+            c.peer_rings
+                .lock()
+                .ok()
+                .and_then(|r| r.get(sid).map(|(_, g)| f32::from_bits(g.load(Ordering::Acquire))))
+        })
+    }
+
+    #[tokio::test]
+    async fn peer_join_seeds_gain_from_saved_volume_and_set_peer_volume_clamps() {
+        let (ctrl, _emitter) = make_controller();
+        let server = FakeServerSession::new();
+        let pk = PublicKey::from_bytes([6u8; 32]);
+        let hex = pk.to_string(); // controller keys peer_volumes by this exact string
+        let mut vols = std::collections::HashMap::new();
+        vols.insert(hex.clone(), 0.5f32);
+        ctrl.join_with_config(
+            3,
+            server.clone(),
+            super::JoinConfig {
+                mode: super::VoiceMode::OpenMic,
+                peer_volumes: vols,
+                connection: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let sid: SessionId = [9u8; 16];
+        // Register the peer (offer key then TrackEnabled), reusing the existing
+        // round-trip helper pattern.
+        let peer_kp = Keypair::generate();
+        let our_kp = server.my_keypair();
+        let key = farder_crypto::media::derive_stream_key();
+        let wrapped = farder_crypto::media::wrap_stream_key_for_peer(
+            &key,
+            peer_kp.signing_key_bytes(),
+            our_kp.public_key().as_bytes(),
+        )
+        .unwrap();
+        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped).await;
+        ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio).await;
+
+        assert_eq!(live_gain_for(&ctrl, &sid).await, Some(0.5), "seeded from saved volume");
+
+        // Over-range clamps to 2.0; live gain updates for the present peer.
+        ctrl.set_peer_volume(hex.clone(), 5.0).await.unwrap();
+        assert_eq!(live_gain_for(&ctrl, &sid).await, Some(2.0), "clamped to 2.0");
+
+        // Negative clamps to 0.0.
+        ctrl.set_peer_volume(hex.clone(), -1.0).await.unwrap();
+        assert_eq!(live_gain_for(&ctrl, &sid).await, Some(0.0), "clamped to 0.0");
+
+        ctrl.leave().await.unwrap();
     }
 }

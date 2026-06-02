@@ -314,6 +314,14 @@ pub fn get_peer_volumes() -> std::collections::HashMap<String, f32> {
     read_peer_volumes()
 }
 
+/// Clamp + persist one peer's volume into the `peer_volumes` settings map.
+pub(crate) fn persist_peer_volume(pubkey_hex: &str, volume: f32) -> Result<(), String> {
+    let mut map = read_peer_volumes();
+    map.insert(pubkey_hex.to_string(), volume.clamp(0.0, 2.0));
+    let value = serde_json::to_value(map).map_err(|e| e.to_string())?;
+    settings_set("peer_volumes", value)
+}
+
 // ---------------------------------------------------------------------------
 // Saved servers list
 // ---------------------------------------------------------------------------
@@ -2056,9 +2064,10 @@ pub async fn voice_join(
     server_id: String,
     channel_id: u64,
 ) -> Result<(), String> {
+    let server_conn = state.get_server(&server_id)?;
     let session = crate::voice_bridge::QuinnServerSession::new(
         Arc::clone(&state),
-        server_id,
+        server_id.clone(),
     )?;
     let config = crate::voice::JoinConfig {
         mode: if read_voice_mode() == "PushToTalk" {
@@ -2067,6 +2076,7 @@ pub async fn voice_join(
             crate::voice::VoiceMode::OpenMic
         },
         peer_volumes: read_peer_volumes(),
+        connection: Some(server_conn.connection.clone()),
     };
     voice
         .join_with_config(
@@ -2082,6 +2092,17 @@ pub async fn voice_toggle_transmit(
     voice: State<'_, Arc<crate::voice::VoiceController>>,
 ) -> Result<bool, String> {
     Ok(voice.toggle_transmit().await)
+}
+
+#[tauri::command]
+pub async fn voice_set_peer_volume(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+    pubkey_hex: String,
+    volume: f32,
+) -> Result<(), String> {
+    let clamped = volume.clamp(0.0, 2.0);
+    persist_peer_volume(&pubkey_hex, clamped)?;
+    voice.set_peer_volume(pubkey_hex, clamped).await
 }
 
 #[tauri::command]
@@ -2485,6 +2506,16 @@ mod voice_settings_tests {
 
             set_ptt_key("KeyV".to_string()).unwrap();
             assert_eq!(read_ptt_key(), "KeyV");
+        });
+    }
+
+    #[test]
+    fn persist_peer_volume_clamps_and_roundtrips() {
+        with_temp_config(|| {
+            persist_peer_volume("deadbeef", 9.0).unwrap();
+            assert_eq!(read_peer_volumes().get("deadbeef"), Some(&2.0));
+            persist_peer_volume("deadbeef", -3.0).unwrap();
+            assert_eq!(read_peer_volumes().get("deadbeef"), Some(&0.0));
         });
     }
 }

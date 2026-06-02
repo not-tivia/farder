@@ -14,11 +14,13 @@ use crate::opus_codec::OPUS_FRAME_SAMPLES_MONO;
 use crate::voice::recv::PeerPcmRing;
 use crate::voice::SessionId;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
-/// Shared registry of active peer rings. VoiceController inserts/removes
-/// as `TrackEnabled` / `TrackDisabled` events arrive.
-pub type PeerRings = Arc<Mutex<HashMap<SessionId, Arc<PeerPcmRing>>>>;
+/// Shared registry of active peer rings paired with a per-peer gain atomic
+/// (holds `f32::to_bits`). VoiceController inserts/removes as `TrackEnabled` /
+/// `TrackDisabled` events arrive; the command layer updates the gain live.
+pub type PeerRings = Arc<Mutex<HashMap<SessionId, (Arc<PeerPcmRing>, Arc<AtomicU32>)>>>;
 
 pub struct MixerTaskConfig {
     pub peer_rings: PeerRings,
@@ -45,11 +47,12 @@ pub fn run(cfg: MixerTaskConfig) {
 fn mix_one_frame(peer_rings: &PeerRings) -> Vec<f32> {
     let rings = peer_rings.lock().expect("peer_rings poisoned");
     let mut acc = vec![0.0f32; OPUS_FRAME_SAMPLES_MONO];
-    for ring in rings.values() {
+    for (ring, gain_bits) in rings.values() {
+        let gain = f32::from_bits(gain_bits.load(Ordering::Acquire));
         let frame = ring.pop_frame();
         for (i, s) in frame.iter().enumerate() {
             if i < acc.len() {
-                acc[i] += *s;
+                acc[i] += *s * gain;
             }
         }
     }
@@ -67,6 +70,10 @@ fn soft_clip(x: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::opus_codec::OPUS_SAMPLE_RATE;
+
+    fn gain_bits(g: f32) -> Arc<AtomicU32> {
+        Arc::new(AtomicU32::new(g.to_bits()))
+    }
 
     fn make_ring_with_sine(hz: f32, n_frames: usize) -> Arc<PeerPcmRing> {
         let ring = Arc::new(PeerPcmRing::new(n_frames + 2));
@@ -125,7 +132,7 @@ mod tests {
     #[test]
     fn single_peer_passes_audible_signal_through() {
         let peer_rings: PeerRings = Default::default();
-        peer_rings.lock().unwrap().insert([1u8; 16], make_ring_with_sine(440.0, 5));
+        peer_rings.lock().unwrap().insert([1u8; 16], (make_ring_with_sine(440.0, 5), gain_bits(1.0)));
         let (tx, rx) = mpsc::sync_channel::<PcmChunk>(4);
         let cfg = MixerTaskConfig {
             peer_rings,
@@ -142,8 +149,8 @@ mod tests {
     #[test]
     fn two_peers_sum_stays_within_soft_clip_bounds() {
         let peer_rings: PeerRings = Default::default();
-        peer_rings.lock().unwrap().insert([1u8; 16], make_ring_with_sine(440.0, 5));
-        peer_rings.lock().unwrap().insert([2u8; 16], make_ring_with_sine(880.0, 5));
+        peer_rings.lock().unwrap().insert([1u8; 16], (make_ring_with_sine(440.0, 5), gain_bits(1.0)));
+        peer_rings.lock().unwrap().insert([2u8; 16], (make_ring_with_sine(880.0, 5), gain_bits(1.0)));
         let (tx, rx) = mpsc::sync_channel::<PcmChunk>(4);
         let cfg = MixerTaskConfig {
             peer_rings,
@@ -157,6 +164,38 @@ mod tests {
             }
         }
         let _ = rx;
+    }
+
+    #[test]
+    fn zero_gain_silences_peer() {
+        let peer_rings: PeerRings = Default::default();
+        peer_rings
+            .lock()
+            .unwrap()
+            .insert([1u8; 16], (make_ring_with_sine(440.0, 5), gain_bits(0.0)));
+        let mixed = mix_one_frame(&peer_rings);
+        assert!(mixed.iter().all(|&s| s == 0.0), "gain 0.0 must silence the peer");
+    }
+
+    #[test]
+    fn double_gain_doubles_pre_clip_amplitude() {
+        // Compare a single peer at gain 1.0 vs 2.0 on a low-amplitude sine
+        // (well inside the soft-clip linear-ish region) sample-by-sample.
+        let unity: PeerRings = Default::default();
+        unity
+            .lock()
+            .unwrap()
+            .insert([1u8; 16], (make_ring_with_sine(440.0, 5), gain_bits(1.0)));
+        let doubled: PeerRings = Default::default();
+        doubled
+            .lock()
+            .unwrap()
+            .insert([1u8; 16], (make_ring_with_sine(440.0, 5), gain_bits(2.0)));
+        let a = mix_one_frame(&unity);
+        let b = mix_one_frame(&doubled);
+        // For at least one clearly non-zero sample, doubled magnitude > unity.
+        let idx = a.iter().position(|&s| s.abs() > 0.05).expect("some signal");
+        assert!(b[idx].abs() > a[idx].abs(), "gain 2.0 must increase amplitude");
     }
 
     #[test]
