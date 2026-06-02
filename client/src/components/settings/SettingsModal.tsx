@@ -22,6 +22,9 @@ export default function SettingsModal({ onClose }: Props) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Don't close if another handler already consumed the key (e.g. the
+      // Voice panel capturing a push-to-talk rebind).
+      if (e.defaultPrevented) return;
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);

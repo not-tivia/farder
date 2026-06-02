@@ -22,13 +22,17 @@ export default function VoiceSettings() {
   useEffect(() => {
     if (!capturing) return;
     const onKey = (e: KeyboardEvent) => {
+      // Capture phase + stopPropagation so the rebind swallows the keystroke
+      // before the settings modal's window-level Escape handler can see it
+      // (otherwise pressing Escape to bind a key would also close the modal).
       e.preventDefault();
+      e.stopPropagation();
       setPttKeyState(e.code);
       void setPttKey(e.code).catch(() => {});
       setCapturing(false);
     };
-    window.addEventListener("keydown", onKey, { once: true });
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, { once: true, capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [capturing]);
 
   return (
