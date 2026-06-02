@@ -1,13 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import CustomizeModal from "./CustomizeModal";
-import GifSearchSettings from "./GifSearchSettings";
-import { TranslationSettingsTab } from "./TranslationSettingsTab";
-import VoiceSettings from "./VoiceSettings";
-
-interface Props {
-  onClose: () => void;
-}
 
 // Reorder a theme list according to the user's saved preference.
 // Themes named in `order` come first in that order; any unlisted themes
@@ -59,27 +52,13 @@ const chromeButton: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const closeButton: CSSProperties = {
-  background: "linear-gradient(to bottom, #ee5a5a 0%, #c83030 100%)",
-  color: "#fff",
-  border: "1px solid #fff",
-  borderRadius: 3,
-  width: 22,
-  height: 18,
-  lineHeight: "16px",
-  padding: 0,
-  fontWeight: "bold",
-  cursor: "pointer",
-};
-
-export default function AppearanceSettings({ onClose }: Props) {
+export default function AppearanceSettings() {
   const [themes, setThemes] = useState<api.ThemeMeta[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [swatchByCss, setSwatchByCss] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [customizing, setCustomizing] = useState<{ themeId: string; name: string } | null>(null);
-  const [activeTab, setActiveTab] = useState<"appearance" | "gif" | "translation" | "voice">("appearance");
 
   async function refresh() {
     setLoading(true);
@@ -196,340 +175,229 @@ export default function AppearanceSettings({ onClose }: Props) {
   }
 
   return (
-    <div
-      className="appearance-settings-backdrop"
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.4)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-      onClick={onClose}
-    >
-      <div
-        className="appearance-settings"
-        style={{
-          background: "var(--xp-window-bg, #ECE9D8)",
-          color: "#000",
-          border: "2px solid var(--xp-blue-dark, #003C74)",
-          borderRadius: "6px 6px 0 0",
-          width: 720,
-          maxWidth: "92vw",
-          maxHeight: "82vh",
-          minHeight: 320,
-          display: "flex",
-          flexDirection: "column",
-          fontFamily: "var(--xp-font, Tahoma, sans-serif)",
-          fontSize: "var(--xp-font-size, 11px)",
-          boxShadow: "3px 3px 16px rgba(0,0,0,0.45)",
-          overflow: "hidden",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Title bar */}
-        <div
-          style={{
-            background:
-              "linear-gradient(to bottom, var(--xp-blue, #0058E6) 0%, var(--xp-blue-light, #3389FF) 100%)",
-            color: "#fff",
-            padding: "4px 6px 4px 10px",
-            fontWeight: "bold",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexShrink: 0,
-          }}
-        >
-          <span>Settings</span>
-          <button onClick={onClose} style={closeButton} title="Close">
-            ✕
-          </button>
-        </div>
-
-        {/* Tab bar */}
-        <div
-          style={{
-            display: "flex",
-            borderBottom: "1px solid var(--xp-border, #888)",
-            padding: "0 4px",
-            flexShrink: 0,
-            background: "var(--xp-window-bg, #ECE9D8)",
-          }}
-        >
-          {(["appearance", "gif", "translation", "voice"] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              style={{
-                font: "inherit",
-                padding: "6px 12px",
-                background: activeTab === tab ? "var(--xp-panel-bg, #fff)" : "transparent",
-                color: activeTab === tab ? "var(--xp-blue, #0058E6)" : "inherit",
-                border: "none",
-                borderBottom:
-                  activeTab === tab
-                    ? "2px solid var(--xp-blue, #0058E6)"
-                    : "2px solid transparent",
-                cursor: "pointer",
-              }}
-            >
-              {tab === "appearance" ? "Appearance" : tab === "gif" ? "GIF Search" : tab === "translation" ? "Translation" : "Voice"}
-            </button>
-          ))}
-        </div>
-
-        {/* Body */}
-        <div
-          style={{
-            padding: 16,
-            overflowY: "auto",
-            overflowX: "hidden",
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            gap: 14,
-          }}
-        >
-          {activeTab === "gif" && <GifSearchSettings />}
-          {activeTab === "translation" && <TranslationSettingsTab />}
-          {activeTab === "voice" && <VoiceSettings />}
-          {activeTab === "appearance" && (
-            <>
-          {loading && <div>Loading themes…</div>}
-          {error && (
-            <div
-              style={{
-                color: "#a00",
-                background: "#fff5f5",
-                border: "1px solid #f3b8b8",
-                padding: 8,
-                borderRadius: 3,
-              }}
-            >
-              {error}
-            </div>
-          )}
-          {!loading && (
-            <>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))",
-                  gap: 12,
-                }}
-              >
-                {themes.map((t, idx) => {
-                  const isActive = t.id === activeId;
-                  const swatch = swatchByCss[t.id] ?? [];
-                  const isDragging = dragSrcIndex === idx;
-                  const isDropTarget = dragOverIndex === idx && dragSrcIndex !== null && dragSrcIndex !== idx;
-                  return (
-                    <button
-                      key={t.id}
-                      onClick={() => selectTheme(t.id)}
-                      draggable={renamingId !== t.id}
-                      onDragStart={(e) => {
-                        setDragSrcIndex(idx);
-                        e.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                        if (dragOverIndex !== idx) setDragOverIndex(idx);
-                      }}
-                      onDragLeave={() => {
-                        if (dragOverIndex === idx) setDragOverIndex(null);
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        if (dragSrcIndex !== null) void reorderThemes(dragSrcIndex, idx);
-                        setDragSrcIndex(null);
-                        setDragOverIndex(null);
-                      }}
-                      onDragEnd={() => {
-                        setDragSrcIndex(null);
-                        setDragOverIndex(null);
-                      }}
-                      style={{
-                        textAlign: "left",
-                        padding: 12,
-                        border: isDropTarget
-                          ? "2px dashed var(--xp-blue, #0058E6)"
-                          : isActive
-                          ? "2px solid var(--xp-blue, #0058E6)"
-                          : "1px solid var(--xp-border, #aca899)",
-                        background: "var(--xp-panel-bg, #fff)",
-                        cursor: isDragging ? "grabbing" : "pointer",
-                        opacity: isDragging ? 0.4 : 1,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 6,
-                        font: "inherit",
-                        color: "var(--xp-text-normal, #000)",
-                        boxShadow: isActive ? "0 0 0 1px var(--xp-blue, #0058E6) inset" : "none",
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        {renamingId === t.id ? (
-                          <input
-                            autoFocus
-                            value={renameDraft}
-                            onChange={(e) => setRenameDraft(e.target.value)}
-                            onClick={(e) => e.stopPropagation()}
-                            onKeyDown={(e) => {
-                              e.stopPropagation();
-                              if (e.key === "Enter") void commitRename(t);
-                              else if (e.key === "Escape") setRenamingId(null);
-                            }}
-                            onBlur={() => void commitRename(t)}
-                            style={{
-                              fontWeight: "bold",
-                              fontSize: 12,
-                              flex: 1,
-                              minWidth: 0,
-                              padding: "1px 4px",
-                              border: "1px solid var(--xp-blue, #0058E6)",
-                              background: "var(--xp-panel-bg, #fff)",
-                              color: "var(--xp-text-normal, #000)",
-                              font: "inherit",
-                            }}
-                          />
-                        ) : (
-                          <>
-                            <div style={{ fontWeight: "bold", fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {t.name}
-                            </div>
-                            {t.source === "user" && (
-                              <div
-                                role="button"
-                                tabIndex={0}
-                                title="Rename"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setRenameDraft(t.name);
-                                  setRenamingId(t.id);
-                                }}
-                                style={{
-                                  fontSize: 11,
-                                  cursor: "pointer",
-                                  padding: "0 4px",
-                                  color: "var(--xp-text-muted, #666)",
-                                }}
-                              >
-                                ✎
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 10, color: "var(--xp-text-muted, #666)" }}>
-                        {t.author} · {t.source}
-                      </div>
-                      <div style={{ fontSize: 10, color: "var(--xp-text-secondary, #555)", lineHeight: 1.35, minHeight: 26 }}>
-                        {t.description}
-                      </div>
-                      <div style={{ display: "flex", gap: 2, marginTop: 2 }}>
-                        {swatch.map((c, i) => (
-                          <div
-                            key={i}
-                            style={{
-                              width: 28,
-                              height: 18,
-                              background: c,
-                              border: "1px solid var(--xp-border, #888)",
-                            }}
-                          />
-                        ))}
-                      </div>
-                      <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
-                        <div
-                          role="button"
-                          tabIndex={0}
-                          onClick={(e) => { e.stopPropagation(); void startCustomizing(t); }}
-                          onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void startCustomizing(t); } }}
-                          title={t.source === "user" ? "Edit this theme" : "Make a customizable copy of this theme"}
-                          style={{
-                            fontSize: 10,
-                            color: "var(--xp-blue, #0058E6)",
-                            textDecoration: "underline",
-                            cursor: "pointer",
-                          }}
-                        >
-                          {t.source === "user" ? "Edit…" : "Customize…"}
+    <div className="settings-panel">
+      <h2 className="settings-panel-title">Appearance</h2>
+      {loading && <div>Loading themes...</div>}
+      {error && <div className="settings-error">{error}</div>}
+      {!loading && (
+        <>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))",
+              gap: 12,
+            }}
+          >
+            {themes.map((t, idx) => {
+              const isActive = t.id === activeId;
+              const swatch = swatchByCss[t.id] ?? [];
+              const isDragging = dragSrcIndex === idx;
+              const isDropTarget = dragOverIndex === idx && dragSrcIndex !== null && dragSrcIndex !== idx;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => selectTheme(t.id)}
+                  draggable={renamingId !== t.id}
+                  onDragStart={(e) => {
+                    setDragSrcIndex(idx);
+                    e.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    if (dragOverIndex !== idx) setDragOverIndex(idx);
+                  }}
+                  onDragLeave={() => {
+                    if (dragOverIndex === idx) setDragOverIndex(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (dragSrcIndex !== null) void reorderThemes(dragSrcIndex, idx);
+                    setDragSrcIndex(null);
+                    setDragOverIndex(null);
+                  }}
+                  onDragEnd={() => {
+                    setDragSrcIndex(null);
+                    setDragOverIndex(null);
+                  }}
+                  style={{
+                    textAlign: "left",
+                    padding: 12,
+                    border: isDropTarget
+                      ? "2px dashed var(--xp-blue, #0058E6)"
+                      : isActive
+                      ? "2px solid var(--xp-blue, #0058E6)"
+                      : "1px solid var(--xp-border, #aca899)",
+                    background: "var(--xp-panel-bg, #fff)",
+                    cursor: isDragging ? "grabbing" : "pointer",
+                    opacity: isDragging ? 0.4 : 1,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                    font: "inherit",
+                    color: "var(--xp-text-normal, #000)",
+                    boxShadow: isActive ? "0 0 0 1px var(--xp-blue, #0058E6) inset" : "none",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    {renamingId === t.id ? (
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === "Enter") void commitRename(t);
+                          else if (e.key === "Escape") setRenamingId(null);
+                        }}
+                        onBlur={() => void commitRename(t)}
+                        style={{
+                          fontWeight: "bold",
+                          fontSize: 12,
+                          flex: 1,
+                          minWidth: 0,
+                          padding: "1px 4px",
+                          border: "1px solid var(--xp-blue, #0058E6)",
+                          background: "var(--xp-panel-bg, #fff)",
+                          color: "var(--xp-text-normal, #000)",
+                          font: "inherit",
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <div style={{ fontWeight: "bold", fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {t.name}
                         </div>
                         {t.source === "user" && (
                           <div
                             role="button"
                             tabIndex={0}
-                            onClick={(e) => { e.stopPropagation(); void deleteTheme(t); }}
-                            onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void deleteTheme(t); } }}
-                            title="Delete this theme"
+                            title="Rename"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRenameDraft(t.name);
+                              setRenamingId(t.id);
+                            }}
                             style={{
-                              fontSize: 10,
-                              color: "#a00",
-                              textDecoration: "underline",
+                              fontSize: 11,
                               cursor: "pointer",
+                              padding: "0 4px",
+                              color: "var(--xp-text-muted, #666)",
                             }}
                           >
-                            Delete
+                            &#x270E;
                           </div>
                         )}
+                      </>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--xp-text-muted, #666)" }}>
+                    {t.author} &middot; {t.source}
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--xp-text-secondary, #555)", lineHeight: 1.35, minHeight: 26 }}>
+                    {t.description}
+                  </div>
+                  <div style={{ display: "flex", gap: 2, marginTop: 2 }}>
+                    {swatch.map((c, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          width: 28,
+                          height: 18,
+                          background: c,
+                          border: "1px solid var(--xp-border, #888)",
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => { e.stopPropagation(); void startCustomizing(t); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void startCustomizing(t); } }}
+                      title={t.source === "user" ? "Edit this theme" : "Make a customizable copy of this theme"}
+                      style={{
+                        fontSize: 10,
+                        color: "var(--xp-blue, #0058E6)",
+                        textDecoration: "underline",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t.source === "user" ? "Edit..." : "Customize..."}
+                    </div>
+                    {t.source === "user" && (
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => { e.stopPropagation(); void deleteTheme(t); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void deleteTheme(t); } }}
+                        title="Delete this theme"
+                        style={{
+                          fontSize: 10,
+                          color: "#a00",
+                          textDecoration: "underline",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Delete
                       </div>
-                    </button>
-                  );
-                })}
-              </div>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
 
-              {/* Footer actions */}
-              <div
-                style={{
-                  marginTop: "auto",
-                  paddingTop: 10,
-                  borderTop: "1px solid var(--xp-border, #c8c4b4)",
-                  display: "flex",
-                  gap: 8,
-                  alignItems: "center",
-                  flexWrap: "wrap",
-                }}
-              >
-                <button
-                  style={chromeButton}
-                  onClick={() =>
-                    api.openThemesFolder().catch((e) => setError(String(e)))
-                  }
-                >
-                  Open themes folder
-                </button>
-                <button style={chromeButton} onClick={refresh} title="Re-scan ~/.farder/themes/">
-                  Refresh
-                </button>
-                <span
-                  style={{
-                    fontSize: 10,
-                    color: "var(--xp-text-muted, #666)",
-                    flex: 1,
-                    minWidth: 220,
-                    lineHeight: 1.4,
-                  }}
-                >
-                  Themes can load external resources. Only use themes from sources you trust.
-                </span>
-              </div>
-            </>
-          )}
-            </>
-          )}
-        </div>
-      </div>
+          {/* Footer actions */}
+          <div
+            style={{
+              marginTop: 16,
+              paddingTop: 10,
+              borderTop: "1px solid var(--xp-border, #c8c4b4)",
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              style={chromeButton}
+              onClick={() =>
+                api.openThemesFolder().catch((e) => setError(String(e)))
+              }
+            >
+              Open themes folder
+            </button>
+            <button style={chromeButton} onClick={refresh} title="Re-scan ~/.farder/themes/">
+              Refresh
+            </button>
+            <span
+              style={{
+                fontSize: 10,
+                color: "var(--xp-text-muted, #666)",
+                flex: 1,
+                minWidth: 220,
+                lineHeight: 1.4,
+              }}
+            >
+              Themes can load external resources. Only use themes from sources you trust.
+            </span>
+          </div>
+        </>
+      )}
       {customizing && (
         <CustomizeModal
           themeId={customizing.themeId}
           initialName={customizing.name}
-          onClose={() => { setCustomizing(null); refresh(); }}
-          onSaved={() => { refresh(); }}
+          onClose={() => {
+            setCustomizing(null);
+            refresh();
+          }}
+          onSaved={() => {
+            refresh();
+          }}
         />
       )}
     </div>

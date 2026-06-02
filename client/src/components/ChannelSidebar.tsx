@@ -9,7 +9,7 @@ import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
-import AppearanceSettings from "./AppearanceSettings";
+import SettingsModal from "./settings/SettingsModal";
 import VoiceControlBar from "./VoiceControlBar";
 import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
 import { useVoice } from "../hooks/useVoice";
@@ -20,7 +20,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
   const [ownPk, setOwnPk] = useState<string | null>(null);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
   const [showNotifSettings, setShowNotifSettings] = useState(false);
-  const [showAppearance, setShowAppearance] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
     api.getDisplayName().then((n) => setName(n)).catch(() => {});
@@ -41,7 +41,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
         </span>
         <button
           className="server-invite-btn"
-          onClick={() => setShowAppearance(true)}
+          onClick={() => setShowSettings(true)}
           title="Appearance"
           style={{ fontSize: 10, marginRight: 4 }}
         >⚙</button>
@@ -63,7 +63,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
         />
       )}
       {showNotifSettings && <NotificationSettings onClose={() => setShowNotifSettings(false)} />}
-      {showAppearance && <AppearanceSettings onClose={() => setShowAppearance(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </>
   );
 }
