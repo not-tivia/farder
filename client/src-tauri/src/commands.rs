@@ -608,6 +608,76 @@ pub async fn get_members(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Voice-channel presence (server roster). Distinct from the audio pipeline
+// (`voice_join` etc.): these update who the server lists as present in a voice
+// channel and broadcast MediaJoined/MediaLeft to all members. The frontend
+// calls join_voice + get_voice_state alongside the audio engine on join.
+// ---------------------------------------------------------------------------
+
+/// Register presence in a voice channel's server-side roster.
+#[tauri::command]
+pub async fn join_voice(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::JoinChannelMedia { channel_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Remove presence from a voice channel's server-side roster.
+#[tauri::command]
+pub async fn leave_voice(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::LeaveChannelMedia { channel_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Fetch the current voice-channel roster (who is present).
+#[tauri::command]
+pub async fn get_voice_state(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+) -> Result<Vec<farder_protocol::server::VoiceMember>, String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::GetMediaState { channel_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::MediaStateResp { participants } => Ok(participants),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
 /// Add a reaction to a message.
 #[tauri::command]
 pub async fn add_reaction(
