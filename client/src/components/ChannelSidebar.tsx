@@ -11,6 +11,7 @@ import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
 import AppearanceSettings from "./AppearanceSettings";
 import VoiceControlBar from "./VoiceControlBar";
+import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
 import { useVoice } from "../hooks/useVoice";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
@@ -117,6 +118,7 @@ export default function ChannelSidebar() {
   const [showInvite, setShowInvite] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
+  const [voiceMenu, setVoiceMenu] = useState<{ x: number; y: number; pubkeyHex: string; displayName: string } | null>(null);
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
 
@@ -376,7 +378,14 @@ export default function ChannelSidebar() {
               const live = liveByPk.get(p.publicKey);
               const initial = (p.displayName || "?").charAt(0).toUpperCase();
               return (
-                <div key={p.publicKey} className={`voice-participant${live?.speaking ? " speaking" : ""}`}>
+                <div
+                  key={p.publicKey}
+                  className={`voice-participant${live?.speaking ? " speaking" : ""}`}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setVoiceMenu({ x: e.clientX, y: e.clientY, pubkeyHex: p.publicKey, displayName: p.displayName });
+                  }}
+                >
                   <span className={`voice-avatar${live?.speaking ? " speaking" : ""}`}>{initial}</span>
                   <span className="voice-participant-name">{p.displayName}</span>
                   {live?.deafened
@@ -624,6 +633,16 @@ export default function ChannelSidebar() {
             })()}
           </div>
         </>
+      )}
+      {voiceMenu && (
+        <VoiceParticipantContextMenu
+          pubkeyHex={voiceMenu.pubkeyHex}
+          displayName={voiceMenu.displayName}
+          position={{ x: voiceMenu.x, y: voiceMenu.y }}
+          currentVolume={voice.peerVolume(voiceMenu.pubkeyHex)}
+          onSetVolume={(v) => { void voice.setPeerVolume(voiceMenu.pubkeyHex, v); }}
+          onClose={() => setVoiceMenu(null)}
+        />
       )}
     </>
   );

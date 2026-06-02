@@ -2221,3 +2221,8 @@ body {
   font-size: 11px;
   cursor: pointer;
 }
+
+/* Per-peer voice volume slider (participant context menu) */
+.voice-volume-slider { padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
+.voice-volume-slider label { font-size: 11px; opacity: 0.85; }
+.voice-volume-slider input[type="range"] { width: 100%; }

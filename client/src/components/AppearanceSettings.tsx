@@ -296,7 +296,6 @@ export default function AppearanceSettings({ onClose }: Props) {
           {activeTab === "gif" && <GifSearchSettings />}
           {activeTab === "translation" && <TranslationSettingsTab />}
           {activeTab === "voice" && <VoiceSettings />}
-          {activeTab === "voice" && <VoiceSettings />}
           {activeTab === "appearance" && (
             <>
           {loading && <div>Loading themes…</div>}

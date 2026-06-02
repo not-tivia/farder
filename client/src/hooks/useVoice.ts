@@ -23,6 +23,8 @@ export interface UseVoice {
   setDeafen: (deafened: boolean) => Promise<void>;
   toggleTransmit: () => Promise<void>;
   connectionQuality: { rttMs: number; lossPct: number } | null;
+  peerVolume: (pubkey: string) => number;
+  setPeerVolume: (pubkey: string, v: number) => Promise<void>;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -46,6 +48,7 @@ export function useVoice(): UseVoice {
   const [peers, setPeers] = useState<VoiceUiPeer[]>([]);
   const [connectionQuality, setConnectionQuality] =
     useState<{ rttMs: number; lossPct: number } | null>(null);
+  const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>({});
 
   const applyState = useCallback((s: api.VoiceState) => {
     const n = normalize(s);
@@ -94,5 +97,20 @@ export function useVoice(): UseVoice {
     // State refreshes via the existing voice://state-changed listener.
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality };
+  // Per-peer playback volume (gain), keyed by pubkey string (the same
+  // publicKeyToString / PublicKey::to_string() form the backend keys by).
+  // Loaded once from persisted settings; updates are optimistic so the slider
+  // reflects changes immediately while the backend clamps + persists.
+  useEffect(() => { void api.getPeerVolumes().then(setPeerVolumes).catch(() => {}); }, []);
+  const peerVolume = useCallback(
+    (pubkey: string) => peerVolumes[pubkey] ?? 1.0,
+    [peerVolumes],
+  );
+  const setPeerVolume = useCallback(async (pubkey: string, v: number) => {
+    const clamped = Math.max(0, Math.min(2, v));
+    setPeerVolumes((prev) => ({ ...prev, [pubkey]: clamped }));
+    await api.voiceSetPeerVolume(pubkey, clamped);
+  }, []);
+
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume };
 }
