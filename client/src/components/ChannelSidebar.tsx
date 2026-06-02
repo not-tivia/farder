@@ -42,7 +42,7 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
         <button
           className="server-invite-btn"
           onClick={() => setShowSettings(true)}
-          title="Appearance"
+          title="Settings"
           style={{ fontSize: 10, marginRight: 4 }}
         >⚙</button>
         <button
