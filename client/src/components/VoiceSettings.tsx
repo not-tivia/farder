@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { getVoiceMode, setVoiceMode, getPttKey, setPttKey } from "../lib/tauri-bridge";
+import SettingsSection from "./settings/SettingsSection";
+import RadioOption from "./settings/RadioOption";
+import KeybindRow from "./settings/KeybindRow";
 
 export default function VoiceSettings() {
   const [mode, setMode] = useState<string>("OpenMic");
@@ -29,33 +32,34 @@ export default function VoiceSettings() {
   }, [capturing]);
 
   return (
-    <div className="voice-settings">
-      <h3>Microphone mode</h3>
-      <label>
-        <input
-          type="radio"
-          name="voice-mode"
-          checked={mode === "OpenMic"}
-          onChange={() => chooseMode("OpenMic")}
+    <div className="settings-panel">
+      <h2 className="settings-panel-title">Voice</h2>
+      <SettingsSection label="Microphone Mode">
+        <RadioOption
+          selected={mode === "OpenMic"}
+          label="Open Mic"
+          description="Your mic is always live - transmit whenever you speak."
+          onSelect={() => chooseMode("OpenMic")}
         />
-        Open Mic
-      </label>
-      <label>
-        <input
-          type="radio"
-          name="voice-mode"
-          checked={mode === "PushToTalk"}
-          onChange={() => chooseMode("PushToTalk")}
+        <RadioOption
+          selected={mode === "PushToTalk"}
+          label="Push to Talk"
+          description="Stay muted until you press your key."
+          onSelect={() => chooseMode("PushToTalk")}
         />
-        Push-to-Talk
-      </label>
+      </SettingsSection>
       {mode === "PushToTalk" && (
-        <div className="voice-settings-ptt-key">
-          <span>Key: {pttKey}</span>
-          <button type="button" onClick={() => setCapturing(true)}>
-            {capturing ? "Press a key..." : "Rebind"}
-          </button>
-        </div>
+        <>
+          <div className="settings-divider" />
+          <SettingsSection label="Push-to-Talk Keybind">
+            <KeybindRow
+              label="Current key"
+              keyLabel={pttKey}
+              capturing={capturing}
+              onRebind={() => setCapturing(true)}
+            />
+          </SettingsSection>
+        </>
       )}
     </div>
   );
