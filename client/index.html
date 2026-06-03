@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Farder</title>
+    <style>
+      /* Global UI scale. Most of the app's text uses hardcoded px sizes in the
+         theme CSS (channel names, the user footer, settings, etc.), so the most
+         reliable way to make the whole interface larger is to zoom the document
+         root -- this scales text AND spacing together, so nothing gets cramped.
+         Raise this number to make everything bigger; lower it to shrink. */
+      :root {
+        zoom: 1.25;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
