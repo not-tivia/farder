@@ -53,10 +53,73 @@ fn upmix_mono_into(sample: f32, channels: usize, out: &mut Vec<f32>) {
     }
 }
 
-/// Choose an f32 `StreamConfig` whose sample-rate range covers `want_sr`,
-/// preferring `want_channels`, then stereo, then ANY channel count (the
-/// callbacks down/upmix between mono and whatever the device offers). On
-/// failure the error lists what the device actually exposes, for diagnosis.
+/// Stateful linear-interpolation resampler for a single mono stream. Converts
+/// `in_rate` -> `out_rate`, keeping phase continuity across `process` calls so
+/// chunk boundaries don't click. Adequate for voice; not studio-grade.
+struct LinearResampler {
+    /// Input samples consumed per output sample (in_rate / out_rate).
+    step: f64,
+    /// Read position relative to `prev` (virtual index 0). Always >= 0.
+    pos: f64,
+    /// The most recent input sample, kept as the boundary sample (virtual
+    /// index 0) so interpolation is continuous across calls.
+    prev: f32,
+    primed: bool,
+}
+
+impl LinearResampler {
+    fn new(in_rate: u32, out_rate: u32) -> Self {
+        let step = if out_rate == 0 {
+            1.0
+        } else {
+            in_rate as f64 / out_rate as f64
+        };
+        Self { step, pos: 0.0, prev: 0.0, primed: false }
+    }
+
+    /// Resample `input` (mono), appending output samples to `out`.
+    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if input.is_empty() {
+            return;
+        }
+        // On the first ever sample, seed `prev` from input[0] (no phantom
+        // sample) and start interpolating from input[1] onward.
+        let input = if !self.primed {
+            self.primed = true;
+            self.prev = input[0];
+            &input[1..]
+        } else {
+            input
+        };
+        let n = input.len();
+        if n == 0 {
+            return;
+        }
+        // Virtual buffer v: v[0] = prev, v[k] = input[k-1] for k in 1..=n.
+        let prev = self.prev;
+        let step = self.step;
+        let mut pos = self.pos;
+        while (pos.floor() as usize) + 1 <= n {
+            let lo = pos.floor() as usize;
+            let frac = (pos - lo as f64) as f32;
+            let a = if lo == 0 { prev } else { input[lo - 1] };
+            let b = input[lo]; // v[lo+1] == input[lo] since lo+1 >= 1
+            out.push(a + (b - a) * frac);
+            pos += step;
+        }
+        // Re-base: the new origin (virtual index 0) becomes the last input
+        // sample. `pos >= n` at loop exit, so the carried position stays >= 0.
+        self.prev = input[n - 1];
+        self.pos = pos - n as f64;
+    }
+}
+
+/// Choose an f32 `StreamConfig` for the device, preferring `want_channels`,
+/// then stereo, then any channel count (the callbacks down/upmix between mono
+/// and whatever the device offers), and preferring a config whose range covers
+/// `want_sr` so no resampling is needed. If the device can't do `want_sr` at
+/// all (e.g. a 96 kHz-only device), fall back to its native rate and let the
+/// callbacks resample. On failure the error lists what the device exposes.
 fn choose_stream_config(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
     want_sr: cpal::SampleRate,
@@ -64,9 +127,7 @@ fn choose_stream_config(
     label: &str,
     format: &AudioFormat,
 ) -> Result<cpal::StreamConfig, String> {
-    let mut exact: Option<cpal::SupportedStreamConfigRange> = None;
-    let mut stereo: Option<cpal::SupportedStreamConfigRange> = None;
-    let mut any: Option<cpal::SupportedStreamConfigRange> = None;
+    let mut f32_configs: Vec<cpal::SupportedStreamConfigRange> = Vec::new();
     let mut available: Vec<String> = Vec::new();
     for cfg in configs {
         available.push(format!(
@@ -76,31 +137,41 @@ fn choose_stream_config(
             cfg.min_sample_rate().0,
             cfg.max_sample_rate().0
         ));
-        if cfg.sample_format() != cpal::SampleFormat::F32 {
-            continue;
-        }
-        if cfg.min_sample_rate() > want_sr || want_sr > cfg.max_sample_rate() {
-            continue;
-        }
-        if cfg.channels() == want_channels {
-            if exact.is_none() {
-                exact = Some(cfg);
-            }
-        } else if cfg.channels() == 2 {
-            if stereo.is_none() {
-                stereo = Some(cfg);
-            }
-        } else if any.is_none() {
-            any = Some(cfg);
+        if cfg.sample_format() == cpal::SampleFormat::F32 {
+            f32_configs.push(cfg);
         }
     }
-    let chosen = exact.or(stereo).or(any).ok_or_else(|| {
-        format!(
-            "no supported {label} config for {format:?}; device offers: [{}]",
-            available.join(", ")
-        )
-    })?;
-    Ok(chosen.with_sample_rate(want_sr).config())
+    // Channel preference: 0 = exact match, 1 = stereo, 2 = anything else.
+    let chan_rank = |ch: u16| -> u8 {
+        if ch == want_channels {
+            0
+        } else if ch == 2 {
+            1
+        } else {
+            2
+        }
+    };
+    // Pass 1: a config whose range already covers want_sr (no resampling).
+    let covering = f32_configs
+        .iter()
+        .filter(|c| c.min_sample_rate() <= want_sr && want_sr <= c.max_sample_rate())
+        .min_by_key(|c| chan_rank(c.channels()));
+    if let Some(c) = covering {
+        return Ok(c.clone().with_sample_rate(want_sr).config());
+    }
+    // Pass 2: device can't do want_sr; take the best-channel config at its
+    // lowest native rate and let the callback resample to/from it.
+    let fallback = f32_configs
+        .iter()
+        .min_by_key(|c| (chan_rank(c.channels()), c.min_sample_rate().0));
+    if let Some(c) = fallback {
+        let rate = c.min_sample_rate();
+        return Ok(c.clone().with_sample_rate(rate).config());
+    }
+    Err(format!(
+        "no supported {label} config for {format:?}; device offers: [{}]",
+        available.join(", ")
+    ))
 }
 
 /// Pick an input device by name, or the host's default if `device_id` is None.
@@ -204,29 +275,50 @@ impl AudioBackend for CpalAudioBackend {
         let dev_channels = cpal_config.channels as usize;
         let want_channels = format.channels as usize;
         let samples_per_chunk = format.samples_per_chunk;
+        let device_rate = cpal_config.sample_rate.0;
+        let engine_rate = format.sample_rate;
         let (tx, rx) = mpsc::sync_channel::<PcmChunk>(8);
 
         let started = Instant::now();
         let mut buffered: Vec<f32> = Vec::with_capacity(samples_per_chunk);
+        // Resample the device's native rate to the engine rate (48k) if they
+        // differ (e.g. a 96 kHz-only device).
+        let mut resampler = if device_rate != engine_rate {
+            Some(LinearResampler::new(device_rate, engine_rate))
+        } else {
+            None
+        };
+        let mut mono_scratch: Vec<f32> = Vec::new();
+        let mut resampled: Vec<f32> = Vec::new();
 
         let stream = device.build_input_stream(
             &cpal_config,
             move |raw: &[f32], _info: &cpal::InputCallbackInfo| {
-                // Walk cpal's interleaved samples one frame at a time. Downmix
-                // stereo->mono if needed. Emit a PcmChunk each time we've
-                // accumulated samples_per_chunk samples worth of output.
+                // 1. Downmix each interleaved device frame to one mono sample
+                //    (still at the device's sample rate).
+                mono_scratch.clear();
                 let mut i = 0;
                 while i + dev_channels <= raw.len() {
-                    // Engine wants mono; average the device's channels for
-                    // this frame down to one sample (handles stereo, 5.1, etc.).
                     let sample = if dev_channels == want_channels {
                         raw[i]
                     } else {
                         downmix_frame_to_mono(&raw[i..i + dev_channels])
                     };
-                    buffered.push(sample);
+                    mono_scratch.push(sample);
                     i += dev_channels;
-
+                }
+                // 2. Resample to the engine rate when the device isn't 48k.
+                let engine_samples: &[f32] = match resampler.as_mut() {
+                    Some(r) => {
+                        resampled.clear();
+                        r.process(&mono_scratch, &mut resampled);
+                        &resampled
+                    }
+                    None => &mono_scratch,
+                };
+                // 3. Accumulate into fixed-size (samples_per_chunk) chunks.
+                for &s in engine_samples {
+                    buffered.push(s);
                     if buffered.len() >= samples_per_chunk {
                         let chunk = PcmChunk {
                             samples: std::mem::take(&mut buffered),
@@ -279,7 +371,17 @@ impl AudioBackend for CpalAudioBackend {
         let buf = chunks_per_500ms.max(2);
         let (tx, rx) = mpsc::sync_channel::<PcmChunk>(buf);
 
+        let device_rate = cpal_config.sample_rate.0;
+        let engine_rate = format.sample_rate;
         let mut pending: Vec<f32> = Vec::new();
+        // Resample the engine rate (48k) to the device's native rate if they
+        // differ (e.g. a 96 kHz-only device).
+        let mut resampler = if device_rate != engine_rate {
+            Some(LinearResampler::new(engine_rate, device_rate))
+        } else {
+            None
+        };
+        let mut resampled: Vec<f32> = Vec::new();
 
         let stream = device.build_output_stream(
             &cpal_config,
@@ -288,12 +390,21 @@ impl AudioBackend for CpalAudioBackend {
                 while pending.len() < out.len() {
                     match rx.try_recv() {
                         Ok(chunk) => {
+                            // Resample engine(48k) mono -> device-rate mono.
+                            let mono: &[f32] = match resampler.as_mut() {
+                                Some(r) => {
+                                    resampled.clear();
+                                    r.process(&chunk.samples, &mut resampled);
+                                    &resampled
+                                }
+                                None => &chunk.samples,
+                            };
                             if dev_channels == want_channels {
-                                pending.extend_from_slice(&chunk.samples);
+                                pending.extend_from_slice(mono);
                             } else {
                                 // Engine produces mono; replicate each sample
                                 // across the device's channels (stereo, 5.1...).
-                                for &s in &chunk.samples {
+                                for &s in mono {
                                     upmix_mono_into(s, dev_channels, &mut pending);
                                 }
                             }
@@ -399,5 +510,60 @@ mod tests {
         let mut out = Vec::new();
         upmix_mono_into(0.9, 0, &mut out);
         assert_eq!(out, vec![0.9]);
+    }
+
+    #[test]
+    fn resampler_identity_tracks_input() {
+        let mut r = LinearResampler::new(48000, 48000);
+        let mut out = Vec::new();
+        r.process(&[0.0, 1.0, 2.0, 3.0, 4.0], &mut out);
+        // 1-sample streaming delay; last sample is retained for continuity.
+        assert_eq!(out, vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn resampler_2x_upsample_interpolates() {
+        let mut r = LinearResampler::new(48000, 96000);
+        let mut out = Vec::new();
+        r.process(&[0.0, 2.0, 4.0], &mut out);
+        assert_eq!(out, vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn resampler_2x_downsample_drops_alternate() {
+        let mut r = LinearResampler::new(96000, 48000);
+        let mut out = Vec::new();
+        r.process(&[0.0, 1.0, 2.0, 3.0, 4.0], &mut out);
+        assert_eq!(out, vec![0.0, 2.0]);
+    }
+
+    #[test]
+    fn resampler_is_continuous_across_calls() {
+        // Splitting the input must give the same output as one call.
+        let input: Vec<f32> = (0..20).map(|i| i as f32).collect();
+
+        let mut whole = LinearResampler::new(96000, 48000);
+        let mut out_whole = Vec::new();
+        whole.process(&input, &mut out_whole);
+
+        let mut split = LinearResampler::new(96000, 48000);
+        let mut out_split = Vec::new();
+        split.process(&input[..7], &mut out_split);
+        split.process(&input[7..], &mut out_split);
+
+        assert_eq!(out_whole, out_split);
+    }
+
+    #[test]
+    fn resampler_handles_single_sample_first_call() {
+        // First call primes prev from input[0] and emits nothing; next call
+        // continues without panicking.
+        let mut r = LinearResampler::new(96000, 48000);
+        let mut out = Vec::new();
+        r.process(&[1.0], &mut out);
+        assert!(out.is_empty());
+        r.process(&[2.0, 3.0, 4.0], &mut out);
+        // Stream so far is [1,2,3,4]; 2x downsample -> ~[1,3].
+        assert_eq!(out, vec![1.0, 3.0]);
     }
 }
