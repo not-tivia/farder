@@ -359,9 +359,22 @@ export default function ChannelSidebar() {
             if (isInThisChannel) {
               await leaveVoiceChannel(ch.id);
             } else {
-              await api.joinVoice(serverId, ch.id);
+              // Register presence, then start the audio engine. Only commit the
+              // "you're in this channel" UI state AFTER audio actually starts --
+              // otherwise a silent audio failure leaves a zombie: marked in the
+              // channel, on everyone's roster, but with no working control bar.
+              try {
+                await api.joinVoice(serverId, ch.id);
+                await voice.join(serverId, ch.id);
+              } catch (err) {
+                console.error("[voice] join failed", err);
+                // Roll back so we don't appear as a ghost on the server roster.
+                await api.leaveVoice(serverId, ch.id).catch(() => {});
+                await voice.leave().catch(() => {});
+                window.alert(`Couldn't join voice channel: ${err}`);
+                return;
+              }
               dispatch({ type: "JOIN_VOICE_CHANNEL", serverId, payload: ch.id });
-              await voice.join(serverId, ch.id).catch((e) => console.error("[voice] join", e));
               try {
                 const vs = await api.getVoiceState(serverId, ch.id);
                 const simplified = (vs || []).filter((v: any) => v && v.public_key).map((v: any) => ({
