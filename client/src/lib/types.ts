@@ -107,7 +107,9 @@ export function isDeletedUser(pk: { bytes: number[] }): boolean {
 }
 
 export interface BannedMember {
-  public_key: string;
+  // Serde-serialized PublicKey: a { bytes } object, not a string. Use
+  // publicKeyToString() before passing to commands or using as a React key.
+  public_key: { bytes: number[] };
   display_name: string;
   ban_reason?: string;
   banned_at: number;

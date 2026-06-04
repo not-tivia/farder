@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
-import type { BannedMember } from "../lib/types";
+import { publicKeyToString, type BannedMember } from "../lib/types";
 
 interface Props {
   serverId: string;
@@ -47,7 +47,7 @@ export default function BannedMembersTab({ serverId }: Props) {
   async function unban(entry: BannedMember) {
     if (!window.confirm(`Unban ${entry.display_name}? They'll be able to rejoin with this identity.`)) return;
     try {
-      await api.unbanMember(serverId, entry.public_key);
+      await api.unbanMember(serverId, publicKeyToString(entry.public_key));
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -65,7 +65,7 @@ export default function BannedMembersTab({ serverId }: Props) {
         </div>
       )}
       {entries.map((e) => (
-        <div key={e.public_key} style={row}>
+        <div key={publicKeyToString(e.public_key)} style={row}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: "bold" }}>{e.display_name}</div>
             <div style={{ fontSize: 10, color: "var(--xp-text-muted, #666)", overflow: "hidden", textOverflow: "ellipsis" }}>
