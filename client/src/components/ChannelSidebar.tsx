@@ -159,8 +159,20 @@ export default function ChannelSidebar() {
   const leaveVoiceChannel = async (channelId: number) => {
     if (!serverId) return;
     await voice.leave().catch(() => {});
-    await api.leaveVoice(serverId, channelId);
+    await api.leaveVoice(serverId, channelId).catch(() => {});
     dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
+    // Re-sync the roster so we're removed from the participant list. A leaver
+    // doesn't reliably receive their own MediaLeft broadcast, and
+    // LEAVE_VOICE_CHANNEL only clears currentVoiceChannelId; without this the
+    // server thinks we left but the list still shows us.
+    try {
+      const vs = await api.getVoiceState(serverId, channelId);
+      const simplified = (vs || []).filter((v: any) => v && v.public_key).map((v: any) => ({
+        publicKey: typeof v.public_key === "string" ? v.public_key : publicKeyToString(v.public_key),
+        displayName: v.display_name || "Unknown",
+      }));
+      dispatch({ type: "SET_VOICE_STATE", serverId, payload: { channelId, participants: simplified } });
+    } catch {}
   };
 
   const channels = activeServer?.channels ?? [];
