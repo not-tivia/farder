@@ -1762,108 +1762,118 @@ pub async fn start_recording() -> Result<(), String> {
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
     let path = tmp_dir.join(&filename);
     let path_str = path.to_string_lossy().to_string();
-    *RECORDING_PATH.lock().unwrap() = Some(path_str.clone());
+    if let Ok(mut g) = RECORDING_PATH.lock() {
+        *g = Some(path_str.clone());
+    }
+
+    // The cpal stream must be created, used, and dropped on one thread, so all
+    // setup happens inside spawn_blocking. Report the setup result back over a
+    // oneshot so a failure (no device, bad config, file create, stream build)
+    // surfaces to the caller instead of silently panicking a detached worker.
+    let (setup_tx, setup_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
     tauri::async_runtime::spawn_blocking(move || {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-        let host = cpal::default_host();
-        let device = match host.default_input_device() {
-            Some(d) => d,
-            None => {
-                eprintln!("[voice] no input device available");
-                RECORDING.store(false, std::sync::atomic::Ordering::SeqCst);
-                return;
+        type RecWriter = hound::WavWriter<std::io::BufWriter<std::fs::File>>;
+        let built = (|| -> Result<(cpal::Stream, Arc<Mutex<Option<RecWriter>>>), String> {
+            let host = cpal::default_host();
+            let device = host
+                .default_input_device()
+                .ok_or_else(|| "no input device available".to_string())?;
+            let config = device
+                .default_input_config()
+                .map_err(|e| format!("input config: {e}"))?;
+            let spec = hound::WavSpec {
+                channels: config.channels(),
+                sample_rate: config.sample_rate().0,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let writer = Arc::new(Mutex::new(Some(
+                hound::WavWriter::create(&path, spec).map_err(|e| format!("create wav: {e}"))?,
+            )));
+            let stream = match config.sample_format() {
+                cpal::SampleFormat::F32 => {
+                    let wc = Arc::clone(&writer);
+                    device.build_input_stream(
+                        &config.into(),
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            if let Ok(mut guard) = wc.lock() {
+                                if let Some(w) = guard.as_mut() {
+                                    for &sample in data {
+                                        let _ = w.write_sample((sample * 32767.0) as i16);
+                                    }
+                                }
+                            }
+                        },
+                        |err| eprintln!("recording error: {err}"),
+                        None,
+                    ).map_err(|e| format!("build input stream: {e}"))?
+                }
+                cpal::SampleFormat::I16 => {
+                    let wc = Arc::clone(&writer);
+                    device.build_input_stream(
+                        &config.into(),
+                        move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                            if let Ok(mut guard) = wc.lock() {
+                                if let Some(w) = guard.as_mut() {
+                                    for &sample in data {
+                                        let _ = w.write_sample(sample);
+                                    }
+                                }
+                            }
+                        },
+                        |err| eprintln!("recording error: {err}"),
+                        None,
+                    ).map_err(|e| format!("build input stream: {e}"))?
+                }
+                other => return Err(format!("unsupported sample format: {other:?}")),
+            };
+            stream.play().map_err(|e| format!("stream.play: {e}"))?;
+            Ok((stream, writer))
+        })();
+
+        match built {
+            Ok((stream, writer)) => {
+                let _ = setup_tx.send(Ok(()));
+                while RECORDING.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                drop(stream);
+                if let Ok(mut guard) = writer.lock() {
+                    if let Some(w) = guard.take() {
+                        let _ = w.finalize();
+                    }
+                }
             }
-        };
-        let config = match device.default_input_config() {
-            Ok(c) => c,
             Err(e) => {
-                eprintln!("[voice] failed to get input config: {}", e);
                 RECORDING.store(false, std::sync::atomic::Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let sample_rate = config.sample_rate().0;
-        let channels = config.channels() as u16;
-
-        let spec = hound::WavSpec {
-            channels,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let writer = Arc::new(Mutex::new(Some(hound::WavWriter::create(&path, spec).unwrap())));
-        let writer_clone = Arc::clone(&writer);
-
-        let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                device.build_input_stream(
-                    &config.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if let Ok(mut guard) = writer_clone.lock() {
-                            if let Some(w) = guard.as_mut() {
-                                for &sample in data {
-                                    let s = (sample * 32767.0) as i16;
-                                    let _ = w.write_sample(s);
-                                }
-                            }
-                        }
-                    },
-                    |err| eprintln!("recording error: {}", err),
-                    None,
-                ).unwrap()
-            }
-            cpal::SampleFormat::I16 => {
-                device.build_input_stream(
-                    &config.into(),
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if let Ok(mut guard) = writer_clone.lock() {
-                            if let Some(w) = guard.as_mut() {
-                                for &sample in data {
-                                    let _ = w.write_sample(sample);
-                                }
-                            }
-                        }
-                    },
-                    |err| eprintln!("recording error: {}", err),
-                    None,
-                ).unwrap()
-            }
-            _ => return,
-        };
-
-        stream.play().unwrap();
-
-        // Wait until RECORDING is set to false
-        while RECORDING.load(std::sync::atomic::Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        drop(stream);
-        // Finalize the WAV file
-        {
-            let mut guard = writer.lock().unwrap();
-            if let Some(w) = guard.take() {
-                let _ = w.finalize();
+                let _ = setup_tx.send(Err(e));
             }
         }
     });
 
-    Ok(())
+    setup_rx
+        .await
+        .map_err(|_| "recording thread ended before it started".to_string())?
 }
 
 /// Stop recording and return the path to the WAV file.
 #[tauri::command]
-pub fn stop_recording() -> Result<String, String> {
+pub async fn stop_recording() -> Result<String, String> {
     use std::sync::atomic::Ordering;
     RECORDING.store(false, Ordering::SeqCst);
-    // Wait a moment for the recording thread to finish
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    let path = RECORDING_PATH.lock().unwrap().take().ok_or("no recording in progress")?;
+    // Give the recording thread a moment to finalize the WAV. Async sleep so we
+    // don't block a worker thread.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let path = RECORDING_PATH
+        .lock()
+        .map_err(|_| "recording state poisoned".to_string())?
+        .take()
+        .ok_or("no recording in progress")?;
     if !std::path::Path::new(&path).exists() {
-        return Err("recording failed — no audio device available".to_string());
+        return Err("recording failed — no audio file was written".to_string());
     }
     Ok(path)
 }
