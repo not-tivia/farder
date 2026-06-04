@@ -36,6 +36,73 @@ impl Default for CpalAudioBackend {
     }
 }
 
+/// Average all interleaved channels of one device frame down to a single mono
+/// sample. Empty frame -> silence.
+fn downmix_frame_to_mono(frame: &[f32]) -> f32 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+    frame.iter().sum::<f32>() / frame.len() as f32
+}
+
+/// Write one mono sample across `channels` interleaved output slots,
+/// replicating it to every channel. Always writes at least one slot.
+fn upmix_mono_into(sample: f32, channels: usize, out: &mut Vec<f32>) {
+    for _ in 0..channels.max(1) {
+        out.push(sample);
+    }
+}
+
+/// Choose an f32 `StreamConfig` whose sample-rate range covers `want_sr`,
+/// preferring `want_channels`, then stereo, then ANY channel count (the
+/// callbacks down/upmix between mono and whatever the device offers). On
+/// failure the error lists what the device actually exposes, for diagnosis.
+fn choose_stream_config(
+    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+    want_sr: cpal::SampleRate,
+    want_channels: u16,
+    label: &str,
+    format: &AudioFormat,
+) -> Result<cpal::StreamConfig, String> {
+    let mut exact: Option<cpal::SupportedStreamConfigRange> = None;
+    let mut stereo: Option<cpal::SupportedStreamConfigRange> = None;
+    let mut any: Option<cpal::SupportedStreamConfigRange> = None;
+    let mut available: Vec<String> = Vec::new();
+    for cfg in configs {
+        available.push(format!(
+            "{:?}/{}ch/{}-{}Hz",
+            cfg.sample_format(),
+            cfg.channels(),
+            cfg.min_sample_rate().0,
+            cfg.max_sample_rate().0
+        ));
+        if cfg.sample_format() != cpal::SampleFormat::F32 {
+            continue;
+        }
+        if cfg.min_sample_rate() > want_sr || want_sr > cfg.max_sample_rate() {
+            continue;
+        }
+        if cfg.channels() == want_channels {
+            if exact.is_none() {
+                exact = Some(cfg);
+            }
+        } else if cfg.channels() == 2 {
+            if stereo.is_none() {
+                stereo = Some(cfg);
+            }
+        } else if any.is_none() {
+            any = Some(cfg);
+        }
+    }
+    let chosen = exact.or(stereo).or(any).ok_or_else(|| {
+        format!(
+            "no supported {label} config for {format:?}; device offers: [{}]",
+            available.join(", ")
+        )
+    })?;
+    Ok(chosen.with_sample_rate(want_sr).config())
+}
+
 /// Pick an input device by name, or the host's default if `device_id` is None.
 fn pick_input_device(host: &cpal::Host, device_id: Option<&str>) -> Result<cpal::Device, String> {
     match device_id {
@@ -55,30 +122,10 @@ fn build_input_config(
     device: &cpal::Device,
     format: &AudioFormat,
 ) -> Result<cpal::StreamConfig, String> {
-    use cpal::SampleRate;
-    let want_sr = SampleRate(format.sample_rate);
-    let want_channels = format.channels;
+    let want_sr = cpal::SampleRate(format.sample_rate);
     let configs = device.supported_input_configs()
         .map_err(|e| format!("supported_input_configs: {e}"))?;
-    let mut exact_match: Option<cpal::SupportedStreamConfigRange> = None;
-    let mut stereo_match: Option<cpal::SupportedStreamConfigRange> = None;
-    for cfg in configs {
-        if cfg.sample_format() != cpal::SampleFormat::F32 {
-            continue;
-        }
-        if cfg.min_sample_rate() <= want_sr && want_sr <= cfg.max_sample_rate() {
-            if cfg.channels() == want_channels {
-                exact_match = Some(cfg);
-                break;
-            }
-            if want_channels == 1 && cfg.channels() == 2 && stereo_match.is_none() {
-                stereo_match = Some(cfg);
-            }
-        }
-    }
-    let chosen = exact_match.or(stereo_match)
-        .ok_or_else(|| format!("no supported input config for {format:?}"))?;
-    Ok(chosen.with_sample_rate(want_sr).config())
+    choose_stream_config(configs, want_sr, format.channels, "input", format)
 }
 
 fn pick_output_device(host: &cpal::Host, device_id: Option<&str>) -> Result<cpal::Device, String> {
@@ -96,30 +143,10 @@ fn build_output_config(
     device: &cpal::Device,
     format: &AudioFormat,
 ) -> Result<cpal::StreamConfig, String> {
-    use cpal::SampleRate;
-    let want_sr = SampleRate(format.sample_rate);
-    let want_channels = format.channels;
+    let want_sr = cpal::SampleRate(format.sample_rate);
     let configs = device.supported_output_configs()
         .map_err(|e| format!("supported_output_configs: {e}"))?;
-    let mut exact_match: Option<cpal::SupportedStreamConfigRange> = None;
-    let mut stereo_match: Option<cpal::SupportedStreamConfigRange> = None;
-    for cfg in configs {
-        if cfg.sample_format() != cpal::SampleFormat::F32 {
-            continue;
-        }
-        if cfg.min_sample_rate() <= want_sr && want_sr <= cfg.max_sample_rate() {
-            if cfg.channels() == want_channels {
-                exact_match = Some(cfg);
-                break;
-            }
-            if want_channels == 1 && cfg.channels() == 2 && stereo_match.is_none() {
-                stereo_match = Some(cfg);
-            }
-        }
-    }
-    let chosen = exact_match.or(stereo_match)
-        .ok_or_else(|| format!("no supported output config for {format:?}"))?;
-    Ok(chosen.with_sample_rate(want_sr).config())
+    choose_stream_config(configs, want_sr, format.channels, "output", format)
 }
 
 impl AudioBackend for CpalAudioBackend {
@@ -190,12 +217,12 @@ impl AudioBackend for CpalAudioBackend {
                 // accumulated samples_per_chunk samples worth of output.
                 let mut i = 0;
                 while i + dev_channels <= raw.len() {
+                    // Engine wants mono; average the device's channels for
+                    // this frame down to one sample (handles stereo, 5.1, etc.).
                     let sample = if dev_channels == want_channels {
                         raw[i]
-                    } else if dev_channels == 2 && want_channels == 1 {
-                        (raw[i] + raw[i + 1]) / 2.0
                     } else {
-                        0.0
+                        downmix_frame_to_mono(&raw[i..i + dev_channels])
                     };
                     buffered.push(sample);
                     i += dev_channels;
@@ -263,14 +290,12 @@ impl AudioBackend for CpalAudioBackend {
                         Ok(chunk) => {
                             if dev_channels == want_channels {
                                 pending.extend_from_slice(&chunk.samples);
-                            } else if want_channels == 1 && dev_channels == 2 {
-                                // Mono -> stereo: duplicate each sample.
-                                for &s in &chunk.samples {
-                                    pending.push(s);
-                                    pending.push(s);
-                                }
                             } else {
-                                pending.extend_from_slice(&chunk.samples);
+                                // Engine produces mono; replicate each sample
+                                // across the device's channels (stereo, 5.1...).
+                                for &s in &chunk.samples {
+                                    upmix_mono_into(s, dev_channels, &mut pending);
+                                }
                             }
                         }
                         Err(_) => break,
@@ -330,5 +355,49 @@ mod tests {
     fn cpal_enumerate_output_devices_returns_vec() {
         let backend = CpalAudioBackend::new();
         let _devices = backend.enumerate_output_devices().expect("enumerate output");
+    }
+
+    #[test]
+    fn downmix_stereo_frame_averages_channels() {
+        assert!((downmix_frame_to_mono(&[0.4, 0.6]) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_surround_frame_averages_all_channels() {
+        // 6-channel (5.1) frame averages to 0.5.
+        let frame = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+        assert!((downmix_frame_to_mono(&frame) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_mono_frame_passes_through() {
+        assert!((downmix_frame_to_mono(&[0.7]) - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_empty_frame_is_silent() {
+        assert_eq!(downmix_frame_to_mono(&[]), 0.0);
+    }
+
+    #[test]
+    fn upmix_mono_to_stereo_duplicates_sample() {
+        let mut out = Vec::new();
+        upmix_mono_into(0.7, 2, &mut out);
+        assert_eq!(out, vec![0.7, 0.7]);
+    }
+
+    #[test]
+    fn upmix_mono_to_surround_replicates_to_all_channels() {
+        let mut out = Vec::new();
+        upmix_mono_into(0.3, 6, &mut out);
+        assert_eq!(out, vec![0.3; 6]);
+    }
+
+    #[test]
+    fn upmix_zero_channels_emits_at_least_one() {
+        // Defensive: never silently drop a sample.
+        let mut out = Vec::new();
+        upmix_mono_into(0.9, 0, &mut out);
+        assert_eq!(out, vec![0.9]);
     }
 }
