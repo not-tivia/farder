@@ -191,10 +191,16 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             }
             Ok(())
         }
-        ServerEvent::MediaJoined { .. }
-        | ServerEvent::MediaLeft { .. }
-        | ServerEvent::StreamCallIncoming { .. }
-        | ServerEvent::StreamCallEnded { .. } => Ok(()), // surfaced by future UI events
+        // Voice-channel presence (roster). Emit so the frontend's
+        // server:voice_joined / server:voice_left listeners keep the
+        // participant list live as peers join and leave. public_key is sent as
+        // its to_string() form ("vk_<hex>") to match the getVoiceState snapshot.
+        ServerEvent::MediaJoined { channel_id, public_key, display_name } =>
+            app.emit("server:voice_joined", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string(), "display_name": display_name })),
+        ServerEvent::MediaLeft { channel_id, public_key } =>
+            app.emit("server:voice_left", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string() })),
+        ServerEvent::StreamCallIncoming { .. }
+        | ServerEvent::StreamCallEnded { .. } => Ok(()), // DM call signaling; no roster UI yet
         _ => Ok(()),
     };
 }
