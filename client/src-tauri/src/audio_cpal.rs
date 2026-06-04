@@ -3,30 +3,68 @@
 // Real AudioBackend backed by cpal. Bridges cpal's callback-based audio
 // API into the AudioBackend trait's `mpsc` channel model.
 //
+// cpal `Stream`s (and the `Host`) are thread-affine (!Send): a stream must be
+// created AND dropped on the same thread. Under tokio's multi-threaded runtime
+// that is impossible to guarantee for a stream stored in a shared struct, which
+// previously caused a "Dropped SendWrapper from a different thread" panic on
+// disconnect. So all cpal objects live on a single dedicated audio thread; the
+// backend is just a command channel to that thread.
+//
 // See docs/superpowers/specs/2026-05-25-cpal-audio-backend-design.md.
 
 use crate::audio::{
     AudioBackend, AudioFormat, AudioInputDevice, AudioOutputDevice, PcmChunk,
 };
 use cpal::traits::{DeviceTrait, HostTrait};
-use send_wrapper::SendWrapper;
 use std::sync::mpsc;
-use std::sync::Mutex;
 use std::time::Instant;
 
 pub struct CpalAudioBackend {
-    host: SendWrapper<cpal::Host>,
-    capture_stream: Mutex<Option<SendWrapper<cpal::Stream>>>,
-    playback_stream: Mutex<Option<SendWrapper<cpal::Stream>>>,
+    cmd_tx: mpsc::Sender<AudioCommand>,
+}
+
+/// Work sent to the dedicated audio thread. Each command carries a reply
+/// channel so the (synchronous) trait methods can block for the result.
+enum AudioCommand {
+    EnumInputs(mpsc::Sender<Result<Vec<AudioInputDevice>, String>>),
+    EnumOutputs(mpsc::Sender<Result<Vec<AudioOutputDevice>, String>>),
+    StartCapture {
+        device_id: Option<String>,
+        format: AudioFormat,
+        reply: mpsc::Sender<Result<mpsc::Receiver<PcmChunk>, String>>,
+    },
+    StopCapture(mpsc::Sender<Result<(), String>>),
+    StartPlayback {
+        device_id: Option<String>,
+        format: AudioFormat,
+        reply: mpsc::Sender<Result<mpsc::SyncSender<PcmChunk>, String>>,
+    },
+    StopPlayback(mpsc::Sender<Result<(), String>>),
 }
 
 impl CpalAudioBackend {
     pub fn new() -> Self {
-        Self {
-            host: SendWrapper::new(cpal::default_host()),
-            capture_stream: Mutex::new(None),
-            playback_stream: Mutex::new(None),
-        }
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("farder-audio".into())
+            .spawn(move || audio_thread(cmd_rx))
+            .expect("spawn audio thread");
+        Self { cmd_tx }
+    }
+
+    /// Send a command to the audio thread and block for its reply. Returns the
+    /// payload `T` (usually itself a `Result`) or an error if the thread is gone.
+    fn request<T>(
+        &self,
+        make: impl FnOnce(mpsc::Sender<T>) -> AudioCommand,
+    ) -> Result<T, String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.cmd_tx
+            .send(make(reply_tx))
+            .map_err(|_| "audio thread is not running".to_string())?;
+        reply_rx
+            .recv()
+            .map_err(|_| "audio thread dropped the reply".to_string())
     }
 }
 
@@ -34,6 +72,88 @@ impl Default for CpalAudioBackend {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The dedicated audio thread. Owns the cpal host and the live streams, so
+/// every stream is created and dropped here, never across threads. Exits when
+/// the backend (and thus the command sender) is dropped.
+fn audio_thread(rx: mpsc::Receiver<AudioCommand>) {
+    let host = cpal::default_host();
+    let mut capture: Option<cpal::Stream> = None;
+    let mut playback: Option<cpal::Stream> = None;
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            AudioCommand::EnumInputs(reply) => {
+                let _ = reply.send(enumerate_inputs(&host));
+            }
+            AudioCommand::EnumOutputs(reply) => {
+                let _ = reply.send(enumerate_outputs(&host));
+            }
+            AudioCommand::StartCapture { device_id, format, reply } => {
+                if capture.is_some() {
+                    let _ = reply.send(Err("capture already active".into()));
+                    continue;
+                }
+                match build_capture_stream(&host, device_id.as_deref(), format) {
+                    Ok((stream, data_rx)) => {
+                        capture = Some(stream);
+                        let _ = reply.send(Ok(data_rx));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            AudioCommand::StopCapture(reply) => {
+                capture = None; // dropped here, on the owning thread
+                let _ = reply.send(Ok(()));
+            }
+            AudioCommand::StartPlayback { device_id, format, reply } => {
+                if playback.is_some() {
+                    let _ = reply.send(Err("playback already active".into()));
+                    continue;
+                }
+                match build_playback_stream(&host, device_id.as_deref(), format) {
+                    Ok((stream, data_tx)) => {
+                        playback = Some(stream);
+                        let _ = reply.send(Ok(data_tx));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            AudioCommand::StopPlayback(reply) => {
+                playback = None;
+                let _ = reply.send(Ok(()));
+            }
+        }
+    }
+    // Sender dropped: `capture` / `playback` drop here as the thread unwinds.
+}
+
+fn enumerate_inputs(host: &cpal::Host) -> Result<Vec<AudioInputDevice>, String> {
+    let devices = host.input_devices().map_err(|e| format!("input_devices: {e}"))?;
+    let default = host.default_input_device().and_then(|d| d.name().ok());
+    let mut out = Vec::new();
+    for (i, dev) in devices.enumerate() {
+        let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
+        let is_default = default.as_deref() == Some(name.as_str());
+        out.push(AudioInputDevice { id: name.clone(), name, is_default });
+    }
+    Ok(out)
+}
+
+fn enumerate_outputs(host: &cpal::Host) -> Result<Vec<AudioOutputDevice>, String> {
+    let devices = host.output_devices().map_err(|e| format!("output_devices: {e}"))?;
+    let default = host.default_output_device().and_then(|d| d.name().ok());
+    let mut out = Vec::new();
+    for (i, dev) in devices.enumerate() {
+        let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
+        let is_default = default.as_deref() == Some(name.as_str());
+        out.push(AudioOutputDevice { id: name.clone(), name, is_default });
+    }
+    Ok(out)
 }
 
 /// Average all interleaved channels of one device frame down to a single mono
@@ -186,9 +306,6 @@ fn pick_input_device(host: &cpal::Host, device_id: Option<&str>) -> Result<cpal:
     }
 }
 
-/// Find a StreamConfig on `device` whose sample rate matches
-/// `format.sample_rate` and whose channel count is either `format.channels`
-/// (preferred) or 2 (we'll downmix to mono).
 fn build_input_config(
     device: &cpal::Device,
     format: &AudioFormat,
@@ -220,222 +337,199 @@ fn build_output_config(
     choose_stream_config(configs, want_sr, format.channels, "output", format)
 }
 
+/// Build (and start) a capture stream on the audio thread, returning it
+/// alongside the channel that delivers mono `PcmChunk`s at the engine rate.
+fn build_capture_stream(
+    host: &cpal::Host,
+    device_id: Option<&str>,
+    format: AudioFormat,
+) -> Result<(cpal::Stream, mpsc::Receiver<PcmChunk>), String> {
+    if format.channels == 0 || format.samples_per_chunk == 0 {
+        return Err(format!("invalid AudioFormat: {format:?}"));
+    }
+    let device = pick_input_device(host, device_id)?;
+    let cpal_config = build_input_config(&device, &format)?;
+    let dev_channels = cpal_config.channels as usize;
+    let want_channels = format.channels as usize;
+    let samples_per_chunk = format.samples_per_chunk;
+    let device_rate = cpal_config.sample_rate.0;
+    let engine_rate = format.sample_rate;
+    let (tx, rx) = mpsc::sync_channel::<PcmChunk>(8);
+
+    let started = Instant::now();
+    let mut buffered: Vec<f32> = Vec::with_capacity(samples_per_chunk);
+    // Resample the device's native rate to the engine rate (48k) if they
+    // differ (e.g. a 96 kHz-only device).
+    let mut resampler = if device_rate != engine_rate {
+        Some(LinearResampler::new(device_rate, engine_rate))
+    } else {
+        None
+    };
+    let mut mono_scratch: Vec<f32> = Vec::new();
+    let mut resampled: Vec<f32> = Vec::new();
+
+    let stream = device.build_input_stream(
+        &cpal_config,
+        move |raw: &[f32], _info: &cpal::InputCallbackInfo| {
+            // 1. Downmix each interleaved device frame to one mono sample
+            //    (still at the device's sample rate).
+            mono_scratch.clear();
+            let mut i = 0;
+            while i + dev_channels <= raw.len() {
+                let sample = if dev_channels == want_channels {
+                    raw[i]
+                } else {
+                    downmix_frame_to_mono(&raw[i..i + dev_channels])
+                };
+                mono_scratch.push(sample);
+                i += dev_channels;
+            }
+            // 2. Resample to the engine rate when the device isn't 48k.
+            let engine_samples: &[f32] = match resampler.as_mut() {
+                Some(r) => {
+                    resampled.clear();
+                    r.process(&mono_scratch, &mut resampled);
+                    &resampled
+                }
+                None => &mono_scratch,
+            };
+            // 3. Accumulate into fixed-size (samples_per_chunk) chunks.
+            for &s in engine_samples {
+                buffered.push(s);
+                if buffered.len() >= samples_per_chunk {
+                    let chunk = PcmChunk {
+                        samples: std::mem::take(&mut buffered),
+                        timestamp_ms: started.elapsed().as_millis() as u64,
+                    };
+                    buffered.reserve(samples_per_chunk);
+                    let _ = tx.try_send(chunk);
+                }
+            }
+        },
+        |err| eprintln!("[audio] cpal capture error: {err}"),
+        None,
+    ).map_err(|e| format!("build_input_stream: {e}"))?;
+
+    use cpal::traits::StreamTrait;
+    stream.play().map_err(|e| format!("stream.play: {e}"))?;
+    Ok((stream, rx))
+}
+
+/// Build (and start) a playback stream on the audio thread, returning it
+/// alongside the channel that accepts mono `PcmChunk`s at the engine rate.
+fn build_playback_stream(
+    host: &cpal::Host,
+    device_id: Option<&str>,
+    format: AudioFormat,
+) -> Result<(cpal::Stream, mpsc::SyncSender<PcmChunk>), String> {
+    if format.channels == 0 || format.samples_per_chunk == 0 {
+        return Err(format!("invalid AudioFormat: {format:?}"));
+    }
+    let device = pick_output_device(host, device_id)?;
+    let cpal_config = build_output_config(&device, &format)?;
+    let dev_channels = cpal_config.channels as usize;
+    let want_channels = format.channels as usize;
+
+    // Buffer sized for ~500ms of audio (matches the mock's behavior).
+    let frames_per_chunk = (format.samples_per_chunk / want_channels).max(1);
+    let chunks_per_500ms = ((format.sample_rate as f32 * 0.5)
+        / frames_per_chunk as f32).ceil() as usize;
+    let buf = chunks_per_500ms.max(2);
+    let (tx, rx) = mpsc::sync_channel::<PcmChunk>(buf);
+
+    let device_rate = cpal_config.sample_rate.0;
+    let engine_rate = format.sample_rate;
+    let mut pending: Vec<f32> = Vec::new();
+    // Resample the engine rate (48k) to the device's native rate if they
+    // differ (e.g. a 96 kHz-only device).
+    let mut resampler = if device_rate != engine_rate {
+        Some(LinearResampler::new(engine_rate, device_rate))
+    } else {
+        None
+    };
+    let mut resampled: Vec<f32> = Vec::new();
+
+    let stream = device.build_output_stream(
+        &cpal_config,
+        move |out: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+            // Refill `pending` from the channel as needed.
+            while pending.len() < out.len() {
+                match rx.try_recv() {
+                    Ok(chunk) => {
+                        // Resample engine(48k) mono -> device-rate mono.
+                        let mono: &[f32] = match resampler.as_mut() {
+                            Some(r) => {
+                                resampled.clear();
+                                r.process(&chunk.samples, &mut resampled);
+                                &resampled
+                            }
+                            None => &chunk.samples,
+                        };
+                        if dev_channels == want_channels {
+                            pending.extend_from_slice(mono);
+                        } else {
+                            // Engine produces mono; replicate each sample
+                            // across the device's channels (stereo, 5.1...).
+                            for &s in mono {
+                                upmix_mono_into(s, dev_channels, &mut pending);
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let take = pending.len().min(out.len());
+            out[..take].copy_from_slice(&pending[..take]);
+            pending.drain(..take);
+            // Underrun -> silence.
+            for s in &mut out[take..] {
+                *s = 0.0;
+            }
+        },
+        |err| eprintln!("[audio] cpal playback error: {err}"),
+        None,
+    ).map_err(|e| format!("build_output_stream: {e}"))?;
+
+    use cpal::traits::StreamTrait;
+    stream.play().map_err(|e| format!("stream.play: {e}"))?;
+    Ok((stream, tx))
+}
+
 impl AudioBackend for CpalAudioBackend {
     fn enumerate_input_devices(&self) -> Result<Vec<AudioInputDevice>, String> {
-        let devices = self.host.input_devices()
-            .map_err(|e| format!("input_devices: {e}"))?;
-        let default = self.host.default_input_device()
-            .and_then(|d| d.name().ok());
-        let mut out = Vec::new();
-        for (i, dev) in devices.enumerate() {
-            let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
-            let is_default = default.as_deref() == Some(name.as_str());
-            out.push(AudioInputDevice {
-                id: name.clone(),
-                name: name.clone(),
-                is_default,
-            });
-        }
-        Ok(out)
+        self.request(AudioCommand::EnumInputs)?
     }
 
     fn enumerate_output_devices(&self) -> Result<Vec<AudioOutputDevice>, String> {
-        let devices = self.host.output_devices()
-            .map_err(|e| format!("output_devices: {e}"))?;
-        let default = self.host.default_output_device()
-            .and_then(|d| d.name().ok());
-        let mut out = Vec::new();
-        for (i, dev) in devices.enumerate() {
-            let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
-            let is_default = default.as_deref() == Some(name.as_str());
-            out.push(AudioOutputDevice {
-                id: name.clone(),
-                name: name.clone(),
-                is_default,
-            });
-        }
-        Ok(out)
+        self.request(AudioCommand::EnumOutputs)?
     }
+
     fn start_capture(
         &self,
         device_id: Option<&str>,
         format: AudioFormat,
     ) -> Result<mpsc::Receiver<PcmChunk>, String> {
-        let mut slot = self.capture_stream.lock()
-            .map_err(|e| format!("capture lock: {e}"))?;
-        if slot.is_some() {
-            return Err("capture already active".into());
-        }
-        if format.channels == 0 || format.samples_per_chunk == 0 {
-            return Err(format!("invalid AudioFormat: {format:?}"));
-        }
-
-        let device = pick_input_device(&self.host, device_id)?;
-        let cpal_config = build_input_config(&device, &format)?;
-        let dev_channels = cpal_config.channels as usize;
-        let want_channels = format.channels as usize;
-        let samples_per_chunk = format.samples_per_chunk;
-        let device_rate = cpal_config.sample_rate.0;
-        let engine_rate = format.sample_rate;
-        let (tx, rx) = mpsc::sync_channel::<PcmChunk>(8);
-
-        let started = Instant::now();
-        let mut buffered: Vec<f32> = Vec::with_capacity(samples_per_chunk);
-        // Resample the device's native rate to the engine rate (48k) if they
-        // differ (e.g. a 96 kHz-only device).
-        let mut resampler = if device_rate != engine_rate {
-            Some(LinearResampler::new(device_rate, engine_rate))
-        } else {
-            None
-        };
-        let mut mono_scratch: Vec<f32> = Vec::new();
-        let mut resampled: Vec<f32> = Vec::new();
-
-        let stream = device.build_input_stream(
-            &cpal_config,
-            move |raw: &[f32], _info: &cpal::InputCallbackInfo| {
-                // 1. Downmix each interleaved device frame to one mono sample
-                //    (still at the device's sample rate).
-                mono_scratch.clear();
-                let mut i = 0;
-                while i + dev_channels <= raw.len() {
-                    let sample = if dev_channels == want_channels {
-                        raw[i]
-                    } else {
-                        downmix_frame_to_mono(&raw[i..i + dev_channels])
-                    };
-                    mono_scratch.push(sample);
-                    i += dev_channels;
-                }
-                // 2. Resample to the engine rate when the device isn't 48k.
-                let engine_samples: &[f32] = match resampler.as_mut() {
-                    Some(r) => {
-                        resampled.clear();
-                        r.process(&mono_scratch, &mut resampled);
-                        &resampled
-                    }
-                    None => &mono_scratch,
-                };
-                // 3. Accumulate into fixed-size (samples_per_chunk) chunks.
-                for &s in engine_samples {
-                    buffered.push(s);
-                    if buffered.len() >= samples_per_chunk {
-                        let chunk = PcmChunk {
-                            samples: std::mem::take(&mut buffered),
-                            timestamp_ms: started.elapsed().as_millis() as u64,
-                        };
-                        buffered.reserve(samples_per_chunk);
-                        let _ = tx.try_send(chunk);
-                    }
-                }
-            },
-            |err| eprintln!("[audio] cpal capture error: {err}"),
-            None,
-        ).map_err(|e| format!("build_input_stream: {e}"))?;
-
-        use cpal::traits::StreamTrait;
-        stream.play().map_err(|e| format!("stream.play: {e}"))?;
-        *slot = Some(SendWrapper::new(stream));
-        Ok(rx)
+        let device_id = device_id.map(|s| s.to_string());
+        self.request(move |reply| AudioCommand::StartCapture { device_id, format, reply })?
     }
 
     fn stop_capture(&self) -> Result<(), String> {
-        let mut slot = self.capture_stream.lock()
-            .map_err(|e| format!("capture lock: {e}"))?;
-        slot.take();
-        Ok(())
+        self.request(AudioCommand::StopCapture)?
     }
+
     fn start_playback(
         &self,
         device_id: Option<&str>,
         format: AudioFormat,
     ) -> Result<mpsc::SyncSender<PcmChunk>, String> {
-        let mut slot = self.playback_stream.lock()
-            .map_err(|e| format!("playback lock: {e}"))?;
-        if slot.is_some() {
-            return Err("playback already active".into());
-        }
-        if format.channels == 0 || format.samples_per_chunk == 0 {
-            return Err(format!("invalid AudioFormat: {format:?}"));
-        }
-
-        let device = pick_output_device(&self.host, device_id)?;
-        let cpal_config = build_output_config(&device, &format)?;
-        let dev_channels = cpal_config.channels as usize;
-        let want_channels = format.channels as usize;
-
-        // Buffer sized for ~500ms of audio (matches the mock's behavior).
-        let frames_per_chunk = (format.samples_per_chunk / want_channels).max(1);
-        let chunks_per_500ms = ((format.sample_rate as f32 * 0.5)
-            / frames_per_chunk as f32).ceil() as usize;
-        let buf = chunks_per_500ms.max(2);
-        let (tx, rx) = mpsc::sync_channel::<PcmChunk>(buf);
-
-        let device_rate = cpal_config.sample_rate.0;
-        let engine_rate = format.sample_rate;
-        let mut pending: Vec<f32> = Vec::new();
-        // Resample the engine rate (48k) to the device's native rate if they
-        // differ (e.g. a 96 kHz-only device).
-        let mut resampler = if device_rate != engine_rate {
-            Some(LinearResampler::new(engine_rate, device_rate))
-        } else {
-            None
-        };
-        let mut resampled: Vec<f32> = Vec::new();
-
-        let stream = device.build_output_stream(
-            &cpal_config,
-            move |out: &mut [f32], _info: &cpal::OutputCallbackInfo| {
-                // Refill `pending` from the channel as needed.
-                while pending.len() < out.len() {
-                    match rx.try_recv() {
-                        Ok(chunk) => {
-                            // Resample engine(48k) mono -> device-rate mono.
-                            let mono: &[f32] = match resampler.as_mut() {
-                                Some(r) => {
-                                    resampled.clear();
-                                    r.process(&chunk.samples, &mut resampled);
-                                    &resampled
-                                }
-                                None => &chunk.samples,
-                            };
-                            if dev_channels == want_channels {
-                                pending.extend_from_slice(mono);
-                            } else {
-                                // Engine produces mono; replicate each sample
-                                // across the device's channels (stereo, 5.1...).
-                                for &s in mono {
-                                    upmix_mono_into(s, dev_channels, &mut pending);
-                                }
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let take = pending.len().min(out.len());
-                out[..take].copy_from_slice(&pending[..take]);
-                pending.drain(..take);
-                // Underrun -> silence.
-                for s in &mut out[take..] {
-                    *s = 0.0;
-                }
-            },
-            |err| eprintln!("[audio] cpal playback error: {err}"),
-            None,
-        ).map_err(|e| format!("build_output_stream: {e}"))?;
-
-        use cpal::traits::StreamTrait;
-        stream.play().map_err(|e| format!("stream.play: {e}"))?;
-        *slot = Some(SendWrapper::new(stream));
-        Ok(tx)
+        let device_id = device_id.map(|s| s.to_string());
+        self.request(move |reply| AudioCommand::StartPlayback { device_id, format, reply })?
     }
 
     fn stop_playback(&self) -> Result<(), String> {
-        let mut slot = self.playback_stream.lock()
-            .map_err(|e| format!("playback lock: {e}"))?;
-        slot.take();
-        Ok(())
+        self.request(AudioCommand::StopPlayback)?
     }
+
     fn backend_name(&self) -> &'static str {
         "cpal"
     }
