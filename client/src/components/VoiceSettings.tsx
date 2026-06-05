@@ -1,22 +1,52 @@
 import { useEffect, useState } from "react";
-import { getVoiceMode, setVoiceMode, getPttKey, setPttKey } from "../lib/tauri-bridge";
+import { listen } from "@tauri-apps/api/event";
+import {
+  getVoiceMode,
+  setVoiceMode,
+  getPttKey,
+  setPttKey,
+  getVoiceSensitivity,
+  setVoiceSensitivity,
+  type VoiceInputLevelPayload,
+} from "../lib/tauri-bridge";
 import SettingsSection from "./settings/SettingsSection";
 import RadioOption from "./settings/RadioOption";
 import KeybindRow from "./settings/KeybindRow";
+
+// Keep in sync with sensitivity_to_threshold() in the Rust voice module.
+function thresholdFor(sensitivity: number): number {
+  return Math.max(0.0005, 0.05 - 0.049 * (Math.min(100, sensitivity) / 100));
+}
+// Map an RMS value to a 0-100% meter position (full scale = rms 0.1).
+const meterPct = (rms: number) => Math.min(100, Math.max(0, rms * 1000));
 
 export default function VoiceSettings() {
   const [mode, setMode] = useState<string>("OpenMic");
   const [pttKey, setPttKeyState] = useState<string>("Backquote");
   const [capturing, setCapturing] = useState(false);
+  const [sensitivity, setSensitivity] = useState<number>(85);
+  const [inputLevel, setInputLevel] = useState<number>(0);
 
   useEffect(() => {
     void getVoiceMode().then(setMode).catch(() => {});
     void getPttKey().then(setPttKeyState).catch(() => {});
+    void getVoiceSensitivity().then(setSensitivity).catch(() => {});
+    // Live mic level (only flows while a voice call is active).
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<VoiceInputLevelPayload>("voice://input-level", (e) => setInputLevel(e.payload.level))
+      .then((u) => { if (cancelled) u(); else unlisten = u; });
+    return () => { cancelled = true; unlisten?.(); };
   }, []);
 
   const chooseMode = (next: string) => {
     setMode(next);
     void setVoiceMode(next).catch((e) => console.error("[voice-settings] failed to save mic mode:", e));
+  };
+
+  const chooseSensitivity = (v: number) => {
+    setSensitivity(v);
+    void setVoiceSensitivity(v).catch((e) => console.error("[voice-settings] failed to save sensitivity:", e));
   };
 
   useEffect(() => {
@@ -35,6 +65,11 @@ export default function VoiceSettings() {
     return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [capturing]);
 
+  const threshold = thresholdFor(sensitivity);
+  const levelPct = meterPct(inputLevel);
+  const markerPct = meterPct(threshold);
+  const isLoud = inputLevel > threshold;
+
   return (
     <div className="settings-panel">
       <h2 className="settings-panel-title">Voice</h2>
@@ -52,6 +87,31 @@ export default function VoiceSettings() {
           onSelect={() => chooseMode("PushToTalk")}
         />
       </SettingsSection>
+
+      <div className="settings-divider" />
+      <SettingsSection label="Mic Sensitivity">
+        <div className="mic-meter">
+          <div
+            className={`mic-meter-fill${isLoud ? " active" : ""}`}
+            style={{ width: `${levelPct}%` }}
+          />
+          <div className="mic-meter-marker" style={{ left: `${markerPct}%` }} />
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={sensitivity}
+          onChange={(e) => chooseSensitivity(Number(e.target.value))}
+          style={{ width: "100%" }}
+        />
+        <p className="settings-help">
+          Drag so the bar turns green only when you talk, not when you're quiet.
+          Join a voice channel to see your live mic level here.
+        </p>
+      </SettingsSection>
+
       {mode === "PushToTalk" && (
         <>
           <div className="settings-divider" />

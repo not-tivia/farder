@@ -47,6 +47,17 @@ impl Default for VoiceMode {
     }
 }
 
+/// Default speaking RMS threshold (sensitivity ~85%). Used until a join reads
+/// the persisted mic-sensitivity setting via `set_speak_threshold`.
+pub const DEFAULT_SPEAK_THRESHOLD: f32 = 0.008;
+
+/// Map a mic-sensitivity slider value (0-100, higher = more sensitive) to the
+/// speaking RMS threshold (lower = easier to trigger).
+pub fn sensitivity_to_threshold(sensitivity: u32) -> f32 {
+    let s = (sensitivity.min(100) as f32) / 100.0;
+    (0.05 - 0.049 * s).max(0.0005)
+}
+
 /// Choose the send-path gate for a mode. PTT uses the shared transmit flag;
 /// Open Mic ignores it and always passes.
 pub fn gate_for_mode(
@@ -248,7 +259,9 @@ pub struct PipelineParams {
     pub peer_rings: crate::voice::mixer::PeerRings,
     pub muted: Arc<std::sync::atomic::AtomicBool>,
     pub gate: crate::voice::gate::GateMode,
+    pub speak_threshold: Arc<std::sync::atomic::AtomicU32>,
     pub local_speaking_tx: tokio::sync::watch::Sender<bool>,
+    pub input_level_tx: tokio::sync::watch::Sender<f32>,
     pub datagram_sink: Box<dyn Fn(Bytes) + Send + Sync + 'static>,
 }
 
@@ -320,7 +333,9 @@ impl VoicePipelineFactory for AudioPipelineFactory {
         let speaker_pk = params.speaker_pk;
         let muted = params.muted;
         let gate = params.gate;
+        let speak_threshold = params.speak_threshold;
         let speak_tx = params.local_speaking_tx;
+        let input_level_tx = params.input_level_tx;
         let datagram_sink = params.datagram_sink;
         tokio::task::spawn_blocking(move || {
             crate::voice::send::run(
@@ -332,6 +347,8 @@ impl VoicePipelineFactory for AudioPipelineFactory {
                     stream_key,
                     speaker_pk,
                     aec_ref: send_aec,
+                    speak_threshold,
+                    input_level_tx,
                     datagram_sink,
                 },
                 muted,
@@ -355,6 +372,9 @@ pub struct VoiceController {
     inner: Arc<Mutex<Inner>>,
     emitter: Arc<dyn VoiceEventEmitter>,
     pipeline_factory: Arc<dyn VoicePipelineFactory>,
+    /// Live speaking RMS threshold (`f32::to_bits`), shared with the active
+    /// send task. Updated by the mic-sensitivity slider; read each frame.
+    speak_threshold: Arc<std::sync::atomic::AtomicU32>,
 }
 
 struct Inner {
@@ -435,7 +455,17 @@ impl VoiceController {
             })),
             emitter,
             pipeline_factory,
+            speak_threshold: Arc::new(std::sync::atomic::AtomicU32::new(
+                DEFAULT_SPEAK_THRESHOLD.to_bits(),
+            )),
         }
+    }
+
+    /// Set the live speaking-detection threshold (the mic-sensitivity slider).
+    /// Takes effect immediately for the active call's send task.
+    pub fn set_speak_threshold(&self, threshold: f32) {
+        self.speak_threshold
+            .store(threshold.to_bits(), std::sync::atomic::Ordering::Release);
     }
 
     pub async fn state(&self) -> VoiceState {
@@ -522,6 +552,7 @@ impl VoiceController {
         let muted_flag = self.inner.lock().await.muted.clone();
         let transmit_flag = self.inner.lock().await.transmit.clone();
         let (speak_tx, mut speak_rx) = tokio::sync::watch::channel(false);
+        let (level_tx, mut level_rx) = tokio::sync::watch::channel(0.0f32);
         let server_for_sink = server.clone();
         let pipeline = self.pipeline_factory.spawn(PipelineParams {
             session_id,
@@ -530,7 +561,9 @@ impl VoiceController {
             peer_rings: peer_rings.clone(),
             muted: muted_flag,
             gate: gate_for_mode(config.mode, transmit_flag),
+            speak_threshold: self.speak_threshold.clone(),
             local_speaking_tx: speak_tx,
+            input_level_tx: level_tx,
             datagram_sink: Box::new(move |b: Bytes| {
                 let _ = server_for_sink.send_datagram(b);
             }),
@@ -547,6 +580,19 @@ impl VoiceController {
                 emitter_for_speak.emit(
                     "voice://local-speaking",
                     serde_json::json!({ "speaking": s }),
+                );
+            }
+        });
+
+        // 5a. Input-level forwarder (drives the mic-sensitivity meter in
+        // settings). Emits the raw RMS ~10x/sec while the call is active.
+        let emitter_for_level = self.emitter.clone();
+        tokio::spawn(async move {
+            while level_rx.changed().await.is_ok() {
+                let level = *level_rx.borrow();
+                emitter_for_level.emit(
+                    "voice://input-level",
+                    serde_json::json!({ "level": level }),
                 );
             }
         });

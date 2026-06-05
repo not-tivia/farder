@@ -445,6 +445,19 @@ export async function getPeerVolumes(): Promise<Record<string, number>> {
   return invoke<Record<string, number>>("get_peer_volumes");
 }
 
+export async function getVoiceSensitivity(): Promise<number> {
+  return invoke<number>("get_voice_sensitivity");
+}
+
+export async function setVoiceSensitivity(value: number): Promise<void> {
+  return invoke<void>("set_voice_sensitivity", { value });
+}
+
+// Raw mic input level (RMS), emitted ~10x/sec while a voice call is active.
+export interface VoiceInputLevelPayload {
+  level: number;
+}
+
 // ---------------------------------------------------------------------------
 // Local server management
 // ---------------------------------------------------------------------------

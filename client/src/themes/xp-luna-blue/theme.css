@@ -2432,3 +2432,31 @@ body {
   padding: 0 2px;
 }
 .toast-close:hover { color: var(--xp-text-normal, #000); }
+
+/* ── Mic sensitivity meter ───────────────────────────────── */
+.mic-meter {
+  position: relative;
+  height: 14px;
+  margin-bottom: 8px;
+  border: 1px solid var(--xp-border, #888);
+  border-radius: 7px;
+  background: var(--xp-window-bg, #ddd);
+  overflow: hidden;
+}
+.mic-meter-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--xp-text-muted, #9aa0a6);
+  transition: width 0.06s linear;
+}
+.mic-meter-fill.active { background: #3ba55d; }
+.mic-meter-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--xp-blue, #0058e6);
+  transform: translateX(-1px);
+}

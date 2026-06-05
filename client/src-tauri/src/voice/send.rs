@@ -14,7 +14,7 @@ use crate::voice::gate::GateMode;
 use crate::voice::SessionId;
 use bytes::Bytes;
 use farder_crypto::media::seal_audio_packet_to_wire;
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, AtomicU32, Ordering}, mpsc, Arc, Mutex};
 use tokio::sync::watch;
 
 pub struct SendTaskConfig {
@@ -26,6 +26,11 @@ pub struct SendTaskConfig {
     pub speaker_pk: [u8; 32],
     /// Most-recent mixed playback PCM, fed back as APM render reference.
     pub aec_ref: Arc<Mutex<Vec<f32>>>,
+    /// Live speaking RMS threshold (`f32::to_bits`), driven by the mic
+    /// sensitivity slider. Read each frame so changes apply mid-call.
+    pub speak_threshold: Arc<AtomicU32>,
+    /// Raw mic input level (RMS), pushed ~10x/sec to drive the settings meter.
+    pub input_level_tx: watch::Sender<f32>,
     /// Datagram sink. Implementations: a closure that calls
     /// `quinn::Connection::send_datagram` or a test-friendly sink for unit tests.
     pub datagram_sink: Box<dyn Fn(Bytes) + Send + Sync + 'static>,
@@ -49,7 +54,6 @@ pub fn run(
     let mut speaking = false;
     let mut consec_below: u32 = 0;
     let mut frame_count: u64 = 0;
-    const SPEAK_THRESHOLD: f32 = 0.008;
     const SPEAK_HANGOVER_FRAMES: u32 = 15; // ~300 ms at 20 ms/frame
 
     while let Ok(chunk) = cfg.pcm_rx.recv() {
@@ -72,17 +76,18 @@ pub fn run(
         }
         apm.process_capture(&mut frame);
 
-        // Local speaking RMS. Muted (or deafened, which implies mute) never
+        // Local speaking detection. The threshold is live-adjustable via the
+        // mic-sensitivity slider. Muted (or deafened, which implies mute) never
         // counts as speaking, and turns the indicator off immediately.
         let rms = rms(&frame);
         let is_muted = muted.load(Ordering::Acquire);
-        // TEMP diagnostic: print the mic level ~once/second so we can tune the
-        // speaking threshold. Remove once the indicator is confirmed working.
+        let threshold = f32::from_bits(cfg.speak_threshold.load(Ordering::Acquire));
+        // Push the raw input level ~10x/sec to drive the settings mic meter.
         frame_count = frame_count.wrapping_add(1);
-        if frame_count % 50 == 0 {
-            eprintln!("[voice] mic rms={rms:.4} muted={is_muted} (speak threshold {SPEAK_THRESHOLD})");
+        if frame_count % 5 == 0 {
+            let _ = cfg.input_level_tx.send(rms);
         }
-        if rms > SPEAK_THRESHOLD && !is_muted {
+        if rms > threshold && !is_muted {
             if !speaking {
                 speaking = true;
                 let _ = local_speaking_tx.send(true);
@@ -160,6 +165,8 @@ mod tests {
         let (tx, rx) = mpsc::channel::<PcmChunk>();
         let sink: Arc<StdMutex<Vec<Bytes>>> = Arc::new(StdMutex::new(Vec::new()));
         let sink_clone = sink.clone();
+        let (level_tx, _level_rx) = watch::channel(0.0f32);
+        std::mem::forget(_level_rx); // keep the sender live for the test
         let cfg = SendTaskConfig {
             pcm_rx: rx,
             apm: AudioProcessor::new(),
@@ -168,6 +175,8 @@ mod tests {
             stream_key: [0xAA; 32],
             speaker_pk: [0xBB; 32],
             aec_ref: Arc::new(Mutex::new(vec![0.0; OPUS_FRAME_SAMPLES_MONO])),
+            speak_threshold: Arc::new(AtomicU32::new(0.008f32.to_bits())),
+            input_level_tx: level_tx,
             datagram_sink: Box::new(move |b: Bytes| {
                 sink_clone.lock().unwrap().push(b);
             }),

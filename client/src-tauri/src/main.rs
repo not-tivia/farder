@@ -154,6 +154,8 @@ fn main() {
             commands::get_ptt_key,
             commands::set_ptt_key,
             commands::get_peer_volumes,
+            commands::get_voice_sensitivity,
+            commands::set_voice_sensitivity,
             commands::create_local_server,
             commands::stop_local_server,
             commands::get_local_servers,

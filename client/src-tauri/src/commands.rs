@@ -322,6 +322,31 @@ pub(crate) fn persist_peer_volume(pubkey_hex: &str, volume: f32) -> Result<(), S
     settings_set("peer_volumes", value)
 }
 
+/// Mic sensitivity (0-100, higher = more sensitive). Default 85.
+pub(crate) fn read_voice_sensitivity() -> u32 {
+    settings_get("voice_sensitivity")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.min(100) as u32)
+        .unwrap_or(85)
+}
+
+#[tauri::command]
+pub fn get_voice_sensitivity() -> u32 {
+    read_voice_sensitivity()
+}
+
+#[tauri::command]
+pub async fn set_voice_sensitivity(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+    value: u32,
+) -> Result<(), String> {
+    let clamped = value.min(100);
+    settings_set("voice_sensitivity", serde_json::Value::from(clamped))?;
+    // Applies live to the active call's send task.
+    voice.set_speak_threshold(crate::voice::sensitivity_to_threshold(clamped));
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Saved servers list
 // ---------------------------------------------------------------------------
@@ -2145,6 +2170,8 @@ pub async fn voice_join(
     channel_id: u64,
 ) -> Result<(), String> {
     let server_conn = state.get_server(&server_id)?;
+    // Apply the saved mic sensitivity before the send task spawns.
+    voice.set_speak_threshold(crate::voice::sensitivity_to_threshold(read_voice_sensitivity()));
     let session = crate::voice_bridge::QuinnServerSession::new(
         Arc::clone(&state),
         server_id.clone(),
