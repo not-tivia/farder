@@ -59,7 +59,7 @@ thread + propagate errors instead of unwrap.
 
 ## IMPORTANT
 
-### I1. Reconnect / connection-loss / kick-ban don't tear down voice **[OPEN]**
+### I1. Reconnect / connection-loss / kick-ban don't tear down voice **[FIXED]**
 - `AppShell.tsx` reconnect path doesn't clear `currentVoiceChannelId` or stop the
   audio engine, so after a reconnect you appear "in" a call over a dead session.
 - `CONNECTION_LOST` (`ServerContext.tsx:140`) preserves the voice roster;
@@ -67,7 +67,10 @@ thread + propagate errors instead of unwrap.
 - Kick/ban (`AppShell.tsx:121-134`) disconnects but never calls `voice.leave()` —
   the mic can stay live and you stay on the roster.
 
-### I2. Pervasive silent error-swallowing on user actions **[OPEN]**
+### I2. Pervasive silent error-swallowing on user actions **[PARTIAL]**
+(Fixed the worst: message edit/delete, create-thread, reactions now surface
+errors. Still open: channel/server switch blank-on-failure, `subscribeChannels`,
+`getMembers`-on-join, voice settings persist.)
 Operations that fail with zero feedback (`try{}catch{}` / `.catch(()=>{})`):
 - Edit message (`Message.tsx:252` closes editor as if saved), delete message &
   create thread (`Message.tsx:450-458`), reactions (`Message.tsx:203-230`).
@@ -79,7 +82,9 @@ Operations that fail with zero feedback (`try{}catch{}` / `.catch(()=>{})`):
   silently.
 Fix incrementally: surface a toast/inline error on the ones that matter.
 
-### I3. `std::Mutex` `.unwrap()` poisoning hazards **[OPEN]**
+### I3. `std::Mutex` `.unwrap()` poisoning hazards **[FIXED]**
+(server_manager child-process locks now recover from poison; the `bridge.rs`
+`pending_requests` locks are not held across `.await` so are lower risk.)
 - `server_manager.rs:30,38,184` — `children` mutex `.unwrap()`, including in the
   app-exit `stop_all` hook → a poisoned mutex panics at exit and orphans
   farder-server child processes (they then fight over the SQLite DB).
