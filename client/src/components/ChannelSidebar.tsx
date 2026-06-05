@@ -128,6 +128,10 @@ export default function ChannelSidebar() {
   // Self display-name initial, for the voice control bar avatar.
   const [selfName, setSelfName] = useState<string>("");
   useEffect(() => { void api.getDisplayName().then((n) => setSelfName(n ?? "")).catch(() => {}); }, []);
+  // Own pubkey, to identify our own row in the voice participant list (our
+  // speaking comes from voice.localSpeaking, not voice.peers which is others).
+  const [ownPk, setOwnPk] = useState<string | null>(null);
+  useEffect(() => { void api.getPublicKey().then(setOwnPk).catch(() => {}); }, []);
 
   // PTT mic mode + bound key, loaded from settings on mount. Read once here
   // (mode is applied at join; v1 does not hot-swap mid-call per the spec).
@@ -408,17 +412,20 @@ export default function ChannelSidebar() {
           <div className="voice-participants">
             {participants.map((p) => {
               const live = liveByPk.get(p.publicKey);
+              // Self speaks via localSpeaking; peers via their live peer state.
+              const isSelf = ownPk != null && p.publicKey === ownPk;
+              const isSpeaking = isSelf ? voice.localSpeaking : (live?.speaking ?? false);
               const initial = (p.displayName || "?").charAt(0).toUpperCase();
               return (
                 <div
                   key={p.publicKey}
-                  className={`voice-participant${live?.speaking ? " speaking" : ""}`}
+                  className={`voice-participant${isSpeaking ? " speaking" : ""}`}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setVoiceMenu({ x: e.clientX, y: e.clientY, pubkeyHex: p.publicKey, displayName: p.displayName });
                   }}
                 >
-                  <span className={`voice-avatar${live?.speaking ? " speaking" : ""}`}>{initial}</span>
+                  <span className={`voice-avatar${isSpeaking ? " speaking" : ""}`}>{initial}</span>
                   <span className="voice-participant-name">{p.displayName}</span>
                   {live?.deafened
                     ? <span className="voice-participant-status" title="Deafened">&#x1F3A7;</span>

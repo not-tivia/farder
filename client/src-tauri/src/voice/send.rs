@@ -49,7 +49,7 @@ pub fn run(
     let mut speaking = false;
     let mut consec_below: u32 = 0;
     let mut frame_count: u64 = 0;
-    const SPEAK_THRESHOLD: f32 = 0.02;
+    const SPEAK_THRESHOLD: f32 = 0.008;
     const SPEAK_HANGOVER_FRAMES: u32 = 15; // ~300 ms at 20 ms/frame
 
     while let Ok(chunk) = cfg.pcm_rx.recv() {
