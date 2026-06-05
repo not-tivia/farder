@@ -6,6 +6,17 @@ use anyhow::{Result, Context, bail};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use zeroize::Zeroize;
 
+/// Argon2id parameters used to wrap the identity key at rest. Tuned high on
+/// purpose: a 4-digit PIN is only 10,000 combinations, so each guess is made
+/// expensive (~0.3-0.5s) to blunt offline brute force. Runs once per launch.
+/// MUST be identical for encrypt and decrypt, or decryption fails.
+fn identity_kdf() -> argon2::Argon2<'static> {
+    // 64 MiB memory, 3 iterations, 1 lane, 32-byte output.
+    let params = argon2::Params::new(64 * 1024, 3, 1, Some(32))
+        .expect("valid argon2 params");
+    argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
+
 pub struct Keypair {
     signing_key: SigningKey,
 }
@@ -42,7 +53,7 @@ impl Keypair {
         let salt: [u8; 16] = rand::random();
         let nonce_bytes: [u8; 12] = rand::random();
         let mut derived_key = [0u8; 32];
-        argon2::Argon2::default()
+        identity_kdf()
             .hash_password_into(passphrase.as_bytes(), &salt, &mut derived_key)
             .map_err(|e| anyhow::anyhow!("argon2 error: {}", e))?;
         let cipher = Aes256Gcm::new_from_slice(&derived_key).context("failed to create cipher")?;
@@ -63,7 +74,7 @@ impl Keypair {
         let nonce_bytes = &data[16..28];
         let ciphertext = &data[28..];
         let mut derived_key = [0u8; 32];
-        argon2::Argon2::default()
+        identity_kdf()
             .hash_password_into(passphrase.as_bytes(), salt, &mut derived_key)
             .map_err(|e| anyhow::anyhow!("argon2 error: {}", e))?;
         let cipher = Aes256Gcm::new_from_slice(&derived_key).context("failed to create cipher")?;
@@ -158,5 +169,17 @@ mod tests {
         let exported = keypair.export_encrypted("correct-pass").expect("export failed");
         let result = Keypair::import_encrypted(&exported, "wrong-pass");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_export_roundtrips_and_rejects_wrong_pin() {
+        let kp = Keypair::generate();
+        let raw = *kp.signing_key_bytes();
+        let blob = kp.export_encrypted("1234").expect("encrypt");
+        // Not the raw key, and right/wrong passphrase behave correctly.
+        assert_ne!(blob.as_slice(), &raw[..]);
+        let back = Keypair::import_encrypted(&blob, "1234").expect("decrypt");
+        assert_eq!(back.signing_key_bytes(), &raw);
+        assert!(Keypair::import_encrypted(&blob, "0000").is_err());
     }
 }
