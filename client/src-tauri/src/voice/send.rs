@@ -72,15 +72,17 @@ pub fn run(
         }
         apm.process_capture(&mut frame);
 
-        // Local speaking RMS.
+        // Local speaking RMS. Muted (or deafened, which implies mute) never
+        // counts as speaking, and turns the indicator off immediately.
         let rms = rms(&frame);
+        let is_muted = muted.load(Ordering::Acquire);
         // TEMP diagnostic: print the mic level ~once/second so we can tune the
         // speaking threshold. Remove once the indicator is confirmed working.
         frame_count = frame_count.wrapping_add(1);
         if frame_count % 50 == 0 {
-            eprintln!("[voice] mic rms={rms:.4} (speak threshold {SPEAK_THRESHOLD})");
+            eprintln!("[voice] mic rms={rms:.4} muted={is_muted} (speak threshold {SPEAK_THRESHOLD})");
         }
-        if rms > SPEAK_THRESHOLD {
+        if rms > SPEAK_THRESHOLD && !is_muted {
             if !speaking {
                 speaking = true;
                 let _ = local_speaking_tx.send(true);
@@ -88,7 +90,7 @@ pub fn run(
             consec_below = 0;
         } else {
             consec_below = consec_below.saturating_add(1);
-            if speaking && consec_below >= SPEAK_HANGOVER_FRAMES {
+            if speaking && (is_muted || consec_below >= SPEAK_HANGOVER_FRAMES) {
                 speaking = false;
                 let _ = local_speaking_tx.send(false);
             }
