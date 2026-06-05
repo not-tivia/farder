@@ -38,6 +38,10 @@ path = "tests/e2e_dm.rs"
 name = "e2e_server"
 path = "tests/e2e_server.rs"
 
+[[test]]
+name = "security_observation"
+path = "tests/security_observation.rs"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
