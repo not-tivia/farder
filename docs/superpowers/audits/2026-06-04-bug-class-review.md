@@ -67,10 +67,11 @@ thread + propagate errors instead of unwrap.
 - Kick/ban (`AppShell.tsx:121-134`) disconnects but never calls `voice.leave()` —
   the mic can stay live and you stay on the roster.
 
-### I2. Pervasive silent error-swallowing on user actions **[PARTIAL]**
-(Fixed the worst: message edit/delete, create-thread, reactions now surface
-errors. Still open: channel/server switch blank-on-failure, `subscribeChannels`,
-`getMembers`-on-join, voice settings persist.)
+### I2. Pervasive silent error-swallowing on user actions **[FIXED]**
+(Discrete actions — message edit/delete, create-thread, reactions — surface
+alerts. High-frequency nav/refresh — channel/server switch, `subscribeChannels`,
+member refresh, voice-settings persist — now log on failure instead of
+swallowing. A proper toast system would be the long-term UX upgrade.)
 Operations that fail with zero feedback (`try{}catch{}` / `.catch(()=>{})`):
 - Edit message (`Message.tsx:252` closes editor as if saved), delete message &
   create thread (`Message.tsx:450-458`), reactions (`Message.tsx:203-230`).
@@ -106,18 +107,19 @@ risking silent frame drops. Standard rates (48/96k) are fine.
 ---
 
 ## MINOR
-- Empty `display_name` → blank avatar initials (`charAt(0)` unguarded in
-  `ChannelSidebar.tsx:492`, `MemberSidebar.tsx:67`, `Message.tsx:278`, etc.).
+- Empty `display_name` → blank avatar initials — **[FIXED]** (guarded in 6 spots
+  across MemberSidebar, MessageInput, UserProfilePopup, Message, ServerStrip,
+  ChannelSidebar).
 - Control bar shows literal "Voice" if the channel is deleted while you're in it
-  (`ChannelSidebar.tsx:503`).
-- `selfInitial={"Y"}` hardcoded placeholder in the control bar
-  (`ChannelSidebar.tsx:504`) — doesn't use your real initial.
-- `CHANNEL_DELETED` leaks the stale `voiceStates[channelId]` entry
-  (`ServerContext.tsx:264`) — invisible (row gone) but accumulates.
-- AEC render reference only fed when buffer length == 960 (`send.rs:66`) — a
-  trap for the future WebRTC APM, not a current bug.
+  — **[FIXED]** (`CHANNEL_DELETED` now exits voice).
+- `selfInitial={"Y"}` hardcoded placeholder in the control bar — **[FIXED]**
+  (uses your real display-name initial).
+- `CHANNEL_DELETED` leaks the stale `voiceStates[channelId]` entry — **[FIXED]**
+  (pruned + clears `currentVoiceChannelId` when it was the active channel).
+- AEC render reference only fed when buffer length == 960 (`send.rs:66`) —
+  **[WON'T FIX]** a trap for the future WebRTC APM, not a current bug.
 - `TauriEmitter::emit` / `bridge.rs:64` drop emit errors during webview teardown
-  — benign except a late `voice://state-changed` can be lost.
+  — **[WON'T FIX]** benign teardown race.
 
 ---
 
