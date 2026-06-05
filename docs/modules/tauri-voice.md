@@ -437,7 +437,8 @@ The real backend. All cpal objects (`Host`, `Stream`) live on a **dedicated OS t
 | Event name | Payload keys | When | Who listens |
 |---|---|---|---|
 | `voice://state-changed` | Full `VoiceState` JSON (`channel_id`, `muted`, `deafened`, `transmitting`, `peers`) | Join, leave, set_mute, set_deafen, toggle_transmit, peer register/unregister/state-change | `useVoice.ts` |
-| `voice://local-speaking` | `{ "speaking": bool }` | Local RMS crosses threshold (with 300 ms hangover) | `useVoice.ts` |
+| `voice://local-speaking` | `{ "speaking": bool }` | Local RMS crosses the (adjustable) sensitivity threshold, with 300 ms hangover; muted/deafened never speaks | `useVoice.ts` |
+| `voice://input-level` | `{ "level": f32 }` | Raw mic RMS, ~10x/sec while a call is active | `VoiceSettings.tsx` (mic-sensitivity meter) |
 | `voice://peer-speaking` | `{ "session_id": [u8;16], "pubkey": String, "active": bool }` | `TrackActivityChanged` arrives for an audio track | `useVoice.ts` |
 | `voice://connection-quality` | `{ "rtt_ms": f64, "loss_pct": f64 }` | Every ~1 s while a call is active (only if `JoinConfig.connection` is `Some`) | `useVoice.ts` |
 

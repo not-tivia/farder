@@ -857,6 +857,16 @@ e.g. `"Backquote"`). Default: `"Backquote"`.
 multiplier). The map is loaded at call time from `settings.json`.
 **invoke name:** `"get_peer_volumes"` → `getPeerVolumes()`.
 
+### `get_voice_sensitivity() -> u32` / `set_voice_sensitivity(voice, value) -> Result<(), String>`
+
+**What it does:** mic sensitivity (0-100, higher = more sensitive; default 85),
+persisted as `voice_sensitivity`. `set_voice_sensitivity` persists it AND applies
+it live to the active call's send task via `VoiceController::set_speak_threshold`
+(mapping sensitivity to the speaking RMS threshold). `voice_join` applies the
+saved value at join. Drives the live mic meter in Voice settings.
+**invoke names:** `"get_voice_sensitivity"` / `"set_voice_sensitivity"` →
+`getVoiceSensitivity()` / `setVoiceSensitivity()`.
+
 ---
 
 ## Group 16 — Recording
