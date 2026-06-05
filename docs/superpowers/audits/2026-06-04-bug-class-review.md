@@ -11,7 +11,7 @@ Status legend: **OPEN** | **FIXING** | **FIXED** (this session).
 
 ## CRITICAL
 
-### C1. Live voice events silently dropped — roster never updates **[FIXING]**
+### C1. Live voice events silently dropped — roster never updates **[FIXED]**
 `client/src-tauri/src/bridge.rs:194`. The server broadcasts `MediaJoined` /
 `MediaLeft` when anyone joins/leaves a voice channel, but `dispatch_event`
 matched them to `=> Ok(())` and emitted nothing. So the frontend listeners
@@ -22,7 +22,7 @@ and part of the **missing mute/deafen icons** (peers not tracked live).
 *Found independently by the state-sync and identifier agents.* Fix: emit
 `server:voice_joined` / `server:voice_left` (public_key as `.to_string()`).
 
-### C2. Optimistic voice-join + control-bar double-gate = silent zombie state **[OPEN]**
+### C2. Optimistic voice-join + control-bar double-gate = silent zombie state **[FIXED]**
 `ChannelSidebar.tsx:362-364` dispatches `JOIN_VOICE_CHANNEL` *before* awaiting
 `voice.join`, and the failure path only `console.error`s — no rollback, no
 `LEAVE_VOICE_CHANNEL`. The control bar renders only when BOTH
@@ -32,14 +32,14 @@ marked "in the channel" (on others' rosters) but the bar returns `null` — a
 blank slot, no controls, no error. *Found by 2 agents.* Fix: commit join UI
 state only after `voice.join` resolves; on failure, roll back + surface an error.
 
-### C3. Unban is always broken (identifier mismatch) **[OPEN]**
+### C3. Unban is always broken (identifier mismatch) **[FIXED]**
 `crates/farder-protocol/src/server.rs:153` serializes `BannedMember.public_key`
 as serde object `{bytes:[…]}`, but `client/src/lib/types.ts:110` types it as
 `string`. `BannedMembersTab.tsx:50` passes the object to `unbanMember` → arrives
 as `"[object Object]"` → `parse_public_key` rejects it. React `key` also breaks.
 Fix: TS should `publicKeyToString(entry.public_key)` and correct the type.
 
-### C4. Audio backend still rejects non-F32 devices **[OPEN]**
+### C4. Audio backend still rejects non-F32 devices **[FIXED]**
 `client/src-tauri/src/audio_cpal.rs` `choose_stream_config` filters to F32
 configs only. A device exposing only I16/I32 (some WASAPI/ALSA drivers) yields
 "no supported config" and the same silent join failure we just fixed for
@@ -47,7 +47,7 @@ rate/channels. The user's device offered F32 so it works, but this is the next
 device that will fail. Fix: build an i16/i32 stream and convert, or widen format
 handling.
 
-### C5. Screen-recording repeats the cpal/thread bug we just fixed **[OPEN]**
+### C5. Screen-recording repeats the cpal/thread bug we just fixed **[FIXED]**
 `client/src-tauri/src/commands.rs:1797-1844` (`start_recording`): builds a cpal
 stream inside `spawn_blocking`, with `.unwrap()` on `WavWriter::create`,
 `build_input_stream`, and `stream.play()` (silent worker-thread panic on any
