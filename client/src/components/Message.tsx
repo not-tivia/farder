@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import type { MessageInfo, AttachmentInfo } from "../lib/types";
 import { publicKeyToString, isDeletedUser } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
+import { toast } from "../lib/toast";
 import * as bookApi from "../lib/book/client";
 import type { BookItem } from "../lib/book/types";
 import { useApp, useActiveServer } from "../context/ServerContext";
@@ -210,7 +211,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
         await api.addReaction(serverId, message.id, emoji, fileId);
       }
     } catch (e) {
-      window.alert(`Reaction failed: ${e}`);
+      toast.error(`Reaction failed: ${e}`);
     } finally {
       setReacting(false);
     }
@@ -223,7 +224,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
     try {
       await api.addReaction(serverId, message.id, emoji);
     } catch (e) {
-      window.alert(`Reaction failed: ${e}`);
+      toast.error(`Reaction failed: ${e}`);
     } finally {
       setReacting(false);
     }
@@ -255,7 +256,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
       await api.editMessage(serverId, message.id, editContent.trim());
       setEditing(false); // only close the editor once the edit actually saved
     } catch (e) {
-      window.alert(`Couldn't save edit: ${e}`);
+      toast.error(`Couldn't save edit: ${e}`);
     }
   }
 
@@ -448,14 +449,14 @@ export default function Message({ message, memberNames, grouped = false, serverI
             {!message.thread_id && (
               <div className="context-menu-item" onClick={async () => {
                 try { await api.createThread(serverId, message.id); }
-                catch (e) { window.alert(`Couldn't create thread: ${e}`); }
+                catch (e) { toast.error(`Couldn't create thread: ${e}`); }
                 setContextMenu(null);
               }}>Create Thread</div>
             )}
             {isOwnMessage && (
               <div className="context-menu-item delete" onClick={async () => {
                 try { await api.deleteMessage(serverId, message.id); }
-                catch (e) { window.alert(`Couldn't delete message: ${e}`); }
+                catch (e) { toast.error(`Couldn't delete message: ${e}`); }
                 setContextMenu(null);
               }}>Delete Message</div>
             )}

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
+import { toast } from "../lib/toast";
 import type { ChannelInfo, CategoryInfo, MemberInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 
@@ -377,7 +378,7 @@ export default function ChannelSidebar() {
                 // Roll back so we don't appear as a ghost on the server roster.
                 await api.leaveVoice(serverId, ch.id).catch(() => {});
                 await voice.leave().catch(() => {});
-                window.alert(`Couldn't join voice channel: ${err}`);
+                toast.error(`Couldn't join voice channel: ${err}`);
                 return;
               }
               dispatch({ type: "JOIN_VOICE_CHANNEL", serverId, payload: ch.id });

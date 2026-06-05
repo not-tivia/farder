@@ -5,6 +5,7 @@ import { useServerEvents } from "./hooks/useServerEvents";
 import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
 import { TranslationFirstRunModal } from "./components/TranslationFirstRunModal";
+import ToastContainer from "./components/ToastContainer";
 import * as api from "./lib/tauri-bridge";
 
 // Module-level guard: React StrictMode in dev mounts the root twice, which
@@ -115,6 +116,7 @@ export default function App() {
   return (
     <AppProvider>
       <AppInner />
+      <ToastContainer />
     </AppProvider>
   );
 }
