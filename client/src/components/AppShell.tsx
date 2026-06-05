@@ -104,6 +104,15 @@ export default function AppShell() {
     };
   }, [serverId, activeServer?.connectionLost]);
 
+  // On connection loss, tear down any active voice call so the mic stops and we
+  // don't show a zombie "in call" state over a dead connection.
+  useEffect(() => {
+    if (serverId && activeServer?.connectionLost && activeServer?.currentVoiceChannelId != null) {
+      api.voiceLeave().catch(() => {});
+      dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId });
+    }
+  }, [serverId, activeServer?.connectionLost, activeServer?.currentVoiceChannelId]);
+
   return (
     <>
       <TitleBar />
@@ -128,6 +137,9 @@ export default function AppShell() {
             onClose={() => {
               const sid = state.kickedBanned!.serverId;
               dispatch({ type: "CLEAR_KICKED_BANNED" });
+              // Stop any voice call (mic) and clear the in-call UI for this server.
+              api.voiceLeave().catch(() => {});
+              dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId: sid });
               // Also disconnect the server so the dialog doesn't recur on reconnect.
               api.disconnectServer(sid).catch(() => {});
             }}

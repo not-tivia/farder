@@ -209,8 +209,8 @@ export default function Message({ message, memberNames, grouped = false, serverI
       } else {
         await api.addReaction(serverId, message.id, emoji, fileId);
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      window.alert(`Reaction failed: ${e}`);
     } finally {
       setReacting(false);
     }
@@ -222,8 +222,8 @@ export default function Message({ message, memberNames, grouped = false, serverI
     setReacting(true);
     try {
       await api.addReaction(serverId, message.id, emoji);
-    } catch {
-      // ignore
+    } catch (e) {
+      window.alert(`Reaction failed: ${e}`);
     } finally {
       setReacting(false);
     }
@@ -253,10 +253,10 @@ export default function Message({ message, memberNames, grouped = false, serverI
     if (!editContent.trim()) return;
     try {
       await api.editMessage(serverId, message.id, editContent.trim());
-    } catch {
-      // ignore
+      setEditing(false); // only close the editor once the edit actually saved
+    } catch (e) {
+      window.alert(`Couldn't save edit: ${e}`);
     }
-    setEditing(false);
   }
 
   return (
@@ -447,13 +447,15 @@ export default function Message({ message, memberNames, grouped = false, serverI
             )}
             {!message.thread_id && (
               <div className="context-menu-item" onClick={async () => {
-                try { await api.createThread(serverId, message.id); } catch {}
+                try { await api.createThread(serverId, message.id); }
+                catch (e) { window.alert(`Couldn't create thread: ${e}`); }
                 setContextMenu(null);
               }}>Create Thread</div>
             )}
             {isOwnMessage && (
               <div className="context-menu-item delete" onClick={async () => {
-                try { await api.deleteMessage(serverId, message.id); } catch {}
+                try { await api.deleteMessage(serverId, message.id); }
+                catch (e) { window.alert(`Couldn't delete message: ${e}`); }
                 setContextMenu(null);
               }}>Delete Message</div>
             )}

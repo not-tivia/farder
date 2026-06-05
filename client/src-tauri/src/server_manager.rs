@@ -27,15 +27,15 @@ impl ServerProcesses {
 
     pub fn register(&self, info: ManagedServer, child: Child) {
         let port = info.port;
-        self.children.lock().unwrap().insert(port, (info, child));
+        self.children.lock().unwrap_or_else(|e| e.into_inner()).insert(port, (info, child));
     }
 
     pub fn list(&self) -> Vec<ManagedServer> {
-        self.children.lock().unwrap().values().map(|(info, _)| info.clone()).collect()
+        self.children.lock().unwrap_or_else(|e| e.into_inner()).values().map(|(info, _)| info.clone()).collect()
     }
 
     pub fn stop_all(&self) {
-        let mut children = self.children.lock().unwrap();
+        let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
         for (_port, (_info, ref mut child)) in children.drain() {
             let _ = child.kill();
             let _ = child.wait();
@@ -181,7 +181,7 @@ pub fn spawn_server_with_data_dir(
 
 /// Stop a locally-managed server by port.
 pub fn stop_server(procs: &ServerProcesses, port: u16) -> Result<(), String> {
-    let mut children = procs.children.lock().unwrap();
+    let mut children = procs.children.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_info, ref mut child)) = children.remove(&port) {
         child.kill().map_err(|e| format!("failed to kill server: {}", e))?;
         let _ = child.wait();
