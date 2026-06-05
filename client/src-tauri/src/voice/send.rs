@@ -48,7 +48,8 @@ pub fn run(
     let mut seq: u64 = 0;
     let mut speaking = false;
     let mut consec_below: u32 = 0;
-    const SPEAK_THRESHOLD: f32 = 0.03;
+    let mut frame_count: u64 = 0;
+    const SPEAK_THRESHOLD: f32 = 0.02;
     const SPEAK_HANGOVER_FRAMES: u32 = 15; // ~300 ms at 20 ms/frame
 
     while let Ok(chunk) = cfg.pcm_rx.recv() {
@@ -73,6 +74,12 @@ pub fn run(
 
         // Local speaking RMS.
         let rms = rms(&frame);
+        // TEMP diagnostic: print the mic level ~once/second so we can tune the
+        // speaking threshold. Remove once the indicator is confirmed working.
+        frame_count = frame_count.wrapping_add(1);
+        if frame_count % 50 == 0 {
+            eprintln!("[voice] mic rms={rms:.4} (speak threshold {SPEAK_THRESHOLD})");
+        }
         if rms > SPEAK_THRESHOLD {
             if !speaking {
                 speaking = true;
