@@ -25,7 +25,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   const joinDate = new Date(member.joined_at * 1000).toLocaleDateString([], {
     year: "numeric", month: "short", day: "numeric"
   });
-  const initial = member.display_name.charAt(0).toUpperCase();
+  const initial = (member.display_name || "?").charAt(0).toUpperCase();
 
   const defaultBannerColor = `hsl(${Math.abs(pkStr.split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % 360}, 50%, 40%)`;
 

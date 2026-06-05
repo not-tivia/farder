@@ -340,7 +340,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
                 className={`mention-autocomplete-item${i === mentionIndex ? " active" : ""}`}
                 onMouseDown={(e) => { e.preventDefault(); insertMention(m); }}
               >
-                <span className="mention-avatar">{m.display_name.charAt(0).toUpperCase()}</span>
+                <span className="mention-avatar">{(m.display_name || "?").charAt(0).toUpperCase()}</span>
                 <span>{m.display_name}</span>
               </div>
             ))}

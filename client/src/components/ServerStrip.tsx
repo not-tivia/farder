@@ -46,7 +46,9 @@ export default function ServerStrip() {
           dispatch({ type: "SET_VOICE_STATE", serverId, payload: { channelId: vc.id, participants: simplified } });
         } catch {}
       }
-    } catch {}
+    } catch (e) {
+      console.error("[server] failed to load server data:", e);
+    }
   }
 
   return (
@@ -63,7 +65,7 @@ export default function ServerStrip() {
             {avatars[s.id] ? (
               <img src={avatars[s.id]} alt={s.name} style={{ width: "100%", height: "100%", borderRadius: "inherit", objectFit: "cover" }} />
             ) : (
-              s.name.charAt(0).toUpperCase()
+              (s.name || "?").charAt(0).toUpperCase()
             )}
             {s.unreadCount > 0 && !isActive && <span className="server-unread-dot" />}
             {s.hasMention && !isActive && <span className="server-mention-badge" />}

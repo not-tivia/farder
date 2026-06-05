@@ -67,7 +67,7 @@ export default function AppShell() {
       ids.push(activeServer.threadChannelId);
     }
     if (ids.length > 0) {
-      api.subscribeChannels(serverId, ids).catch(() => {});
+      api.subscribeChannels(serverId, ids).catch((e) => console.error("[subscribe] failed; channel may stop receiving messages:", e));
     }
   }, [serverId, activeServer?.connected, activeServer?.currentChannelId, activeServer?.dmPanelChannelId, activeServer?.threadChannelId]);
 

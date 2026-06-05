@@ -16,7 +16,7 @@ export default function VoiceSettings() {
 
   const chooseMode = (next: string) => {
     setMode(next);
-    void setVoiceMode(next).catch(() => {});
+    void setVoiceMode(next).catch((e) => console.error("[voice-settings] failed to save mic mode:", e));
   };
 
   useEffect(() => {
@@ -28,7 +28,7 @@ export default function VoiceSettings() {
       e.preventDefault();
       e.stopPropagation();
       setPttKeyState(e.code);
-      void setPttKey(e.code).catch(() => {});
+      void setPttKey(e.code).catch((err) => console.error("[voice-settings] failed to save PTT key:", err));
       setCapturing(false);
     };
     window.addEventListener("keydown", onKey, { once: true, capture: true });

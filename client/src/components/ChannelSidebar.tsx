@@ -124,6 +124,10 @@ export default function ChannelSidebar() {
 
   const voice = useVoice();
 
+  // Self display-name initial, for the voice control bar avatar.
+  const [selfName, setSelfName] = useState<string>("");
+  useEffect(() => { void api.getDisplayName().then(setSelfName).catch(() => {}); }, []);
+
   // PTT mic mode + bound key, loaded from settings on mount. Read once here
   // (mode is applied at join; v1 does not hot-swap mid-call per the spec).
   const [micMode, setMicMode] = useState<string>("OpenMic");
@@ -326,7 +330,9 @@ export default function ChannelSidebar() {
         const latestId = Math.max(...reversed.map((m) => m.id));
         dispatch({ type: "MARK_READ", serverId, payload: { channelId: channel.id, lastMessageId: latestId } });
       }
-    } catch {}
+    } catch (e) {
+      console.error("[channel] failed to load history:", e);
+    }
   }
 
   async function handleMoveChannel(channelId: number, targetCategoryId: number | null, targetPosition: number) {
@@ -502,7 +508,7 @@ export default function ChannelSidebar() {
                     className={`channel-item dm-item${isActive ? " active" : ""}${hasUnread ? " unread" : ""}`}
                     onClick={() => handleSelectChannel(dm.channel)}
                   >
-                    <span className="dm-avatar-mini">{dm.participant.display_name.charAt(0).toUpperCase()}</span>
+                    <span className="dm-avatar-mini">{(dm.participant.display_name || "?").charAt(0).toUpperCase()}</span>
                     <span>{dm.participant.display_name}</span>
                   </div>
                 );
@@ -514,7 +520,7 @@ export default function ChannelSidebar() {
           <VoiceControlBar
             voice={voice}
             channelName={channels.find((c) => c.id === activeServer.currentVoiceChannelId)?.name ?? "Voice"}
-            selfInitial={"Y"}
+            selfInitial={(selfName || "Y").charAt(0).toUpperCase()}
             onDisconnect={() => leaveVoiceChannel(activeServer.currentVoiceChannelId!)}
           />
         )}

@@ -256,7 +256,7 @@ export function useServerEvents(): void {
       // Re-fetch the full member list to get accurate data
       api.getMembers(serverId).then(members => {
         dispatch({ type: "SET_MEMBERS", serverId, payload: members });
-      }).catch(() => {});
+      }).catch((e) => console.error("[members] refresh on join failed:", e));
     }).then(safePush);
 
     listen("server:member_left", (e) => {

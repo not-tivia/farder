@@ -261,11 +261,19 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     case "CHANNEL_CREATED":
       if (state.channels.some(c => c.id === action.payload.id)) return state;
       return { ...state, channels: [...state.channels, action.payload] };
-    case "CHANNEL_DELETED":
+    case "CHANNEL_DELETED": {
+      const { channelId } = action.payload;
+      // Prune the stale voice roster for the deleted channel, and exit voice if
+      // it was the channel we were in.
+      const { [channelId]: _removed, ...voiceStates } = state.voiceStates;
       return {
         ...state,
-        channels: state.channels.filter((c) => c.id !== action.payload.channelId),
+        channels: state.channels.filter((c) => c.id !== channelId),
+        voiceStates,
+        currentVoiceChannelId:
+          state.currentVoiceChannelId === channelId ? null : state.currentVoiceChannelId,
       };
+    }
     case "CATEGORY_CREATED":
       return { ...state, categories: [...state.categories, action.payload] };
     case "CATEGORY_DELETED":
