@@ -126,7 +126,7 @@ export default function ChannelSidebar() {
 
   // Self display-name initial, for the voice control bar avatar.
   const [selfName, setSelfName] = useState<string>("");
-  useEffect(() => { void api.getDisplayName().then(setSelfName).catch(() => {}); }, []);
+  useEffect(() => { void api.getDisplayName().then((n) => setSelfName(n ?? "")).catch(() => {}); }, []);
 
   // PTT mic mode + bound key, loaded from settings on mount. Read once here
   // (mode is applied at join; v1 does not hot-swap mid-call per the spec).
