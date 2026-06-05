@@ -23,3 +23,4 @@ module relevant to what you're touching. New docs use
 ## Frontend (`client/src/`)
 - [`frontend-bridge.md`](frontend-bridge.md) — the typed `invoke()` wrappers (`tauri-bridge.ts`) + shared TS types.
 - [`frontend-state.md`](frontend-state.md) — `ServerContext` reducer, `useServerEvents`, `useVoice`.
+- [`frontend-toast.md`](frontend-toast.md) — app-wide toast notifications (`toast.error/success/info`).
