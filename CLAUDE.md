@@ -58,3 +58,28 @@ When adding or touching a Tauri command:
 - Frontend type-check: `cd client && npx tsc --noEmit` (no JS test runner).
 - Run the desktop client: `cd client && npm run tauri dev` (needs a display +
   audio; **cannot run from WSL while WSLg is disabled** — see project memory).
+
+## Documentation discipline
+
+Farder is open source and growing; contributors (and AI agents) navigate it via
+`ARCHITECTURE.md` (the one-page map) and the per-module docs under
+`docs/modules/` (one doc per file or tightly-coupled group, using
+`docs/modules/_TEMPLATE.md`). The goal: a junior dev can understand what a piece
+of code does, how to call it, and what it connects to **without reading the
+implementation**.
+
+**Docs are treated like tests: drift is not "done".** When you add or change a
+public surface, update the matching doc in the **same commit**. Before marking
+any feature complete, run this checklist:
+
+- [ ] New `#[tauri::command]`? → `docs/modules/tauri-commands.md` has an entry
+      (name, params, return, side effects) and names the matching
+      `invoke("...")` in `tauri-bridge.ts`.
+- [ ] New Tauri event in `bridge.rs`? → `docs/modules/tauri-bridge.md` lists the
+      event name, payload, and the `useServerEvents.ts` listener that consumes it.
+- [ ] New public Rust fn in a crate? → the relevant `docs/modules/*.md` has an entry.
+- [ ] New React hook / context action? → `frontend-hooks.md` / `frontend-context.md`.
+- [ ] New crate, layer, or data-flow path? → `ARCHITECTURE.md` reflects it.
+
+When auditing or onboarding, prefer reading these docs first; if a doc is
+missing or stale for an area you touch, writing/fixing it IS part of the task.
