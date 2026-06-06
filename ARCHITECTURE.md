@@ -71,6 +71,10 @@ needed). The control bar is gated on the audio engine; the roster on presence.
 
 ## Cross-cutting things that bite
 
+- **Identity at rest:** `client/src-tauri/src/identity.rs` (`IdentityStore`)
+  stores the Ed25519 key encrypted (Argon2id + AES-256-GCM) behind a 4-digit
+  PIN; `farder-crypto::recovery` provides a BIP39 recovery phrase. See
+  `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #2.
 - **The untyped command seam** (above). Keep `invoke("...")` names, the
   `#[tauri::command]`, and the `generate_handler!` list in `main.rs` in sync.
 - **The event bus** (`bridge.rs`): every `ServerEvent` maps to exactly one

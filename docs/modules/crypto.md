@@ -1,6 +1,6 @@
 # farder-crypto
 
-> **File(s):** `crates/farder-crypto/src/identity.rs`, `key_exchange.rs`, `encryption.rs`, `media.rs`, `lib.rs`
+> **File(s):** `crates/farder-crypto/src/identity.rs`, `key_exchange.rs`, `encryption.rs`, `media.rs`, `recovery.rs`, `lib.rs`
 > **Layer:** Crypto crate
 > **Last reviewed:** 2026-06-04
 
@@ -262,6 +262,39 @@ A fresh ephemeral X25519 keypair used in the farder-node session-key-exchange pr
 
 ---
 
+### `recovery.rs` — BIP39 recovery phrase encoding
+
+#### `recovery::phrase_from_key(key: &[u8; 32]) -> Result<String>`
+
+**What it does:** encodes a 32-byte Ed25519 signing key as a 24-word BIP39
+mnemonic phrase. The phrase encodes the key itself directly, so it is as
+sensitive as the raw key — treat it with the same secrecy.
+**Parameters:** `key` — the 32-byte signing-key scalar.
+**Returns:** space-joined 24-word BIP39 phrase on success; anyhow error if
+encoding fails.
+**Side effects:** none (purely in-memory).
+**Connects to:** called by `IdentityStore` (`client/src-tauri/src/identity.rs`)
+whenever a new or migrated identity is created, to produce the recovery phrase
+returned to the frontend by `create_identity`, `migrate_plaintext_identity`, and
+`restore_identity`.
+
+---
+
+#### `recovery::key_from_phrase(phrase: &str) -> Result<[u8; 32]>`
+
+**What it does:** decodes a 24-word BIP39 mnemonic phrase back to the 32-byte
+Ed25519 signing key. Validates checksum, rejects unknown words, and checks that
+the decoded length is exactly 32 bytes.
+**Parameters:** `phrase` — space-separated 24-word BIP39 string.
+**Returns:** the raw 32-byte signing key on success; anyhow error on bad
+checksum, unknown words, or wrong length (error surfaces as `InvalidPhrase` to
+the Tauri caller in `restore_identity`).
+**Side effects:** none.
+**Connects to:** called by `IdentityStore::restore_from_phrase` inside
+`restore_identity`.
+
+---
+
 ## State it owns
 
 This crate is stateless — it has no global state and no persistent handles. All inputs and outputs are plain values or byte slices.
@@ -278,6 +311,7 @@ None directly. Callers pass values in and receive values out.
 
 ## Integration map
 
+- **`identity.rs` (`IdentityStore`) in `client/src-tauri`** — `create_identity`, `migrate_plaintext_identity`, and `restore_identity` call `recovery::phrase_from_key` to produce BIP39 recovery phrases; `restore_identity` calls `recovery::key_from_phrase` to rebuild the key.
 - **`commands.rs`** (DM E2EE path) — `dm_encrypt`/`dm_decrypt` Tauri commands call `key_exchange::derive_dm_shared_secret` then `encryption::encrypt`/`decrypt`. The shared secret is derived fresh on every call; it is not cached in `AppState`.
 - **`farder-node::PersonalNode`** (node-level DM path) — uses `SessionKeypair::derive_shared_secret` for an older ephemeral-key exchange; stores the secret in `PeerManager`. This path is separate from, and independent of, the Tauri command DM path.
 - **`voice/mod.rs`** (`VoiceController`) — calls `derive_stream_key` + `wrap_stream_key_for_peer` when generating a per-call key offer, and `unwrap_stream_key` in `on_stream_key_offer` when receiving one from a peer.

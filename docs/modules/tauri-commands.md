@@ -59,33 +59,72 @@ independent — what matters for the seam is only the string inside `invoke(...)
 ## Group 1 — Identity
 
 These commands manage the local cryptographic identity keypair stored in
-`~/.farder/identity.key`. They never contact a server.
+`<data dir>/identity.key`. They never contact a server. All five live in
+`client/src-tauri/src/identity.rs` (logic on `IdentityStore`). The private
+key never crosses the Tauri boundary — only the public key and recovery
+phrase are returned to the frontend.
 
 ---
 
-### `generate_keypair(state) -> Result<String, String>`
+### `identity_status() -> IdentityStatus`
 
-**What it does:** generates a fresh Ed25519 keypair (via `farder_crypto`),
-writes the 32-byte signing key to `identity.key`, stores the bytes in
-`AppState::signing_key_bytes`, and returns the public key as a `"vk_<hex>"`
-string.
-**Parameters:** `state` — Tauri-managed `AppState` (implicit, not passed from JS).
-**Returns:** the `"vk_<hex>"` public key string on success; an error string if
-the file write fails.
-**Side effects:** overwrites `~/.farder/identity.key`; mutates
-`AppState::signing_key_bytes`.
-**invoke name:** `"generate_keypair"` → `generateKeypair()` in `tauri-bridge.ts`.
+**What it does:** classifies `<data dir>/identity.key` by file length without
+decrypting: `"none"` (file absent), `"plaintext"` (legacy 32-byte key that
+needs migration), or `"encrypted"` (current format). Drives which screen the
+IdentityGate shows.
+**Side effects:** none (read-only disk check).
+**invoke name:** `"identity_status"` → `identityStatus()`.
 
 ---
 
-### `load_identity(state) -> Option<String>`
+### `create_identity(pin) -> { public_key, recovery_phrase }`
 
-**What it does:** reads `identity.key` from disk, reconstructs the keypair,
-loads the bytes into `AppState::signing_key_bytes`, and returns the public key
-string. Returns `null` if no saved key exists.
-**Returns:** `"vk_<hex>"` or `null`.
+**What it does:** generates a fresh Ed25519 identity, encrypts it under a
+4-digit PIN (Argon2id + AES-256-GCM), writes the blob to
+`<data dir>/identity.key`, loads the key into `AppState`, and returns the
+public key plus a 24-word BIP39 recovery phrase.
+**Parameters:** `pin` — 4-digit PIN string.
+**Returns:** `{ public_key: "vk_<hex>", recovery_phrase: "<24 words>" }`.
+**Side effects:** writes `identity.key`; mutates `AppState::signing_key_bytes`.
+Async — crypto runs off the UI thread.
+**invoke name:** `"create_identity"` → `createIdentity(pin)`.
+
+---
+
+### `unlock_identity(pin) -> public_key`
+
+**What it does:** decrypts the stored identity blob with the PIN, loads the
+key into `AppState`, and returns the public key.
+**Parameters:** `pin` — 4-digit PIN string.
+**Returns:** `"vk_<hex>"` on success; errors with `IncorrectPin` on a wrong PIN
+(no lockout).
 **Side effects:** mutates `AppState::signing_key_bytes`.
-**invoke name:** `"load_identity"` → `loadIdentity()`.
+**invoke name:** `"unlock_identity"` → `unlockIdentity(pin)`.
+
+---
+
+### `migrate_plaintext_identity(pin) -> { public_key, recovery_phrase }`
+
+**What it does:** one-time migration — reads the legacy plaintext 32-byte key,
+re-stores it encrypted under the PIN (key value preserved), loads it into
+`AppState`, and returns the public key plus a 24-word BIP39 recovery phrase.
+**Parameters:** `pin` — 4-digit PIN string.
+**Returns:** `{ public_key: "vk_<hex>", recovery_phrase: "<24 words>" }`.
+**Side effects:** overwrites `identity.key` with the encrypted blob; mutates
+`AppState::signing_key_bytes`.
+**invoke name:** `"migrate_plaintext_identity"` → `migratePlaintextIdentity(pin)`.
+
+---
+
+### `restore_identity(phrase, pin) -> public_key`
+
+**What it does:** rebuilds the Ed25519 key from a 24-word BIP39 recovery
+phrase, re-stores it encrypted under a new PIN, and loads it into `AppState`.
+**Parameters:** `phrase` — 24-word BIP39 phrase; `pin` — new 4-digit PIN.
+**Returns:** `"vk_<hex>"` on success; errors with `InvalidPhrase` on a bad
+checksum or unknown words.
+**Side effects:** writes `identity.key`; mutates `AppState::signing_key_bytes`.
+**invoke name:** `"restore_identity"` → `restoreIdentity(phrase, pin)`.
 
 ---
 
@@ -1283,7 +1322,7 @@ rewrites `servers.json`.
 
 | Field / variable | Type | What it tracks, when it's mutated |
 |---|---|---|
-| `AppState::signing_key_bytes` | `Mutex<Option<[u8;32]>>` | Loaded signing key; mutated by `generate_keypair` / `load_identity` |
+| `AppState::signing_key_bytes` | `Mutex<Option<[u8;32]>>` | Loaded signing key; mutated by `create_identity` / `unlock_identity` / `migrate_plaintext_identity` / `restore_identity` |
 | `AppState::servers` | `Mutex<HashMap<String, Arc<ServerConnection>>>` | Live server connections; mutated by `connect_server` / `disconnect_server` / `create_local_server` |
 | `RECORDING` | `AtomicBool` (static) | Whether a recording is in progress |
 | `RECORDING_PATH` | `Mutex<Option<String>>` (static) | Path to the in-progress WAV file |
@@ -1307,8 +1346,9 @@ rewrites `servers.json`.
   to give the controller a handle to send stream datagrams.
 - **`server_manager.rs`** — called by `create_local_server`, `stop_local_server`,
   `get_local_servers`, `restart_local_servers`.
-- **`farder_crypto`** — used by `dm_encrypt`/`dm_decrypt` and by
-  `connect_and_authenticate` inside `connect_server`.
+- **`farder_crypto`** — used by `dm_encrypt`/`dm_decrypt`, by the
+  `identity.rs` `IdentityStore` commands (Argon2id + AES-256-GCM, BIP39
+  recovery), and by `connect_and_authenticate` inside `connect_server`.
 - **`tauri-bridge.ts`** — every command's typed TypeScript wrapper; the
   `invoke("X")` strings here must match the Rust function names and the
   `generate_handler!` entries in `main.rs`.
