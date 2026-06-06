@@ -148,3 +148,27 @@ fn encoded_dm_protocol_frame_never_contains_plaintext() {
         other => panic!("expected EncryptedDm, got {other:?}"),
     }
 }
+
+/// The audit (2026-06-05) found the identity key was stored as raw plaintext.
+/// This is the standing regression guard for the fix: the encrypted blob the
+/// real key-wrapping path produces must neither equal nor contain the raw
+/// private key, must reopen under the right PIN, and must reject the wrong one.
+#[test]
+fn encrypted_identity_blob_is_not_the_raw_private_key() {
+    let kp = Keypair::generate();
+    let raw = *kp.signing_key_bytes();
+    let blob = kp.export_encrypted("1234").expect("encrypt identity");
+
+    assert_ne!(blob.as_slice(), &raw[..], "blob equals the raw private key");
+    assert!(
+        !contains_subslice(&blob, &raw),
+        "raw private key bytes appear verbatim inside the encrypted blob"
+    );
+
+    let back = Keypair::import_encrypted(&blob, "1234").expect("decrypt identity");
+    assert_eq!(back.signing_key_bytes(), &raw);
+    assert!(
+        Keypair::import_encrypted(&blob, "9999").is_err(),
+        "wrong PIN must fail"
+    );
+}
