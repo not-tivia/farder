@@ -5,9 +5,9 @@
 //! 4-digit PIN.
 //!
 //! `IdentityStore` takes an explicit directory so it is unit-testable without
-//! touching the user's real home. The `#[tauri::command]` wrappers (added in a
-//! later task) run the blocking crypto off the UI thread and load the unlocked
-//! key into `AppState`.
+//! touching the user's real home. The `#[tauri::command]` wrappers at the
+//! bottom of this file run the blocking crypto off the UI thread and load the
+//! unlocked key into `AppState`.
 
 use crate::state::AppState;
 use farder_crypto::identity::Keypair;
