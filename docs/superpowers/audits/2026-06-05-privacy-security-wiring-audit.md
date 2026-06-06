@@ -19,7 +19,7 @@ Status legend: **VERIFIED** (observed good) | **GAP** (observed missing/dead) |
 | # | Area | Verdict | Evidence |
 |---|------|---------|----------|
 | 1 | DM end-to-end encryption | **VERIFIED** | observation tests pass — plaintext absent from wire bytes; peer-only decrypt |
-| 2 | Identity private key at rest | **GAP (HIGH)** | key written as raw 32 bytes; `export_encrypted`/PIN never called |
+| 2 | Identity private key at rest | **FIXED** (pending GUI verification) | now encrypted at rest (Argon2id+AES-256-GCM) behind a 4-digit PIN; plaintext write path removed |
 | 3 | Relay IP masking | **GAP (MED)** | relay crate is dead code — never wired into the client connect path |
 | 4 | Private key never on wire / logged / to frontend | **OK** | only public key + signature sent; no key logging; `Debug` not derived |
 | 5 | Voice stream-key handling | **OK** | random per-session, memory-only, wrapped per-peer with AES-256-GCM |
@@ -65,7 +65,19 @@ body-bearing field. Typing indicators carry no message content.
 
 ---
 
-## 2. Identity private key at rest — GAP (HIGH)
+## 2. Identity private key at rest — FIXED (pending GUI verification)
+
+> **Resolved 2026-06-06** on branch `identity-key-encryption`. The plaintext
+> `generate_keypair`/`load_identity` path was removed entirely; the key is now
+> encrypted at rest (Argon2id 64 MiB + AES-256-GCM) behind a 4-digit PIN via
+> `client/src-tauri/src/identity.rs` (`IdentityStore`), with a 24-word BIP39
+> recovery phrase and transparent migration of existing plaintext keys. See
+> spec `docs/superpowers/specs/2026-06-05-identity-key-encryption-design.md` and
+> plan `docs/superpowers/plans/2026-06-05-identity-key-encryption.md`. The
+> observation test `encrypted_identity_blob_is_not_the_raw_private_key`
+> (`tests/security_observation.rs`) is the standing regression guard. The PIN
+> gate UI flow remains UNVERIFIED until a Windows GUI run. Original finding
+> below for the record.
 
 **Observation:** `generate_keypair` writes the key with
 `std::fs::write(&path, keypair.signing_key_bytes())`

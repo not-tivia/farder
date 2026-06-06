@@ -64,9 +64,10 @@
 
 **What it does:** serialises the signing key as `salt(16) || nonce(12) || AES-256-GCM(signing_key)`, where the AES key is derived from `passphrase` via Argon2id (64 MiB memory, 3 iterations, 1 lane), configured by the shared `identity_kdf()` helper so encrypt and decrypt always agree. The derived key is zeroized from the stack after use.
 **Parameters:** `passphrase` — user-supplied string; any length.
-**Returns:** 60-byte blob on success (`16 + 12 + 32 plaintext + 16 GCM tag`), or an Argon2/AES error.
+**Returns:** 76-byte blob on success (`16 + 12 + 32 plaintext + 16 GCM tag`), or an Argon2/AES error.
 **Side effects:** none (caller is responsible for writing the blob to disk).
-**Connects to:** not yet wired to a Tauri command; intended for future "export identity" UI flow.
+**Connects to:** `IdentityStore::seal_new` (`client/src-tauri/src/identity.rs`), the
+key-at-rest path behind `create_identity`/`migrate_plaintext_identity`/`restore_identity`.
 
 ---
 
@@ -290,7 +291,7 @@ the decoded length is exactly 32 bytes.
 checksum, unknown words, or wrong length (error surfaces as `InvalidPhrase` to
 the Tauri caller in `restore_identity`).
 **Side effects:** none.
-**Connects to:** called by `IdentityStore::restore_from_phrase` inside
+**Connects to:** called by `IdentityStore::restore` inside
 `restore_identity`.
 
 ---
