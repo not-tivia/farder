@@ -112,6 +112,18 @@ impl IdentityStore {
         self.seal_new(Keypair::generate(), pin)
     }
 
+    /// One-time: read the legacy 32-byte plaintext key and re-store it
+    /// encrypted under `pin`. The key value is preserved.
+    pub fn migrate(&self, pin: &str) -> Result<CreatedIdentity, IdentityError> {
+        validate_pin(pin)?;
+        let raw = std::fs::read(self.key_path()).map_err(|e| IdentityError::Io(e.to_string()))?;
+        let bytes: [u8; 32] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::Corrupt("plaintext key not 32 bytes".into()))?;
+        self.seal_new(Keypair::from_signing_key_bytes(&bytes), pin)
+    }
+
     /// Returning user: decrypt the blob with `pin`.
     pub fn unlock(&self, pin: &str) -> Result<UnlockedIdentity, IdentityError> {
         let data = std::fs::read(self.key_path()).map_err(|e| IdentityError::Io(e.to_string()))?;
@@ -195,5 +207,25 @@ mod tests {
     fn create_rejects_bad_pin() {
         let (_d, s) = store();
         assert!(matches!(s.create("12"), Err(IdentityError::BadPin)));
+    }
+
+    #[test]
+    fn migrate_plaintext_is_lossless_and_encrypts() {
+        let (_d, s) = store();
+        // Simulate a legacy plaintext identity on disk.
+        let original = Keypair::generate();
+        let raw = *original.signing_key_bytes();
+        std::fs::write(s.key_path(), raw).unwrap();
+        assert_eq!(s.status(), IdentityStatus::Plaintext);
+
+        let created = s.migrate("1234").expect("migrate");
+        // Same key preserved (lossless)...
+        assert_eq!(created.key_bytes, raw);
+        // ...now stored encrypted (not the raw bytes) and classed Encrypted.
+        let on_disk = std::fs::read(s.key_path()).unwrap();
+        assert_ne!(on_disk.as_slice(), &raw[..]);
+        assert_eq!(s.status(), IdentityStatus::Encrypted);
+        // Unlocks with the chosen PIN.
+        assert_eq!(s.unlock("1234").unwrap().key_bytes, raw);
     }
 }
