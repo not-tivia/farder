@@ -4,3 +4,4 @@ pub mod media;
 pub mod encryption;
 pub mod pin;
 pub mod profile;
+pub mod recovery;

@@ -18,5 +18,6 @@ argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 rmp-serde = "1"
+bip39 = "2"
 
 [dev-dependencies]
