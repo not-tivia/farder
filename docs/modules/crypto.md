@@ -62,7 +62,7 @@
 
 #### `Keypair::export_encrypted(&self, passphrase: &str) -> Result<Vec<u8>>`
 
-**What it does:** serialises the signing key as `salt(16) || nonce(12) || AES-256-GCM(signing_key)`, where the AES key is derived from `passphrase` via Argon2 (default params). The derived key is zeroized from the stack after use.
+**What it does:** serialises the signing key as `salt(16) || nonce(12) || AES-256-GCM(signing_key)`, where the AES key is derived from `passphrase` via Argon2id (64 MiB memory, 3 iterations, 1 lane), configured by the shared `identity_kdf()` helper so encrypt and decrypt always agree. The derived key is zeroized from the stack after use.
 **Parameters:** `passphrase` — user-supplied string; any length.
 **Returns:** 60-byte blob on success (`16 + 12 + 32 plaintext + 16 GCM tag`), or an Argon2/AES error.
 **Side effects:** none (caller is responsible for writing the blob to disk).
@@ -75,7 +75,7 @@
 **What it does:** reverses `export_encrypted` — derives the AES key from `passphrase`, decrypts the signing key, and reconstructs the `Keypair`. Returns an error (not a panic) if the passphrase is wrong (AES-GCM authentication fails) or the blob is malformed.
 **Parameters:** `data` — the full blob from `export_encrypted`; `passphrase` — must match the one used to export.
 **Returns:** `Keypair` on success; anyhow error otherwise.
-**Side effects:** zeroizes the Argon2-derived key from the stack after use.
+**Side effects:** zeroizes the Argon2id-derived key from the stack after use.
 
 ---
 
