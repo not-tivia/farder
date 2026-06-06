@@ -41,6 +41,33 @@ export async function getPublicKey(): Promise<string | null> {
   return invoke<string | null>("get_public_key");
 }
 
+export type IdentityStatus = "none" | "plaintext" | "encrypted";
+
+export interface CreateIdentityResult {
+  public_key: string;
+  recovery_phrase: string;
+}
+
+export async function identityStatus(): Promise<IdentityStatus> {
+  return invoke<IdentityStatus>("identity_status");
+}
+
+export async function createIdentity(pin: string): Promise<CreateIdentityResult> {
+  return invoke<CreateIdentityResult>("create_identity", { pin });
+}
+
+export async function unlockIdentity(pin: string): Promise<string> {
+  return invoke<string>("unlock_identity", { pin });
+}
+
+export async function migratePlaintextIdentity(pin: string): Promise<CreateIdentityResult> {
+  return invoke<CreateIdentityResult>("migrate_plaintext_identity", { pin });
+}
+
+export async function restoreIdentity(phrase: string, pin: string): Promise<string> {
+  return invoke<string>("restore_identity", { phrase, pin });
+}
+
 export async function setDisplayName(name: string): Promise<void> {
   return invoke<void>("set_display_name", { name });
 }
