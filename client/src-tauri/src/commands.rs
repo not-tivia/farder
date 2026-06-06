@@ -59,34 +59,6 @@ pub struct SendMessageResult {
 // Identity commands
 // ---------------------------------------------------------------------------
 
-fn key_path() -> std::path::PathBuf {
-    farder_data_dir().join("identity.key")
-}
-
-#[tauri::command]
-pub fn generate_keypair(state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    // Always generate a fresh key, overwriting any saved one
-    let keypair = Keypair::generate();
-    let path = key_path();
-    std::fs::write(&path, keypair.signing_key_bytes()).map_err(|e| e.to_string())?;
-    let public_key = keypair.public_key().to_string();
-    let mut lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
-    *lock = Some(*keypair.signing_key_bytes());
-    Ok(public_key)
-}
-
-/// Load a previously saved identity from disk, or return null if none exists.
-#[tauri::command]
-pub fn load_identity(state: State<'_, Arc<AppState>>) -> Option<String> {
-    let path = key_path();
-    let bytes: [u8; 32] = std::fs::read(&path).ok()?.try_into().ok()?;
-    let keypair = Keypair::from_signing_key_bytes(&bytes);
-    let public_key = keypair.public_key().to_string();
-    let mut lock = state.signing_key_bytes.lock().ok()?;
-    *lock = Some(bytes);
-    Some(public_key)
-}
-
 #[tauri::command]
 pub fn get_public_key(state: State<'_, Arc<AppState>>) -> Option<String> {
     let lock = state.signing_key_bytes.lock().ok()?;
@@ -420,7 +392,7 @@ pub async fn connect_server(
             .map_err(|e| e.to_string())?;
         match lock.as_ref() {
             Some(bytes) => Keypair::from_signing_key_bytes(bytes),
-            None => return Err("no identity keypair set — call generate_keypair first".to_string()),
+            None => return Err("no identity keypair set — unlock your identity first".to_string()),
         }
     };
 
@@ -1993,7 +1965,7 @@ pub fn dm_encrypt(
 ) -> Result<String, String> {
     let our_sk = {
         let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
-        lock.ok_or_else(|| "no identity — call generate_keypair or load_identity first".to_string())?
+        lock.ok_or_else(|| "no identity — unlock your identity first".to_string())?
     };
     let their_pk = parse_public_key(&their_public_key)?;
     let shared = farder_crypto::key_exchange::derive_dm_shared_secret(&our_sk, their_pk.as_bytes())
@@ -2012,7 +1984,7 @@ pub fn dm_decrypt(
 ) -> Result<String, String> {
     let our_sk = {
         let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
-        lock.ok_or_else(|| "no identity — call generate_keypair or load_identity first".to_string())?
+        lock.ok_or_else(|| "no identity — unlock your identity first".to_string())?
     };
     let their_pk = parse_public_key(&their_public_key)?;
     let shared = farder_crypto::key_exchange::derive_dm_shared_secret(&our_sk, their_pk.as_bytes())
@@ -2321,7 +2293,7 @@ pub async fn create_local_server(
             .map_err(|e| e.to_string())?;
         match lock.as_ref() {
             Some(bytes) => Keypair::from_signing_key_bytes(bytes),
-            None => return Err("no identity keypair set — call generate_keypair first".to_string()),
+            None => return Err("no identity keypair set — unlock your identity first".to_string()),
         }
     };
 

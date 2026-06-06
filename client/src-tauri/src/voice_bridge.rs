@@ -35,7 +35,7 @@ impl QuinnServerSession {
                 Some(bytes) => Arc::new(Keypair::from_signing_key_bytes(bytes)),
                 None => {
                     return Err(
-                        "no identity keypair set — call generate_keypair first".to_string()
+                        "no identity keypair set — unlock your identity first".to_string()
                     );
                 }
             }

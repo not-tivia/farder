@@ -59,8 +59,6 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::generate_keypair,
-            commands::load_identity,
             commands::get_public_key,
             identity::identity_status,
             identity::create_identity,

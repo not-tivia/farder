@@ -78,7 +78,7 @@ export default function AppShell() {
     async function tryReconnect() {
       while (!cancelled && serverId) {
         try {
-          await api.loadIdentity();
+          await api.getPublicKey();
           const result = await api.connectServer(serverId);
           dispatch({ type: "RECONNECTED", serverId });
           dispatch({ type: "CONNECTED", serverId, payload: result });
