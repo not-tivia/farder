@@ -7,6 +7,7 @@ mod bridge;
 mod commands;
 mod connection;
 mod display;
+mod identity;
 mod opus_codec;
 mod state;
 mod server_manager;

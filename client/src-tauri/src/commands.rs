@@ -15,7 +15,7 @@ use tauri::{AppHandle, State};
 // Profile helpers
 // ---------------------------------------------------------------------------
 
-fn farder_data_dir() -> std::path::PathBuf {
+pub(crate) fn farder_data_dir() -> std::path::PathBuf {
     let dir = if let Ok(custom) = std::env::var("FARDER_DATA") {
         std::path::PathBuf::from(custom)
     } else {
