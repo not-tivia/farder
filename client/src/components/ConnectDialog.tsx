@@ -102,7 +102,7 @@ export default function ConnectDialog() {
   useEffect(() => {
     async function init() {
       const [existingKey, existingName] = await Promise.allSettled([
-        api.loadIdentity(),
+        api.getPublicKey(),
         api.getDisplayName(),
       ]);
 
@@ -128,9 +128,9 @@ export default function ConnectDialog() {
     setLoading(true);
     setError(null);
     try {
-      const key = await api.generateKeypair();
+      const key = await api.getPublicKey();
       await api.setDisplayName(trimmed);
-      setPubKey(key);
+      if (key) setPubKey(key);
       setSavedName(trimmed);
       dispatch({ type: "SET_IDENTITY" });
       setStep("choice");
@@ -184,14 +184,10 @@ export default function ConnectDialog() {
     setError(null);
 
     if (!pubKey) {
-      try {
-        const key = await api.generateKeypair();
+      const key = await api.getPublicKey();
+      if (key) {
         setPubKey(key);
         dispatch({ type: "SET_IDENTITY" });
-      } catch (e) {
-        setError(String(e));
-        setLoading(false);
-        return;
       }
     }
 

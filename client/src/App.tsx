@@ -4,6 +4,7 @@ import { AppProvider, useApp } from "./context/ServerContext";
 import { useServerEvents } from "./hooks/useServerEvents";
 import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
+import IdentityGate from "./components/IdentityGate";
 import { TranslationFirstRunModal } from "./components/TranslationFirstRunModal";
 import ToastContainer from "./components/ToastContainer";
 import * as api from "./lib/tauri-bridge";
@@ -17,6 +18,7 @@ let initStarted = false;
 function AppInner() {
   const { state, dispatch } = useApp();
   const [initializing, setInitializing] = useState(true);
+  const [unlocked, setUnlocked] = useState(false);
   useServerEvents();
 
   // Handle farder:// deep links passed via CLI argument at launch.
@@ -33,11 +35,10 @@ function AppInner() {
   }, [dispatch]);
 
   useEffect(() => {
+    if (!unlocked) return;
     if (initStarted) return;
     initStarted = true;
     async function init() {
-      const key = await api.loadIdentity();
-      if (!key) { setInitializing(false); return; }
       dispatch({ type: "SET_IDENTITY" });
 
       // Restart any locally-managed servers first, then get the updated list
@@ -77,7 +78,11 @@ function AppInner() {
       setInitializing(false);
     }
     init().catch(() => setInitializing(false));
-  }, []);
+  }, [unlocked]);
+
+  if (!unlocked) {
+    return <IdentityGate onUnlocked={() => setUnlocked(true)} />;
+  }
 
   // Still loading — show nothing (or a splash screen later)
   if (initializing) {
