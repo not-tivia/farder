@@ -60,6 +60,12 @@ export async function restoreIdentity(phrase: string, pin: string): Promise<stri
   return invoke<string>("restore_identity", { phrase, pin });
 }
 
+// Save the recovery phrase as a PNG (rendered on a canvas, passed as raw
+// base64) via a native Save dialog. Resolves true if saved, false if cancelled.
+export async function saveRecoveryImage(pngBase64: string): Promise<boolean> {
+  return invoke<boolean>("save_recovery_image", { pngBase64 });
+}
+
 export async function setDisplayName(name: string): Promise<void> {
   return invoke<void>("set_display_name", { name });
 }

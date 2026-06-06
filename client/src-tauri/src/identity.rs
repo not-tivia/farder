@@ -243,6 +243,34 @@ pub async fn restore_identity(
     Ok(unlocked.public_key)
 }
 
+/// Save a PNG of the recovery phrase (rendered on the frontend canvas, passed
+/// as standard-base64) to a user-chosen file via a native Save dialog. Returns
+/// `true` if a file was written, `false` if the user cancelled. The image is an
+/// UNENCRYPTED copy of the key material — the UI warns the user accordingly;
+/// this command only performs the user-initiated write.
+#[tauri::command]
+pub async fn save_recovery_image(png_base64: String) -> Result<bool, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.as_bytes())
+        .map_err(|e| format!("bad image data: {e}"))?;
+    let path = tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_file_name("farder-recovery-phrase.png")
+            .add_filter("PNG image", &["png"])
+            .save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match path {
+        Some(p) => {
+            std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

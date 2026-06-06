@@ -3,6 +3,64 @@ import * as api from "../lib/tauri-bridge";
 
 type Screen = "loading" | "set-pin" | "enter-pin" | "migrate" | "restore" | "show-phrase";
 
+// Render the 24-word recovery phrase to a PNG and return its raw base64 (no
+// data-URL prefix). The image bakes in a "keep secret" warning so an exported
+// copy carries its own caution. Returns null if a canvas context isn't
+// available.
+function renderPhraseImage(phrase: string): string | null {
+  const words = phrase.trim().split(/\s+/);
+  const cols = 3;
+  const rows = Math.ceil(words.length / cols);
+  const W = 900;
+  const padX = 60;
+  const headerH = 150;
+  const rowH = 56;
+  const H = headerH + rows * rowH + 80;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  // Background.
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+
+  // Header.
+  ctx.fillStyle = "#111111";
+  ctx.font = "bold 34px sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillText("Farder Recovery Phrase", padX, 36);
+
+  // Warning, baked into the image.
+  ctx.fillStyle = "#c0392b";
+  ctx.font = "bold 20px sans-serif";
+  ctx.fillText("KEEP SECRET - anyone with these words can take over your account.", padX, 84);
+  ctx.fillStyle = "#666666";
+  ctx.font = "16px sans-serif";
+  ctx.fillText("Store offline (USB or printed). Do not leave this image on a shared drive.", padX, 112);
+
+  // Word grid, numbered.
+  const colW = (W - padX * 2) / cols;
+  ctx.font = "22px monospace";
+  for (let i = 0; i < words.length; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = padX + col * colW;
+    const y = headerH + row * rowH;
+    ctx.fillStyle = "#999999";
+    const num = `${i + 1}`.padStart(2, "0");
+    ctx.fillText(`${num}.`, x, y);
+    ctx.fillStyle = "#111111";
+    ctx.fillText(words[i], x + 46, y);
+  }
+
+  const dataUrl = canvas.toDataURL("image/png");
+  const comma = dataUrl.indexOf(",");
+  return comma >= 0 ? dataUrl.slice(comma + 1) : null;
+}
+
 // Reusable 4-digit PIN field (digits only, max length 4).
 function PinField({
   value,
@@ -37,6 +95,8 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
   const [recoveryPhrase, setRecoveryPhrase] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [saveNote, setSaveNote] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -114,6 +174,43 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
       console.error("[identity] restore failed:", e);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleCopyPhrase() {
+    try {
+      await navigator.clipboard.writeText(recoveryPhrase);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      // Best-effort: clear the clipboard ~60s later so the seed doesn't linger
+      // in clipboard history, but only if it still holds our phrase.
+      setTimeout(() => {
+        navigator.clipboard
+          .readText()
+          .then((cur) => {
+            if (cur === recoveryPhrase) return navigator.clipboard.writeText("");
+          })
+          .catch(() => {});
+      }, 60000);
+    } catch (e) {
+      setSaveNote("Couldn't copy - select the words and copy manually.");
+      console.error("[identity] copy failed:", e);
+    }
+  }
+
+  async function handleSaveImage() {
+    setSaveNote(null);
+    const b64 = renderPhraseImage(recoveryPhrase);
+    if (!b64) {
+      setSaveNote("Couldn't render the image on this device.");
+      return;
+    }
+    try {
+      const saved = await api.saveRecoveryImage(b64);
+      setSaveNote(saved ? "Saved. Keep that file somewhere safe and offline." : null);
+    } catch (e) {
+      setSaveNote("Couldn't save the image.");
+      console.error("[identity] save image failed:", e);
     }
   }
 
@@ -212,6 +309,21 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
       <p style={{ fontFamily: "monospace", background: "var(--input-bg, #00000022)", padding: 12, borderRadius: 6, wordSpacing: 4 }}>
         {recoveryPhrase}
       </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="connect-link" onClick={handleCopyPhrase}>
+          {copied ? "Copied!" : "Copy"}
+        </button>
+        <button className="connect-link" onClick={handleSaveImage}>
+          Save as image
+        </button>
+      </div>
+      <p style={{ fontSize: 12, color: "var(--text-muted, #888)", marginTop: 4 }}>
+        A copy or image is an unencrypted backup of your account key. Prefer
+        offline storage (USB or printed); don't leave it on a shared drive.
+      </p>
+      {saveNote && (
+        <p style={{ fontSize: 12, color: "var(--text-muted, #888)", marginTop: 4 }}>{saveNote}</p>
+      )}
       <button className="connect-button" onClick={onUnlocked}>
         I've saved it - continue
       </button>

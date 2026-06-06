@@ -65,6 +65,7 @@ fn main() {
             identity::unlock_identity,
             identity::migrate_plaintext_identity,
             identity::restore_identity,
+            identity::save_recovery_image,
             commands::set_display_name,
             commands::get_display_name,
             commands::set_bio,
