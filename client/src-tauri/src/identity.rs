@@ -81,6 +81,50 @@ impl IdentityStore {
             Err(_) => IdentityStatus::None,
         }
     }
+
+    /// Atomically write the encrypted blob to the key file (temp + rename).
+    fn write_blob(&self, blob: &[u8]) -> Result<(), IdentityError> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| IdentityError::Io(e.to_string()))?;
+        let tmp = self.dir.join("identity.key.tmp");
+        std::fs::write(&tmp, blob).map_err(|e| IdentityError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, self.key_path()).map_err(|e| IdentityError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Encrypt `keypair` under `pin`, persist it, and return its recovery phrase.
+    fn seal_new(&self, keypair: Keypair, pin: &str) -> Result<CreatedIdentity, IdentityError> {
+        let blob = keypair
+            .export_encrypted(pin)
+            .map_err(|e| IdentityError::Io(format!("encrypt failed: {e}")))?;
+        self.write_blob(&blob)?;
+        let phrase = recovery::phrase_from_key(keypair.signing_key_bytes())
+            .map_err(|e| IdentityError::Io(format!("phrase failed: {e}")))?;
+        Ok(CreatedIdentity {
+            key_bytes: *keypair.signing_key_bytes(),
+            public_key: keypair.public_key().to_string(),
+            recovery_phrase: phrase,
+        })
+    }
+
+    /// New user: generate a fresh key, encrypt under `pin`, persist.
+    pub fn create(&self, pin: &str) -> Result<CreatedIdentity, IdentityError> {
+        validate_pin(pin)?;
+        self.seal_new(Keypair::generate(), pin)
+    }
+
+    /// Returning user: decrypt the blob with `pin`.
+    pub fn unlock(&self, pin: &str) -> Result<UnlockedIdentity, IdentityError> {
+        let data = std::fs::read(self.key_path()).map_err(|e| IdentityError::Io(e.to_string()))?;
+        if data.len() < MIN_ENCRYPTED_LEN {
+            return Err(IdentityError::Corrupt("encrypted key too short".into()));
+        }
+        let keypair =
+            Keypair::import_encrypted(&data, pin).map_err(|_| IdentityError::IncorrectPin)?;
+        Ok(UnlockedIdentity {
+            key_bytes: *keypair.signing_key_bytes(),
+            public_key: keypair.public_key().to_string(),
+        })
+    }
 }
 
 fn validate_pin(pin: &str) -> Result<(), IdentityError> {
@@ -127,5 +171,29 @@ mod tests {
         assert!(validate_pin("000").is_err());
         assert!(validate_pin("12345").is_err());
         assert!(validate_pin("12a4").is_err());
+    }
+
+    #[test]
+    fn create_then_unlock_roundtrips_and_hides_key() {
+        let (_d, s) = store();
+        let created = s.create("1234").expect("create");
+        assert_eq!(created.recovery_phrase.split_whitespace().count(), 24);
+
+        // OBSERVATION: the on-disk bytes are NOT the raw private key.
+        let on_disk = std::fs::read(s.key_path()).unwrap();
+        assert_ne!(on_disk.as_slice(), &created.key_bytes[..]);
+        assert!(on_disk.len() >= MIN_ENCRYPTED_LEN);
+
+        // Right PIN reopens to the same key; wrong PIN fails.
+        let unlocked = s.unlock("1234").expect("unlock");
+        assert_eq!(unlocked.key_bytes, created.key_bytes);
+        assert_eq!(unlocked.public_key, created.public_key);
+        assert!(matches!(s.unlock("0000"), Err(IdentityError::IncorrectPin)));
+    }
+
+    #[test]
+    fn create_rejects_bad_pin() {
+        let (_d, s) = store();
+        assert!(matches!(s.create("12"), Err(IdentityError::BadPin)));
     }
 }
