@@ -112,6 +112,18 @@ impl IdentityStore {
         self.seal_new(Keypair::generate(), pin)
     }
 
+    /// Forgot-PIN path: rebuild the key from its recovery phrase and re-store
+    /// it encrypted under a new `pin`.
+    pub fn restore(&self, phrase: &str, pin: &str) -> Result<UnlockedIdentity, IdentityError> {
+        validate_pin(pin)?;
+        let bytes = recovery::key_from_phrase(phrase).map_err(|_| IdentityError::InvalidPhrase)?;
+        let created = self.seal_new(Keypair::from_signing_key_bytes(&bytes), pin)?;
+        Ok(UnlockedIdentity {
+            key_bytes: created.key_bytes,
+            public_key: created.public_key,
+        })
+    }
+
     /// One-time: read the legacy 32-byte plaintext key and re-store it
     /// encrypted under `pin`. The key value is preserved.
     pub fn migrate(&self, pin: &str) -> Result<CreatedIdentity, IdentityError> {
@@ -207,6 +219,24 @@ mod tests {
     fn create_rejects_bad_pin() {
         let (_d, s) = store();
         assert!(matches!(s.create("12"), Err(IdentityError::BadPin)));
+    }
+
+    #[test]
+    fn restore_from_phrase_rebuilds_identity() {
+        let (_d, s) = store();
+        let created = s.create("1234").expect("create");
+        let phrase = created.recovery_phrase.clone();
+
+        // A fresh store (new device) restores from the phrase under a new PIN.
+        let (_d2, s2) = store();
+        let restored = s2.restore(&phrase, "5678").expect("restore");
+        assert_eq!(restored.key_bytes, created.key_bytes);
+        assert_eq!(s2.unlock("5678").unwrap().key_bytes, created.key_bytes);
+
+        assert!(matches!(
+            s2.restore("totally invalid phrase here", "5678"),
+            Err(IdentityError::InvalidPhrase)
+        ));
     }
 
     #[test]
