@@ -159,6 +159,90 @@ fn validate_pin(pin: &str) -> Result<(), IdentityError> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tauri commands — thin wrappers. The Argon2 work is blocking, so each runs on
+// a blocking thread to avoid freezing the webview, then loads the unlocked key
+// into AppState. Only the PUBLIC key (and recovery phrase) cross to the
+// frontend; the private key never does.
+// ---------------------------------------------------------------------------
+
+fn store_key(state: &Arc<AppState>, key_bytes: [u8; 32]) -> Result<(), IdentityError> {
+    let mut lock = state
+        .signing_key_bytes
+        .lock()
+        .map_err(|e| IdentityError::Io(format!("state lock poisoned: {e}")))?;
+    *lock = Some(key_bytes);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn identity_status() -> IdentityStatus {
+    IdentityStore::default_location().status()
+}
+
+#[tauri::command]
+pub async fn create_identity(
+    state: State<'_, Arc<AppState>>,
+    pin: String,
+) -> Result<CreateIdentityResult, IdentityError> {
+    let created = tauri::async_runtime::spawn_blocking(move || {
+        IdentityStore::default_location().create(&pin)
+    })
+    .await
+    .map_err(|e| IdentityError::Io(format!("task join error: {e}")))??;
+    store_key(state.inner(), created.key_bytes)?;
+    Ok(CreateIdentityResult {
+        public_key: created.public_key,
+        recovery_phrase: created.recovery_phrase,
+    })
+}
+
+#[tauri::command]
+pub async fn unlock_identity(
+    state: State<'_, Arc<AppState>>,
+    pin: String,
+) -> Result<String, IdentityError> {
+    let unlocked = tauri::async_runtime::spawn_blocking(move || {
+        IdentityStore::default_location().unlock(&pin)
+    })
+    .await
+    .map_err(|e| IdentityError::Io(format!("task join error: {e}")))??;
+    store_key(state.inner(), unlocked.key_bytes)?;
+    Ok(unlocked.public_key)
+}
+
+#[tauri::command]
+pub async fn migrate_plaintext_identity(
+    state: State<'_, Arc<AppState>>,
+    pin: String,
+) -> Result<CreateIdentityResult, IdentityError> {
+    let created = tauri::async_runtime::spawn_blocking(move || {
+        IdentityStore::default_location().migrate(&pin)
+    })
+    .await
+    .map_err(|e| IdentityError::Io(format!("task join error: {e}")))??;
+    store_key(state.inner(), created.key_bytes)?;
+    Ok(CreateIdentityResult {
+        public_key: created.public_key,
+        recovery_phrase: created.recovery_phrase,
+    })
+}
+
+#[tauri::command]
+pub async fn restore_identity(
+    state: State<'_, Arc<AppState>>,
+    phrase: String,
+    pin: String,
+) -> Result<String, IdentityError> {
+    let unlocked = tauri::async_runtime::spawn_blocking(move || {
+        IdentityStore::default_location().restore(&phrase, &pin)
+    })
+    .await
+    .map_err(|e| IdentityError::Io(format!("task join error: {e}")))??;
+    store_key(state.inner(), unlocked.key_bytes)?;
+    Ok(unlocked.public_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
