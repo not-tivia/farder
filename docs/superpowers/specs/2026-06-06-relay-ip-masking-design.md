@@ -9,8 +9,14 @@ binary boots and writes its key as `0600`. **Phase 2 DONE** (2026-06-07, branch
 under a persisted `server_id`, serves each bridged stream via a `RelayStreamRole`
 marker + session-token registry (text + files demuxed by token); reuses the
 existing auth/`main_loop`/file handlers (direct mode untouched, 206 tests green);
-integration tests + a real relay↔server binary smoke confirm it. Phases 3–5
-remain (Phase 3 wires the client + invites and adds the Gap #3 observation test).
+integration tests + a real relay↔server binary smoke confirm it. **Phase 3a DONE**
+(2026-06-07, branch `relay-phase3a-client`): the client connects to a relayed
+server via `connect_via_relay` (relay-cert pinned), files over `Session{token}`
+streams, voice refused over relay; a headless observation test asserts the server
+sees the relay's address, never the client's — **closes audit Gap #3**. Spec
+`2026-06-07-relay-phase3a-client-connection-design.md`. Remaining: **Phase 3b**
+(pretty `farder.com/invite` links + invite directory), **Phase 4** (relay UI),
+**Phase 5** (voice over relay).
 **Audit origin:** `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #3 (MED)
 
 ## Problem

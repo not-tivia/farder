@@ -20,7 +20,7 @@ Status legend: **VERIFIED** (observed good) | **GAP** (observed missing/dead) |
 |---|------|---------|----------|
 | 1 | DM end-to-end encryption | **VERIFIED** | observation tests pass — plaintext absent from wire bytes; peer-only decrypt |
 | 2 | Identity private key at rest | **FIXED** (pending GUI verification) | now encrypted at rest (Argon2id+AES-256-GCM) behind a 4-digit PIN; plaintext write path removed |
-| 3 | Relay IP masking | **GAP (MED)** | relay crate is dead code — never wired into the client connect path |
+| 3 | Relay IP masking | **FIXED** (core path; pretty invites/UI follow) | relay rendezvous + server relay-mode + client relay-connect all wired; observation test asserts the server sees the relay's address, never the client's |
 | 4 | Private key never on wire / logged / to frontend | **OK** | only public key + signature sent; no key logging; `Debug` not derived |
 | 5 | Voice stream-key handling | **OK** | random per-session, memory-only, wrapped per-peer with AES-256-GCM |
 
@@ -108,7 +108,21 @@ behind the same two Tauri commands.
 
 ---
 
-## 3. Relay IP masking — GAP (MED)
+## 3. Relay IP masking — FIXED (core path)
+
+> **Resolved 2026-06-07** across relay Phases 1-3a (branches `relay-phase1-harden`,
+> `relay-phase2-server-mode`, `relay-phase3a-client`). The relay is now a working
+> rendezvous server (Phase 1); a server runs relay-only via `--relay`, registering
+> under a stable `server_id` and serving each bridged stream by a `RelayStreamRole`
+> marker + session-token demux (Phase 2); and the client connects through the relay
+> with `connect_via_relay` (relay-cert pinned), so the server observes only the
+> relay's address. A headless observation test
+> (`client/src-tauri/src/connection.rs` `relay_it`) asserts the server's observed
+> `remote_address()` is the relay's, never the client's — Gap #3's guarantee.
+> Specs/plans: `2026-06-06-relay-ip-masking-design.md` (umbrella) + the per-phase
+> docs. Still ahead (not part of the privacy guarantee): pretty `farder.com/invite`
+> links + the invite directory (Phase 3b) and the relay UI (Phase 4); voice over
+> relay is deferred. Original finding below for the record.
 
 **Observation:** the relay crate (`crates/farder-relay/`) is correctly designed —
 it terminates the client QUIC connection and opens a **separate** upstream
