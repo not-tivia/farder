@@ -4,7 +4,13 @@
 **Status:** Approved (architecture + decomposition). **Phase 1 DONE** (2026-06-06,
 branch `relay-phase1-harden`): relay is a working, tested rendezvous server
 (register/connect/bridge + persistent cert), all integration tests green; the
-binary boots and writes its key as `0600`. Phases 2–5 remain.
+binary boots and writes its key as `0600`. **Phase 2 DONE** (2026-06-07, branch
+`relay-phase2-server-mode`): server runs relay-only (`--relay`), dials+registers
+under a persisted `server_id`, serves each bridged stream via a `RelayStreamRole`
+marker + session-token registry (text + files demuxed by token); reuses the
+existing auth/`main_loop`/file handlers (direct mode untouched, 206 tests green);
+integration tests + a real relay↔server binary smoke confirm it. Phases 3–5
+remain (Phase 3 wires the client + invites and adds the Gap #3 observation test).
 **Audit origin:** `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #3 (MED)
 
 ## Problem
