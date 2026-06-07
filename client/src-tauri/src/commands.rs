@@ -787,6 +787,27 @@ pub(crate) async fn upload_file_internal(
     upload_file_internal_with_channel(state, server_id, 0, file_path).await
 }
 
+/// Write the RelayStreamRole::Session marker on a file-transfer stream when the
+/// connection is relayed (the server demuxes relay file streams by this token).
+/// A no-op for direct connections.
+async fn write_relay_session_marker(
+    send: &mut quinn::SendStream,
+    conn: &crate::state::ServerConnection,
+) -> Result<(), String> {
+    if conn.relayed {
+        let role = farder_protocol::server::RelayStreamRole::Session {
+            token: conn.session_token.clone(),
+        };
+        crate::connection::write_frame(
+            send,
+            &farder_protocol::codec::encode(&role).map_err(|e| e.to_string())?,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Core upload logic shared by the Tauri command and the internal helper.
 async fn upload_file_internal_with_channel(
     state: &AppState,
@@ -822,17 +843,7 @@ async fn upload_file_internal_with_channel(
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 
     // Relayed connections demux file streams by a Session role marker.
-    if conn.relayed {
-        let role = farder_protocol::server::RelayStreamRole::Session {
-            token: conn.session_token.clone(),
-        };
-        crate::connection::write_frame(
-            &mut send,
-            &farder_protocol::codec::encode(&role).map_err(|e| e.to_string())?,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    }
+    write_relay_session_marker(&mut send, &conn).await?;
 
     // Send UploadRequest
     let req = farder_protocol::server::UploadRequest {
@@ -912,17 +923,7 @@ pub(crate) async fn download_file_internal(
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 
     // Relayed connections demux file streams by a Session role marker.
-    if conn.relayed {
-        let role = farder_protocol::server::RelayStreamRole::Session {
-            token: conn.session_token.clone(),
-        };
-        crate::connection::write_frame(
-            &mut send,
-            &farder_protocol::codec::encode(&role).map_err(|e| e.to_string())?,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    }
+    write_relay_session_marker(&mut send, &conn).await?;
 
     // Send DownloadRequest
     let req = farder_protocol::server::DownloadRequest { file_id };
@@ -1310,6 +1311,9 @@ pub async fn add_favorite(
     let conn = state.get_server(&server_id).map_err(|e| e.to_string())?;
     let quic_conn = conn.connection.clone();
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
+
+    // Relayed connections demux file streams by a Session role marker.
+    write_relay_session_marker(&mut send, &conn).await?;
 
     let req = farder_protocol::server::DownloadRequest { file_id };
     let req_bytes = farder_protocol::codec::encode(&req).map_err(|e| e.to_string())?;
