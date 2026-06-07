@@ -8,4 +8,6 @@ pub struct Config {
     pub bind: SocketAddr,
     #[arg(long, default_value = "1024")]
     pub max_connections: u32,
+    #[arg(long, default_value = "./relay-data")]
+    pub data_dir: std::path::PathBuf,
 }
