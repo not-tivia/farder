@@ -419,7 +419,9 @@ pub async fn connect_server(
         };
 
     let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
-    {
+    // Relayed connections carry no datagrams (voice is not relayed), so only
+    // run the datagram recv loop for direct (non-relayed) connections.
+    if !relayed {
         let dispatcher_for_loop = media_dispatcher.clone();
         let conn_for_loop = conn.clone();
         tokio::spawn(async move {
@@ -819,6 +821,19 @@ async fn upload_file_internal_with_channel(
     let quic_conn = conn.connection.clone();
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
 
+    // Relayed connections demux file streams by a Session role marker.
+    if conn.relayed {
+        let role = farder_protocol::server::RelayStreamRole::Session {
+            token: conn.session_token.clone(),
+        };
+        crate::connection::write_frame(
+            &mut send,
+            &farder_protocol::codec::encode(&role).map_err(|e| e.to_string())?,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
     // Send UploadRequest
     let req = farder_protocol::server::UploadRequest {
         channel_id,
@@ -895,6 +910,19 @@ pub(crate) async fn download_file_internal(
     let conn = state.get_server(server_id).map_err(|e| e.to_string())?;
     let quic_conn = conn.connection.clone();
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
+
+    // Relayed connections demux file streams by a Session role marker.
+    if conn.relayed {
+        let role = farder_protocol::server::RelayStreamRole::Session {
+            token: conn.session_token.clone(),
+        };
+        crate::connection::write_frame(
+            &mut send,
+            &farder_protocol::codec::encode(&role).map_err(|e| e.to_string())?,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
 
     // Send DownloadRequest
     let req = farder_protocol::server::DownloadRequest { file_id };
@@ -2155,6 +2183,9 @@ pub async fn voice_join(
     channel_id: u64,
 ) -> Result<(), String> {
     let server_conn = state.get_server(&server_id)?;
+    if server_conn.relayed {
+        return Err("voice is not available over a relay yet".to_string());
+    }
     // Apply the saved mic sensitivity before the send task spawns.
     voice.set_speak_threshold(crate::voice::sensitivity_to_threshold(read_voice_sensitivity()));
     let session = crate::voice_bridge::QuinnServerSession::new(
