@@ -265,6 +265,33 @@ mod tests {
         conn
     }
 
+    /// Like `register_echo_server`, but echoes bytes UPPERCASED so its replies
+    /// are distinguishable from the verbatim echo server (used to prove which
+    /// registrant the relay routed to).
+    async fn register_uppercase_server(relay: SocketAddr, id: Vec<u8>) -> Connection {
+        let ep = test_client_endpoint();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let reg = codec::encode(&Message::RelayRegister { server_id: id }).unwrap();
+        write_message(&mut send, &reg).await.unwrap();
+        let ack = read_message(&mut recv).await.unwrap();
+        let ack: Message = codec::decode(&ack).unwrap();
+        assert!(matches!(ack, Message::RelayRegistered));
+        let echo_conn = conn.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, mut r)) = echo_conn.accept_bi().await {
+                tokio::spawn(async move {
+                    let data = r.read_to_end(64 * 1024).await.unwrap_or_default();
+                    let upper: Vec<u8> = data.iter().map(|b| b.to_ascii_uppercase()).collect();
+                    let _ = s.write_all(&upper).await;
+                    let _ = s.finish();
+                });
+            }
+        });
+        std::mem::forget(ep);
+        conn
+    }
+
     /// Connect as a client and send RelayConnect; return the first-stream reply.
     async fn client_connect(relay: SocketAddr, id: Vec<u8>) -> (Connection, Message) {
         let ep = test_client_endpoint();
@@ -333,19 +360,22 @@ mod tests {
     async fn reregistration_routes_to_newest_server() {
         let (relay, _conns) = start_relay().await;
         let id = vec![4u8; 16];
-        let _first = register_echo_server(relay, id.clone()).await;
-        let _second = register_echo_server(relay, id.clone()).await; // replaces first
+        // First registrant would echo UPPERCASED; second echoes verbatim and
+        // must replace the first in the registry.
+        let _first = register_uppercase_server(relay, id.clone()).await;
+        let _second = register_echo_server(relay, id.clone()).await;
 
         let (client, reply) = client_connect(relay, id).await;
         assert!(matches!(reply, Message::RelayConnected));
         let (mut send, mut recv) = client.open_bi().await.unwrap();
         send.write_all(b"route me").await.unwrap();
         send.finish().unwrap();
-        // If routed to a non-echoing server the read would hang, so bound it.
         let echoed = tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(64 * 1024))
             .await
             .expect("bridge to newest registrant timed out")
             .unwrap();
-        assert_eq!(echoed, b"route me");
+        // Verbatim (lowercase) proves the SECOND registrant served it; the first
+        // would have returned "ROUTE ME".
+        assert_eq!(echoed, b"route me", "relay must route to the newest registrant");
     }
 }
