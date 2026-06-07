@@ -48,6 +48,7 @@ pub struct ConnectResult {
     pub categories: Vec<CategoryInfo>,
     pub roles: Vec<RoleInfo>,
     pub owner_public_key: Option<farder_crypto::identity::PublicKey>,
+    pub relayed: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -472,7 +473,7 @@ pub async fn connect_server(
             *server_conn.server_name.lock().unwrap() = name.clone();
             // Save to persistent server list
             save_server_entry(&address, &name);
-            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key })
+            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
@@ -520,7 +521,7 @@ pub async fn get_server_info(
         .map_err(|e| e.to_string())?;
     match response {
         ServerResponse::ServerInfo { name, member_count, channels, categories, roles, owner_public_key } => {
-            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key })
+            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed: false })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
@@ -2448,6 +2449,7 @@ pub async fn create_local_server(
                 "categories": categories,
                 "roles": roles,
                 "owner_public_key": owner_public_key,
+                "relayed": false,
             }))
         }
         ServerResponse::Error { reason } => Err(reason),
