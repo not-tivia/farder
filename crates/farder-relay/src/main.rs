@@ -20,14 +20,6 @@ async fn main() -> Result<()> {
     info!("Starting Farder Relay v{}", env!("CARGO_PKG_VERSION"));
     let endpoint = listener::create_endpoint(config.bind, &config.data_dir)?;
     let connections = router::new_connection_map();
-    while let Some(incoming) = endpoint.accept().await {
-        let conn = incoming.await?;
-        let connections = connections.clone();
-        tokio::spawn(async move {
-            if let Err(e) = router::handle_connection(conn, connections).await {
-                tracing::warn!("Connection error: {}", e);
-            }
-        });
-    }
+    router::serve(endpoint, connections).await?;
     Ok(())
 }

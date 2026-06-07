@@ -1,6 +1,6 @@
 use anyhow::Result;
 use farder_protocol::{codec, messages::Message};
-use quinn::{Connection, RecvStream, SendStream};
+use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -12,72 +12,137 @@ pub fn new_connection_map() -> ConnectionMap {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+/// Accept loop: spawn a handler per incoming QUIC connection.
+pub async fn serve(endpoint: Endpoint, connections: ConnectionMap) -> Result<()> {
+    while let Some(incoming) = endpoint.accept().await {
+        let connections = connections.clone();
+        tokio::spawn(async move {
+            match incoming.await {
+                Ok(conn) => {
+                    if let Err(e) = handle_connection(conn, connections).await {
+                        warn!("connection error: {}", e);
+                    }
+                }
+                Err(e) => warn!("incoming connection failed: {}", e),
+            }
+        });
+    }
+    Ok(())
+}
+
 pub async fn handle_connection(conn: Connection, connections: ConnectionMap) -> Result<()> {
     let remote = conn.remote_address();
-    info!("New connection from {}", remote);
-    let (mut send, mut recv) = conn.accept_bi().await?;
+    info!("new connection from {}", remote);
+    // The first bi-stream carries the role-establishing message.
+    let (send, mut recv) = conn.accept_bi().await?;
     let buf = read_message(&mut recv).await?;
     let msg: Message = codec::decode(&buf)?;
     match msg {
+        Message::RelayRegister { server_id } => {
+            handle_register(server_id, conn, send, connections).await
+        }
         Message::RelayConnect { destination_id } => {
-            let dest_conn = {
-                let map = connections.read().await;
-                map.get(&destination_id).cloned()
-            };
-            if let Some(dest) = dest_conn {
-                let response = Message::RelayConnected;
-                let response_bytes = codec::encode(&response)?;
-                write_message(&mut send, &response_bytes).await?;
-                bridge_connections(conn, dest).await?;
-            } else {
-                let response = Message::RelayError {
-                    reason: "destination not connected".to_string(),
-                };
-                let response_bytes = codec::encode(&response)?;
-                write_message(&mut send, &response_bytes).await?;
-            }
+            handle_connect(destination_id, conn, send, connections).await
         }
         _ => {
-            warn!("Unexpected first message from {}", remote);
+            warn!("unexpected first message from {}", remote);
+            Ok(())
+        }
+    }
+}
+
+/// A server registers under `server_id`; hold its connection open as a control
+/// channel and remove it from the registry when it closes. A duplicate id
+/// replaces the previous registration (server reconnect).
+async fn handle_register(
+    server_id: Vec<u8>,
+    conn: Connection,
+    mut send: SendStream,
+    connections: ConnectionMap,
+) -> Result<()> {
+    {
+        let mut map = connections.write().await;
+        if map.insert(server_id.clone(), conn.clone()).is_some() {
+            warn!("server id re-registered, replacing previous ({} bytes)", server_id.len());
+        } else {
+            info!("server registered ({} bytes id)", server_id.len());
+        }
+    }
+    let ack = codec::encode(&Message::RelayRegistered)?;
+    write_message(&mut send, &ack).await?;
+
+    // Keep the control connection alive; clean up on close.
+    conn.closed().await;
+    let mut map = connections.write().await;
+    if let Some(existing) = map.get(&server_id) {
+        // Only remove if it is still OUR connection (not a newer re-registration).
+        if existing.stable_id() == conn.stable_id() {
+            map.remove(&server_id);
+            info!("server unregistered ({} bytes id)", server_id.len());
         }
     }
     Ok(())
 }
 
-pub async fn register_connection(
-    identity: Vec<u8>,
-    conn: Connection,
+/// A client asks for `destination_id`; bridge it to the registered server, or
+/// reply with an error if none is registered.
+async fn handle_connect(
+    destination_id: Vec<u8>,
+    client_conn: Connection,
+    mut send: SendStream,
     connections: ConnectionMap,
-) {
-    let mut map = connections.write().await;
-    map.insert(identity, conn);
-}
-
-pub async fn unregister_connection(identity: &[u8], connections: ConnectionMap) {
-    let mut map = connections.write().await;
-    map.remove(identity);
-}
-
-async fn bridge_connections(a: Connection, b: Connection) -> Result<()> {
-    let a2b = bridge_one_direction(a.clone(), b.clone());
-    let b2a = bridge_one_direction(b, a);
-    tokio::select! {
-        r = a2b => r,
-        r = b2a => r,
+) -> Result<()> {
+    let dest = {
+        let map = connections.read().await;
+        map.get(&destination_id).cloned()
+    };
+    match dest {
+        Some(server_conn) => {
+            let ack = codec::encode(&Message::RelayConnected)?;
+            write_message(&mut send, &ack).await?;
+            bridge_client(client_conn, server_conn).await
+        }
+        None => {
+            let err = codec::encode(&Message::RelayError {
+                reason: "destination not connected".to_string(),
+            })?;
+            write_message(&mut send, &err).await?;
+            // Flush the reply and keep the connection alive until the client
+            // has drained it; otherwise dropping `client_conn` here would tear
+            // the connection down before the buffered error reaches the peer.
+            let _ = send.finish();
+            client_conn.closed().await;
+            Ok(())
+        }
     }
 }
 
-async fn bridge_one_direction(from: Connection, to: Connection) -> Result<()> {
+/// Bridge every bi-stream the client opens to a fresh bi-stream on the server's
+/// control connection, copying bytes both ways. Each writer is finished on EOF
+/// so the peer sees the end of the stream.
+async fn bridge_client(client_conn: Connection, server_conn: Connection) -> Result<()> {
     loop {
-        let (mut from_send, mut from_recv) = from.accept_bi().await?;
-        let (mut to_send, mut to_recv) = to.open_bi().await?;
+        let (mut c_send, mut c_recv) = match client_conn.accept_bi().await {
+            Ok(s) => s,
+            Err(_) => break, // client connection closed
+        };
+        let (mut s_send, mut s_recv) = match server_conn.open_bi().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("could not open server stream: {}", e);
+                break;
+            }
+        };
         tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut from_recv, &mut to_send).await;
+            let _ = tokio::io::copy(&mut c_recv, &mut s_send).await;
+            let _ = s_send.finish();
         });
         tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut to_recv, &mut from_send).await;
+            let _ = tokio::io::copy(&mut s_recv, &mut c_send).await;
+            let _ = c_send.finish();
         });
     }
+    Ok(())
 }
 
 pub async fn read_message(recv: &mut RecvStream) -> Result<Vec<u8>> {
@@ -97,4 +162,190 @@ pub async fn write_message(send: &mut SendStream, data: &[u8]) -> Result<()> {
     send.write_all(&len).await?;
     send.write_all(data).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quinn::Endpoint;
+    use rustls::pki_types::ServerName;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    fn ensure_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    // Test-only verifier: accept any relay cert (Phase 3 adds real pinning).
+    #[derive(Debug)]
+    struct SkipVerify;
+    impl rustls::client::danger::ServerCertVerifier for SkipVerify {
+        fn verify_server_cert(
+            &self,
+            _e: &rustls::pki_types::CertificateDer<'_>,
+            _i: &[rustls::pki_types::CertificateDer<'_>],
+            _n: &ServerName<'_>,
+            _o: &[u8],
+            _t: rustls::pki_types::UnixTime,
+        ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    fn test_client_endpoint() -> Endpoint {
+        let crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipVerify))
+            .with_no_client_auth();
+        let client_config = quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
+        ));
+        let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config);
+        endpoint
+    }
+
+    /// Start a relay on an ephemeral port; return its address and the registry.
+    async fn start_relay() -> (SocketAddr, ConnectionMap) {
+        ensure_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let ep = crate::listener::create_endpoint("127.0.0.1:0".parse().unwrap(), dir.path())
+            .unwrap();
+        let addr = ep.local_addr().unwrap();
+        let conns = new_connection_map();
+        tokio::spawn(serve(ep, conns.clone()));
+        // Keep the tempdir alive for the test process lifetime.
+        std::mem::forget(dir);
+        (addr, conns)
+    }
+
+    /// Connect to the relay and register as a server under `id`, spawning an
+    /// echo loop that mirrors any bytes on accepted bi-streams.
+    async fn register_echo_server(relay: SocketAddr, id: Vec<u8>) -> Connection {
+        let ep = test_client_endpoint();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let reg = codec::encode(&Message::RelayRegister { server_id: id }).unwrap();
+        write_message(&mut send, &reg).await.unwrap();
+        let ack = read_message(&mut recv).await.unwrap();
+        let ack: Message = codec::decode(&ack).unwrap();
+        assert!(matches!(ack, Message::RelayRegistered));
+        let echo_conn = conn.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, mut r)) = echo_conn.accept_bi().await {
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut r, &mut s).await;
+                    let _ = s.finish();
+                });
+            }
+        });
+        // Keep the client endpoint alive.
+        std::mem::forget(ep);
+        conn
+    }
+
+    /// Connect as a client and send RelayConnect; return the first-stream reply.
+    async fn client_connect(relay: SocketAddr, id: Vec<u8>) -> (Connection, Message) {
+        let ep = test_client_endpoint();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let msg = codec::encode(&Message::RelayConnect { destination_id: id }).unwrap();
+        write_message(&mut send, &msg).await.unwrap();
+        let reply = read_message(&mut recv).await.unwrap();
+        let reply: Message = codec::decode(&reply).unwrap();
+        std::mem::forget(ep);
+        (conn, reply)
+    }
+
+    #[tokio::test]
+    async fn bridges_client_to_registered_server() {
+        let (relay, _conns) = start_relay().await;
+        let id = vec![1u8; 16];
+        let _server = register_echo_server(relay, id.clone()).await;
+
+        let (client, reply) = client_connect(relay, id).await;
+        assert!(matches!(reply, Message::RelayConnected));
+
+        // Data flows on a NEW bi-stream the client opens; the relay bridges it.
+        let (mut send, mut recv) = client.open_bi().await.unwrap();
+        send.write_all(b"hello through the relay").await.unwrap();
+        send.finish().unwrap();
+        let echoed = recv.read_to_end(64 * 1024).await.unwrap();
+        assert_eq!(echoed, b"hello through the relay");
+    }
+
+    #[tokio::test]
+    async fn unknown_destination_errors() {
+        let (relay, _conns) = start_relay().await;
+        let (_client, reply) = client_connect(relay, vec![2u8; 16]).await;
+        match reply {
+            Message::RelayError { reason } => assert!(reason.contains("not connected")),
+            other => panic!("expected RelayError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_clears_on_server_disconnect() {
+        let (relay, conns) = start_relay().await;
+        let id = vec![3u8; 16];
+        let server = register_echo_server(relay, id.clone()).await;
+        // Wait until the registry actually has the entry.
+        for _ in 0..50 {
+            if conns.read().await.contains_key(&id) { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(conns.read().await.contains_key(&id));
+
+        server.close(0u32.into(), b"bye");
+        // Wait until cleanup removes it.
+        for _ in 0..50 {
+            if !conns.read().await.contains_key(&id) { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!conns.read().await.contains_key(&id), "registry entry must be removed on disconnect");
+
+        let (_client, reply) = client_connect(relay, id).await;
+        assert!(matches!(reply, Message::RelayError { .. }));
+    }
+
+    #[tokio::test]
+    async fn reregistration_routes_to_newest_server() {
+        let (relay, _conns) = start_relay().await;
+        let id = vec![4u8; 16];
+        let _first = register_echo_server(relay, id.clone()).await;
+        let _second = register_echo_server(relay, id.clone()).await; // replaces first
+
+        let (client, reply) = client_connect(relay, id).await;
+        assert!(matches!(reply, Message::RelayConnected));
+        let (mut send, mut recv) = client.open_bi().await.unwrap();
+        send.write_all(b"route me").await.unwrap();
+        send.finish().unwrap();
+        // If routed to a non-echoing server the read would hang, so bound it.
+        let echoed = tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(64 * 1024))
+            .await
+            .expect("bridge to newest registrant timed out")
+            .unwrap();
+        assert_eq!(echoed, b"route me");
+    }
 }
