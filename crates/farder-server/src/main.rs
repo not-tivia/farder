@@ -23,6 +23,15 @@ struct Args {
     storage_dir: String,
     #[arg(long, default_value = "52428800")]
     max_file_size: u64,
+
+    /// If set, run relay-only: register with this relay instead of binding a
+    /// public listener (hides the server's IP).
+    #[arg(long)]
+    relay: Option<SocketAddr>,
+
+    /// Directory for the server's stable relay identity (server_id).
+    #[arg(long, default_value = "./server-data")]
+    data_dir: std::path::PathBuf,
 }
 
 fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -106,6 +115,13 @@ async fn main() -> Result<()> {
     }
 
     let _retention = retention::spawn_retention_task(Arc::clone(&state), args.retention_interval);
+
+    if let Some(relay_addr) = args.relay {
+        let server_id = farder_server::relay::load_or_generate_server_id(&args.data_dir)?;
+        info!("Relay-only mode: registering with relay {}", relay_addr);
+        farder_server::relay::serve_via_relay(state, relay_addr, server_id).await?;
+        return Ok(());
+    }
 
     let endpoint = make_server_endpoint(args.bind)?;
     info!("Server listening on {}", args.bind);
