@@ -9,6 +9,38 @@ use std::net::SocketAddr;
 
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024; // 16 MB
 
+/// Connection info for a relayed server, parsed from the escape-hatch link
+/// `farder://relay/<relay_addr>/<server_id_hex>/<cert_fp_hex>/<invite_token>`.
+#[derive(Clone, Debug)]
+pub struct RelayTarget {
+    pub relay_addr: SocketAddr,
+    pub server_id: Vec<u8>,
+    pub cert_fp: Vec<u8>,
+    pub invite_token: String,
+}
+
+/// Parse a relay link, or `None` if `s` is not a well-formed relay link (e.g. a
+/// direct `farder://addr/code` link or anything else).
+pub fn parse_relay_target(s: &str) -> Option<RelayTarget> {
+    let rest = s.strip_prefix("farder://relay/")?;
+    let parts: Vec<&str> = rest.splitn(4, '/').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let relay_addr: SocketAddr = parts[0].parse().ok()?;
+    let server_id = hex::decode(parts[1]).ok()?;
+    let cert_fp = hex::decode(parts[2]).ok()?;
+    if server_id.is_empty() || cert_fp.is_empty() || parts[3].is_empty() {
+        return None;
+    }
+    Some(RelayTarget {
+        relay_addr,
+        server_id,
+        cert_fp,
+        invite_token: parts[3].to_string(),
+    })
+}
+
 /// Read a length-prefixed frame (4-byte big-endian length header).
 pub async fn read_frame(recv: &mut RecvStream) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
@@ -107,4 +139,29 @@ pub async fn connect_and_authenticate(
     };
 
     Ok((conn, send, recv, session_token))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_valid_relay_link() {
+        let t = parse_relay_target(
+            "farder://relay/1.2.3.4:4433/aabb/ccdd/inv123",
+        )
+        .expect("valid");
+        assert_eq!(t.relay_addr, "1.2.3.4:4433".parse().unwrap());
+        assert_eq!(t.server_id, vec![0xaa, 0xbb]);
+        assert_eq!(t.cert_fp, vec![0xcc, 0xdd]);
+        assert_eq!(t.invite_token, "inv123");
+    }
+
+    #[test]
+    fn rejects_non_relay_or_malformed() {
+        assert!(parse_relay_target("farder://1.2.3.4:4435/inv").is_none()); // direct form
+        assert!(parse_relay_target("farder://relay/1.2.3.4:4433/aabb").is_none()); // too few parts
+        assert!(parse_relay_target("https://example.com").is_none());
+        assert!(parse_relay_target("farder://relay/notanaddr/aa/bb/t").is_none()); // bad addr
+    }
 }
