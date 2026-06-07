@@ -35,3 +35,4 @@ reqwest = { version = "0.12", features = ["rustls-tls"], default-features = fals
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
+tempfile = "3"

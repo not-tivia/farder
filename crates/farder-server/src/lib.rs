@@ -13,6 +13,7 @@ pub mod members;
 pub mod messages;
 pub mod permissions;
 pub mod reactions;
+pub mod relay;
 pub mod retention;
 pub mod state;
 pub mod templates;
