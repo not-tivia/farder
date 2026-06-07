@@ -45,6 +45,7 @@ impl RateLimiter {
 
 pub struct SessionInfo {
     pub public_key: PublicKey,
+    pub is_owner: bool,
     pub expires_at: u64,
 }
 
@@ -85,6 +86,26 @@ impl ServerState {
         }
     }
 
+    /// Register an authenticated session by its login token (relay file streams
+    /// look this up to learn whose stream they are). The entry is removed when
+    /// the primary session ends.
+    pub async fn register_session(&self, token: [u8; 32], public_key: PublicKey, is_owner: bool) {
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(token, SessionInfo { public_key, is_owner, expires_at: u64::MAX });
+    }
+
+    /// Look up a session token, returning `(public_key, is_owner)` if present.
+    pub async fn lookup_session(&self, token: &[u8; 32]) -> Option<(PublicKey, bool)> {
+        let sessions = self.sessions.read().await;
+        sessions.get(token).map(|s| (s.public_key.clone(), s.is_owner))
+    }
+
+    /// Remove a session token (called when the primary session ends).
+    pub async fn remove_session(&self, token: &[u8; 32]) {
+        let mut sessions = self.sessions.write().await;
+        sessions.remove(token);
+    }
+
     pub fn new_for_test() -> Result<Self> {
         let conn = db::open_in_memory()?;
         let tmp = std::env::temp_dir().join(format!("farder-test-{}", std::process::id()));
@@ -115,5 +136,28 @@ mod tests {
         assert!(rl.allow(&a));
         assert!(!rl.allow(&a));
         assert!(rl.allow(&b));
+    }
+}
+
+#[cfg(test)]
+mod session_registry_tests {
+    use super::*;
+
+    fn empty_state() -> ServerState {
+        ServerState::new_for_test().expect("build in-memory ServerState")
+    }
+
+    #[tokio::test]
+    async fn session_register_lookup_remove() {
+        let state = empty_state();
+        let pk = farder_crypto::identity::Keypair::generate().public_key();
+        let token = [7u8; 32];
+        assert!(state.lookup_session(&token).await.is_none());
+        state.register_session(token, pk.clone(), true).await;
+        let got = state.lookup_session(&token).await.expect("present");
+        assert_eq!(got.0, pk);
+        assert!(got.1, "is_owner preserved");
+        state.remove_session(&token).await;
+        assert!(state.lookup_session(&token).await.is_none());
     }
 }
