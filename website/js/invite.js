@@ -75,6 +75,13 @@
    * focused after ~1.5 s the app probably didn't open.
    */
   function tryOpenDeepLink(deepLink, statusEl) {
+    // Defense-in-depth: only ever open farder:// deep links (never javascript:, etc.).
+    if (typeof deepLink !== "string" || deepLink.indexOf("farder://") !== 0) {
+      statusEl.textContent = "Invalid invite link.";
+      statusEl.className = "invite-status error";
+      return;
+    }
+
     statusEl.textContent = "Opening Farder…";
     statusEl.className = "invite-status";
 
