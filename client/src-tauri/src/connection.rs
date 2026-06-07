@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 use farder_crypto::identity::Keypair;
 use farder_protocol::{
     codec,
-    server::{ClientFrame, ServerFrame},
+    messages::Message,
+    server::{ClientFrame, RelayStreamRole, ServerFrame},
 };
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use std::net::SocketAddr;
@@ -112,13 +113,25 @@ pub async fn connect_and_authenticate(
         .await
         .context("failed to accept bi-stream from server")?;
 
-    // Step 3: receive challenge nonce
-    let nonce = match recv_server_frame(&mut recv).await? {
+    // Steps 3-5: run the shared challenge-response handshake.
+    let session_token =
+        run_client_handshake(&mut send, &mut recv, keypair, invite_code, setup_token).await?;
+    Ok((conn, send, recv, session_token))
+}
+
+/// Run the challenge-response auth handshake over an established stream pair.
+/// Shared by the direct and relay connect paths. Returns the session token.
+pub async fn run_client_handshake(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    keypair: &Keypair,
+    invite_code: Option<String>,
+    setup_token: Option<String>,
+) -> Result<Vec<u8>> {
+    let nonce = match recv_server_frame(recv).await? {
         ServerFrame::Challenge { nonce } => nonce,
         other => bail!("expected Challenge, got {:?}", other),
     };
-
-    // Step 4: sign the nonce and authenticate
     let signed_challenge = keypair.sign(&nonce);
     let public_key = keypair.public_key();
     let auth_frame = ClientFrame::Authenticate {
@@ -127,17 +140,50 @@ pub async fn connect_and_authenticate(
         invite_code,
         setup_token,
     };
-    send_client_frame(&mut send, &auth_frame)
+    send_client_frame(send, &auth_frame)
         .await
         .context("failed to send Authenticate frame")?;
-
-    // Step 5: receive authentication result
-    let session_token = match recv_server_frame(&mut recv).await? {
-        ServerFrame::Authenticated { session_token } => session_token,
+    match recv_server_frame(recv).await? {
+        ServerFrame::Authenticated { session_token } => Ok(session_token),
         ServerFrame::AuthError { reason } => bail!("authentication failed: {}", reason),
         other => bail!("unexpected frame after auth: {:?}", other),
-    };
+    }
+}
 
+/// Connect to a relayed server THROUGH its relay. The relay bridges the client's
+/// streams to the server, so the server only ever sees the relay's address
+/// (closes Gap #3). The caller must pass an endpoint that pins the relay's cert
+/// (see `tls::make_pinned_relay_endpoint`).
+pub async fn connect_via_relay(
+    endpoint: Endpoint,
+    target: &RelayTarget,
+    keypair: &Keypair,
+    invite_code: Option<String>,
+    setup_token: Option<String>,
+) -> Result<(Connection, SendStream, RecvStream, Vec<u8>)> {
+    let conn = endpoint
+        .connect(target.relay_addr, "farder-relay")
+        .context("failed to initiate relay connection")?
+        .await
+        .context("relay QUIC handshake failed")?;
+
+    // RelayConnect handshake on the first bi-stream.
+    let (mut rc_send, mut rc_recv) = conn.open_bi().await.context("open relay control stream")?;
+    let connect_msg = codec::encode(&Message::RelayConnect {
+        destination_id: target.server_id.clone(),
+    })?;
+    write_frame(&mut rc_send, &connect_msg).await?;
+    match codec::decode::<Message>(&read_frame(&mut rc_recv).await?)? {
+        Message::RelayConnected => {}
+        Message::RelayError { reason } => bail!("relay refused: {}", reason),
+        other => bail!("unexpected relay reply: {:?}", other),
+    }
+
+    // Open the primary stream, mark it Primary, then run the normal handshake.
+    let (mut send, mut recv) = conn.open_bi().await.context("open primary stream")?;
+    write_frame(&mut send, &codec::encode(&RelayStreamRole::Primary)?).await?;
+    let session_token =
+        run_client_handshake(&mut send, &mut recv, keypair, invite_code, setup_token).await?;
     Ok((conn, send, recv, session_token))
 }
 
