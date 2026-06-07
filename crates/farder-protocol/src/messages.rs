@@ -6,6 +6,8 @@ pub enum Message {
     RelayConnect { destination_id: Vec<u8> },
     RelayConnected,
     RelayError { reason: String },
+    RelayRegister { server_id: Vec<u8> },
+    RelayRegistered,
     KeyExchange { sender: PublicKey, session_public_key: [u8; 32] },
     KeyExchangeResponse { responder: PublicKey, session_public_key: [u8; 32] },
     EncryptedDm { sender: PublicKey, ciphertext: Vec<u8>, timestamp: u64 },
@@ -85,6 +87,24 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_roundtrip_relay_register() {
+        let msg = Message::RelayRegister { server_id: vec![9u8, 8, 7, 6] };
+        let encoded = codec::encode(&msg).expect("encode failed");
+        let decoded: Message = codec::decode(&encoded).expect("decode failed");
+        match decoded {
+            Message::RelayRegister { server_id } => assert_eq!(server_id, vec![9u8, 8, 7, 6]),
+            other => panic!("expected RelayRegister, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_relay_registered() {
+        let encoded = codec::encode(&Message::RelayRegistered).expect("encode failed");
+        let decoded: Message = codec::decode(&encoded).expect("decode failed");
+        assert!(matches!(decoded, Message::RelayRegistered));
     }
 
     #[test]
