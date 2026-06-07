@@ -1,7 +1,10 @@
 # Relay / IP-Masking — Design Spec
 
 **Date:** 2026-06-06
-**Status:** Approved (architecture + decomposition); Phase 1 ready to plan
+**Status:** Approved (architecture + decomposition). **Phase 1 DONE** (2026-06-06,
+branch `relay-phase1-harden`): relay is a working, tested rendezvous server
+(register/connect/bridge + persistent cert), all integration tests green; the
+binary boots and writes its key as `0600`. Phases 2–5 remain.
 **Audit origin:** `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #3 (MED)
 
 ## Problem
