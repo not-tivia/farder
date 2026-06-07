@@ -42,6 +42,18 @@ pub fn parse_relay_target(s: &str) -> Option<RelayTarget> {
     })
 }
 
+/// Build a relay deep link from a target and a (new) invite code:
+/// `farder://relay/<relay_addr>/<server_id_hex>/<cert_fp_hex>/<code>`.
+pub fn build_relay_link(target: &RelayTarget, code: &str) -> String {
+    format!(
+        "farder://relay/{}/{}/{}/{}",
+        target.relay_addr,
+        hex::encode(&target.server_id),
+        hex::encode(&target.cert_fp),
+        code
+    )
+}
+
 /// Read a length-prefixed frame (4-byte big-endian length header).
 pub async fn read_frame(recv: &mut RecvStream) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
@@ -219,6 +231,23 @@ mod tests {
         assert!(parse_relay_target("farder://relay/1.2.3.4:4433/aabb").is_none()); // too few parts
         assert!(parse_relay_target("https://example.com").is_none());
         assert!(parse_relay_target("farder://relay/notanaddr/aa/bb/t").is_none()); // bad addr
+    }
+
+    #[test]
+    fn build_relay_link_roundtrips_with_new_code() {
+        let target = RelayTarget {
+            relay_addr: "1.2.3.4:4433".parse().unwrap(),
+            server_id: vec![0xaa, 0xbb],
+            cert_fp: vec![0xcc, 0xdd],
+            invite_token: "old".into(),
+        };
+        let link = build_relay_link(&target, "NEWCODE");
+        assert_eq!(link, "farder://relay/1.2.3.4:4433/aabb/ccdd/NEWCODE");
+        let back = parse_relay_target(&link).expect("parses");
+        assert_eq!(back.relay_addr, target.relay_addr);
+        assert_eq!(back.server_id, target.server_id);
+        assert_eq!(back.cert_fp, target.cert_fp);
+        assert_eq!(back.invite_token, "NEWCODE");
     }
 }
 

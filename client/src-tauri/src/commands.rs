@@ -1507,12 +1507,21 @@ pub async fn create_invite(
     .map_err(|e| e.to_string())?;
     match response {
         ServerResponse::InviteCreated { code } => {
-            // Build the https://farder.gg/join/ link using server_id as the address
             use base64::Engine;
-            let plain = format!("{}/{}", server_id, code);
-            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plain.as_bytes());
+            let (encoded, deep_link) =
+                if let Some(target) = crate::connection::parse_relay_target(&server_id) {
+                    let deep_link = crate::connection::build_relay_link(&target, &code);
+                    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(deep_link.as_bytes());
+                    (encoded, deep_link)
+                } else {
+                    let plain = format!("{}/{}", server_id, code);
+                    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(plain.as_bytes());
+                    let deep_link = format!("farder://{}/{}", server_id, code);
+                    (encoded, deep_link)
+                };
             let link = format!("https://farder.gg/join/{}", encoded);
-            let deep_link = format!("farder://{}/{}", server_id, code);
             Ok(InviteResult { code, link, deep_link })
         }
         ServerResponse::Error { reason } => Err(reason),
