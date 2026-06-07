@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useApp } from "../context/ServerContext";
+import { parseInviteLink } from "../lib/invite";
 
 type Step = "setup" | "choice" | "create-1" | "create-2" | "join";
 
@@ -12,73 +13,6 @@ const DEFAULT_TEMPLATES = [
   { id: "public-community", name: "Community", description: "Public community with moderation" },
 ];
 
-/** Parse a farder:// invite link into address + invite/setup token.
- *  Formats:
- *    farder://host:port/inviteCode
- *    farder://host:port/setup:hextoken
- *    host:port (bare address, no invite)
- *    raw invite code or setup token (used with saved server address)
- */
-function parseInviteLink(input: string): {
-  address?: string;
-  inviteCode?: string;
-  setupToken?: string;
-} {
-  const trimmed = input.trim();
-  if (!trimmed) return {};
-
-  // farder.gg/join/ENCODED format
-  const joinMatch = trimmed.match(/(?:https?:\/\/)?farder\.gg\/join\/([A-Za-z0-9_-]+)/);
-  if (joinMatch) {
-    try {
-      const decoded = atob(joinMatch[1].replace(/-/g, "+").replace(/_/g, "/"));
-      const slashIdx = decoded.indexOf("/");
-      if (slashIdx > 0) {
-        const address = decoded.substring(0, slashIdx);
-        const token = decoded.substring(slashIdx + 1);
-        if (token.startsWith("setup:")) {
-          return { address, setupToken: token.slice(6) };
-        }
-        return { address, inviteCode: token };
-      }
-    } catch {}
-  }
-
-  // farder:// protocol link
-  const farderMatch = trimmed.match(/^farder:\/\/([^/]+)\/(.+)$/i);
-  if (farderMatch) {
-    const address = farderMatch[1];
-    const token = farderMatch[2];
-    if (token.startsWith("setup:")) {
-      return { address, setupToken: token.slice(6) };
-    }
-    return { address, inviteCode: token };
-  }
-
-  // host:port/code format (without farder://)
-  const slashMatch = trimmed.match(/^([^/]+:\d+)\/(.+)$/);
-  if (slashMatch) {
-    const address = slashMatch[1];
-    const token = slashMatch[2];
-    if (token.startsWith("setup:")) {
-      return { address, setupToken: token.slice(6) };
-    }
-    return { address, inviteCode: token };
-  }
-
-  // 64-char hex = standalone setup token
-  if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-    return { setupToken: trimmed };
-  }
-
-  // host:port only (no invite)
-  if (/^.+:\d+$/.test(trimmed)) {
-    return { address: trimmed };
-  }
-
-  // Short string = invite code
-  return { inviteCode: trimmed };
-}
 
 export default function ConnectDialog() {
   const { dispatch } = useApp();
