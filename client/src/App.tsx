@@ -8,6 +8,7 @@ import IdentityGate from "./components/IdentityGate";
 import { TranslationFirstRunModal } from "./components/TranslationFirstRunModal";
 import ToastContainer from "./components/ToastContainer";
 import * as api from "./lib/tauri-bridge";
+import { parseInviteLink } from "./lib/invite";
 
 // Module-level guard: React StrictMode in dev mounts the root twice, which
 // would otherwise run init() twice — spawning duplicate local servers and
@@ -19,20 +20,18 @@ function AppInner() {
   const { state, dispatch } = useApp();
   const [initializing, setInitializing] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
+  const [pendingInvite, setPendingInvite] = useState<string | null>(null);
   useServerEvents();
 
   // Handle farder:// deep links passed via CLI argument at launch.
+  // The link can arrive before the identity is unlocked, so just queue it;
+  // a separate effect processes it once `unlocked` becomes true.
   useEffect(() => {
     const unlisten = listen<string>("deep-link", (e) => {
-      const url = e.payload;
-      const match = url.match(/^farder:\/\/([^/]+)\/(.+)$/);
-      if (!match) return;
-      const address = match[1];
-      const inviteCode = match[2];
-      console.log("[deep-link] invite:", address, inviteCode);
+      setPendingInvite(e.payload);
     });
     return () => { unlisten.then((u) => u()); };
-  }, [dispatch]);
+  }, []);
 
   useEffect(() => {
     if (!unlocked) return;
@@ -79,6 +78,35 @@ function AppInner() {
     }
     init().catch(() => setInitializing(false));
   }, [unlocked]);
+
+  // Process a queued farder:// deep link once the identity is unlocked.
+  useEffect(() => {
+    if (!unlocked || !pendingInvite) return;
+    const url = pendingInvite;
+    setPendingInvite(null);
+    (async () => {
+      const parsed = parseInviteLink(url);
+      if (!parsed.address) {
+        console.error("[deep-link] unrecognized invite:", url);
+        return;
+      }
+      try {
+        const result = await api.connectServer(parsed.address, parsed.inviteCode, parsed.setupToken);
+        dispatch({ type: "SERVER_ADDED", serverId: parsed.address, payload: result });
+        dispatch({ type: "SET_ACTIVE_SERVER", serverId: parsed.address });
+        try {
+          const members = await api.getMembers(parsed.address);
+          dispatch({ type: "SET_MEMBERS", serverId: parsed.address, payload: members });
+        } catch {}
+        try {
+          const dms = await api.listDms(parsed.address);
+          dispatch({ type: "SET_DMS", serverId: parsed.address, payload: dms });
+        } catch {}
+      } catch (e) {
+        console.error("[deep-link] failed to join from invite:", e);
+      }
+    })();
+  }, [unlocked, pendingInvite]);
 
   if (!unlocked) {
     return <IdentityGate onUnlocked={() => setUnlocked(true)} />;
