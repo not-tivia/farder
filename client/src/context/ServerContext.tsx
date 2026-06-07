@@ -20,6 +20,7 @@ export interface PerServerState {
   voiceStates: Record<number, { publicKey: string; displayName: string }[]>;
   currentVoiceChannelId: number | null;
   ownerPublicKey: string | null;
+  relayed: boolean;
   highlightMessageId: number | null;
 }
 
@@ -52,6 +53,7 @@ const initialPerServerState: PerServerState = {
   voiceStates: {},
   currentVoiceChannelId: null,
   ownerPublicKey: null,
+  relayed: false,
   highlightMessageId: null,
 };
 
@@ -372,6 +374,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         ownerPublicKey: payload.owner_public_key
           ? publicKeyToString(payload.owner_public_key)
           : null,
+        relayed: payload.relayed ?? false,
       };
 
       return {

@@ -80,6 +80,7 @@ export interface ConnectResult {
   categories: CategoryInfo[];
   roles: RoleInfo[];
   owner_public_key?: { bytes: number[] } | null;
+  relayed?: boolean;
 }
 
 export interface SendMessageResult {
