@@ -4,22 +4,27 @@
  * URL format:  farder.gg/join/ENCODED_TOKEN
  * Example:     farder.gg/join/cGxheS5mYXJkZXIuZ2c6NDQzNS9BYkMxMjN4WQ
  *
- * ENCODED_TOKEN is URL-safe base64 of "server_address/invite_code".
+ * ENCODED_TOKEN is URL-safe base64 (no padding) of either:
+ *   - "server_address/invite_code"  (direct server invite)
+ *   - "farder://..."                (relay or full deep link — self-describing)
  * Deep link:   farder://play.farder.gg:4435/AbC123xY
+ *              farder://relay/1.2.3.4:4433/aabb/ccdd/CODE
  */
 
 (function () {
   "use strict";
 
   /**
-   * Parse the URL to extract server address and invite code.
+   * Parse the URL to extract invite info.
    *
    * Primary format: /join/ENCODED_TOKEN
-   *   where ENCODED_TOKEN is URL-safe base64 of "server_address/invite_code".
+   *   where ENCODED_TOKEN is URL-safe base64 (no padding) of either:
+   *     - "server_address/invite_code"  -> returns { server, code }
+   *     - "farder://..."               -> returns { deepLink }  (relay / self-describing)
    *
-   * Fallback: ?server=...&code=... query string form.
+   * Fallback: ?server=...&code=... query string form -> returns { server, code }.
    *
-   * Returns { server, code } or null if the URL doesn't match.
+   * Returns { server, code }, { deepLink }, or null if the URL doesn't match.
    */
   function parseInviteUrl() {
     var path = window.location.pathname;
@@ -28,8 +33,12 @@
     var joinMatch = path.match(/\/join\/([A-Za-z0-9_-]+)/);
     if (joinMatch) {
       try {
-        var encoded = joinMatch[1].replace(/-/g, '+').replace(/_/g, '/');
-        var decoded = atob(encoded);
+        var b64 = joinMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) b64 += '=';
+        var decoded = atob(b64);
+        if (decoded.indexOf('farder://') === 0) {
+          return { deepLink: decoded };           // relay (or any full) deep link
+        }
         var slashIdx = decoded.indexOf('/');
         if (slashIdx > 0) {
           return {
@@ -66,7 +75,7 @@
    * focused after ~1.5 s the app probably didn't open.
    */
   function tryOpenDeepLink(deepLink, statusEl) {
-    statusEl.textContent = "Opening Farder\u2026";
+    statusEl.textContent = "Opening Farder…";
     statusEl.className = "invite-status";
 
     var iframe = document.createElement("iframe");
@@ -113,23 +122,41 @@
 
   /**
    * Render the "valid invite" UI into #invite-content.
+   *
+   * @param {Element} container    - The #invite-content element.
+   * @param {string|null} server   - Server address (null for relay/self-describing invites).
+   * @param {string|null} code     - Invite code (null for relay/self-describing invites).
+   * @param {string|null} deepLink - Pre-built deep link URI (takes priority over server+code).
    */
-  function renderValidInvite(container, server, code) {
-    var deepLink = buildDeepLink(server, code);
+  function renderValidInvite(container, server, code, deepLink) {
+    deepLink = deepLink || buildDeepLink(server, code);
+
+    // For relay invites the server address is embedded in the deep link itself —
+    // there is no user-friendly address/code to display.
+    var headerHtml;
+    if (server) {
+      headerHtml =
+        '<div class="invite-header">' +
+          '<div class="invite-server-icon">&#x1F310;</div>' +
+          '<div class="invite-heading">You’ve been invited to a Farder server!</div>' +
+          '<div class="invite-subheading">Server: <strong>' + escapeHtml(server) + "</strong></div>" +
+        "</div>" +
+        '<div class="invite-code-display">' +
+          '<div class="invite-code-label">Invite code</div>' +
+          '<div class="invite-code-value">' + escapeHtml(code) + "</div>" +
+        "</div>" +
+        '<hr class="invite-separator">';
+    } else {
+      headerHtml =
+        '<div class="invite-header">' +
+          '<div class="invite-server-icon">&#x1F310;</div>' +
+          '<div class="invite-heading">You’ve been invited to a Farder server!</div>' +
+        "</div>" +
+        '<hr class="invite-separator">';
+    }
 
     container.innerHTML =
-      '<div class="invite-header">' +
-        '<div class="invite-server-icon">&#x1F310;</div>' +
-        '<div class="invite-heading">You\u2019ve been invited to a Farder server!</div>' +
-        '<div class="invite-subheading">Server: <strong>' + escapeHtml(server) + "</strong></div>" +
-      "</div>" +
-
-      '<div class="invite-code-display">' +
-        '<div class="invite-code-label">Invite code</div>' +
-        '<div class="invite-code-value">' + escapeHtml(code) + "</div>" +
-      "</div>" +
-
-      '<hr class="invite-separator">' +
+      headerHtml +
 
       '<div class="invite-actions">' +
         '<button class="btn btn-blue" id="btn-open-farder">&#x1F680;&nbsp; Open in Farder</button>' +
@@ -181,7 +208,7 @@
       .replace(/'/g, "&#39;");
   }
 
-  // ── Entry point ───────────────────────────────────────────
+  // -- Entry point ---------------------------------------------------
 
   document.addEventListener("DOMContentLoaded", function () {
     var container = document.getElementById("invite-content");
@@ -189,8 +216,10 @@
 
     var parsed = parseInviteUrl();
 
-    if (parsed && parsed.server && parsed.code) {
-      renderValidInvite(container, parsed.server, parsed.code);
+    if (parsed && parsed.deepLink) {
+      renderValidInvite(container, null, null, parsed.deepLink);
+    } else if (parsed && parsed.server && parsed.code) {
+      renderValidInvite(container, parsed.server, parsed.code, null);
     } else {
       renderInvalidInvite(container);
     }
