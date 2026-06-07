@@ -14,9 +14,15 @@ integration tests + a real relay↔server binary smoke confirm it. **Phase 3a DO
 server via `connect_via_relay` (relay-cert pinned), files over `Session{token}`
 streams, voice refused over relay; a headless observation test asserts the server
 sees the relay's address, never the client's — **closes audit Gap #3**. Spec
-`2026-06-07-relay-phase3a-client-connection-design.md`. Remaining: **Phase 3b**
-(pretty `farder.com/invite` links + invite directory), **Phase 4** (relay UI),
-**Phase 5** (voice over relay).
+`2026-06-07-relay-phase3a-client-connection-design.md`. **Phase 3b DONE**
+(2026-06-07, branch `relay-phase3b-invites`): `create_invite` encodes a relayed
+server's full deep link into a self-describing `farder.gg/join/<base64>` web link
+(no backend); the static invite page (`website/js/invite.js`) opens it; a shared
+relay-aware `parseInviteLink` + the completed `App.tsx` deep-link handler join on
+click. Spec `2026-06-07-relay-phase3b-invite-links-design.md`. Remaining:
+**Phase 4** (relay UI: mark a server relayed, hide voice on relayed servers, a
+join-confirm dialog) and **Phase 5** (voice over relay), plus deploying the hosted
+default relay (ops). The click-to-join GUI flow is UNVERIFIED until a Windows run.
 **Audit origin:** `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #3 (MED)
 
 ## Problem

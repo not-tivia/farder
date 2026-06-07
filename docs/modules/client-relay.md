@@ -52,6 +52,28 @@ link as the server's address means reconnect on relaunch re-parses it — no
   relayed connection (datagrams aren't relayed). The datagram recv loop is not
   spawned for relayed connections.
 
+## Invite links (Phase 3b)
+
+A relayed server's "Create Invite" (`create_invite`, `commands.rs`) detects the
+relay form (`parse_relay_target`) and encodes the full relay deep link with the
+new code — `farder://relay/<addr>/<server_id>/<cert_fp>/<code>` via
+`build_relay_link` — as base64url into a self-describing
+`https://farder.gg/join/<base64>` web link (no backend). Direct invites keep their
+existing `address/code` encoding.
+
+When a friend clicks the link, the static page `website/js/invite.js` base64-decodes
+the payload; if it starts with `farder://` it opens that deep link directly
+(`tryOpenDeepLink` only ever opens `farder://` URLs). The OS hands the app a
+`deep-link` event; the `App.tsx` handler queues it until the identity is unlocked,
+then `parseInviteLink` (shared, relay-aware, `client/src/lib/invite.ts`) turns it
+into a connection target and joins via `connect_server` (which takes the relay path
+from 3a). `parseInviteLink` returns a relay deep link whole as `address`; direct
+links return `address` + `inviteCode`/`setupToken`.
+
+The full click-to-join flow needs the OS deep-link handler + a live relay and is
+verified on the Windows build (headless guards: the Rust link round-trip test +
+tsc + a node base64 round-trip).
+
 ## Trust / limits
 
 - The relay's cert is pinned by fingerprint from the connection info (Phase 3a).
