@@ -1,4 +1,4 @@
-use crate::{attachments, auth, channels, events::EventTarget, handlers, members, permissions, state::ServerState};
+use crate::{attachments, auth, channels, events::EventTarget, handlers, members, permissions, state::{EventSender, ServerState}};
 use anyhow::{Context, Result};
 use farder_crypto::identity::PublicKey;
 use farder_protocol::{codec, server::*};
@@ -378,7 +378,7 @@ async fn handle_fetch_url(
 // Auxiliary stream dispatcher
 // ---------------------------------------------------------------------------
 
-async fn handle_auxiliary_stream(
+pub(crate) async fn handle_auxiliary_stream(
     state: &Arc<ServerState>,
     member_key: &PublicKey,
     is_owner: bool,
@@ -401,18 +401,34 @@ async fn handle_auxiliary_stream(
 }
 
 // ---------------------------------------------------------------------------
-// Main handler (public)
+// Authentication (shared by direct + relay paths)
 // ---------------------------------------------------------------------------
 
-pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection) -> Result<()> {
-    let (mut send, mut recv) = conn.open_bi().await?;
+/// Result of a successful authentication handshake on a (send, recv) pair.
+pub(crate) struct AuthOutcome {
+    pub public_key: PublicKey,
+    pub pk_bytes: [u8; 32],
+    pub is_owner: bool,
+    pub session_token: [u8; 32],
+    pub event_rx: tokio::sync::mpsc::Receiver<ServerEvent>,
+    pub event_tx: EventSender,
+}
 
+/// Run the auth handshake (challenge → authenticate → register) over the given
+/// control streams. On success, the client is registered in `state.clients`,
+/// the session token is registered in the session registry, and `MemberJoined`
+/// has been broadcast. Does NOT touch `voice_connections` (direct-mode only).
+pub(crate) async fn authenticate(
+    state: &Arc<ServerState>,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<AuthOutcome> {
     // Step 1: Send challenge
     let nonce = auth::generate_challenge();
-    send_server_frame(&mut send, &ServerFrame::Challenge { nonce }).await?;
+    send_server_frame(send, &ServerFrame::Challenge { nonce }).await?;
 
     // Step 2: Receive authentication frame
-    let client_frame = recv_client_frame(&mut recv).await?;
+    let client_frame = recv_client_frame(recv).await?;
     let (public_key, signed_challenge, invite_code, setup_token) = match client_frame {
         ClientFrame::Authenticate {
             public_key,
@@ -422,7 +438,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         } => (public_key, signed_challenge, invite_code, setup_token),
         _ => {
             let _ = send_server_frame(
-                &mut send,
+                send,
                 &ServerFrame::AuthError {
                     reason: "expected Authenticate frame".to_string(),
                 },
@@ -435,7 +451,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     // Step 3: Verify signature
     if let Err(e) = auth::verify_challenge(&public_key, &nonce, &signed_challenge) {
         let reason = format!("signature verification failed: {}", e);
-        let _ = send_server_frame(&mut send, &ServerFrame::AuthError { reason: reason.clone() }).await;
+        let _ = send_server_frame(send, &ServerFrame::AuthError { reason: reason.clone() }).await;
         anyhow::bail!("{}", reason);
     }
 
@@ -491,7 +507,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     match &auth_result {
         Err(reason) => {
             let _ = send_server_frame(
-                &mut send,
+                send,
                 &ServerFrame::AuthError {
                     reason: reason.clone(),
                 },
@@ -504,7 +520,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 
     let session_token = auth::generate_session_token();
     send_server_frame(
-        &mut send,
+        send,
         &ServerFrame::Authenticated {
             session_token: session_token.to_vec(),
         },
@@ -513,6 +529,13 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 
     info!("client authenticated: {}", public_key);
 
+    // Step 8: Check is_owner (computed before registry inserts so the session
+    // registry records the correct owner flag in a single insert).
+    let is_owner = {
+        let owner = state.owner.read().await;
+        owner.as_ref().map(|o| o == &public_key).unwrap_or(false)
+    };
+
     // Step 6: Register client in state.clients
     let (event_tx, event_rx) = mpsc::channel::<ServerEvent>(64);
     let our_event_tx = event_tx.clone();
@@ -520,10 +543,9 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         let mut clients = state.clients.write().await;
         clients.insert(pk_bytes, event_tx);
     }
-    {
-        let mut voice_conns = state.voice_connections.write().await;
-        voice_conns.insert(pk_bytes, conn.clone());
-    }
+
+    // Register the session token once, with the correct is_owner flag.
+    state.register_session(session_token, public_key.clone(), is_owner).await;
 
     // Step 7: Broadcast MemberJoined to all
     let display_name = {
@@ -534,7 +556,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     };
 
     broadcast_event(
-        &state,
+        state,
         EventTarget::All,
         ServerEvent::MemberJoined {
             public_key: public_key.clone(),
@@ -543,11 +565,83 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     )
     .await;
 
-    // Step 8: Check is_owner
-    let is_owner = {
-        let owner = state.owner.read().await;
-        owner.as_ref().map(|o| o == &public_key).unwrap_or(false)
-    };
+    Ok(AuthOutcome {
+        public_key,
+        pk_bytes,
+        is_owner,
+        session_token,
+        event_rx,
+        event_tx: our_event_tx,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Session cleanup (shared by direct + relay paths)
+// ---------------------------------------------------------------------------
+
+/// Tear down per-client registry state when the primary session ends: remove the
+/// session token, evict from `state.clients` (only if still ours), drop all
+/// subscriptions, and broadcast `MemberLeft`. Does NOT touch `voice_connections`
+/// (direct-mode only).
+pub(crate) async fn cleanup_session(
+    state: &Arc<ServerState>,
+    public_key: &PublicKey,
+    pk_bytes: [u8; 32],
+    event_tx: &EventSender,
+    session_token: &[u8; 32],
+) {
+    state.remove_session(session_token).await;
+
+    // Only remove from the clients map if WE'RE still the registered sender —
+    // otherwise a newer connection from the same identity has taken over and
+    // we'd evict its entry, killing the live session.
+    {
+        let mut clients = state.clients.write().await;
+        let still_ours = clients
+            .get(&pk_bytes)
+            .map(|existing| existing.same_channel(event_tx))
+            .unwrap_or(false);
+        if still_ours {
+            clients.remove(&pk_bytes);
+        }
+    }
+    {
+        let mut subs = state.subscriptions.write().await;
+        for (_channel_id, subscribers) in subs.iter_mut() {
+            subscribers.remove(&pk_bytes);
+        }
+    }
+    broadcast_event(
+        state,
+        EventTarget::All,
+        ServerEvent::MemberLeft {
+            public_key: public_key.clone(),
+        },
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Main handler (public)
+// ---------------------------------------------------------------------------
+
+pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection) -> Result<()> {
+    let (mut send, mut recv) = conn.open_bi().await?;
+
+    let AuthOutcome {
+        public_key,
+        pk_bytes,
+        is_owner,
+        session_token,
+        event_rx,
+        event_tx,
+    } = authenticate(&state, &mut send, &mut recv).await?;
+
+    // Direct-only: register the connection for voice.
+    {
+        let mut voice_conns = state.voice_connections.write().await;
+        voice_conns.insert(pk_bytes, conn.clone());
+    }
 
     // Step 9: Spawn auxiliary stream acceptor
     let conn_clone = conn.clone();
@@ -723,34 +817,9 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     datagram_task.abort();
 
     // Step 11: Cleanup on disconnect.
-    // Only remove from the clients map if WE'RE still the registered sender —
-    // otherwise a newer connection from the same identity has taken over and
-    // we'd evict its entry, killing the live session.
-    {
-        let mut clients = state.clients.write().await;
-        let still_ours = clients
-            .get(&pk_bytes)
-            .map(|existing| existing.same_channel(&our_event_tx))
-            .unwrap_or(false);
-        if still_ours {
-            clients.remove(&pk_bytes);
-        }
-    }
+    // Direct-only: drop the voice connection registration.
     state.voice_connections.write().await.remove(&pk_bytes);
-    {
-        let mut subs = state.subscriptions.write().await;
-        for (_channel_id, subscribers) in subs.iter_mut() {
-            subscribers.remove(&pk_bytes);
-        }
-    }
-    broadcast_event(
-        &state,
-        EventTarget::All,
-        ServerEvent::MemberLeft {
-            public_key: public_key.clone(),
-        },
-    )
-    .await;
+    cleanup_session(&state, &public_key, pk_bytes, &event_tx, &session_token).await;
 
     if let Err(e) = loop_result {
         warn!("client {} disconnected with error: {}", public_key, e);
@@ -765,7 +834,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 // Main loop (private)
 // ---------------------------------------------------------------------------
 
-async fn main_loop(
+pub(crate) async fn main_loop(
     state: Arc<ServerState>,
     member_key: PublicKey,
     is_owner: bool,
