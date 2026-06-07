@@ -154,11 +154,13 @@ pub async fn run_client_handshake(
 /// streams to the server, so the server only ever sees the relay's address
 /// (closes Gap #3). The caller must pass an endpoint that pins the relay's cert
 /// (see `tls::make_pinned_relay_endpoint`).
+///
+/// Authentication uses `target.invite_token` (extracted from the relay link)
+/// as the invite code — no separate invite code parameter is needed.
 pub async fn connect_via_relay(
     endpoint: Endpoint,
     target: &RelayTarget,
     keypair: &Keypair,
-    invite_code: Option<String>,
     setup_token: Option<String>,
 ) -> Result<(Connection, SendStream, RecvStream, Vec<u8>)> {
     let conn = endpoint
@@ -178,12 +180,20 @@ pub async fn connect_via_relay(
         Message::RelayError { reason } => bail!("relay refused: {}", reason),
         other => bail!("unexpected relay reply: {:?}", other),
     }
+    // Control stream is done; finish it gracefully (avoid a reset frame).
+    let _ = rc_send.finish();
 
     // Open the primary stream, mark it Primary, then run the normal handshake.
     let (mut send, mut recv) = conn.open_bi().await.context("open primary stream")?;
     write_frame(&mut send, &codec::encode(&RelayStreamRole::Primary)?).await?;
-    let session_token =
-        run_client_handshake(&mut send, &mut recv, keypair, invite_code, setup_token).await?;
+    let session_token = run_client_handshake(
+        &mut send,
+        &mut recv,
+        keypair,
+        Some(target.invite_token.clone()),
+        setup_token,
+    )
+    .await?;
     Ok((conn, send, recv, session_token))
 }
 
