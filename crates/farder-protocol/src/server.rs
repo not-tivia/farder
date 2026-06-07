@@ -176,6 +176,17 @@ pub struct OverrideInfo {
     pub deny: u64,
 }
 
+/// First frame on every relay-bridged stream, identifying its role. Relay-mode
+/// only; direct connections do not use it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RelayStreamRole {
+    /// A new client session: the server runs the auth handshake on this stream.
+    Primary,
+    /// A file-transfer stream for an already-authenticated session, identified
+    /// by the session token the server issued at login.
+    Session { token: Vec<u8> },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientFrame {
     Authenticate {
@@ -626,6 +637,20 @@ mod tests {
             let frame = ServerFrame::Event(ev);
             let bytes = codec::encode(&frame).unwrap();
             let _decoded: ServerFrame = codec::decode(&bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_relay_stream_role() {
+        let p = RelayStreamRole::Primary;
+        let back: RelayStreamRole = codec::decode(&codec::encode(&p).unwrap()).unwrap();
+        assert!(matches!(back, RelayStreamRole::Primary));
+
+        let s = RelayStreamRole::Session { token: vec![1u8, 2, 3] };
+        let back: RelayStreamRole = codec::decode(&codec::encode(&s).unwrap()).unwrap();
+        match back {
+            RelayStreamRole::Session { token } => assert_eq!(token, vec![1u8, 2, 3]),
+            other => panic!("expected Session, got {other:?}"),
         }
     }
 
