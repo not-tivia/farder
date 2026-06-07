@@ -27,7 +27,17 @@ fn load_or_generate_cert(
     let cert_der = certified.cert.der().to_vec();
     let key_der = certified.key_pair.serialize_der();
     std::fs::write(&cert_path, &cert_der)?;
+    // NOTE: first-run is check-then-write; two relays booting on the same
+    // data_dir simultaneously could race to generate mismatched cert/key.
+    // Low-risk for a single relay process; revisit with atomic write/lock if
+    // we ever run multiple relays sharing a data dir.
     std::fs::write(&key_path, &key_der)?;
+    // The private key must not be world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     let key = PrivateKeyDer::try_from(key_der).map_err(|e| anyhow::anyhow!("key parse: {}", e))?;
     Ok((CertificateDer::from(cert_der), key))
 }
