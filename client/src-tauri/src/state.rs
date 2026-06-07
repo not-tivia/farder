@@ -18,6 +18,11 @@ pub struct ServerConnection {
     /// Dispatcher for inbound QUIC media datagrams; fed by the datagram recv
     /// loop spawned in commands.rs immediately after authentication.
     pub media_dispatcher: Arc<MediaInboundDispatcher>,
+    /// Session token issued at login; presented on relay file-transfer streams.
+    pub session_token: Vec<u8>,
+    /// True if this connection is routed through a relay (so file streams need a
+    /// RelayStreamRole::Session marker and voice is unavailable).
+    pub relayed: bool,
 }
 
 impl ServerConnection {

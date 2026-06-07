@@ -1,5 +1,6 @@
 use crate::bridge;
 use crate::connection::connect_and_authenticate;
+use crate::connection::connect_via_relay;
 use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
@@ -396,16 +397,26 @@ pub async fn connect_server(
         }
     };
 
-    let addr: std::net::SocketAddr = address
-        .parse()
-        .map_err(|e: std::net::AddrParseError| e.to_string())?;
-
-    let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
-
-    let (conn, send, recv, _session_token) =
-        connect_and_authenticate(endpoint.clone(), addr, &keypair, invite_code, setup_token)
-            .await
-            .map_err(|e| e.to_string())?;
+    let (endpoint, conn, send, recv, session_token, relayed) =
+        if let Some(target) = crate::connection::parse_relay_target(&address) {
+            let endpoint = crate::tls::make_pinned_relay_endpoint(target.cert_fp.clone())
+                .map_err(|e| e.to_string())?;
+            let (conn, send, recv, token) =
+                connect_via_relay(endpoint.clone(), &target, &keypair, setup_token)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            (endpoint, conn, send, recv, token, true)
+        } else {
+            let addr: std::net::SocketAddr = address
+                .parse()
+                .map_err(|e: std::net::AddrParseError| e.to_string())?;
+            let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
+            let (conn, send, recv, token) =
+                connect_and_authenticate(endpoint.clone(), addr, &keypair, invite_code, setup_token)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            (endpoint, conn, send, recv, token, false)
+        };
 
     let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
     {
@@ -434,6 +445,8 @@ pub async fn connect_server(
         event_reader_handle: Mutex::new(None),
         server_name: Mutex::new(String::new()),
         media_dispatcher,
+        session_token,
+        relayed,
     });
 
     let handle = bridge::spawn_event_reader(app, address.clone(), Arc::clone(&server_conn), recv);
@@ -2302,7 +2315,7 @@ pub async fn create_local_server(
         .parse()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
 
-    let (conn, send, recv, _session_token) =
+    let (conn, send, recv, session_token) =
         connect_and_authenticate(endpoint.clone(), addr, &keypair, None, None)
             .await
             .map_err(|e| e.to_string())?;
@@ -2335,6 +2348,8 @@ pub async fn create_local_server(
         event_reader_handle: Mutex::new(None),
         server_name: Mutex::new(name.clone()),
         media_dispatcher,
+        session_token,
+        relayed: false,
     });
 
     let handle = bridge::spawn_event_reader(app.clone(), address.clone(), Arc::clone(&server_conn), recv);
