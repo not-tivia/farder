@@ -115,6 +115,13 @@ async fn handle_register(
     let ack = codec::encode(&Message::RelayRegistered)?;
     write_message(&mut send, &ack).await?;
 
+    // Route datagrams the server sends back to the right relayed client.
+    let route_state = state.clone();
+    let route_conn = conn.clone();
+    tokio::spawn(async move {
+        crate::datagram::route_server_datagrams(route_conn, route_state).await;
+    });
+
     // Keep the control connection alive; clean up on close.
     conn.closed().await;
     let mut map = state.servers.write().await;
@@ -151,6 +158,13 @@ async fn handle_connect(
 
             // Announce the new lane to the destination server (reliable control stream).
             announce(&control, &Message::RelayClientConnected { handle }).await;
+
+            // Forward the client's voice datagrams to the server, tagged with its handle.
+            let fwd_client = client_conn.clone();
+            let fwd_server = server_conn.clone();
+            tokio::spawn(async move {
+                crate::datagram::forward_client_datagrams(fwd_client, fwd_server, handle).await;
+            });
 
             // Bridge the client's streams (blocks until the client disconnects).
             let bridge_result = bridge_client(client_conn, server_conn).await;
@@ -593,6 +607,91 @@ mod tests {
             Message::RelayClientDisconnected { handle: h } => assert_eq!(h, handle),
             other => panic!("expected RelayClientDisconnected, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn forwards_client_datagram_tagged_with_handle() {
+        let (relay, _state) = start_relay().await;
+        let id = vec![6u8; 16];
+        let (_server, mut ctrl_rx, mut dg_rx) = register_capturing_server(relay, id.clone()).await;
+
+        let (client, _client_ep, reply) = client_connect_dg(relay, id).await;
+        assert!(matches!(reply, Message::RelayConnected));
+        let handle = match recv_timeout(&mut ctrl_rx, "RelayClientConnected").await {
+            Message::RelayClientConnected { handle } => handle,
+            other => panic!("got {other:?}"),
+        };
+
+        client.send_datagram(Bytes::from_static(b"voicepacket")).unwrap();
+        let got = recv_timeout(&mut dg_rx, "forwarded datagram").await;
+
+        let mut expected = handle.to_be_bytes().to_vec();
+        expected.extend_from_slice(b"voicepacket");
+        assert_eq!(got.as_ref(), expected.as_slice(), "server must receive [handle][payload]");
+    }
+
+    #[tokio::test]
+    async fn routes_server_datagram_to_correct_client() {
+        let (relay, _state) = start_relay().await;
+        let id = vec![7u8; 16];
+        let (server, mut ctrl_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
+
+        // Two clients connect; capture both handles in announce order.
+        let (client1, _ep1, _r1) = client_connect_dg(relay, id.clone()).await;
+        let h1 = match recv_timeout(&mut ctrl_rx, "connect 1").await {
+            Message::RelayClientConnected { handle } => handle,
+            other => panic!("got {other:?}"),
+        };
+        let (client2, _ep2, _r2) = client_connect_dg(relay, id).await;
+        let h2 = match recv_timeout(&mut ctrl_rx, "connect 2").await {
+            Message::RelayClientConnected { handle } => handle,
+            other => panic!("got {other:?}"),
+        };
+        assert_ne!(h1, h2);
+
+        // Server sends a datagram tagged for client 2 only.
+        let mut for_c2 = h2.to_be_bytes().to_vec();
+        for_c2.extend_from_slice(b"hello-two");
+        server.send_datagram(Bytes::from(for_c2)).unwrap();
+
+        // Client 2 receives the stripped payload.
+        let got2 = tokio::time::timeout(Duration::from_secs(5), client2.read_datagram())
+            .await
+            .expect("client 2 timed out")
+            .unwrap();
+        assert_eq!(got2.as_ref(), b"hello-two");
+
+        // Client 1 receives nothing within a short window (selective routing).
+        let none = tokio::time::timeout(Duration::from_millis(300), client1.read_datagram()).await;
+        assert!(none.is_err(), "client 1 must not receive a datagram tagged for client 2");
+    }
+
+    #[tokio::test]
+    async fn unknown_handle_datagram_is_dropped() {
+        let (relay, _state) = start_relay().await;
+        let id = vec![8u8; 16];
+        let (server, mut ctrl_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
+
+        let (client, _ep, _r) = client_connect_dg(relay, id).await;
+        let handle = match recv_timeout(&mut ctrl_rx, "connect").await {
+            Message::RelayClientConnected { handle } => handle,
+            other => panic!("got {other:?}"),
+        };
+
+        // A datagram tagged with a never-assigned handle must be dropped (no panic).
+        let mut bogus = 999_999u32.to_be_bytes().to_vec();
+        bogus.extend_from_slice(b"nowhere");
+        server.send_datagram(Bytes::from(bogus)).unwrap();
+
+        // A subsequent valid datagram still routes - proving the loop survived.
+        let mut valid = handle.to_be_bytes().to_vec();
+        valid.extend_from_slice(b"real");
+        server.send_datagram(Bytes::from(valid)).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), client.read_datagram())
+            .await
+            .expect("valid datagram after a bogus one timed out")
+            .unwrap();
+        assert_eq!(got.as_ref(), b"real");
     }
 
     #[tokio::test]
