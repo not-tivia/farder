@@ -23,12 +23,13 @@ See the umbrella design `docs/superpowers/specs/2026-06-06-relay-ip-masking-desi
 - `clients: RwLock<HashMap<u32, Connection>>` -- live relayed clients by routing handle.
 - `next_handle: AtomicU32` -- monotonic handle allocator (starts at 1; 0 is reserved).
 
-## Datagram routing (Phase 5a)
+## Datagram routing (Phase 5b)
 
 Each relayed client gets a `u32` **handle** at `RelayConnect`. The relay:
-- announces `RelayClientConnected { handle }` / `RelayClientDisconnected { handle }`
-  to the destination server over its reliable control stream (so the server learns
-  every client's lane, even silent listeners);
+- **stamps each bridged stream** with the client's 4-byte big-endian handle
+  (`[handle: u32 BE]`) as a prefix written before the `RelayStreamRole` frame, so
+  the server can bind the handle to the authenticated member (authoritative
+  correlation -- no control-stream announce needed);
 - **forwards** client->server datagrams tagged `[handle:u32 BE][payload]`
   (`datagram::forward_client_datagrams`);
 - **routes** server->client datagrams by stripping the `[handle]` prefix and
@@ -46,20 +47,22 @@ never reads are dropped by QUIC. No relayed text/file traffic is affected.
 
 ## Protocol messages (`farder-protocol`)
 
-`RelayRegister`/`RelayRegistered`, `RelayConnect`/`RelayConnected`/`RelayError`,
-and the Phase-5a `RelayClientConnected { handle }` / `RelayClientDisconnected { handle }`.
+`RelayRegister`/`RelayRegistered`, `RelayConnect`/`RelayConnected`/`RelayError`.
+The Phase-5a `RelayClientConnected`/`RelayClientDisconnected` control-stream
+announce messages were REMOVED in Phase 5b; the handle stamp on the bridged
+stream replaces them.
 
-## Out of scope (Phase 5b)
+## Out of scope (5b-client)
 
-The server reading/producing tagged datagrams (voice fan-out over the relay), the
-client enabling datagrams on its pinned relay endpoint and re-enabling voice, and
-real-audio end-to-end verification. 5a is the relay half only, tested headlessly
-with doubles in `router.rs`'s `mod tests`.
+The client enabling datagrams on its pinned relay endpoint, running the relayed
+recv loop, dropping the `voice_join` refusal, and un-greying the voice UI. These
+are deferred to Phase 5b-client and are UNVERIFIED until a Windows + deployed-relay
+run.
 
 ## Tests
 
 `crates/farder-relay/src/router.rs` `#[cfg(test)] mod tests` (real-QUIC loopback,
-doubles): handle announce on connect/disconnect, datagram forward tagging, selective
-routing between two clients, unknown-handle drop, plus the Phase-1/2 bridge/registry
-tests (the backward-compat checkpoint). `farder-server`'s `relay_mode` integration
-tests are the cross-crate backward-compat gate.
+doubles): bridged-stream handle stamp, datagram forward tagging, selective routing
+between two clients, unknown-handle drop, plus the Phase-1/2 bridge/registry tests
+(the backward-compat checkpoint). `farder-server`'s `relay_mode` integration tests
+are the cross-crate backward-compat gate.

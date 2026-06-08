@@ -30,11 +30,14 @@ and `docs/modules/tauri-voice.md`/`server-connection.md` for the surrounding flo
 Every relay-bridged stream opens with a `farder_protocol::server::RelayStreamRole`
 frame (4-byte big-endian length + rmp_serde, matching `connection.rs`):
 
-- `Primary` → `run_relay_primary`: runs the existing `connection::authenticate`
-  (challenge → verify → `ServerFrame::Authenticated { session_token }`), which
-  registers the token in the session registry, then `connection::main_loop`, then
-  `connection::cleanup_session` (removes the token). Mirrors direct mode minus the
-  connection-specific voice/aux/datagram loops.
+- `Primary` → `run_relay_primary`: reads the 4-byte big-endian handle stamp
+  written by the relay before the `RelayStreamRole` frame, then runs the existing
+  `connection::authenticate` (challenge → verify → `ServerFrame::Authenticated
+  { session_token }`), which registers the token in the session registry, then
+  `connection::main_loop`, then `connection::cleanup_session` (removes the token).
+  After auth, registers `VoiceSink::Relayed { relay, handle }` in
+  `voice_connections` and `handle -> pk` in `relay_voice_handles`; both are
+  removed on cleanup.
 - `Session { token }` → `run_relay_aux`: `state.lookup_session(token)` →
   `(member_key, is_owner)` → `connection::handle_auxiliary_stream` (file
   upload/download). An unknown/expired token closes only that stream.
@@ -56,15 +59,38 @@ aux streams stay connection-trusted).
 ## Refactor seam (`crates/farder-server/src/connection.rs`)
 
 The per-client core is `pub(crate)`: `authenticate` (→ `AuthOutcome`),
-`cleanup_session`, `main_loop`, `handle_auxiliary_stream`. Direct
-`handle_connection` and `relay::run_relay_primary` both compose them; the relay
-path simply omits the `quinn::Connection`-specific aux-acceptor and datagram
-loops (voice over relay is deferred).
+`cleanup_session`, `main_loop`, `handle_auxiliary_stream`,
+`process_inbound_voice_frame`. Direct `handle_connection` and
+`relay::run_relay_primary` both compose them; the relay path runs the voice
+datagram loop on the relay connection rather than individual Quinn connections.
+
+## Voice over relay (Phase 5b)
+
+Voice is now served server-side over the relay connection:
+
+- `serve_relay_stream` reads the 4-byte big-endian handle stamp from the relay
+  before the `RelayStreamRole` frame (authoritative binding of stream to client).
+- `run_relay_primary` registers a `VoiceSink::Relayed { relay, handle }` in
+  `voice_connections` and `handle -> pk` in `relay_voice_handles` after successful
+  auth; both entries are removed on session cleanup.
+- `connect_and_serve` runs one voice datagram loop on the relay connection. It
+  demuxes incoming `[handle:u32 BE][frame]` datagrams by source handle (looked up
+  in `relay_voice_handles` to find the sender's `PublicKey`), then calls
+  `connection::process_inbound_voice_frame`, which fans out to each recipient
+  tagged by their `VoiceSink` (`Direct` or `Relayed { relay, handle }`).
+- `relay_client_endpoint` enables datagrams so the relay connection can carry
+  voice packets.
+- Stream-key offers ride the bridged control stream (primary session), so the
+  E2EE key-exchange path is unchanged.
+
+Note: the CLIENT half (datagram-enabled pinned relay endpoint, the relayed recv
+loop, dropping the `voice_join` refusal, un-greying the voice UI) is deferred to
+Phase 5b-client and is UNVERIFIED until a Windows + deployed-relay run.
 
 ## Trust / limits (this phase)
 
 - The server accepts the relay's cert without pinning (pinning is Phase 3).
-- No voice/datagrams over the relay (deferred).
+- Voice IS now served over the relay (server side; see above).
 - `server_id` is a public routing handle, not a secret.
 - Relay abuse controls (who may register, rate limits) are deferred.
 
