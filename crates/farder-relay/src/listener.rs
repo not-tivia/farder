@@ -56,6 +56,8 @@ pub fn create_endpoint(bind_addr: SocketAddr, data_dir: &Path) -> Result<Endpoin
             .try_into()
             .map_err(|e| anyhow::anyhow!("idle timeout: {:?}", e))?,
     ));
+    transport.datagram_receive_buffer_size(Some(1 << 20));
+    transport.datagram_send_buffer_size(1 << 20);
     server_config.transport_config(Arc::new(transport));
     let endpoint = Endpoint::server(server_config, bind_addr)?;
     info!("Relay listening on {}", bind_addr);

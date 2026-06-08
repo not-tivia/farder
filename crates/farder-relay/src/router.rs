@@ -229,6 +229,25 @@ mod tests {
         }
     }
 
+    /// Like `test_client_endpoint`, but with QUIC datagrams enabled -- needed to
+    /// exercise the relay's datagram forward/route paths.
+    fn test_client_endpoint_with_datagrams() -> Endpoint {
+        let crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipVerify))
+            .with_no_client_auth();
+        let mut client_config = quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
+        ));
+        let mut transport = quinn::TransportConfig::default();
+        transport.datagram_receive_buffer_size(Some(1 << 20));
+        transport.datagram_send_buffer_size(1 << 20);
+        client_config.transport_config(Arc::new(transport));
+        let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config);
+        endpoint
+    }
+
     fn test_client_endpoint() -> Endpoint {
         let crypto = rustls::ClientConfig::builder()
             .dangerous()
@@ -427,5 +446,39 @@ mod tests {
         assert!(attempt.is_err(), "connection over the cap must be refused");
         std::mem::forget(ep2);
         let _ = c1;
+    }
+
+    #[tokio::test]
+    async fn relay_endpoint_supports_datagrams() {
+        ensure_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let ep = crate::listener::create_endpoint("127.0.0.1:0".parse().unwrap(), dir.path()).unwrap();
+        let addr = ep.local_addr().unwrap();
+        std::mem::forget(dir);
+
+        // Relay side: accept one connection, read one datagram.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Some(inc) = ep.accept().await {
+                if let Ok(conn) = inc.await {
+                    if let Ok(dg) = conn.read_datagram().await {
+                        let _ = tx.send(dg.to_vec());
+                    }
+                }
+            }
+        });
+
+        // Client side: connect and send a datagram. If the relay endpoint did
+        // NOT advertise datagram support, send_datagram() returns UnsupportedByPeer
+        // and the unwrap below panics -- which is exactly the pre-implementation failure.
+        let cep = test_client_endpoint_with_datagrams();
+        let conn = cep.connect(addr, "farder-relay").unwrap().await.unwrap();
+        conn.send_datagram(bytes::Bytes::from_static(b"ping")).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("relay did not receive the datagram")
+            .unwrap();
+        assert_eq!(got, b"ping");
+        std::mem::forget(cep);
     }
 }
