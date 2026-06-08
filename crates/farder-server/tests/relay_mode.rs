@@ -194,24 +194,17 @@ async fn relay_connect(destination_id: Vec<u8>, client_conn: Connection, mut sen
     match dest {
         Some(server_conn) => {
             write_framed(&mut send, &codec::encode(&Message::RelayConnected).unwrap()).await;
-            // Bridge every client bi-stream to a fresh server bi-stream.
+            let handle: u32 = 1; // single client per test; any nonzero handle is fine
             loop {
                 let (mut c_send, mut c_recv) = match client_conn.accept_bi().await {
-                    Ok(s) => s,
-                    Err(_) => break,
+                    Ok(s) => s, Err(_) => break,
                 };
                 let (mut s_send, mut s_recv) = match server_conn.open_bi().await {
-                    Ok(s) => s,
-                    Err(_) => break,
+                    Ok(s) => s, Err(_) => break,
                 };
-                tokio::spawn(async move {
-                    let _ = tokio::io::copy(&mut c_recv, &mut s_send).await;
-                    let _ = s_send.finish();
-                });
-                tokio::spawn(async move {
-                    let _ = tokio::io::copy(&mut s_recv, &mut c_send).await;
-                    let _ = c_send.finish();
-                });
+                s_send.write_all(&handle.to_be_bytes()).await.unwrap();
+                tokio::spawn(async move { let _ = tokio::io::copy(&mut c_recv, &mut s_send).await; let _ = s_send.finish(); });
+                tokio::spawn(async move { let _ = tokio::io::copy(&mut s_recv, &mut c_send).await; let _ = c_send.finish(); });
             }
         }
         None => {

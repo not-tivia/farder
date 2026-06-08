@@ -1,9 +1,10 @@
 //! Relay-mode server transport. Instead of binding a public listener, the
 //! server dials a relay, registers under its stable `server_id`, and serves
-//! each relay-bridged stream as a client session — reusing the same auth /
+//! each relay-bridged stream as a client session -- reusing the same auth /
 //! main_loop / file-transfer code as direct mode. The server never learns a
-//! client's real address (only its relay connection). Voice/datagrams are not
-//! served over the relay (deferred).
+//! client's real address (only its relay connection). Voice/datagrams ARE
+//! served over the relay via UDP datagrams prefixed with the 4-byte routing
+//! handle assigned by the relay (Phase 5b).
 
 use crate::connection::{authenticate, cleanup_session, handle_auxiliary_stream, main_loop};
 use crate::state::ServerState;
@@ -69,6 +70,8 @@ fn relay_client_endpoint() -> Result<Endpoint> {
     let mut cfg = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    transport.datagram_receive_buffer_size(Some(1 << 20));
+    transport.datagram_send_buffer_size(1 << 20);
     cfg.transport_config(Arc::new(transport));
     let mut ep = Endpoint::client("0.0.0.0:0".parse()?)?;
     ep.set_default_client_config(cfg);
@@ -98,30 +101,65 @@ async fn connect_and_serve(endpoint: &Endpoint, relay_addr: SocketAddr, server_i
     anyhow::ensure!(matches!(ack, Message::RelayRegistered), "relay did not confirm registration");
     info!("registered with relay {}", relay_addr);
 
+    {
+        let dg_state = Arc::clone(state);
+        let dg_conn = conn.clone();
+        tokio::spawn(async move {
+            let media_config = crate::media_stream::MediaConfig::default();
+            loop {
+                match dg_conn.read_datagram().await {
+                    Ok(dg) => {
+                        if dg.len() < 4 { continue; }
+                        let handle = u32::from_be_bytes([dg[0], dg[1], dg[2], dg[3]]);
+                        let sender_pk = { dg_state.relay_voice_handles.read().await.get(&handle).copied() };
+                        if let Some(pk) = sender_pk {
+                            crate::connection::process_inbound_voice_frame(&dg_state, pk, dg.slice(4..), &media_config).await;
+                        }
+                    }
+                    Err(_) => break, // relay connection closed
+                }
+            }
+        });
+    }
+
     loop {
         let (s, r) = conn.accept_bi().await?;
         let state = Arc::clone(state);
+        let relay_conn = conn.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_relay_stream(state, s, r).await {
+            if let Err(e) = serve_relay_stream(state, relay_conn, s, r).await {
                 tracing::debug!("relay stream ended: {}", e);
             }
         });
     }
 }
 
-async fn serve_relay_stream(state: Arc<ServerState>, send: SendStream, mut recv: RecvStream) -> Result<()> {
+async fn serve_relay_stream(state: Arc<ServerState>, relay_conn: quinn::Connection, send: SendStream, mut recv: RecvStream) -> Result<()> {
+    // Phase 5b: every bridged stream is prefixed with the relay-assigned 4-byte
+    // routing handle (authoritative). Read it before the RelayStreamRole.
+    let mut hb = [0u8; 4];
+    recv.read_exact(&mut hb).await?;
+    let handle = u32::from_be_bytes(hb);
     let role: RelayStreamRole = codec::decode(&read_framed(&mut recv).await?)?;
     match role {
-        RelayStreamRole::Primary => run_relay_primary(state, send, recv).await,
+        RelayStreamRole::Primary => run_relay_primary(state, relay_conn, handle, send, recv).await,
         RelayStreamRole::Session { token } => run_relay_aux(state, send, recv, token).await,
     }
 }
 
-async fn run_relay_primary(state: Arc<ServerState>, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+async fn run_relay_primary(state: Arc<ServerState>, relay_conn: quinn::Connection, handle: u32, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
     let outcome = authenticate(&state, &mut send, &mut recv).await?;
+    let pk_bytes = outcome.pk_bytes;
+    // Phase 5b: bind this relayed member to its routing handle for voice.
+    state.voice_connections.write().await.insert(pk_bytes, crate::state::VoiceSink::Relayed { relay: relay_conn.clone(), handle });
+    state.relay_voice_handles.write().await.insert(handle, pk_bytes);
+
     let loop_result = main_loop(
         Arc::clone(&state), outcome.public_key.clone(), outcome.is_owner, &mut send, &mut recv, outcome.event_rx,
     ).await;
+
+    state.voice_connections.write().await.remove(&pk_bytes);
+    state.relay_voice_handles.write().await.remove(&handle);
     cleanup_session(&state, &outcome.public_key, outcome.pk_bytes, &outcome.event_tx, &outcome.session_token).await;
     loop_result
 }
