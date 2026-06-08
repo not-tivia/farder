@@ -66,7 +66,10 @@ fn relay_client_endpoint() -> Result<Endpoint> {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipVerify))
         .with_no_client_auth();
-    let cfg = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
+    let mut cfg = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    cfg.transport_config(Arc::new(transport));
     let mut ep = Endpoint::client("0.0.0.0:0".parse()?)?;
     ep.set_default_client_config(cfg);
     Ok(ep)

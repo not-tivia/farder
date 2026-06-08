@@ -47,9 +47,16 @@ pub fn create_endpoint(bind_addr: SocketAddr, data_dir: &Path) -> Result<Endpoin
     let server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?,
     ));
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        std::time::Duration::from_secs(60)
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("idle timeout: {:?}", e))?,
+    ));
+    server_config.transport_config(Arc::new(transport));
     let endpoint = Endpoint::server(server_config, bind_addr)?;
     info!("Relay listening on {}", bind_addr);
     Ok(endpoint)
