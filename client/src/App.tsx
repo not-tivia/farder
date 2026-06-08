@@ -124,14 +124,34 @@ function AppInner() {
     );
   }
 
+  // Modal for confirming a join from an invite link. Extracted so every
+  // post-unlock return branch can render it (a brand-new user with no servers
+  // who clicks an invite must still see the confirm prompt).
+  const confirmModal = joinConfirm ? (
+    <JoinConfirmModal
+      onConfirm={() => { const u = joinConfirm; setJoinConfirm(null); void joinFromInvite(u); }}
+      onCancel={() => setJoinConfirm(null)}
+    />
+  ) : null;
+
   // Show onboarding if no identity yet
   if (!state.hasIdentity) {
-    return <ConnectDialog />;
+    return (
+      <>
+        <ConnectDialog />
+        {confirmModal}
+      </>
+    );
   }
 
   // Show first-server dialog if identity exists but no servers
   if (state.serverList.length === 0) {
-    return <ConnectDialog />;
+    return (
+      <>
+        <ConnectDialog />
+        {confirmModal}
+      </>
+    );
   }
 
   // Show main app shell
@@ -139,12 +159,7 @@ function AppInner() {
     <>
       <AppShell />
       <TranslationFirstRunModal />
-      {joinConfirm && (
-        <JoinConfirmModal
-          onConfirm={() => { const u = joinConfirm; setJoinConfirm(null); void joinFromInvite(u); }}
-          onCancel={() => setJoinConfirm(null)}
-        />
-      )}
+      {confirmModal}
     </>
   );
 }
