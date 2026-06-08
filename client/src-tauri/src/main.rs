@@ -6,6 +6,7 @@ mod tenor;
 mod bridge;
 mod commands;
 mod connection;
+mod default_relay;
 mod display;
 mod identity;
 mod opus_codec;
