@@ -8,8 +8,6 @@ pub enum Message {
     RelayError { reason: String },
     RelayRegister { server_id: Vec<u8> },
     RelayRegistered,
-    RelayClientConnected { handle: u32 },
-    RelayClientDisconnected { handle: u32 },
     KeyExchange { sender: PublicKey, session_public_key: [u8; 32] },
     KeyExchangeResponse { responder: PublicKey, session_public_key: [u8; 32] },
     EncryptedDm { sender: PublicKey, ciphertext: Vec<u8>, timestamp: u64 },
@@ -107,26 +105,6 @@ mod tests {
         let encoded = codec::encode(&Message::RelayRegistered).expect("encode failed");
         let decoded: Message = codec::decode(&encoded).expect("decode failed");
         assert!(matches!(decoded, Message::RelayRegistered));
-    }
-
-    #[test]
-    fn test_roundtrip_relay_client_connected() {
-        let encoded = codec::encode(&Message::RelayClientConnected { handle: 42 }).expect("encode failed");
-        let decoded: Message = codec::decode(&encoded).expect("decode failed");
-        match decoded {
-            Message::RelayClientConnected { handle } => assert_eq!(handle, 42),
-            other => panic!("expected RelayClientConnected, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_relay_client_disconnected() {
-        let encoded = codec::encode(&Message::RelayClientDisconnected { handle: 7 }).expect("encode failed");
-        let decoded: Message = codec::decode(&encoded).expect("decode failed");
-        match decoded {
-            Message::RelayClientDisconnected { handle } => assert_eq!(handle, 7),
-            other => panic!("expected RelayClientDisconnected, got {other:?}"),
-        }
     }
 
     #[test]

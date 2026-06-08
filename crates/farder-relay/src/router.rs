@@ -4,14 +4,12 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-/// A server registered with the relay: its control connection plus the
-/// relay->server control stream used to announce client handles (Phase 5a).
+/// A server registered with the relay: its QUIC connection.
 pub struct RegisteredServer {
     pub conn: Connection,
-    pub control: Arc<Mutex<SendStream>>,
 }
 
 /// All relay routing state: registered servers, live relayed clients keyed by
@@ -88,23 +86,19 @@ pub async fn handle_connection(conn: Connection, state: SharedState) -> Result<(
     }
 }
 
-/// A server registers under `server_id`; open a relay->server control stream
-/// (used to announce client handles in Phase 5a), hold its connection open, and
-/// remove it from the registry when it closes. A duplicate id replaces the
-/// previous registration (server reconnect).
+/// A server registers under `server_id`; hold its connection open and remove it
+/// from the registry when it closes. A duplicate id replaces the previous
+/// registration (server reconnect).
 async fn handle_register(
     server_id: Vec<u8>,
     conn: Connection,
     mut send: SendStream,
     state: SharedState,
 ) -> Result<()> {
-    // Dedicated relay->server control stream for handle announcements.
-    let (control_send, _control_recv) = conn.open_bi().await?;
-    let control = Arc::new(Mutex::new(control_send));
     {
         let mut map = state.servers.write().await;
         if map
-            .insert(server_id.clone(), RegisteredServer { conn: conn.clone(), control })
+            .insert(server_id.clone(), RegisteredServer { conn: conn.clone() })
             .is_some()
         {
             warn!("server id re-registered, replacing previous ({} bytes)", server_id.len());
@@ -145,19 +139,16 @@ async fn handle_connect(
 ) -> Result<()> {
     let dest = {
         let map = state.servers.read().await;
-        map.get(&destination_id).map(|r| (r.conn.clone(), r.control.clone()))
+        map.get(&destination_id).map(|r| r.conn.clone())
     };
     match dest {
-        Some((server_conn, control)) => {
+        Some(server_conn) => {
             let ack = codec::encode(&Message::RelayConnected)?;
             write_message(&mut send, &ack).await?;
 
             // Assign this client a routing handle and record it.
             let handle = state.next_handle.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             state.clients.write().await.insert(handle, client_conn.clone());
-
-            // Announce the new lane to the destination server (reliable control stream).
-            announce(&control, &Message::RelayClientConnected { handle }).await;
 
             // Forward the client's voice datagrams to the server, tagged with its handle.
             let fwd_client = client_conn.clone();
@@ -169,9 +160,8 @@ async fn handle_connect(
             // Bridge the client's streams (blocks until the client disconnects).
             let bridge_result = bridge_client(client_conn, server_conn, handle).await;
 
-            // Cleanup: drop the handle and announce the disconnect.
+            // Cleanup: remove the handle.
             state.clients.write().await.remove(&handle);
-            announce(&control, &Message::RelayClientDisconnected { handle }).await;
 
             bridge_result
         }
@@ -187,22 +177,6 @@ async fn handle_connect(
             client_conn.closed().await;
             Ok(())
         }
-    }
-}
-
-/// Write a control message to a server's relay->server control stream.
-/// Best-effort: a write failure (server gone) is logged, not fatal.
-async fn announce(control: &Arc<Mutex<SendStream>>, msg: &Message) {
-    let encoded = match codec::encode(msg) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("failed to encode control message: {}", e);
-            return;
-        }
-    };
-    let mut guard = control.lock().await;
-    if let Err(e) = write_message(&mut guard, &encoded).await {
-        warn!("failed to write control message: {}", e);
     }
 }
 
@@ -535,13 +509,14 @@ mod tests {
         let _ = c1;
     }
 
-    /// Register as a server that does NOT echo; instead it captures the relay's
-    /// control-stream announcements (the relay opens that stream to us) and any
-    /// datagrams the relay forwards. Returns the connection plus receivers.
+    /// Register as a server that does NOT echo; instead it reads the 4-byte
+    /// handle stamp from each bridged bi-stream the relay opens (Phase 5b) and
+    /// captures any datagrams the relay forwards. Returns the connection, a
+    /// receiver of handles learned from the stamp, and a datagram receiver.
     async fn register_capturing_server(
         relay: SocketAddr,
         id: Vec<u8>,
-    ) -> (Connection, mpsc::UnboundedReceiver<Message>, mpsc::UnboundedReceiver<Bytes>) {
+    ) -> (Connection, mpsc::UnboundedReceiver<u32>, mpsc::UnboundedReceiver<Bytes>) {
         let ep = test_client_endpoint_with_datagrams();
         let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
         let (mut send, mut recv) = conn.open_bi().await.unwrap();
@@ -551,15 +526,15 @@ mod tests {
         let ack: Message = codec::decode(&ack).unwrap();
         assert!(matches!(ack, Message::RelayRegistered));
 
-        // The relay opens ONE control stream to us; read framed control messages.
-        let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
-        let ctrl_conn = conn.clone();
+        // Read the 4-byte handle stamp from each bridged stream the relay opens.
+        let (h_tx, h_rx) = mpsc::unbounded_channel();
+        let h_conn = conn.clone();
         tokio::spawn(async move {
-            if let Ok((_s, mut r)) = ctrl_conn.accept_bi().await {
-                while let Ok(buf) = read_message(&mut r).await {
-                    if let Ok(m) = codec::decode::<Message>(&buf) {
-                        let _ = ctrl_tx.send(m);
-                    }
+            while let Ok((_s, mut r)) = h_conn.accept_bi().await {
+                let mut hb = [0u8; 4];
+                if r.read_exact(&mut hb).await.is_ok() {
+                    let _ = h_tx.send(u32::from_be_bytes(hb));
+                    tokio::spawn(async move { let _ = r.read_to_end(1 << 20).await; });
                 }
             }
         });
@@ -574,7 +549,7 @@ mod tests {
         });
 
         std::mem::forget(ep);
-        (conn, ctrl_rx, dg_rx)
+        (conn, h_rx, dg_rx)
     }
 
     /// Connect as a client over a datagram-enabled endpoint; return the
@@ -599,43 +574,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn announces_client_connect_and_disconnect() {
-        let (relay, _state) = start_relay().await;
-        let id = vec![5u8; 16];
-        let (_server, mut ctrl_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
-
-        let (client, client_ep, reply) = client_connect_dg(relay, id).await;
-        assert!(matches!(reply, Message::RelayConnected));
-
-        let connected = recv_timeout(&mut ctrl_rx, "RelayClientConnected").await;
-        let handle = match connected {
-            Message::RelayClientConnected { handle } => handle,
-            other => panic!("expected RelayClientConnected, got {other:?}"),
-        };
-        assert_ne!(handle, 0, "handle 0 is reserved");
-
-        // Drop the client; the relay must announce its disconnect with the same handle.
-        client.close(0u32.into(), b"bye");
-        drop(client_ep);
-        let disconnected = recv_timeout(&mut ctrl_rx, "RelayClientDisconnected").await;
-        match disconnected {
-            Message::RelayClientDisconnected { handle: h } => assert_eq!(h, handle),
-            other => panic!("expected RelayClientDisconnected, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn forwards_client_datagram_tagged_with_handle() {
         let (relay, _state) = start_relay().await;
         let id = vec![6u8; 16];
-        let (_server, mut ctrl_rx, mut dg_rx) = register_capturing_server(relay, id.clone()).await;
+        let (_server, mut handle_rx, mut dg_rx) = register_capturing_server(relay, id.clone()).await;
 
         let (client, _client_ep, reply) = client_connect_dg(relay, id).await;
         assert!(matches!(reply, Message::RelayConnected));
-        let handle = match recv_timeout(&mut ctrl_rx, "RelayClientConnected").await {
-            Message::RelayClientConnected { handle } => handle,
-            other => panic!("got {other:?}"),
-        };
+        // Open one bi-stream so the relay bridges + stamps it; learn the handle from the stamp.
+        let (mut bs, _br) = client.open_bi().await.unwrap();
+        bs.write_all(b"x").await.unwrap();
+        let handle = recv_timeout(&mut handle_rx, "handle stamp").await;
 
         client.send_datagram(Bytes::from_static(b"voicepacket")).unwrap();
         let got = recv_timeout(&mut dg_rx, "forwarded datagram").await;
@@ -649,19 +598,20 @@ mod tests {
     async fn routes_server_datagram_to_correct_client() {
         let (relay, _state) = start_relay().await;
         let id = vec![7u8; 16];
-        let (server, mut ctrl_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
+        let (server, mut handle_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
 
-        // Two clients connect; capture both handles in announce order.
+        // Two clients connect; open a bi-stream per client and read each handle from the stamp
+        // receiver before connecting the next client so ordering stays deterministic.
         let (client1, _ep1, _r1) = client_connect_dg(relay, id.clone()).await;
-        let h1 = match recv_timeout(&mut ctrl_rx, "connect 1").await {
-            Message::RelayClientConnected { handle } => handle,
-            other => panic!("got {other:?}"),
-        };
+        let (mut bs1, _br1) = client1.open_bi().await.unwrap();
+        bs1.write_all(b"x").await.unwrap();
+        let h1 = recv_timeout(&mut handle_rx, "handle stamp 1").await;
+
         let (client2, _ep2, _r2) = client_connect_dg(relay, id).await;
-        let h2 = match recv_timeout(&mut ctrl_rx, "connect 2").await {
-            Message::RelayClientConnected { handle } => handle,
-            other => panic!("got {other:?}"),
-        };
+        let (mut bs2, _br2) = client2.open_bi().await.unwrap();
+        bs2.write_all(b"x").await.unwrap();
+        let h2 = recv_timeout(&mut handle_rx, "handle stamp 2").await;
+
         assert_ne!(h1, h2);
 
         // Server sends a datagram tagged for client 2 only.
@@ -685,13 +635,13 @@ mod tests {
     async fn unknown_handle_datagram_is_dropped() {
         let (relay, _state) = start_relay().await;
         let id = vec![8u8; 16];
-        let (server, mut ctrl_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
+        let (server, mut handle_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
 
         let (client, _ep, _r) = client_connect_dg(relay, id).await;
-        let handle = match recv_timeout(&mut ctrl_rx, "connect").await {
-            Message::RelayClientConnected { handle } => handle,
-            other => panic!("got {other:?}"),
-        };
+        // Open one bi-stream so the relay bridges + stamps it; learn the handle from the stamp.
+        let (mut bs, _br) = client.open_bi().await.unwrap();
+        bs.write_all(b"x").await.unwrap();
+        let handle = recv_timeout(&mut handle_rx, "handle stamp").await;
 
         // A datagram tagged with a never-assigned handle must be dropped (no panic).
         let mut bogus = 999_999u32.to_be_bytes().to_vec();
