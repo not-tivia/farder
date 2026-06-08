@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         30,                                  // max new connections per IP per window
         std::time::Duration::from_secs(60),  // the rate window
     ));
-    let connections = router::new_connection_map();
+    let connections = router::new_state();
     router::serve(endpoint, connections, limiter).await?;
     Ok(())
 }

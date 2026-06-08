@@ -2,14 +2,35 @@ use anyhow::Result;
 use farder_protocol::{codec, messages::Message};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
-pub type ConnectionMap = Arc<RwLock<HashMap<Vec<u8>, Connection>>>;
+/// A server registered with the relay: its control connection plus the
+/// relay->server control stream used to announce client handles (Phase 5a).
+pub struct RegisteredServer {
+    pub conn: Connection,
+    pub control: Arc<Mutex<SendStream>>,
+}
 
-pub fn new_connection_map() -> ConnectionMap {
-    Arc::new(RwLock::new(HashMap::new()))
+/// All relay routing state: registered servers, live relayed clients keyed by
+/// their routing handle, and the monotonic handle allocator.
+pub struct RelayState {
+    pub servers: RwLock<HashMap<Vec<u8>, RegisteredServer>>,
+    pub clients: RwLock<HashMap<u32, Connection>>,
+    pub next_handle: AtomicU32,
+}
+
+pub type SharedState = Arc<RelayState>;
+
+pub fn new_state() -> SharedState {
+    Arc::new(RelayState {
+        servers: RwLock::new(HashMap::new()),
+        clients: RwLock::new(HashMap::new()),
+        // Handle 0 is reserved (never assigned) so it can read as "no handle".
+        next_handle: AtomicU32::new(1),
+    })
 }
 
 /// Accept loop: spawn a handler per incoming QUIC connection, gated by the
@@ -17,7 +38,7 @@ pub fn new_connection_map() -> ConnectionMap {
 /// connections are refused before the handshake.
 pub async fn serve(
     endpoint: Endpoint,
-    connections: ConnectionMap,
+    state: SharedState,
     limiter: std::sync::Arc<crate::limits::ConnectionLimiter>,
 ) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
@@ -30,12 +51,12 @@ pub async fn serve(
                 continue;
             }
         };
-        let connections = connections.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let _guard = guard; // held for the connection's lifetime
             match incoming.await {
                 Ok(conn) => {
-                    if let Err(e) = handle_connection(conn, connections).await {
+                    if let Err(e) = handle_connection(conn, state).await {
                         warn!("connection error: {}", e);
                     }
                 }
@@ -46,7 +67,7 @@ pub async fn serve(
     Ok(())
 }
 
-pub async fn handle_connection(conn: Connection, connections: ConnectionMap) -> Result<()> {
+pub async fn handle_connection(conn: Connection, state: SharedState) -> Result<()> {
     let remote = conn.remote_address();
     info!("new connection from {}", remote);
     // The first bi-stream carries the role-establishing message.
@@ -55,10 +76,10 @@ pub async fn handle_connection(conn: Connection, connections: ConnectionMap) -> 
     let msg: Message = codec::decode(&buf)?;
     match msg {
         Message::RelayRegister { server_id } => {
-            handle_register(server_id, conn, send, connections).await
+            handle_register(server_id, conn, send, state).await
         }
         Message::RelayConnect { destination_id } => {
-            handle_connect(destination_id, conn, send, connections).await
+            handle_connect(destination_id, conn, send, state).await
         }
         _ => {
             warn!("unexpected first message from {}", remote);
@@ -67,18 +88,25 @@ pub async fn handle_connection(conn: Connection, connections: ConnectionMap) -> 
     }
 }
 
-/// A server registers under `server_id`; hold its connection open as a control
-/// channel and remove it from the registry when it closes. A duplicate id
-/// replaces the previous registration (server reconnect).
+/// A server registers under `server_id`; open a relay->server control stream
+/// (used to announce client handles in Phase 5a), hold its connection open, and
+/// remove it from the registry when it closes. A duplicate id replaces the
+/// previous registration (server reconnect).
 async fn handle_register(
     server_id: Vec<u8>,
     conn: Connection,
     mut send: SendStream,
-    connections: ConnectionMap,
+    state: SharedState,
 ) -> Result<()> {
+    // Dedicated relay->server control stream for handle announcements.
+    let (control_send, _control_recv) = conn.open_bi().await?;
+    let control = Arc::new(Mutex::new(control_send));
     {
-        let mut map = connections.write().await;
-        if map.insert(server_id.clone(), conn.clone()).is_some() {
+        let mut map = state.servers.write().await;
+        if map
+            .insert(server_id.clone(), RegisteredServer { conn: conn.clone(), control })
+            .is_some()
+        {
             warn!("server id re-registered, replacing previous ({} bytes)", server_id.len());
         } else {
             info!("server registered ({} bytes id)", server_id.len());
@@ -89,10 +117,10 @@ async fn handle_register(
 
     // Keep the control connection alive; clean up on close.
     conn.closed().await;
-    let mut map = connections.write().await;
+    let mut map = state.servers.write().await;
     if let Some(existing) = map.get(&server_id) {
         // Only remove if it is still OUR connection (not a newer re-registration).
-        if existing.stable_id() == conn.stable_id() {
+        if existing.conn.stable_id() == conn.stable_id() {
             map.remove(&server_id);
             info!("server unregistered ({} bytes id)", server_id.len());
         }
@@ -106,11 +134,11 @@ async fn handle_connect(
     destination_id: Vec<u8>,
     client_conn: Connection,
     mut send: SendStream,
-    connections: ConnectionMap,
+    state: SharedState,
 ) -> Result<()> {
     let dest = {
-        let map = connections.read().await;
-        map.get(&destination_id).cloned()
+        let map = state.servers.read().await;
+        map.get(&destination_id).map(|r| r.conn.clone())
     };
     match dest {
         Some(server_conn) => {
@@ -262,20 +290,19 @@ mod tests {
     }
 
     /// Start a relay on an ephemeral port; return its address and the registry.
-    async fn start_relay() -> (SocketAddr, ConnectionMap) {
+    async fn start_relay() -> (SocketAddr, SharedState) {
         ensure_provider();
         let dir = tempfile::tempdir().unwrap();
         let ep = crate::listener::create_endpoint("127.0.0.1:0".parse().unwrap(), dir.path())
             .unwrap();
         let addr = ep.local_addr().unwrap();
-        let conns = new_connection_map();
+        let state = new_state();
         let limiter = std::sync::Arc::new(crate::limits::ConnectionLimiter::new(
             10_000, 10_000, std::time::Duration::from_secs(60),
         ));
-        tokio::spawn(serve(ep, conns.clone(), limiter));
-        // Keep the tempdir alive for the test process lifetime.
+        tokio::spawn(serve(ep, state.clone(), limiter));
         std::mem::forget(dir);
-        (addr, conns)
+        (addr, state)
     }
 
     /// Connect to the relay and register as a server under `id`, spawning an
@@ -375,20 +402,18 @@ mod tests {
         let (relay, conns) = start_relay().await;
         let id = vec![3u8; 16];
         let server = register_echo_server(relay, id.clone()).await;
-        // Wait until the registry actually has the entry.
         for _ in 0..50 {
-            if conns.read().await.contains_key(&id) { break; }
+            if conns.servers.read().await.contains_key(&id) { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(conns.read().await.contains_key(&id));
+        assert!(conns.servers.read().await.contains_key(&id));
 
         server.close(0u32.into(), b"bye");
-        // Wait until cleanup removes it.
         for _ in 0..50 {
-            if !conns.read().await.contains_key(&id) { break; }
+            if !conns.servers.read().await.contains_key(&id) { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(!conns.read().await.contains_key(&id), "registry entry must be removed on disconnect");
+        assert!(!conns.servers.read().await.contains_key(&id), "registry entry must be removed on disconnect");
 
         let (_client, reply) = client_connect(relay, id).await;
         assert!(matches!(reply, Message::RelayError { .. }));
@@ -423,11 +448,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ep = crate::listener::create_endpoint("127.0.0.1:0".parse().unwrap(), dir.path()).unwrap();
         let addr = ep.local_addr().unwrap();
-        let conns = new_connection_map();
+        let state = new_state();
         let limiter = std::sync::Arc::new(crate::limits::ConnectionLimiter::new(
             1, 10_000, std::time::Duration::from_secs(60),
         ));
-        tokio::spawn(serve(ep, conns.clone(), limiter));
+        tokio::spawn(serve(ep, state, limiter));
         std::mem::forget(dir);
 
         // First connection: open it and keep it alive so it holds the only slot.
