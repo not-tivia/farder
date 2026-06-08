@@ -167,7 +167,7 @@ async fn handle_connect(
             });
 
             // Bridge the client's streams (blocks until the client disconnects).
-            let bridge_result = bridge_client(client_conn, server_conn).await;
+            let bridge_result = bridge_client(client_conn, server_conn, handle).await;
 
             // Cleanup: drop the handle and announce the disconnect.
             state.clients.write().await.remove(&handle);
@@ -207,9 +207,11 @@ async fn announce(control: &Arc<Mutex<SendStream>>, msg: &Message) {
 }
 
 /// Bridge every bi-stream the client opens to a fresh bi-stream on the server's
-/// control connection, copying bytes both ways. Each writer is finished on EOF
-/// so the peer sees the end of the stream.
-async fn bridge_client(client_conn: Connection, server_conn: Connection) -> Result<()> {
+/// control connection, copying bytes both ways. Each server-bound stream is
+/// prefixed with the client's 4-byte big-endian routing handle (Phase 5b), so
+/// the server can authoritatively bind the handle to the authenticated member.
+/// Each writer is finished on EOF so the peer sees the end of the stream.
+async fn bridge_client(client_conn: Connection, server_conn: Connection, handle: u32) -> Result<()> {
     loop {
         let (mut c_send, mut c_recv) = match client_conn.accept_bi().await {
             Ok(s) => s,
@@ -222,6 +224,11 @@ async fn bridge_client(client_conn: Connection, server_conn: Connection) -> Resu
                 break;
             }
         };
+        // Authoritative handle stamp: written by the relay, not the client.
+        if let Err(e) = s_send.write_all(&handle.to_be_bytes()).await {
+            warn!("could not stamp handle on bridged stream: {}", e);
+            break;
+        }
         tokio::spawn(async move {
             let _ = tokio::io::copy(&mut c_recv, &mut s_send).await;
             let _ = s_send.finish();
@@ -367,6 +374,10 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((mut s, mut r)) = echo_conn.accept_bi().await {
                 tokio::spawn(async move {
+                    // Discard the 4-byte handle stamp the relay prepends (Phase 5b).
+                    if r.read_exact(&mut [0u8; 4]).await.is_err() {
+                        return;
+                    }
                     let _ = tokio::io::copy(&mut r, &mut s).await;
                     let _ = s.finish();
                 });
@@ -393,6 +404,10 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((mut s, mut r)) = echo_conn.accept_bi().await {
                 tokio::spawn(async move {
+                    // Discard the 4-byte handle stamp the relay prepends (Phase 5b).
+                    if r.read_exact(&mut [0u8; 4]).await.is_err() {
+                        return;
+                    }
                     let data = r.read_to_end(64 * 1024).await.unwrap_or_default();
                     let upper: Vec<u8> = data.iter().map(|b| b.to_ascii_uppercase()).collect();
                     let _ = s.write_all(&upper).await;
@@ -692,6 +707,54 @@ mod tests {
             .expect("valid datagram after a bogus one timed out")
             .unwrap();
         assert_eq!(got.as_ref(), b"real");
+    }
+
+    #[tokio::test]
+    async fn bridged_stream_is_stamped_with_client_handle() {
+        let (relay, _state) = start_relay().await;
+        let id = vec![9u8; 16];
+        let ep = test_client_endpoint_with_datagrams();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut sreg, mut rreg) = conn.open_bi().await.unwrap();
+        let reg = codec::encode(&Message::RelayRegister { server_id: id.clone() }).unwrap();
+        write_message(&mut sreg, &reg).await.unwrap();
+        let ack = read_message(&mut rreg).await.unwrap();
+        assert!(matches!(codec::decode::<Message>(&ack).unwrap(), Message::RelayRegistered));
+
+        let server_conn = conn.clone();
+
+        let cep = test_client_endpoint_with_datagrams();
+        let cconn = cep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut cs, mut cr) = cconn.open_bi().await.unwrap();
+        let m = codec::encode(&Message::RelayConnect { destination_id: id }).unwrap();
+        write_message(&mut cs, &m).await.unwrap();
+        let reply = read_message(&mut cr).await.unwrap();
+        assert!(matches!(codec::decode::<Message>(&reply).unwrap(), Message::RelayConnected));
+        let (mut bs, _br) = cconn.open_bi().await.unwrap();
+        bs.write_all(b"after-the-stamp").await.unwrap();
+        bs.finish().unwrap();
+
+        let mut found_handle: Option<u32> = None;
+        for _ in 0..3 {
+            let (_s, mut r) = tokio::time::timeout(Duration::from_secs(5), server_conn.accept_bi())
+                .await.expect("accept_bi timed out").unwrap();
+            let mut h = [0u8; 4];
+            if r.read_exact(&mut h).await.is_ok() {
+                let rest = tokio::time::timeout(Duration::from_secs(3), r.read_to_end(64))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or_default();
+                if rest == b"after-the-stamp" {
+                    found_handle = Some(u32::from_be_bytes(h));
+                    break;
+                }
+            }
+        }
+        let handle = found_handle.expect("bridged stream must start with a 4-byte handle stamp");
+        assert_ne!(handle, 0, "handle 0 is reserved");
+        std::mem::forget(ep);
+        std::mem::forget(cep);
     }
 
     #[tokio::test]
