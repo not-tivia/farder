@@ -74,6 +74,22 @@ The full click-to-join flow needs the OS deep-link handler + a live relay and is
 verified on the Windows build (headless guards: the Rust link round-trip test +
 tsc + a node base64 round-trip).
 
+## Relay UX (Phase 4, pieces 2+3)
+
+- `ConnectResult` carries a `relayed: bool`, threaded into the frontend
+  `PerServerState.relayed` (via the `SERVER_ADDED` reducer). Components read it to
+  reflect relay state in the UI.
+- **Voice disabled on relayed servers:** `ChannelSidebar` greys voice channels and
+  shows a toast ("Voice isn't available over a relay yet") instead of calling
+  `joinVoice` when `activeServer.relayed` — the backend already refuses it (3a); this
+  makes the UI honest before the click.
+- **Join-confirm:** a `JoinConfirmModal` ("Join this server?") gates a deep-link
+  invite before connecting (replacing 3b's auto-join). It renders in every
+  post-unlock branch (ConnectDialog/no-servers and the main app) so a brand-new user
+  joining their first server via a link still sees it.
+- **Deferred:** creating a relayed server in the app (piece 1) waits on the hosted
+  default relay (a user otherwise has no relay address/fingerprint to point at).
+
 ## Trust / limits
 
 - The relay's cert is pinned by fingerprint from the connection info (Phase 3a).

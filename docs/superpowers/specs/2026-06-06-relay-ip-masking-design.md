@@ -20,9 +20,15 @@ server's full deep link into a self-describing `farder.gg/join/<base64>` web lin
 (no backend); the static invite page (`website/js/invite.js`) opens it; a shared
 relay-aware `parseInviteLink` + the completed `App.tsx` deep-link handler join on
 click. Spec `2026-06-07-relay-phase3b-invite-links-design.md`. Remaining:
-**Phase 4** (relay UI: mark a server relayed, hide voice on relayed servers, a
-join-confirm dialog) and **Phase 5** (voice over relay), plus deploying the hosted
-default relay (ops). The click-to-join GUI flow is UNVERIFIED until a Windows run.
+**Phase 4 pieces 2+3 DONE** (2026-06-07, branch `relay-phase4-ui`): voice is
+UI-disabled (greyed + toast) on relayed servers, and deep-link invites are gated by
+a "Join this server?" confirm modal. `relayed` is surfaced via `ConnectResult` →
+`PerServerState`. Spec `2026-06-07-relay-phase4-relay-ui-design.md`. **Piece 1**
+(create a relayed server in-app) is DEFERRED until the hosted default relay is
+deployed. Remaining: **Phase 5** (voice over relay), deploying the hosted default
+relay (ops, which also unblocks piece 1), and re-examining short invite links once
+the default relay's fingerprint can be bundled. The voice-disable styling, the
+confirm modal, and the click-to-join GUI flow are UNVERIFIED until a Windows run.
 **Audit origin:** `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #3 (MED)
 
 ## Problem
