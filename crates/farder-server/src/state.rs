@@ -8,6 +8,28 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use tokio::sync::{mpsc, RwLock};
 
+/// Where a member's voice datagrams are sent. Direct clients have their own
+/// QUIC connection; relayed clients share the server's single relay connection
+/// and are addressed by their relay-assigned routing handle (Phase 5b).
+pub enum VoiceSink {
+    Direct(quinn::Connection),
+    Relayed { relay: quinn::Connection, handle: u32 },
+}
+
+impl VoiceSink {
+    pub fn send_datagram(&self, frame: bytes::Bytes) -> Result<(), quinn::SendDatagramError> {
+        match self {
+            VoiceSink::Direct(c) => c.send_datagram(frame),
+            VoiceSink::Relayed { relay, handle } => {
+                let mut tagged = Vec::with_capacity(4 + frame.len());
+                tagged.extend_from_slice(&handle.to_be_bytes());
+                tagged.extend_from_slice(&frame);
+                relay.send_datagram(tagged.into())
+            }
+        }
+    }
+}
+
 pub struct RateLimiter {
     pub users: Mutex<HashMap<[u8; 32], VecDeque<u64>>>,
     pub max_per_window: usize,
@@ -55,7 +77,8 @@ pub struct ServerState {
     pub db: Mutex<Connection>,
     pub sessions: RwLock<HashMap<[u8; 32], SessionInfo>>,
     pub clients: RwLock<HashMap<[u8; 32], EventSender>>,
-    pub voice_connections: RwLock<HashMap<[u8; 32], quinn::Connection>>,
+    pub voice_connections: RwLock<HashMap<[u8; 32], VoiceSink>>,
+    pub relay_voice_handles: RwLock<HashMap<u32, [u8; 32]>>,
     pub subscriptions: RwLock<HashMap<u64, HashSet<[u8; 32]>>>,
     pub owner: RwLock<Option<PublicKey>>,
     pub setup_token: Mutex<Option<[u8; 32]>>,
@@ -74,6 +97,7 @@ impl ServerState {
             sessions: RwLock::new(HashMap::new()),
             clients: RwLock::new(HashMap::new()),
             voice_connections: RwLock::new(HashMap::new()),
+            relay_voice_handles: RwLock::new(HashMap::new()),
             subscriptions: RwLock::new(HashMap::new()),
             owner: RwLock::new(None),
             setup_token: Mutex::new(None),
@@ -136,6 +160,62 @@ mod tests {
         assert!(rl.allow(&a));
         assert!(!rl.allow(&a));
         assert!(rl.allow(&b));
+    }
+}
+
+#[cfg(test)]
+mod voice_sink_tests {
+    use super::*;
+    use bytes::Bytes;
+
+    async fn loopback_pair() -> (quinn::Connection, quinn::Connection) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert = rcgen::generate_simple_self_signed(vec!["t".into()]).unwrap();
+        let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
+        let key = rustls::pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der()).unwrap();
+        let mut scfg = quinn::ServerConfig::with_single_cert(vec![cert_der], key).unwrap();
+        {
+            let mut t = quinn::TransportConfig::default();
+            t.datagram_receive_buffer_size(Some(1 << 20));
+            t.datagram_send_buffer_size(1 << 20);
+            scfg.transport_config(std::sync::Arc::new(t));
+        }
+        let sep = quinn::Endpoint::server(scfg, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let saddr = sep.local_addr().unwrap();
+        #[derive(Debug)] struct Skip;
+        impl rustls::client::danger::ServerCertVerifier for Skip {
+            fn verify_server_cert(&self,_:&rustls::pki_types::CertificateDer<'_>,_:&[rustls::pki_types::CertificateDer<'_>],_:&rustls::pki_types::ServerName<'_>,_:&[u8],_:rustls::pki_types::UnixTime)->std::result::Result<rustls::client::danger::ServerCertVerified,rustls::Error>{Ok(rustls::client::danger::ServerCertVerified::assertion())}
+            fn verify_tls12_signature(&self,_:&[u8],_:&rustls::pki_types::CertificateDer<'_>,_:&rustls::DigitallySignedStruct)->std::result::Result<rustls::client::danger::HandshakeSignatureValid,rustls::Error>{Ok(rustls::client::danger::HandshakeSignatureValid::assertion())}
+            fn verify_tls13_signature(&self,_:&[u8],_:&rustls::pki_types::CertificateDer<'_>,_:&rustls::DigitallySignedStruct)->std::result::Result<rustls::client::danger::HandshakeSignatureValid,rustls::Error>{Ok(rustls::client::danger::HandshakeSignatureValid::assertion())}
+            fn supported_verify_schemes(&self)->Vec<rustls::SignatureScheme>{rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()}
+        }
+        let crypto = rustls::ClientConfig::builder().dangerous().with_custom_certificate_verifier(std::sync::Arc::new(Skip)).with_no_client_auth();
+        let mut ccfg = quinn::ClientConfig::new(std::sync::Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap()));
+        let mut t = quinn::TransportConfig::default();
+        t.datagram_receive_buffer_size(Some(1 << 20));
+        t.datagram_send_buffer_size(1 << 20);
+        ccfg.transport_config(std::sync::Arc::new(t));
+        let mut cep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        cep.set_default_client_config(ccfg);
+        let server_fut = tokio::spawn(async move { sep.accept().await.unwrap().await.unwrap() });
+        let client = cep.connect(saddr, "t").unwrap().await.unwrap();
+        let server = server_fut.await.unwrap();
+        std::mem::forget(cep);
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn relayed_sink_prefixes_handle_direct_does_not() {
+        let (a, b) = loopback_pair().await;
+        let sink = VoiceSink::Relayed { relay: a.clone(), handle: 0x01020304 };
+        sink.send_datagram(Bytes::from_static(b"frame")).unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), b.read_datagram()).await.unwrap().unwrap();
+        assert_eq!(got.as_ref(), &[0x01,0x02,0x03,0x04, b'f',b'r',b'a',b'm',b'e']);
+
+        let sink = VoiceSink::Direct(a.clone());
+        sink.send_datagram(Bytes::from_static(b"frame")).unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), b.read_datagram()).await.unwrap().unwrap();
+        assert_eq!(got.as_ref(), b"frame");
     }
 }
 

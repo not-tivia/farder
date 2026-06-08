@@ -640,7 +640,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     // Direct-only: register the connection for voice.
     {
         let mut voice_conns = state.voice_connections.write().await;
-        voice_conns.insert(pk_bytes, conn.clone());
+        voice_conns.insert(pk_bytes, crate::state::VoiceSink::Direct(conn.clone()));
     }
 
     // Step 9: Spawn auxiliary stream acceptor
@@ -771,10 +771,10 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
                                         stream_state.sessions.get(&sid)
                                     {
                                         let conn_pk = &session.connection_pk;
-                                        if let Some(peer_conn) =
+                                        if let Some(sink) =
                                             voice_conns.get(conn_pk)
                                         {
-                                            let _ = peer_conn
+                                            let _ = sink
                                                 .send_datagram(bytes.clone());
                                         }
                                     }
