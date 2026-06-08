@@ -25,10 +25,18 @@ UI-disabled (greyed + toast) on relayed servers, and deep-link invites are gated
 a "Join this server?" confirm modal. `relayed` is surfaced via `ConnectResult` →
 `PerServerState`. Spec `2026-06-07-relay-phase4-relay-ui-design.md`. **Piece 1**
 (create a relayed server in-app) is DEFERRED until the hosted default relay is
-deployed. Remaining: **Phase 5** (voice over relay), deploying the hosted default
-relay (ops, which also unblocks piece 1), and re-examining short invite links once
-the default relay's fingerprint can be bundled. The voice-disable styling, the
-confirm modal, and the click-to-join GUI flow are UNVERIFIED until a Windows run.
+deployed. **Default relay DEPLOY-READY** (2026-06-07, branch `relay-deploy-readiness`): the
+relay now has abuse controls (enforced `max_connections` cap + per-IP rate limit +
+60s idle timeout, with a coordinated 15s keep-alive on the server's relay endpoint
+— a real fix for idle-but-live servers dropping), plus deployment artifacts
+(`deploy/relay/` Dockerfile/compose/systemd — the Docker image builds) + a deploy
+guide (`docs/deploy/relay.md`) + an empty client `default_relay.rs` scaffold. Spec
+`2026-06-07-default-relay-deploy-readiness-design.md`. **Actual provisioning**
+(rent a host, DNS, run it, read the fingerprint, fill in `default_relay.rs`) is the
+user's guided hands-on step in the deploy guide. Remaining: **Phase 5** (voice over
+relay); the user deploying the relay (then Phase 4 piece 1 + shorter links become
+possible). The voice-disable styling, confirm modal, and click-to-join GUI flow are
+UNVERIFIED until a Windows run.
 **Audit origin:** `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #3 (MED)
 
 ## Problem
