@@ -1,0 +1,19 @@
+# Bare-VPS alternative to Docker. Install:
+#   sudo cp target/release/farder-relay /usr/local/bin/
+#   sudo useradd -r -s /usr/sbin/nologin relay && sudo mkdir -p /var/lib/farder-relay && sudo chown relay /var/lib/farder-relay
+#   sudo cp deploy/relay/farder-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now farder-relay
+[Unit]
+Description=Farder privacy relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/farder-relay --bind 0.0.0.0:4433 --data-dir /var/lib/farder-relay
+User=relay
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=farder_relay=info
+
+[Install]
+WantedBy=multi-user.target
