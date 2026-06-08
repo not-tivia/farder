@@ -20,7 +20,12 @@ async fn main() -> Result<()> {
     let config = Config::parse();
     info!("Starting Farder Relay v{}", env!("CARGO_PKG_VERSION"));
     let endpoint = listener::create_endpoint(config.bind, &config.data_dir)?;
+    let limiter = std::sync::Arc::new(limits::ConnectionLimiter::new(
+        config.max_connections as usize,
+        30,                                  // max new connections per IP per window
+        std::time::Duration::from_secs(60),  // the rate window
+    ));
     let connections = router::new_connection_map();
-    router::serve(endpoint, connections).await?;
+    router::serve(endpoint, connections, limiter).await?;
     Ok(())
 }

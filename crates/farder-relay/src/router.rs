@@ -12,11 +12,27 @@ pub fn new_connection_map() -> ConnectionMap {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-/// Accept loop: spawn a handler per incoming QUIC connection.
-pub async fn serve(endpoint: Endpoint, connections: ConnectionMap) -> Result<()> {
+/// Accept loop: spawn a handler per incoming QUIC connection, gated by the
+/// abuse-control limiter (global cap + per-IP rate limit). Over-limit
+/// connections are refused before the handshake.
+pub async fn serve(
+    endpoint: Endpoint,
+    connections: ConnectionMap,
+    limiter: std::sync::Arc<crate::limits::ConnectionLimiter>,
+) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
+        let ip = incoming.remote_address().ip();
+        let guard = match limiter.try_admit(ip, std::time::Instant::now()) {
+            Some(g) => g,
+            None => {
+                warn!("refused connection from {} (over limit)", ip);
+                incoming.refuse();
+                continue;
+            }
+        };
         let connections = connections.clone();
         tokio::spawn(async move {
+            let _guard = guard; // held for the connection's lifetime
             match incoming.await {
                 Ok(conn) => {
                     if let Err(e) = handle_connection(conn, connections).await {
@@ -234,7 +250,10 @@ mod tests {
             .unwrap();
         let addr = ep.local_addr().unwrap();
         let conns = new_connection_map();
-        tokio::spawn(serve(ep, conns.clone()));
+        let limiter = std::sync::Arc::new(crate::limits::ConnectionLimiter::new(
+            10_000, 10_000, std::time::Duration::from_secs(60),
+        ));
+        tokio::spawn(serve(ep, conns.clone(), limiter));
         // Keep the tempdir alive for the test process lifetime.
         std::mem::forget(dir);
         (addr, conns)
@@ -377,5 +396,36 @@ mod tests {
         // Verbatim (lowercase) proves the SECOND registrant served it; the first
         // would have returned "ROUTE ME".
         assert_eq!(echoed, b"route me", "relay must route to the newest registrant");
+    }
+
+    #[tokio::test]
+    async fn over_cap_connection_is_refused() {
+        ensure_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let ep = crate::listener::create_endpoint("127.0.0.1:0".parse().unwrap(), dir.path()).unwrap();
+        let addr = ep.local_addr().unwrap();
+        let conns = new_connection_map();
+        let limiter = std::sync::Arc::new(crate::limits::ConnectionLimiter::new(
+            1, 10_000, std::time::Duration::from_secs(60),
+        ));
+        tokio::spawn(serve(ep, conns.clone(), limiter));
+        std::mem::forget(dir);
+
+        // First connection: open it and keep it alive so it holds the only slot.
+        let ep1 = test_client_endpoint();
+        let c1 = ep1.connect(addr, "farder-relay").unwrap().await.unwrap();
+        let _s1 = c1.open_bi().await.unwrap();
+        std::mem::forget(ep1);
+
+        // Second connection: refused by the cap. quinn's refuse() sends a
+        // CONNECTION_CLOSE during the handshake, so the client's connect().await
+        // resolves to an error. (A non-refused 2nd connection would instead
+        // succeed and stay open, so this assertion fails iff the cap weren't
+        // enforced.)
+        let ep2 = test_client_endpoint();
+        let attempt = ep2.connect(addr, "farder-relay").unwrap().await;
+        assert!(attempt.is_err(), "connection over the cap must be refused");
+        std::mem::forget(ep2);
+        let _ = c1;
     }
 }
