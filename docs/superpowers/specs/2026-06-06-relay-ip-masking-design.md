@@ -33,10 +33,18 @@ relay now has abuse controls (enforced `max_connections` cap + per-IP rate limit
 guide (`docs/deploy/relay.md`) + an empty client `default_relay.rs` scaffold. Spec
 `2026-06-07-default-relay-deploy-readiness-design.md`. **Actual provisioning**
 (rent a host, DNS, run it, read the fingerprint, fill in `default_relay.rs`) is the
-user's guided hands-on step in the deploy guide. Remaining: **Phase 5** (voice over
-relay); the user deploying the relay (then Phase 4 piece 1 + shorter links become
-possible). The voice-disable styling, confirm modal, and click-to-join GUI flow are
-UNVERIFIED until a Windows run.
+user's guided hands-on step in the deploy guide. **Phase 5a DONE** (2026-06-07, branch
+`relay-phase5a-datagram-routing`): the relay enables QUIC datagrams, assigns each
+relayed client a u32 handle, announces `RelayClientConnected/Disconnected { handle }`
+to the server over a relay->server control stream, forwards client->server voice
+datagrams tagged with the source handle, and routes server->client datagrams by the
+destination handle prefix; headless doubles tests (14 relay tests green); backward-
+compatible with Phase-2 servers (relay_mode integration tests confirm relayed
+text/file traffic is unaffected). Spec `docs/modules/relay.md`. Remaining:
+**Phase 5b** (server voice fan-out over the relay + client wiring + re-enabling voice
++ real-audio end-to-end verification); the user deploying the relay (then Phase 4
+piece 1 + shorter links become possible). The voice-disable styling, confirm modal,
+and click-to-join GUI flow are UNVERIFIED until a Windows run.
 **Audit origin:** `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #3 (MED)
 
 ## Problem
