@@ -689,105 +689,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
         loop {
             match conn_for_dg.read_datagram().await {
                 Ok(bytes) => {
-                    // Determine the sending connection's pk bytes (used to
-                    // authenticate the frame against the registered session).
-                    let sending_pk: [u8; 32] = pk_bytes;
-
-                    let now_ms = {
-                        use std::time::{SystemTime, UNIX_EPOCH};
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64
-                    };
-
-                    // Obtain routing decision.  on_frame_ingress needs a
-                    // &mut StreamState, which lives inside
-                    // state.media.channels (one StreamState per channel_id).
-                    // The session_id in the frame header tells us which
-                    // channel to look in, so we must parse just the session_id
-                    // first, then call into the matching StreamState.
-                    //
-                    // parse_media_frame validates the full header; if the buf
-                    // is too short the call below returns Drop(ParseError).
-                    let raw: &[u8] = &bytes;
-
-                    // Fast path: identify the channel from the session_id
-                    // embedded in the raw frame (bytes 12..28).
-                    let channel_id_opt: Option<u64> = if raw.len()
-                        >= crate::media_stream::MEDIA_FRAME_HEADER_LEN
-                    {
-                        let mut sid = [0u8; crate::media_stream::SESSION_ID_LEN];
-                        sid.copy_from_slice(
-                            &raw[12..12 + crate::media_stream::SESSION_ID_LEN],
-                        );
-                        let channels = state_for_dg.media.channels.read().unwrap();
-                        channels
-                            .iter()
-                            .find(|(_ch, st)| st.sessions.contains_key(&sid))
-                            .map(|(ch, _)| *ch)
-                    } else {
-                        None
-                    };
-
-                    let channel_id = match channel_id_opt {
-                        Some(c) => c,
-                        None => {
-                            // Frame too short or session unknown — drop silently.
-                            tracing::trace!("[media] datagram dropped: session not found");
-                            continue;
-                        }
-                    };
-
-                    let decision = {
-                        let mut channels =
-                            state_for_dg.media.channels.write().unwrap();
-                        if let Some(stream_state) = channels.get_mut(&channel_id) {
-                            crate::media_stream::on_frame_ingress(
-                                stream_state,
-                                &media_config,
-                                &sending_pk,
-                                raw,
-                                now_ms,
-                            )
-                        } else {
-                            crate::media_stream::IngressDecision::Drop(
-                                crate::media_stream::DropReason::UnknownSession,
-                            )
-                        }
-                    };
-
-                    match decision {
-                        crate::media_stream::IngressDecision::Forward { recipients } => {
-                            // Map each recipient SessionId → connection_pk →
-                            // quinn::Connection, then send the datagram.
-                            let voice_conns =
-                                state_for_dg.voice_connections.read().await;
-                            let channels =
-                                state_for_dg.media.channels.read().unwrap();
-                            if let Some(stream_state) = channels.get(&channel_id) {
-                                for sid in recipients {
-                                    if let Some(session) =
-                                        stream_state.sessions.get(&sid)
-                                    {
-                                        let conn_pk = &session.connection_pk;
-                                        if let Some(sink) =
-                                            voice_conns.get(conn_pk)
-                                        {
-                                            let _ = sink
-                                                .send_datagram(bytes.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        crate::media_stream::IngressDecision::Drop(_reason) => {
-                            tracing::trace!(
-                                "[media] datagram dropped: {:?}",
-                                _reason
-                            );
-                        }
-                    }
+                    process_inbound_voice_frame(&state_for_dg, pk_bytes, bytes, &media_config).await;
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. })
                 | Err(quinn::ConnectionError::ConnectionClosed { .. })
@@ -1047,5 +949,161 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
         EventTarget::MediaTrackEnabled { .. } => {}
         EventTarget::MediaTrackDisabled { .. } => {}
         EventTarget::MediaSetDeafen { .. } => {}
+    }
+}
+
+/// Process one inbound voice frame: find its channel, run the ingress decision,
+/// and fan it out to each recipient's VoiceSink. Shared by the direct
+/// per-connection datagram loop and the relay-mode datagram loop. `sending_pk`
+/// is the authoritative sender (the direct connection's authed pk, or the relay
+/// source handle's bound pk).
+pub(crate) async fn process_inbound_voice_frame(
+    state: &Arc<ServerState>,
+    sending_pk: [u8; 32],
+    bytes: bytes::Bytes,
+    media_config: &crate::media_stream::MediaConfig,
+) {
+    let now_ms = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    };
+    let raw: &[u8] = &bytes;
+    let channel_id_opt: Option<u64> = if raw.len() >= crate::media_stream::MEDIA_FRAME_HEADER_LEN {
+        let mut sid = [0u8; crate::media_stream::SESSION_ID_LEN];
+        sid.copy_from_slice(&raw[12..12 + crate::media_stream::SESSION_ID_LEN]);
+        let channels = state.media.channels.read().unwrap();
+        channels.iter().find(|(_ch, st)| st.sessions.contains_key(&sid)).map(|(ch, _)| *ch)
+    } else {
+        None
+    };
+    let channel_id = match channel_id_opt {
+        Some(c) => c,
+        None => { tracing::trace!("[media] datagram dropped: session not found"); return; }
+    };
+    let decision = {
+        let mut channels = state.media.channels.write().unwrap();
+        if let Some(stream_state) = channels.get_mut(&channel_id) {
+            crate::media_stream::on_frame_ingress(stream_state, media_config, &sending_pk, raw, now_ms)
+        } else {
+            crate::media_stream::IngressDecision::Drop(crate::media_stream::DropReason::UnknownSession)
+        }
+    };
+    match decision {
+        crate::media_stream::IngressDecision::Forward { recipients } => {
+            let voice_conns = state.voice_connections.read().await;
+            let channels = state.media.channels.read().unwrap();
+            if let Some(stream_state) = channels.get(&channel_id) {
+                for sid in recipients {
+                    if let Some(session) = stream_state.sessions.get(&sid) {
+                        if let Some(sink) = voice_conns.get(&session.connection_pk) {
+                            let _ = sink.send_datagram(bytes.clone());
+                        }
+                    }
+                }
+            }
+        }
+        crate::media_stream::IngressDecision::Drop(_reason) => {
+            tracing::trace!("[media] datagram dropped: {:?}", _reason);
+        }
+    }
+}
+
+#[cfg(test)]
+mod voice_relay_tests {
+    use super::*;
+    use bytes::Bytes;
+
+    async fn loopback_pair() -> (quinn::Connection, quinn::Connection) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert = rcgen::generate_simple_self_signed(vec!["t".into()]).unwrap();
+        let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
+        let key = rustls::pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der()).unwrap();
+        let mut scfg = quinn::ServerConfig::with_single_cert(vec![cert_der], key).unwrap();
+        {
+            let mut t = quinn::TransportConfig::default();
+            t.datagram_receive_buffer_size(Some(1 << 20));
+            t.datagram_send_buffer_size(1 << 20);
+            scfg.transport_config(std::sync::Arc::new(t));
+        }
+        let sep = quinn::Endpoint::server(scfg, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let saddr = sep.local_addr().unwrap();
+        #[derive(Debug)] struct Skip;
+        impl rustls::client::danger::ServerCertVerifier for Skip {
+            fn verify_server_cert(&self,_:&rustls::pki_types::CertificateDer<'_>,_:&[rustls::pki_types::CertificateDer<'_>],_:&rustls::pki_types::ServerName<'_>,_:&[u8],_:rustls::pki_types::UnixTime)->std::result::Result<rustls::client::danger::ServerCertVerified,rustls::Error>{Ok(rustls::client::danger::ServerCertVerified::assertion())}
+            fn verify_tls12_signature(&self,_:&[u8],_:&rustls::pki_types::CertificateDer<'_>,_:&rustls::DigitallySignedStruct)->std::result::Result<rustls::client::danger::HandshakeSignatureValid,rustls::Error>{Ok(rustls::client::danger::HandshakeSignatureValid::assertion())}
+            fn verify_tls13_signature(&self,_:&[u8],_:&rustls::pki_types::CertificateDer<'_>,_:&rustls::DigitallySignedStruct)->std::result::Result<rustls::client::danger::HandshakeSignatureValid,rustls::Error>{Ok(rustls::client::danger::HandshakeSignatureValid::assertion())}
+            fn supported_verify_schemes(&self)->Vec<rustls::SignatureScheme>{rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()}
+        }
+        let crypto = rustls::ClientConfig::builder().dangerous().with_custom_certificate_verifier(std::sync::Arc::new(Skip)).with_no_client_auth();
+        let mut ccfg = quinn::ClientConfig::new(std::sync::Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap()));
+        let mut t = quinn::TransportConfig::default();
+        t.datagram_receive_buffer_size(Some(1 << 20));
+        t.datagram_send_buffer_size(1 << 20);
+        ccfg.transport_config(std::sync::Arc::new(t));
+        let mut cep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        cep.set_default_client_config(ccfg);
+        let server_fut = tokio::spawn(async move { sep.accept().await.unwrap().await.unwrap() });
+        let client = cep.connect(saddr, "t").unwrap().await.unwrap();
+        let server = server_fut.await.unwrap();
+        std::mem::forget(cep);
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn relayed_fanout_tags_recipient_handle() {
+        use crate::state::{ServerState, VoiceSink};
+        use crate::media_stream::{build_media_frame, ServerSession, MediaConfig, StreamState};
+        use farder_protocol::server::TrackKind;
+        use std::collections::{HashMap, HashSet};
+        use std::sync::Arc;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let config = MediaConfig::default();
+
+        // One shared "relay" connection. relay_tx_side = the server's relay conn;
+        // relay_rx = the relay's view (we read what the server emits).
+        let (relay_tx_side, relay_rx) = loopback_pair().await;
+
+        let alice_pk = farder_crypto::identity::PublicKey::from_bytes([0xaa; 32]);
+        let bob_pk = farder_crypto::identity::PublicKey::from_bytes([0xbb; 32]);
+        let alice_conn = [0xaa; 32];
+        let bob_conn = [0xbb; 32];
+        let alice_session = [1u8; 16];
+        let bob_session = [2u8; 16];
+        let (h_alice, h_bob) = (10u32, 20u32);
+
+        {
+            let mut channels = state.media.channels.write().unwrap();
+            let st = channels.entry(99).or_insert_with(StreamState::new);
+            for (sid, conn_pk, pk, name) in [
+                (alice_session, alice_conn, alice_pk.clone(), "alice"),
+                (bob_session, bob_conn, bob_pk.clone(), "bob"),
+            ] {
+                let mut tracks = HashSet::new();
+                tracks.insert(TrackKind::Audio);
+                st.sessions.insert(sid, ServerSession {
+                    connection_pk: conn_pk, channel_id: 99, public_key: pk,
+                    display_name: name.into(), active_tracks: tracks,
+                    buckets: HashMap::new(), last_audio_frame_ms: None, last_video_frame_ms: None,
+                });
+            }
+        }
+        {
+            let mut vc = state.voice_connections.write().await;
+            vc.insert(alice_conn, VoiceSink::Relayed { relay: relay_tx_side.clone(), handle: h_alice });
+            vc.insert(bob_conn, VoiceSink::Relayed { relay: relay_tx_side.clone(), handle: h_bob });
+        }
+
+        let frame = build_media_frame(TrackKind::Audio, 1, &alice_session, b"opaque-ct");
+        process_inbound_voice_frame(&state, alice_conn, Bytes::from(frame.clone()), &config).await;
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), relay_rx.read_datagram())
+            .await.expect("no datagram emitted").unwrap();
+        let mut expected = h_bob.to_be_bytes().to_vec();
+        expected.extend_from_slice(&frame);
+        assert_eq!(got.as_ref(), expected.as_slice(), "fan-out must tag the RECIPIENT (bob) handle");
+
+        let second = tokio::time::timeout(std::time::Duration::from_millis(300), relay_rx.read_datagram()).await;
+        assert!(second.is_err(), "only one recipient (bob); sender must not be echoed");
     }
 }
