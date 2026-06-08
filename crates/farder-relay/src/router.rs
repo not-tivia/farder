@@ -138,13 +138,28 @@ async fn handle_connect(
 ) -> Result<()> {
     let dest = {
         let map = state.servers.read().await;
-        map.get(&destination_id).map(|r| r.conn.clone())
+        map.get(&destination_id).map(|r| (r.conn.clone(), r.control.clone()))
     };
     match dest {
-        Some(server_conn) => {
+        Some((server_conn, control)) => {
             let ack = codec::encode(&Message::RelayConnected)?;
             write_message(&mut send, &ack).await?;
-            bridge_client(client_conn, server_conn).await
+
+            // Assign this client a routing handle and record it.
+            let handle = state.next_handle.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            state.clients.write().await.insert(handle, client_conn.clone());
+
+            // Announce the new lane to the destination server (reliable control stream).
+            announce(&control, &Message::RelayClientConnected { handle }).await;
+
+            // Bridge the client's streams (blocks until the client disconnects).
+            let bridge_result = bridge_client(client_conn, server_conn).await;
+
+            // Cleanup: drop the handle and announce the disconnect.
+            state.clients.write().await.remove(&handle);
+            announce(&control, &Message::RelayClientDisconnected { handle }).await;
+
+            bridge_result
         }
         None => {
             let err = codec::encode(&Message::RelayError {
@@ -158,6 +173,22 @@ async fn handle_connect(
             client_conn.closed().await;
             Ok(())
         }
+    }
+}
+
+/// Write a control message to a server's relay->server control stream.
+/// Best-effort: a write failure (server gone) is logged, not fatal.
+async fn announce(control: &Arc<Mutex<SendStream>>, msg: &Message) {
+    let encoded = match codec::encode(msg) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("failed to encode control message: {}", e);
+            return;
+        }
+    };
+    let mut guard = control.lock().await;
+    if let Err(e) = write_message(&mut guard, &encoded).await {
+        warn!("failed to write control message: {}", e);
     }
 }
 
@@ -211,10 +242,12 @@ pub async fn write_message(send: &mut SendStream, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use quinn::Endpoint;
     use rustls::pki_types::ServerName;
     use std::net::SocketAddr;
     use std::time::Duration;
+    use tokio::sync::mpsc;
 
     fn ensure_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -471,6 +504,95 @@ mod tests {
         assert!(attempt.is_err(), "connection over the cap must be refused");
         std::mem::forget(ep2);
         let _ = c1;
+    }
+
+    /// Register as a server that does NOT echo; instead it captures the relay's
+    /// control-stream announcements (the relay opens that stream to us) and any
+    /// datagrams the relay forwards. Returns the connection plus receivers.
+    async fn register_capturing_server(
+        relay: SocketAddr,
+        id: Vec<u8>,
+    ) -> (Connection, mpsc::UnboundedReceiver<Message>, mpsc::UnboundedReceiver<Bytes>) {
+        let ep = test_client_endpoint_with_datagrams();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let reg = codec::encode(&Message::RelayRegister { server_id: id }).unwrap();
+        write_message(&mut send, &reg).await.unwrap();
+        let ack = read_message(&mut recv).await.unwrap();
+        let ack: Message = codec::decode(&ack).unwrap();
+        assert!(matches!(ack, Message::RelayRegistered));
+
+        // The relay opens ONE control stream to us; read framed control messages.
+        let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+        let ctrl_conn = conn.clone();
+        tokio::spawn(async move {
+            if let Ok((_s, mut r)) = ctrl_conn.accept_bi().await {
+                while let Ok(buf) = read_message(&mut r).await {
+                    if let Ok(m) = codec::decode::<Message>(&buf) {
+                        let _ = ctrl_tx.send(m);
+                    }
+                }
+            }
+        });
+
+        // Capture forwarded datagrams.
+        let (dg_tx, dg_rx) = mpsc::unbounded_channel();
+        let dg_conn = conn.clone();
+        tokio::spawn(async move {
+            while let Ok(b) = dg_conn.read_datagram().await {
+                let _ = dg_tx.send(b);
+            }
+        });
+
+        std::mem::forget(ep);
+        (conn, ctrl_rx, dg_rx)
+    }
+
+    /// Connect as a client over a datagram-enabled endpoint; return the
+    /// connection (so the test can send/recv datagrams) and the first reply.
+    async fn client_connect_dg(relay: SocketAddr, id: Vec<u8>) -> (Connection, Endpoint, Message) {
+        let ep = test_client_endpoint_with_datagrams();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let msg = codec::encode(&Message::RelayConnect { destination_id: id }).unwrap();
+        write_message(&mut send, &msg).await.unwrap();
+        let reply = read_message(&mut recv).await.unwrap();
+        let reply: Message = codec::decode(&reply).unwrap();
+        (conn, ep, reply)
+    }
+
+    /// Receive from an mpsc receiver with a timeout, panicking on timeout.
+    async fn recv_timeout<T>(rx: &mut mpsc::UnboundedReceiver<T>, what: &str) -> T {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+            .unwrap_or_else(|| panic!("channel closed waiting for {what}"))
+    }
+
+    #[tokio::test]
+    async fn announces_client_connect_and_disconnect() {
+        let (relay, _state) = start_relay().await;
+        let id = vec![5u8; 16];
+        let (_server, mut ctrl_rx, _dg_rx) = register_capturing_server(relay, id.clone()).await;
+
+        let (client, client_ep, reply) = client_connect_dg(relay, id).await;
+        assert!(matches!(reply, Message::RelayConnected));
+
+        let connected = recv_timeout(&mut ctrl_rx, "RelayClientConnected").await;
+        let handle = match connected {
+            Message::RelayClientConnected { handle } => handle,
+            other => panic!("expected RelayClientConnected, got {other:?}"),
+        };
+        assert_ne!(handle, 0, "handle 0 is reserved");
+
+        // Drop the client; the relay must announce its disconnect with the same handle.
+        client.close(0u32.into(), b"bye");
+        drop(client_ep);
+        let disconnected = recv_timeout(&mut ctrl_rx, "RelayClientDisconnected").await;
+        match disconnected {
+            Message::RelayClientDisconnected { handle: h } => assert_eq!(h, handle),
+            other => panic!("expected RelayClientDisconnected, got {other:?}"),
+        }
     }
 
     #[tokio::test]
