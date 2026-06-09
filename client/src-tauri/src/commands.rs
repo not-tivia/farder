@@ -420,9 +420,10 @@ pub async fn connect_server(
         };
 
     let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
-    // Relayed connections carry no datagrams (voice is not relayed), so only
-    // run the datagram recv loop for direct (non-relayed) connections.
-    if !relayed {
+    // Voice datagrams flow over BOTH direct and relayed connections: the relay
+    // strips the routing handle before delivering, so the client sees raw frames
+    // identical to direct mode (Phase 5b-client).
+    {
         let dispatcher_for_loop = media_dispatcher.clone();
         let conn_for_loop = conn.clone();
         tokio::spawn(async move {
@@ -2197,9 +2198,6 @@ pub async fn voice_join(
     channel_id: u64,
 ) -> Result<(), String> {
     let server_conn = state.get_server(&server_id)?;
-    if server_conn.relayed {
-        return Err("voice is not available over a relay yet".to_string());
-    }
     // Apply the saved mic sensitivity before the send task spawns.
     voice.set_speak_threshold(crate::voice::sensitivity_to_threshold(read_voice_sensitivity()));
     let session = crate::voice_bridge::QuinnServerSession::new(
