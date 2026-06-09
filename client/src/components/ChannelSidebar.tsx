@@ -365,14 +365,8 @@ export default function ChannelSidebar() {
           data-drag-id={ch.id}
           data-drag-type="channel"
           className={`channel-item voice-channel${isInThisChannel ? " active" : ""}${dragOverId === ch.id ? " drag-over" : ""}`}
-          style={activeServer?.relayed ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
-          title={activeServer?.relayed ? "Voice isn't available over a relay yet" : undefined}
           onClick={async () => {
             if (!serverId) return;
-            if (activeServer?.relayed) {
-              toast.error("Voice isn't available over a relay yet");
-              return;
-            }
             if (isInThisChannel) {
               await leaveVoiceChannel(ch.id);
             } else {
