@@ -140,9 +140,12 @@ async fn serve_relay_stream(state: Arc<ServerState>, relay_conn: quinn::Connecti
     let mut hb = [0u8; 4];
     recv.read_exact(&mut hb).await?;
     let handle = u32::from_be_bytes(hb);
+    anyhow::ensure!(handle != 0, "relay sent reserved routing handle 0");
     let role: RelayStreamRole = codec::decode(&read_framed(&mut recv).await?)?;
     match role {
         RelayStreamRole::Primary => run_relay_primary(state, relay_conn, handle, send, recv).await,
+        // The routing handle is consumed above but unused for Session streams:
+        // auxiliary streams are authenticated by their session token, not the handle.
         RelayStreamRole::Session { token } => run_relay_aux(state, send, recv, token).await,
     }
 }
