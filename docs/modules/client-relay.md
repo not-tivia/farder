@@ -2,7 +2,8 @@
 
 **Purpose:** lets the Tauri client connect to a **relayed** server *through its
 relay*, so the destination server sees only the relay's IP (closes audit Gap #3).
-Added in relay Phase 3a. Direct connections are unchanged.
+Added in relay Phase 3a. Direct connections are unchanged. Voice over relay is
+now enabled (Phase 5b) -- see "Relay-mode behaviour" and "Trust / limits" below.
 
 See the umbrella design `docs/superpowers/specs/2026-06-06-relay-ip-masking-design.md`
 and the server side `docs/modules/server-relay.md`.
@@ -48,9 +49,10 @@ link as the server's address means reconnect on relaunch re-parses it — no
   connections, but for relayed ones it writes `RelayStreamRole::Session{token}`
   before the Upload/Download request so the server demuxes the stream to the right
   member.
-- **Voice:** `voice_join` returns "voice is not available over a relay yet" for a
-  relayed connection (datagrams aren't relayed). The datagram recv loop is not
-  spawned for relayed connections.
+- **Voice (Phase 5b):** voice now works over the relay. The pinned relay endpoint
+  enables QUIC datagrams; the voice datagram recv loop runs for relayed connections
+  (the client sees raw frames -- the relay strips/adds the routing handle before
+  forwarding). `voice_join` no longer refuses relayed servers.
 
 ## Invite links (Phase 3b)
 
@@ -79,10 +81,10 @@ tsc + a node base64 round-trip).
 - `ConnectResult` carries a `relayed: bool`, threaded into the frontend
   `PerServerState.relayed` (via the `SERVER_ADDED` reducer). Components read it to
   reflect relay state in the UI.
-- **Voice disabled on relayed servers:** `ChannelSidebar` greys voice channels and
-  shows a toast ("Voice isn't available over a relay yet") instead of calling
-  `joinVoice` when `activeServer.relayed` — the backend already refuses it (3a); this
-  makes the UI honest before the click.
+- **Voice on relayed servers (gate REMOVED in Phase 5b-client):** the previous gate
+  that greyed voice channels and showed a toast ("Voice isn't available over a relay
+  yet") has been removed. Voice channels are now fully clickable on relayed servers;
+  `ChannelSidebar` no longer suppresses `joinVoice` when `activeServer.relayed`.
 - **Join-confirm:** a `JoinConfirmModal` ("Join this server?") gates a deep-link
   invite before connecting (replacing 3b's auto-join). It renders in every
   post-unlock branch (ConnectDialog/no-servers and the main app) so a brand-new user
@@ -96,7 +98,10 @@ tsc + a node base64 round-trip).
   The Farder default relay's fingerprint can be bundled when that relay is deployed.
 - The relay still sees the client's IP + non-DM traffic by design (it's the trusted
   hop); pinning prevents a *different* attacker from impersonating it. DMs stay E2EE.
-- Voice over relay is deferred.
+- Voice over relay is now implemented on both the server (Phase 5b-server) and the
+  client (Phase 5b-client). **Real-audio end-to-end behavior is UNVERIFIED** until
+  a Windows build + deployed-relay run can be performed; WSL lacks the audio/display
+  stack required to exercise the full path.
 
 ## Tests
 
