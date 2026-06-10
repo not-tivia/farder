@@ -2740,12 +2740,17 @@ pub async fn create_local_server(
                 return Err(e.to_string());
             }
         };
-        // Retry until the server has registered with the relay (or time out).
+        // Wait for the just-spawned local server to register with the relay,
+        // then connect. We give it a ~1s head start and poll GENTLY (every
+        // ~1.5s) rather than hammering: rapid retries open a fresh relay
+        // connection each time and would trip the relay's per-IP rate limit,
+        // which then refuses the server's own registration too (deadlocking it).
         let connected = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             loop {
                 match crate::connection::connect_via_relay(endpoint.clone(), &target, &keypair, None).await {
                     Ok(t) => return t,
-                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(1500)).await,
                 }
             }
         })

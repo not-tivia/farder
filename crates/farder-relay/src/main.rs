@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let endpoint = listener::create_endpoint(config.bind, &config.data_dir)?;
     let limiter = std::sync::Arc::new(limits::ConnectionLimiter::new(
         config.max_connections as usize,
-        30,                                  // max new connections per IP per window
+        300,                                 // max new connections per IP per window. One IP legitimately carries a lot: a home/office NAT shares its IP across many users, and a host runs both its client AND its local server from the same IP. 30 was far too strict.
         std::time::Duration::from_secs(60),  // the rate window
     ));
     let connections = router::new_state();
