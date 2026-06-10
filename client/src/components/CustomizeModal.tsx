@@ -12,7 +12,7 @@ import {
   canRedo,
   type HistoryState,
 } from "../lib/customizer/history";
-import { generateOverrideCss, mergeForSave } from "../lib/customizer/cssGenerator";
+import { generateOverrideCss, mergeForSave, parseOverrideCss } from "../lib/customizer/cssGenerator";
 import CustomizerRegionRow from "./CustomizerRegionRow";
 import CustomizerIntro from "./CustomizerIntro";
 
@@ -75,6 +75,29 @@ export default function CustomizeModal({ themeId, initialName, onClose, onSaved 
   const [showIntro, setShowIntro] = useState<boolean>(() => localStorage.getItem(INTRO_DISMISSED_KEY) !== "true");
   const [dirty, setDirty] = useState<boolean>(false);
   const swatches = useMemo(() => extractSwatchesFromActiveTheme(), []);
+
+  // On open, seed the editor with any previously-saved customizer values so
+  // the swatches show the theme's real colors instead of the "unset" checkerboard.
+  // loadThemeCss returns the full CSS (base + override block if the user has saved
+  // customizations). parseOverrideCss extracts only the structured region values.
+  // New themes that have never been customized produce an empty map here,
+  // which is identical to the default initHistory(new Map()) state, so the
+  // checkerboard "unset" indicator is correctly shown for those regions.
+  useEffect(() => {
+    let cancelled = false;
+    api.loadThemeCss(themeId).then((css) => {
+      if (cancelled) return;
+      const savedRegions = parseOverrideCss(css);
+      if (savedRegions.size > 0) {
+        setHistory(initHistory(savedRegions));
+      }
+    }).catch(() => {
+      // Best-effort: if the load fails, just leave the editor empty rather
+      // than blocking the user from opening the customizer at all.
+    });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [themeId]);
 
   const regions = useMemo(() => histCurrent(history), [history]);
 
