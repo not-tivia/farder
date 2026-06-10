@@ -51,6 +51,33 @@ When adding or touching a Tauri command:
   whether a security step is *actually invoked* on the real path rather than
   merely defined.
 
+## UI must be styled and theme-compatible (REQUIRED)
+
+Farder's component styling lives in the **per-theme CSS files**
+(`client/src/themes/<id>/theme.css` — `xp-luna-blue`, `discord-dark`,
+`hello-kitty`, …), not in one global stylesheet. There is **no default fallback
+styling**: a new element with a `className` that no theme defines renders **raw and
+unstyled** (this is exactly how the create-server relay choice shipped looking
+broken — floating radios, squished inputs, run-together text). New UI is not "done"
+until it is styled in the themes the user actually runs.
+
+When you add or restructure any UI:
+- **Prefer existing classes and theme CSS variables.** Reuse the app's established
+  classes (`.template-card`, `.connect-input`, `.connect-section`, `.privacy-option`,
+  …) and color variables (`var(--xp-blue)`, `var(--xp-panel-bg)`,
+  `var(--xp-text-normal)`, `var(--xp-border)`, `var(--xp-sidebar)`, …). UI built from
+  these inherits **every** theme automatically. Match an existing component's pattern
+  rather than inventing a new look.
+- **If you must add a new class, add its CSS to EVERY file in
+  `client/src/themes/*/theme.css`**, driven by the theme's CSS variables — never
+  hard-coded colors — so it looks right in all themes (including future ones).
+- **Never ship a `className` with no CSS, and never hard-code colors.** Inline
+  styles are acceptable for *layout* (flex, spacing, sizing) but every color,
+  border, and background must come from a `var(--xp-…)` so it adapts to the theme.
+- Before marking UI work complete, confirm the new elements render correctly across
+  themes (e.g. `grep -l "<your-class>" client/src/themes/*/theme.css` should list
+  all of them). An unstyled or hard-coded-color control is a bug, not a detail.
+
 ## Build / test commands
 
 - Rust (all): `cargo test --workspace` (workspace root `/home/deez/farder`).
