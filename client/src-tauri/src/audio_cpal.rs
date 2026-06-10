@@ -379,7 +379,8 @@ fn pick_input_device(host: &cpal::Host, device_id: Option<&str>) -> Result<cpal:
         Some(name) => host.input_devices()
             .map_err(|e| format!("input_devices: {e}"))?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .ok_or_else(|| format!("input device not found: {name}")),
+            .or_else(|| host.default_input_device())
+            .ok_or_else(|| "no input device available".to_string()),
     }
 }
 
@@ -400,7 +401,8 @@ fn pick_output_device(host: &cpal::Host, device_id: Option<&str>) -> Result<cpal
         Some(name) => host.output_devices()
             .map_err(|e| format!("output_devices: {e}"))?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .ok_or_else(|| format!("output device not found: {name}")),
+            .or_else(|| host.default_output_device())
+            .ok_or_else(|| "no output device available".to_string()),
     }
 }
 
