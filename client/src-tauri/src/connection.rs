@@ -31,7 +31,7 @@ pub fn parse_relay_target(s: &str) -> Option<RelayTarget> {
     let relay_addr: SocketAddr = parts[0].parse().ok()?;
     let server_id = hex::decode(parts[1]).ok()?;
     let cert_fp = hex::decode(parts[2]).ok()?;
-    if server_id.is_empty() || cert_fp.is_empty() || parts[3].is_empty() {
+    if server_id.is_empty() || cert_fp.is_empty() {
         return None;
     }
     Some(RelayTarget {
@@ -198,14 +198,13 @@ pub async fn connect_via_relay(
     // Open the primary stream, mark it Primary, then run the normal handshake.
     let (mut send, mut recv) = conn.open_bi().await.context("open primary stream")?;
     write_frame(&mut send, &codec::encode(&RelayStreamRole::Primary)?).await?;
-    let session_token = run_client_handshake(
-        &mut send,
-        &mut recv,
-        keypair,
-        Some(target.invite_token.clone()),
-        setup_token,
-    )
-    .await?;
+    // An empty token means "no invite" -- the owner auto-claims a fresh server.
+    let invite = if target.invite_token.is_empty() {
+        None
+    } else {
+        Some(target.invite_token.clone())
+    };
+    let session_token = run_client_handshake(&mut send, &mut recv, keypair, invite, setup_token).await?;
     Ok((conn, send, recv, session_token))
 }
 
@@ -231,6 +230,23 @@ mod tests {
         assert!(parse_relay_target("farder://relay/1.2.3.4:4433/aabb").is_none()); // too few parts
         assert!(parse_relay_target("https://example.com").is_none());
         assert!(parse_relay_target("farder://relay/notanaddr/aa/bb/t").is_none()); // bad addr
+    }
+
+    #[test]
+    fn relay_link_round_trips_an_empty_owner_token() {
+        let addr: std::net::SocketAddr = "45.77.70.199:4433".parse().unwrap();
+        let target = RelayTarget {
+            relay_addr: addr,
+            server_id: vec![1u8; 32],
+            cert_fp: vec![2u8; 32],
+            invite_token: String::new(),
+        };
+        let link = build_relay_link(&target, ""); // owner link: empty token
+        let parsed = parse_relay_target(&link).expect("empty-token link must parse");
+        assert_eq!(parsed.relay_addr, addr);
+        assert_eq!(parsed.server_id, vec![1u8; 32]);
+        assert_eq!(parsed.cert_fp, vec![2u8; 32]);
+        assert!(parsed.invite_token.is_empty());
     }
 
     #[test]
