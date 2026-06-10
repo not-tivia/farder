@@ -908,22 +908,65 @@ saved value at join. Drives the live mic meter in Voice settings.
 
 ---
 
-## Group 16 — Recording
+## Group 16 — Audio device selection
+
+---
+
+### `list_input_devices() -> Result<Vec<AudioDeviceInfo>, String>`
+
+**What it does:** enumerates all cpal audio input devices on the host. Returns
+a list of `{ name: String, is_default: bool }`. The name can be passed to
+`set_input_device` to persist the selection.
+**invoke name:** `"list_input_devices"` -> `listInputDevices()`.
+
+---
+
+### `list_output_devices() -> Result<Vec<AudioDeviceInfo>, String>`
+
+Same as `list_input_devices` but for output (playback) devices.
+**invoke name:** `"list_output_devices"` -> `listOutputDevices()`.
+
+---
+
+### `get_input_device() -> Option<String>` / `set_input_device(name: Option<String>) -> Result<(), String>`
+
+**What it does:** reads/writes the `"input_device"` key in `settings.json`.
+`None` / absent = system default. The saved name is consumed by
+`start_recording` (voice-message capture), `voice_join` (live call capture),
+and the `Test Mic` flow.
+**Side effects (set):** overwrites `settings.json`; removes the key when `name` is
+`null` / `None` to restore system-default behaviour.
+**invoke names:** `"get_input_device"` / `"set_input_device"` ->
+`getInputDevice()` / `setInputDevice()`.
+
+---
+
+### `get_output_device() -> Option<String>` / `set_output_device(name: Option<String>) -> Result<(), String>`
+
+Same pattern as `get/set_input_device` but for the `"output_device"` key.
+Consumed by `play_audio_file` (Test Mic playback) and `voice_join`
+(live call mixer playback).
+**invoke names:** `"get_output_device"` / `"set_output_device"` ->
+`getOutputDevice()` / `setOutputDevice()`.
+
+---
+
+## Group 17 — Recording
 
 ---
 
 ### `start_recording() -> Result<(), String>`
 
-**What it does:** opens the default system audio input device via `cpal`,
-creates a WAV file in the OS temp directory (filename
+**What it does:** opens the saved input device (falling back to system default)
+via `cpal`, creates a WAV file in the OS temp directory (filename
 `farder_voice_<ms>.wav`), and streams 16-bit samples into it. The blocking
 cpal stream runs in `spawn_blocking`. The command awaits a oneshot channel
 that reports success or failure of the stream setup before returning, so a
 missing audio device surfaces immediately rather than silently.
 **Returns:** `Ok(())` once recording has started (not when it ends).
-**Side effects:** writes to a temp WAV file; acquires the system audio input device.
-Globally idempotent — returns `Err("already recording")` if called twice.
-**invoke name:** `"start_recording"` → `startRecording()`.
+**Side effects:** writes to a temp WAV file; acquires the audio input device.
+Globally idempotent -- returns `Err("already recording")` if called twice.
+**invoke name:** `"start_recording"` -> `startRecording()`.
 
 ---
 
@@ -945,9 +988,18 @@ Returns the file path. Used as an alternative to `start_recording` when the
 frontend captures audio itself.
 **invoke name:** `"save_temp_audio"` → `saveTempAudio()`.
 
+### `play_audio_file(path) -> Result<(), String>`
+
+**What it does:** decodes a WAV file and plays it on the saved output device
+(falling back to system default) via a cpal output stream. Runs in
+`spawn_blocking`; the command returns once playback completes.
+**Side effects:** acquires the audio output device for the duration.
+Used by the `Test Mic` flow to play back the just-recorded WAV.
+**invoke name:** `"play_audio_file"` -> `playAudioFile()`.
+
 ---
 
-## Group 17 — Invites and account deletion
+## Group 18 — Invites and account deletion
 
 ---
 
@@ -986,7 +1038,7 @@ returned invite code:
 
 ---
 
-## Group 18 — Notifications
+## Group 19 — Notifications
 
 ---
 

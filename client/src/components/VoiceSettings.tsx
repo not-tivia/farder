@@ -10,6 +10,13 @@ import {
   startRecording,
   stopRecording,
   playAudioFile,
+  listInputDevices,
+  listOutputDevices,
+  getInputDevice,
+  setInputDevice,
+  getOutputDevice,
+  setOutputDevice,
+  type AudioDeviceInfo,
   type VoiceInputLevelPayload,
 } from "../lib/tauri-bridge";
 import SettingsSection from "./settings/SettingsSection";
@@ -27,6 +34,9 @@ type MicTestPhase = "idle" | "recording" | "playing";
 
 const MIC_TEST_DURATION_MS = 3000;
 
+// System-default sentinel shown in the dropdown.
+const SYSTEM_DEFAULT = "";
+
 export default function VoiceSettings() {
   const [mode, setMode] = useState<string>("OpenMic");
   const [pttKey, setPttKeyState] = useState<string>("Backquote");
@@ -35,11 +45,20 @@ export default function VoiceSettings() {
   const [inputLevel, setInputLevel] = useState<number>(0);
   const [micTestPhase, setMicTestPhase] = useState<MicTestPhase>("idle");
   const [micTestError, setMicTestError] = useState<string | null>(null);
+  const [inputDevices, setInputDevices] = useState<AudioDeviceInfo[]>([]);
+  const [outputDevices, setOutputDevices] = useState<AudioDeviceInfo[]>([]);
+  // Empty string = system default.
+  const [selectedInput, setSelectedInput] = useState<string>(SYSTEM_DEFAULT);
+  const [selectedOutput, setSelectedOutput] = useState<string>(SYSTEM_DEFAULT);
 
   useEffect(() => {
     void getVoiceMode().then(setMode).catch(() => {});
     void getPttKey().then(setPttKeyState).catch(() => {});
     void getVoiceSensitivity().then(setSensitivity).catch(() => {});
+    void listInputDevices().then(setInputDevices).catch(() => {});
+    void listOutputDevices().then(setOutputDevices).catch(() => {});
+    void getInputDevice().then((n) => setSelectedInput(n ?? SYSTEM_DEFAULT)).catch(() => {});
+    void getOutputDevice().then((n) => setSelectedOutput(n ?? SYSTEM_DEFAULT)).catch(() => {});
     // Live mic level (only flows while a voice call is active).
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -47,6 +66,22 @@ export default function VoiceSettings() {
       .then((u) => { if (cancelled) u(); else unlisten = u; });
     return () => { cancelled = true; unlisten?.(); };
   }, []);
+
+  const chooseInputDevice = (name: string) => {
+    setSelectedInput(name);
+    const value = name === SYSTEM_DEFAULT ? null : name;
+    void setInputDevice(value).catch((e) =>
+      console.error("[voice-settings] failed to save input device:", e)
+    );
+  };
+
+  const chooseOutputDevice = (name: string) => {
+    setSelectedOutput(name);
+    const value = name === SYSTEM_DEFAULT ? null : name;
+    void setOutputDevice(value).catch((e) =>
+      console.error("[voice-settings] failed to save output device:", e)
+    );
+  };
 
   const chooseMode = (next: string) => {
     setMode(next);
@@ -107,6 +142,45 @@ export default function VoiceSettings() {
   return (
     <div className="settings-panel">
       <h2 className="settings-panel-title">Voice</h2>
+
+      <SettingsSection label="Microphone (input device)">
+        <select
+          value={selectedInput}
+          onChange={(e) => chooseInputDevice(e.target.value)}
+          style={{ width: "100%" }}
+        >
+          <option value={SYSTEM_DEFAULT}>System default</option>
+          {inputDevices.map((d) => (
+            <option key={d.name} value={d.name}>
+              {d.name}{d.is_default ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
+        <p className="settings-help">
+          The microphone used for voice calls and voice message recording.
+        </p>
+      </SettingsSection>
+
+      <div className="settings-divider" />
+      <SettingsSection label="Output device (speakers / headphones)">
+        <select
+          value={selectedOutput}
+          onChange={(e) => chooseOutputDevice(e.target.value)}
+          style={{ width: "100%" }}
+        >
+          <option value={SYSTEM_DEFAULT}>System default</option>
+          {outputDevices.map((d) => (
+            <option key={d.name} value={d.name}>
+              {d.name}{d.is_default ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
+        <p className="settings-help">
+          The device used to play incoming voice and mic test playback.
+        </p>
+      </SettingsSection>
+
+      <div className="settings-divider" />
       <SettingsSection label="Microphone Mode">
         <RadioOption
           selected={mode === "OpenMic"}

@@ -322,6 +322,98 @@ pub async fn set_voice_sensitivity(
 }
 
 // ---------------------------------------------------------------------------
+// Audio device settings
+// ---------------------------------------------------------------------------
+
+/// Read the saved input device name (None = system default).
+pub(crate) fn read_input_device() -> Option<String> {
+    settings_get("input_device")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+}
+
+/// Read the saved output device name (None = system default).
+pub(crate) fn read_output_device() -> Option<String> {
+    settings_get("output_device")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+}
+
+#[derive(serde::Serialize)]
+pub struct AudioDeviceInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// Enumerate available audio input devices via cpal. Returns the system
+/// default marked with `is_default: true`. Each `name` can be passed to
+/// `set_input_device` to persist the selection.
+#[tauri::command]
+pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let devices = host.input_devices().map_err(|e| format!("input_devices: {e}"))?;
+    let mut out = Vec::new();
+    for (i, dev) in devices.enumerate() {
+        let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
+        let is_default = default_name.as_deref() == Some(name.as_str());
+        out.push(AudioDeviceInfo { name, is_default });
+    }
+    Ok(out)
+}
+
+/// Enumerate available audio output devices via cpal. Returns the system
+/// default marked with `is_default: true`. Each `name` can be passed to
+/// `set_output_device` to persist the selection.
+#[tauri::command]
+pub fn list_output_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let devices = host.output_devices().map_err(|e| format!("output_devices: {e}"))?;
+    let mut out = Vec::new();
+    for (i, dev) in devices.enumerate() {
+        let name = dev.name().unwrap_or_else(|_| format!("device-{i}"));
+        let is_default = default_name.as_deref() == Some(name.as_str());
+        out.push(AudioDeviceInfo { name, is_default });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn get_input_device() -> Option<String> {
+    read_input_device()
+}
+
+#[tauri::command]
+pub fn set_input_device(name: Option<String>) -> Result<(), String> {
+    match name {
+        Some(n) => settings_set("input_device", serde_json::Value::String(n)),
+        None => {
+            let mut map = read_settings();
+            map.remove("input_device");
+            write_settings(map)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_output_device() -> Option<String> {
+    read_output_device()
+}
+
+#[tauri::command]
+pub fn set_output_device(name: Option<String>) -> Result<(), String> {
+    match name {
+        Some(n) => settings_set("output_device", serde_json::Value::String(n)),
+        None => {
+            let mut map = read_settings();
+            map.remove("output_device");
+            write_settings(map)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Saved servers list
 // ---------------------------------------------------------------------------
 
@@ -1801,7 +1893,7 @@ pub fn save_temp_audio(data: String) -> Result<String, String> {
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RECORDING_PATH: Mutex<Option<String>> = Mutex::new(None);
 
-/// Start recording audio from the default input device. Writes WAV to a temp file.
+/// Start recording audio from the saved input device (or system default). Writes WAV to a temp file.
 #[tauri::command]
 pub async fn start_recording() -> Result<(), String> {
     use std::sync::atomic::Ordering;
@@ -1819,6 +1911,9 @@ pub async fn start_recording() -> Result<(), String> {
         *g = Some(path_str.clone());
     }
 
+    // Read the saved input device name before moving into spawn_blocking.
+    let saved_input_device = read_input_device();
+
     // The cpal stream must be created, used, and dropped on one thread, so all
     // setup happens inside spawn_blocking. Report the setup result back over a
     // oneshot so a failure (no device, bad config, file create, stream build)
@@ -1831,9 +1926,18 @@ pub async fn start_recording() -> Result<(), String> {
         type RecWriter = hound::WavWriter<std::io::BufWriter<std::fs::File>>;
         let built = (|| -> Result<(cpal::Stream, Arc<Mutex<Option<RecWriter>>>), String> {
             let host = cpal::default_host();
-            let device = host
-                .default_input_device()
-                .ok_or_else(|| "no input device available".to_string())?;
+            // Use the saved input device by name, or fall back to the system default.
+            let device = match saved_input_device.as_deref() {
+                None => host
+                    .default_input_device()
+                    .ok_or_else(|| "no input device available".to_string())?,
+                Some(name) => host
+                    .input_devices()
+                    .map_err(|e| format!("input_devices: {e}"))?
+                    .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                    .or_else(|| host.default_input_device())
+                    .ok_or_else(|| "no input device available".to_string())?,
+            };
             let config = device
                 .default_input_config()
                 .map_err(|e| format!("input config: {e}"))?;
@@ -1947,11 +2051,13 @@ pub async fn stop_recording() -> Result<String, String> {
     Ok(path)
 }
 
-/// Play a WAV file on the default output device. Reads the entire file and
+/// Play a WAV file on the saved output device (or system default). Reads the entire file and
 /// feeds samples through a cpal output stream, then drops the stream when done.
 /// Used by the "Test mic" flow to play back a just-recorded WAV.
 #[tauri::command]
 pub async fn play_audio_file(path: String) -> Result<(), String> {
+    // Read the saved output device name before moving into spawn_blocking.
+    let saved_output_device = read_output_device();
     tauri::async_runtime::spawn_blocking(move || {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -1988,9 +2094,18 @@ pub async fn play_audio_file(path: String) -> Result<(), String> {
         }
 
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| "no output device available".to_string())?;
+        // Use the saved output device by name, or fall back to the system default.
+        let device = match saved_output_device.as_deref() {
+            None => host
+                .default_output_device()
+                .ok_or_else(|| "no output device available".to_string())?,
+            Some(name) => host
+                .output_devices()
+                .map_err(|e| format!("output_devices: {e}"))?
+                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                .or_else(|| host.default_output_device())
+                .ok_or_else(|| "no output device available".to_string())?,
+        };
         let config = device
             .default_output_config()
             .map_err(|e| format!("output config: {e}"))?;
@@ -2458,6 +2573,8 @@ pub async fn voice_join(
         },
         peer_volumes: read_peer_volumes(),
         connection: Some(server_conn.connection.clone()),
+        input_device: read_input_device(),
+        output_device: read_output_device(),
     };
     voice
         .join_with_config(

@@ -89,6 +89,10 @@ pub struct JoinConfig {
     /// QUIC connection for the connection-quality poller. `None` (e.g. in
     /// tests) means no poller is spawned. Cheaply clonable.
     pub connection: Option<quinn::Connection>,
+    /// Saved input device name (None = system default).
+    pub input_device: Option<String>,
+    /// Saved output device name (None = system default).
+    pub output_device: Option<String>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -263,6 +267,10 @@ pub struct PipelineParams {
     pub local_speaking_tx: tokio::sync::watch::Sender<bool>,
     pub input_level_tx: tokio::sync::watch::Sender<f32>,
     pub datagram_sink: Box<dyn Fn(Bytes) + Send + Sync + 'static>,
+    /// Saved input device name (None = system default). Passed to `start_capture`.
+    pub input_device: Option<String>,
+    /// Saved output device name (None = system default). Passed to `start_playback`.
+    pub output_device: Option<String>,
 }
 
 /// A live audio pipeline. Dropping (or calling stop) must terminate the
@@ -310,8 +318,9 @@ impl VoicePipelineFactory for AudioPipelineFactory {
             channels: 1,
             samples_per_chunk: OPUS_FRAME_SAMPLES_MONO,
         };
-        let pcm_rx = backend.start_capture(None, format)?;
-        let playback_tx = backend.start_playback(None, format)?;
+        // Use the saved device name if one was set; fall back to None (system default).
+        let pcm_rx = backend.start_capture(params.input_device.as_deref(), format)?;
+        let playback_tx = backend.start_playback(params.output_device.as_deref(), format)?;
 
         let aec_ref = Arc::new(std::sync::Mutex::new(vec![0.0f32; OPUS_FRAME_SAMPLES_MONO]));
 
@@ -567,6 +576,8 @@ impl VoiceController {
             datagram_sink: Box::new(move |b: Bytes| {
                 let _ = server_for_sink.send_datagram(b);
             }),
+            input_device: config.input_device.clone(),
+            output_device: config.output_device.clone(),
         })?;
 
         // 4. EnableTrack last, after pipeline is up.

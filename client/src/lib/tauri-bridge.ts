@@ -482,6 +482,37 @@ export async function setVoiceSensitivity(value: number): Promise<void> {
   return invoke<void>("set_voice_sensitivity", { value });
 }
 
+// ── Audio device selection ─────────────────────────────────────────────────
+
+export interface AudioDeviceInfo {
+  name: string;
+  is_default: boolean;
+}
+
+export async function listInputDevices(): Promise<AudioDeviceInfo[]> {
+  return invoke<AudioDeviceInfo[]>("list_input_devices");
+}
+
+export async function listOutputDevices(): Promise<AudioDeviceInfo[]> {
+  return invoke<AudioDeviceInfo[]>("list_output_devices");
+}
+
+export async function getInputDevice(): Promise<string | null> {
+  return invoke<string | null>("get_input_device");
+}
+
+export async function setInputDevice(name: string | null): Promise<void> {
+  return invoke<void>("set_input_device", { name });
+}
+
+export async function getOutputDevice(): Promise<string | null> {
+  return invoke<string | null>("get_output_device");
+}
+
+export async function setOutputDevice(name: string | null): Promise<void> {
+  return invoke<void>("set_output_device", { name });
+}
+
 // Raw mic input level (RMS), emitted ~10x/sec while a voice call is active.
 export interface VoiceInputLevelPayload {
   level: number;
