@@ -1445,6 +1445,7 @@ dependencies = [
  "hound",
  "image",
  "quinn",
+ "rand 0.8.5",
  "rcgen",
  "reqwest 0.12.28",
  "rfd",

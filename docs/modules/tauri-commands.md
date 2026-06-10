@@ -1262,19 +1262,29 @@ machine. A "local server" is a full server process managed by the Tauri app.
 
 ---
 
-### `create_local_server(app, state, procs, name, template, privacy, icon_path) -> Result<Value, String>`
+### `create_local_server(app, state, procs, name, template, privacy, icon_path, relay_mode, relay_addr, relay_fp) -> Result<Value, String>`
 
 **What it does:** spawns a `farder-server` child process using `server_manager`,
-polls for readiness (up to 5 s), connects as owner (no invite needed — first
-connection auto-claims ownership on a fresh server), optionally saves a server
-avatar, fetches initial server info, and returns the full connect result plus
-the assigned address.
-**Parameters:**
-- `template` — one of `"blank"`, `"friend-group"`, `"gaming-community"`, `"organization"`, `"public-community"`.
-- `privacy` — passed through to `spawn_server`.
-- `icon_path` — optional local image path for the server avatar.
+connects as owner (no invite needed -- first connection auto-claims ownership on
+a fresh server), optionally saves a server avatar, fetches initial server info,
+and returns the full connect result plus the assigned address.  Supports two
+connectivity modes selected by `relay_mode`:
+- `"direct"` -- direct local bind (legacy behaviour); polls for readiness up to 5 s.
+- `"farder"` -- uses the built-in Farder default relay; retries the relay
+  connection for up to 30 s while the server registers.
+- `"selfhost"` -- connects through a caller-supplied relay at `relay_addr` with
+  certificate fingerprint `relay_fp` (64 hex chars / 32 bytes).
 
-**Returns:** `{ address, server_name, member_count, channels, categories, roles, owner_public_key }`.
+**Parameters:**
+- `template` -- one of `"blank"`, `"friend-group"`, `"gaming-community"`, `"organization"`, `"public-community"`.
+- `privacy` -- passed through to `spawn_server`.
+- `icon_path` -- optional local image path for the server avatar.
+- `relay_mode` -- `"direct"` | `"farder"` | `"selfhost"`.
+- `relay_addr` -- host:port of the relay (self-host mode only; ignored otherwise).
+- `relay_fp` -- 64-char hex certificate fingerprint (self-host mode only).
+
+**Returns:** `{ address, server_name, member_count, channels, categories, roles, owner_public_key, relayed }`.
+`address` is `"127.0.0.1:<port>"` for direct or a `farder://` relay link for relayed servers.
 **Side effects:** spawns a child OS process; establishes a connection; writes
 `servers.json`; may write a server avatar file.
 **Gotcha:** duplicate name check (same name as existing local server) returns an

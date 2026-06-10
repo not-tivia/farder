@@ -2274,6 +2274,37 @@ pub async fn voice_get_state(
 // Local server management commands
 // ---------------------------------------------------------------------------
 
+/// Resolve the create-server relay choice into an optional (relay addr, cert fp).
+/// `None` means a direct server. Validates self-host inputs.
+fn resolve_relay_choice(
+    mode: &str,
+    addr: Option<&str>,
+    fp: Option<&str>,
+) -> Result<Option<(std::net::SocketAddr, Vec<u8>)>, String> {
+    match mode {
+        "direct" => Ok(None),
+        "farder" => crate::default_relay::default_relay()
+            .map(Some)
+            .ok_or_else(|| "the Farder default relay is not configured in this build".to_string()),
+        "selfhost" => {
+            let addr = addr.unwrap_or("").trim();
+            let fp = fp.unwrap_or("").trim();
+            let sock: std::net::SocketAddr = addr
+                .parse()
+                .map_err(|_| format!("invalid relay address '{}' (expected host:port)", addr))?;
+            let fp_bytes = hex::decode(fp).map_err(|_| "relay fingerprint must be hexadecimal".to_string())?;
+            if fp_bytes.len() != 32 {
+                return Err(format!(
+                    "relay fingerprint must be 64 hex characters (32 bytes); got {} bytes",
+                    fp_bytes.len()
+                ));
+            }
+            Ok(Some((sock, fp_bytes)))
+        }
+        other => Err(format!("unknown relay mode '{}'", other)),
+    }
+}
+
 #[tauri::command]
 pub async fn create_local_server(
     app: AppHandle,
@@ -2283,6 +2314,9 @@ pub async fn create_local_server(
     template: String,
     privacy: String,
     icon_path: Option<String>,
+    relay_mode: String,            // "farder" | "selfhost" | "direct"
+    relay_addr: Option<String>,    // self-host only
+    relay_fp: Option<String>,      // self-host only
 ) -> Result<serde_json::Value, String> {
     // Refuse to create a duplicate local server. Names are unique per machine
     // because they map to a single data directory — letting "1" exist twice
@@ -2302,66 +2336,91 @@ pub async fn create_local_server(
         ));
     }
 
-    // Spawn the server process
-    let (info, child) = crate::server_manager::spawn_server(&name, &template, &privacy, None)?;
-    let port = info.port;
-    let address = format!("127.0.0.1:{}", port);
-    let local_data_dir = info.data_dir.clone();
-    let local_template = info.template.clone();
+    let relay = resolve_relay_choice(&relay_mode, relay_addr.as_deref(), relay_fp.as_deref())?;
 
-    // Register the child process
-    procs.register(info, child);
-
-    // Wait for the server to be ready (poll up to 5 seconds)
-    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match crate::tls::make_client_endpoint() {
-                Ok(endpoint) => {
-                    let addr: std::net::SocketAddr = address.parse().unwrap();
-                    if let Ok(connecting) = endpoint.connect(addr, "farder-server") {
-                        match connecting.await {
-                            Ok(conn) => {
-                                conn.close(0u32.into(), b"probe");
-                                return;
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-    })
-    .await;
-
-    if ready.is_err() {
-        // Clean up the spawned server on timeout
-        crate::server_manager::stop_server(&procs, port)?;
-        return Err("server failed to start within 5 seconds".to_string());
-    }
-
-    // Now connect and auto-claim as owner (no invite or setup token needed)
+    // Load the owner keypair up front (needed for both paths).
     let keypair = {
-        let lock = state
-            .signing_key_bytes
-            .lock()
-            .map_err(|e| e.to_string())?;
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
         match lock.as_ref() {
             Some(bytes) => Keypair::from_signing_key_bytes(bytes),
-            None => return Err("no identity keypair set — unlock your identity first".to_string()),
+            None => return Err("no identity keypair set -- unlock your identity first".to_string()),
         }
     };
 
-    let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
-    let addr: std::net::SocketAddr = address
-        .parse()
-        .map_err(|e: std::net::AddrParseError| e.to_string())?;
+    // Generate a stable server_id (used only in relay mode).
+    let server_id: [u8; 32] = rand::random();
 
-    let (conn, send, recv, session_token) =
-        connect_and_authenticate(endpoint.clone(), addr, &keypair, None, None)
-            .await
-            .map_err(|e| e.to_string())?;
+    let (info, child) = crate::server_manager::spawn_server(
+        &name,
+        &template,
+        &privacy,
+        relay.as_ref().map(|(a, _)| (*a, server_id)),
+    )?;
+    let port = info.port;
+    let relayed = info.relayed;
+    let local_data_dir = info.data_dir.clone();
+    let local_template = info.template.clone();
+    procs.register(info, child);
+
+    // Connect + obtain the entry id (relay link or 127.0.0.1:port).
+    let (conn, send, recv, session_token, address, endpoint) = if let Some((relay_addr, cert_fp)) = relay {
+        let target = crate::connection::RelayTarget {
+            relay_addr,
+            server_id: server_id.to_vec(),
+            cert_fp: cert_fp.clone(),
+            invite_token: String::new(), // owner: no invite
+        };
+        let endpoint = crate::tls::make_pinned_relay_endpoint(cert_fp.clone()).map_err(|e| e.to_string())?;
+        // Retry until the server has registered with the relay (or time out).
+        let connected = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match crate::connection::connect_via_relay(endpoint.clone(), &target, &keypair, None).await {
+                    Ok(t) => return t,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+                }
+            }
+        })
+        .await;
+        let (conn, send, recv, session_token) = match connected {
+            Ok(t) => t,
+            Err(_) => {
+                crate::server_manager::stop_server(&procs, port)?;
+                return Err("the relayed server did not register with the relay within 30 seconds".to_string());
+            }
+        };
+        let link = crate::connection::build_relay_link(&target, "");
+        (conn, send, recv, session_token, link, endpoint)
+    } else {
+        let address = format!("127.0.0.1:{}", port);
+        // Wait for the direct server to be ready (poll up to 5 seconds).
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(endpoint) = crate::tls::make_client_endpoint() {
+                    if let Ok(addr) = address.parse::<std::net::SocketAddr>() {
+                        if let Ok(connecting) = endpoint.connect(addr, "farder-server") {
+                            if let Ok(conn) = connecting.await {
+                                conn.close(0u32.into(), b"probe");
+                                return;
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        })
+        .await;
+        if ready.is_err() {
+            crate::server_manager::stop_server(&procs, port)?;
+            return Err("server failed to start within 5 seconds".to_string());
+        }
+        let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
+        let addr: std::net::SocketAddr = address.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+        let (conn, send, recv, session_token) =
+            connect_and_authenticate(endpoint.clone(), addr, &keypair, None, None)
+                .await
+                .map_err(|e| e.to_string())?;
+        (conn, send, recv, session_token, address, endpoint)
+    };
 
     let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
     {
@@ -2392,7 +2451,7 @@ pub async fn create_local_server(
         server_name: Mutex::new(name.clone()),
         media_dispatcher,
         session_token,
-        relayed: false,
+        relayed,
     });
 
     let handle = bridge::spawn_event_reader(app.clone(), address.clone(), Arc::clone(&server_conn), recv);
@@ -2447,7 +2506,7 @@ pub async fn create_local_server(
                 "categories": categories,
                 "roles": roles,
                 "owner_public_key": owner_public_key,
-                "relayed": false,
+                "relayed": relayed,
             }))
         }
         ServerResponse::Error { reason } => Err(reason),
@@ -2656,5 +2715,30 @@ mod voice_settings_tests {
             persist_peer_volume("deadbeef", -3.0).unwrap();
             assert_eq!(read_peer_volumes().get("deadbeef"), Some(&0.0));
         });
+    }
+}
+
+#[cfg(test)]
+mod relay_choice_tests {
+    use super::*;
+
+    #[test]
+    fn direct_resolves_to_none() {
+        assert!(resolve_relay_choice("direct", None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn farder_resolves_to_the_default_relay() {
+        let r = resolve_relay_choice("farder", None, None).unwrap();
+        assert!(r.is_some(), "default relay is configured");
+    }
+
+    #[test]
+    fn selfhost_validates_addr_and_fingerprint() {
+        let ok = resolve_relay_choice("selfhost", Some("1.2.3.4:4433"), Some(&"ab".repeat(32))).unwrap();
+        assert!(ok.is_some());
+        assert!(resolve_relay_choice("selfhost", Some("nope"), Some(&"ab".repeat(32))).is_err());
+        assert!(resolve_relay_choice("selfhost", Some("1.2.3.4:4433"), Some("zz")).is_err());
+        assert!(resolve_relay_choice("selfhost", Some("1.2.3.4:4433"), Some("abcd")).is_err()); // not 32 bytes
     }
 }
