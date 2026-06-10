@@ -2370,7 +2370,13 @@ pub async fn create_local_server(
             cert_fp: cert_fp.clone(),
             invite_token: String::new(), // owner: no invite
         };
-        let endpoint = crate::tls::make_pinned_relay_endpoint(cert_fp.clone()).map_err(|e| e.to_string())?;
+        let endpoint = match crate::tls::make_pinned_relay_endpoint(cert_fp.clone()) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = crate::server_manager::stop_server(&procs, port);
+                return Err(e.to_string());
+            }
+        };
         // Retry until the server has registered with the relay (or time out).
         let connected = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
@@ -2416,9 +2422,13 @@ pub async fn create_local_server(
         let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
         let addr: std::net::SocketAddr = address.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
         let (conn, send, recv, session_token) =
-            connect_and_authenticate(endpoint.clone(), addr, &keypair, None, None)
-                .await
-                .map_err(|e| e.to_string())?;
+            match connect_and_authenticate(endpoint.clone(), addr, &keypair, None, None).await {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = crate::server_manager::stop_server(&procs, port);
+                    return Err(e.to_string());
+                }
+            };
         (conn, send, recv, session_token, address, endpoint)
     };
 
