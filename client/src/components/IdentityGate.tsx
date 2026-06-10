@@ -67,11 +67,13 @@ function PinField({
   onChange,
   autoFocus,
   placeholder,
+  onSubmit,
 }: {
   value: string;
   onChange: (v: string) => void;
   autoFocus?: boolean;
   placeholder?: string;
+  onSubmit?: () => void;
 }) {
   return (
     <input
@@ -83,6 +85,9 @@ function PinField({
       value={value}
       maxLength={4}
       onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 4))}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && onSubmit) onSubmit();
+      }}
     />
   );
 }
@@ -161,6 +166,17 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
       setBusy(false);
     }
   }
+
+  // Auto-submit the unlock once all 4 digits are entered -- no need to also
+  // click "Unlock". A wrong PIN just clears the field so you can retype.
+  useEffect(() => {
+    if (screen === "enter-pin" && pin.length === 4 && !busy) {
+      handleUnlock();
+    }
+    // handleUnlock intentionally omitted: re-running on its identity could
+    // double-submit. The pin/screen/busy guard is what gates this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pin, screen, busy]);
 
   async function handleRestore() {
     if (pin.length !== 4) return setError("New PIN must be 4 digits.");
@@ -261,7 +277,7 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
     return shell(
       "Enter your PIN",
       <>
-        <PinField value={pin} onChange={setPin} autoFocus />
+        <PinField value={pin} onChange={setPin} autoFocus onSubmit={handleUnlock} />
         <button
           className="connect-button"
           disabled={busy || pin.length !== 4}
