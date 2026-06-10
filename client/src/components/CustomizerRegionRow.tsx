@@ -2,10 +2,15 @@ import { useRef, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import ColorPickerPopover from "./ColorPickerPopover";
 import type { RegionDefinition, RegionState, ImageFit } from "../lib/customizer/types";
+import type { EffectiveColor } from "./CustomizeModal";
 
 interface Props {
   region: RegionDefinition;
   state: RegionState | undefined;
+  /** Live-DOM effective colors for this region, read once on modal open.
+   *  Display-only: used as swatch fallback and to seed the picker when the
+   *  user has not yet set an explicit override. Never written to RegionState. */
+  current?: EffectiveColor;
   themeId: string;
   themeSwatches: string[];
   onChange: (next: RegionState | undefined) => void;
@@ -36,6 +41,7 @@ const FIT_OPTIONS: ImageFit[] = ["stretch", "tile", "center", "cover"];
 export default function CustomizerRegionRow({
   region,
   state,
+  current,
   themeId,
   themeSwatches,
   onChange,
@@ -48,6 +54,10 @@ export default function CustomizerRegionRow({
   const bgColor = state?.bgColor;
   const bgImage = state?.bgImage;
   const textColor = state?.textColor;
+
+  // Checkerboard used as the final fallback when neither an override nor a
+  // live-DOM effective color is available for a region.
+  const checkerboard = "repeating-linear-gradient(45deg, #eee, #eee 4px, #ccc 4px, #ccc 8px)";
 
   function patch(p: Partial<RegionState>): void {
     const next: RegionState = {
@@ -99,14 +109,21 @@ export default function CustomizerRegionRow({
     >
       <div style={{ fontWeight: "bold" }}>{region.label}</div>
 
-      {/* Background color swatch */}
+      {/* Background color swatch.
+          Fallback order: explicit override -> current effective color -> checkerboard. */}
       <button
         ref={bgRef}
         onClick={() => setOpenPicker(openPicker === "bg" ? null : "bg")}
-        title={bgColor ? `Background: ${bgColor}` : "Set background color"}
+        title={
+          bgColor
+            ? `Background: ${bgColor}`
+            : current?.bg
+            ? `Current: ${current.bg} (no override set)`
+            : "Set background color"
+        }
         style={{
           ...swatchBtn,
-          background: bgColor ?? "repeating-linear-gradient(45deg, #eee, #eee 4px, #ccc 4px, #ccc 8px)",
+          background: bgColor ?? current?.bg ?? checkerboard,
         }}
       />
 
@@ -142,17 +159,24 @@ export default function CustomizerRegionRow({
 
       <span /> {/* spacer */}
 
-      {/* Text color */}
+      {/* Text color.
+          Fallback order: explicit override -> current effective color -> checkerboard. */}
       {region.hasText ? (
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <span style={{ fontSize: 10, color: "var(--xp-text-muted, #666)" }}>text:</span>
           <button
             ref={textRef}
             onClick={() => setOpenPicker(openPicker === "text" ? null : "text")}
-            title={textColor ? `Text color: ${textColor}` : "Set text color"}
+            title={
+              textColor
+                ? `Text color: ${textColor}`
+                : current?.text
+                ? `Current: ${current.text} (no override set)`
+                : "Set text color"
+            }
             style={{
               ...swatchBtn,
-              background: textColor ?? "repeating-linear-gradient(45deg, #eee, #eee 4px, #ccc 4px, #ccc 8px)",
+              background: textColor ?? current?.text ?? checkerboard,
             }}
           />
         </div>
@@ -169,10 +193,14 @@ export default function CustomizerRegionRow({
         ×
       </button>
 
-      {/* Popovers */}
+      {/* Popovers.
+          When no override is set, seed the picker from the current effective
+          color so the user starts from the theme's real value, not blank.
+          The seed is display-only: onChange only fires when the user actually
+          commits a color, so merely opening the picker writes nothing. */}
       {openPicker === "bg" && bgRef.current && (
         <ColorPickerPopover
-          value={bgColor}
+          value={bgColor ?? current?.bg}
           themeSwatches={themeSwatches}
           anchorRect={bgRef.current.getBoundingClientRect()}
           onChange={(c) => patch({ bgColor: c, bgImage: undefined })}
@@ -185,7 +213,7 @@ export default function CustomizerRegionRow({
       )}
       {openPicker === "text" && textRef.current && (
         <ColorPickerPopover
-          value={textColor}
+          value={textColor ?? current?.text}
           themeSwatches={themeSwatches}
           anchorRect={textRef.current.getBoundingClientRect()}
           onChange={(c) => patch({ textColor: c })}

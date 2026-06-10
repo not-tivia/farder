@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import { REGIONS } from "../lib/customizer/regions";
-import type { RegionId, RegionState } from "../lib/customizer/types";
+import type { RegionId, RegionState, RegionDefinition } from "../lib/customizer/types";
 import {
   initHistory,
   pushSnapshot,
@@ -15,6 +15,74 @@ import {
 import { generateOverrideCss, mergeForSave, parseOverrideCss } from "../lib/customizer/cssGenerator";
 import CustomizerRegionRow from "./CustomizerRegionRow";
 import CustomizerIntro from "./CustomizerIntro";
+
+export interface EffectiveColor {
+  bg?: string;
+  text?: string;
+}
+
+/** Read the live DOM to determine what color each region is currently rendering.
+ *  Returns a map of RegionId -> { bg?, text? } using getComputedStyle.
+ *  All DOM access is guarded so a missing element never throws.
+ *  Results are display-only; they are NEVER written to history or RegionState. */
+function computeEffectiveColors(regions: RegionDefinition[]): Map<RegionId, EffectiveColor> {
+  const result = new Map<RegionId, EffectiveColor>();
+
+  for (const region of regions) {
+    const entry: EffectiveColor = {};
+
+    // Accent region: color comes from a CSS variable on :root, not a selector.
+    if (region.accentVariable) {
+      try {
+        const val = getComputedStyle(document.documentElement)
+          .getPropertyValue(region.accentVariable)
+          .trim();
+        if (val) entry.bg = val;
+      } catch {
+        // ignore
+      }
+      result.set(region.id, entry);
+      continue;
+    }
+
+    // Background: walk backgroundSelectors until we find a rendered element with
+    // a non-transparent background color.
+    for (const sel of region.backgroundSelectors) {
+      try {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const c = getComputedStyle(el).backgroundColor;
+        if (c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent") {
+          entry.bg = c;
+          break;
+        }
+      } catch {
+        // invalid selector or access error — skip
+      }
+    }
+
+    // Text: walk textSelectors until we find a rendered element with a color.
+    if (region.hasText) {
+      for (const sel of region.textSelectors) {
+        try {
+          const el = document.querySelector(sel);
+          if (!el) continue;
+          const c = getComputedStyle(el).color;
+          if (c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent") {
+            entry.text = c;
+            break;
+          }
+        } catch {
+          // invalid selector or access error — skip
+        }
+      }
+    }
+
+    result.set(region.id, entry);
+  }
+
+  return result;
+}
 
 interface Props {
   themeId: string;
@@ -75,6 +143,21 @@ export default function CustomizeModal({ themeId, initialName, onClose, onSaved 
   const [showIntro, setShowIntro] = useState<boolean>(() => localStorage.getItem(INTRO_DISMISSED_KEY) !== "true");
   const [dirty, setDirty] = useState<boolean>(false);
   const swatches = useMemo(() => extractSwatchesFromActiveTheme(), []);
+
+  // Computed once on mount (after a tick so layout is ready). Display-only —
+  // never written into history or RegionState. Used as swatch fallback when a
+  // region has no explicit override, so built-in themes show their real colors.
+  const [effectiveColors, setEffectiveColors] = useState<Map<RegionId, EffectiveColor>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    // Defer by one tick so the themed DOM is painted before we read colors.
+    const id = setTimeout(() => {
+      setEffectiveColors(computeEffectiveColors(REGIONS));
+    }, 0);
+    return () => clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // On open, seed the editor with any previously-saved customizer values so
   // the swatches show the theme's real colors instead of the "unset" checkerboard.
@@ -279,6 +362,7 @@ export default function CustomizeModal({ themeId, initialName, onClose, onSaved 
               key={r.id}
               region={r}
               state={regions.get(r.id)}
+              current={effectiveColors.get(r.id)}
               themeId={themeId}
               themeSwatches={swatches}
               onChange={(next) => updateRegion(r.id, next)}
