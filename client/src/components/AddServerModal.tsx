@@ -27,6 +27,12 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
   const [selectedTemplate, setSelectedTemplate] = useState("blank");
   const [privacy, setPrivacy] = useState("invite-only");
 
+  // Relay choice state
+  const [relayMode, setRelayMode] = useState<"farder" | "selfhost" | "direct">("farder");
+  const [relayAddr, setRelayAddr] = useState("");
+  const [relayFp, setRelayFp] = useState("");
+  const [showRelayInfo, setShowRelayInfo] = useState(false);
+
   // Join state
   const [inviteInput, setInviteInput] = useState("");
 
@@ -45,6 +51,10 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
       setError("Please enter a server name.");
       return;
     }
+    if (relayMode === "selfhost" && (!relayAddr.trim() || !relayFp.trim())) {
+      setError("Enter the relay address and fingerprint.");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -53,6 +63,9 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
         selectedTemplate,
         privacy,
         serverIcon ?? undefined,
+        relayMode,
+        relayMode === "selfhost" ? relayAddr.trim() : undefined,
+        relayMode === "selfhost" ? relayFp.trim() : undefined,
       );
       const { address, ...connectPayload } = result;
       dispatch({ type: "SERVER_ADDED", serverId: address, payload: connectPayload });
@@ -230,6 +243,45 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
                     Open
                   </label>
                 </div>
+              </div>
+
+              <div className="reachability">
+                <label className="section-label">How will people reach your server?</label>
+
+                <label className="relay-option">
+                  <input type="radio" name="relayMode" checked={relayMode === "farder"} onChange={() => setRelayMode("farder")} />
+                  <span><strong>Use the Farder relay</strong> <em>Recommended</em><br />
+                  <small>Members&apos; IPs and yours stay hidden, and it works even behind a home router.</small></span>
+                </label>
+
+                <label className="relay-option">
+                  <input type="radio" name="relayMode" checked={relayMode === "selfhost"} onChange={() => setRelayMode("selfhost")} />
+                  <span><strong>Self-host your own relay</strong> <em>Advanced</em><br />
+                  <small>Point at a relay you run yourself.</small></span>
+                </label>
+                {relayMode === "selfhost" && (
+                  <div className="relay-selfhost-fields">
+                    <input placeholder="Relay address (host:port)" value={relayAddr} onChange={(e) => setRelayAddr(e.target.value)} />
+                    <input placeholder="Cert fingerprint (64 hex characters)" value={relayFp} onChange={(e) => setRelayFp(e.target.value)} />
+                  </div>
+                )}
+
+                <label className="relay-option">
+                  <input type="radio" name="relayMode" checked={relayMode === "direct"} onChange={() => setRelayMode("direct")} />
+                  <span><strong>Direct &mdash; same network only</strong> <em>Advanced</em><br />
+                  <small>Connects straight to your machine. Only reachable on your own network or with port-forwarding, and your IP is visible.</small></span>
+                </label>
+
+                <button type="button" className="learn-more-toggle" onClick={() => setShowRelayInfo(!showRelayInfo)}>
+                  {showRelayInfo ? "Hide details" : "Learn more"}
+                </button>
+                {showRelayInfo && (
+                  <div className="learn-more-body">
+                    <p>A relay is a neutral middle server. Because you and your members connect <em>through</em> it instead of directly to each other, neither side learns the other&apos;s IP address &mdash; and your server stays reachable even behind a home router.</p>
+                    <p>For this to protect you, the relay must be run by a neutral party (a relay run by the server&apos;s own host can&apos;t hide IPs from that host). The Farder relay is that neutral party.</p>
+                    <p><strong>One honest caveat:</strong> today a relay&apos;s operator can technically read a community&apos;s messages (they aren&apos;t yet end-to-end encrypted between members and the server). Your direct messages and voice are always end-to-end encrypted regardless. Removing even that is on the roadmap.</p>
+                  </div>
+                )}
               </div>
 
               {error && <div className="error-text">{error}</div>}

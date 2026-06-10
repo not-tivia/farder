@@ -506,6 +506,9 @@ export async function createLocalServer(
   template: string,
   privacy: string,
   iconPath?: string,
+  relayMode: "farder" | "selfhost" | "direct" = "farder",
+  relayAddr?: string,
+  relayFp?: string,
 ): Promise<{
   address: string;
   server_name: string;
@@ -519,6 +522,9 @@ export async function createLocalServer(
     template,
     privacy,
     iconPath: iconPath ?? null,
+    relayMode,
+    relayAddr: relayAddr ?? null,
+    relayFp: relayFp ?? null,
   });
 }
 
