@@ -111,30 +111,42 @@ fn server_data_dir(server_name: &str) -> Result<PathBuf, String> {
 /// 2. The workspace target/debug directory (for dev builds)
 /// 3. System PATH
 fn find_server_binary() -> Result<PathBuf, String> {
-    // Check next to current executable
+    // Candidate file names next to the executable, most-specific first. On
+    // Windows the binary carries a ".exe" suffix (EXE_SUFFIX); the Tauri sidecar
+    // is named with the build target triple. We try every combination so the
+    // binary is found whether it was placed with or without the suffix/triple
+    // (a long-standing Windows bug: we only checked the suffix-less names, so on
+    // Windows we never matched `farder-server-<triple>.exe` and fell through to a
+    // stale PATH binary).
+    let triple = env!("TARGET");
+    let ext = std::env::consts::EXE_SUFFIX; // ".exe" on Windows, "" elsewhere
+    let names = [
+        format!("farder-server-{triple}{ext}"),
+        format!("farder-server-{triple}"),
+        format!("farder-server{ext}"),
+        "farder-server".to_string(),
+    ];
+
+    // Check next to the current executable (the Tauri sidecar location).
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let candidate = exe_dir.join("farder-server");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-            // Also check with target triple suffix
-            let triple = env!("TARGET");
-            let candidate = exe_dir.join(format!("farder-server-{}", triple));
-            if candidate.exists() {
-                return Ok(candidate);
+            for name in &names {
+                let candidate = exe_dir.join(name);
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
             }
         }
     }
 
-    // Check if farder-server is on PATH (try running it directly — works cross-platform)
+    // Check if farder-server is on PATH (Command resolves the platform suffix).
     if let Ok(output) = Command::new("farder-server").arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).status() {
         if output.success() {
             return Ok(PathBuf::from("farder-server"));
         }
     }
 
-    Err("could not find farder-server binary — build it with 'cargo build -p farder-server'".to_string())
+    Err("could not find the farder-server binary next to the app or on PATH. Build it (`cargo build -p farder-server`) and place the sidecar (see client/src-tauri/binaries/copy-sidecar.sh on Linux/macOS or copy-sidecar.ps1 on Windows).".to_string())
 }
 
 /// Spawn a farder-server process. `relay` = Some((relay_addr, server_id)) starts
