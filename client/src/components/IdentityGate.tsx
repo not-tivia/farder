@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as api from "../lib/tauri-bridge";
 
 type Screen = "loading" | "set-pin" | "enter-pin" | "migrate" | "restore" | "show-phrase";
@@ -61,34 +61,75 @@ function renderPhraseImage(phrase: string): string | null {
   return comma >= 0 ? dataUrl.slice(comma + 1) : null;
 }
 
-// Reusable 4-digit PIN field (digits only, max length 4).
+// Reusable 4-digit PIN field rendered as 4 circles (Twitter/X DM-unlock style).
+// Keeps the same value/onChange contract (value is a 0-4 char digit string).
+// A visually-hidden <input> handles all keystrokes; clicking/tapping the circle
+// row focuses it. onComplete fires as soon as the 4th digit is entered, or on
+// Enter when 4 digits are already present.
 function PinField({
   value,
   onChange,
   autoFocus,
-  placeholder,
-  onSubmit,
+  onComplete,
 }: {
   value: string;
   onChange: (v: string) => void;
   autoFocus?: boolean;
-  placeholder?: string;
-  onSubmit?: () => void;
+  onComplete?: () => void;
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = e.target.value.replace(/\D/g, "").slice(0, 4);
+    onChange(next);
+    if (next.length === 4) onComplete?.();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && value.length === 4) onComplete?.();
+  };
+
+  const circleStyle = (filled: boolean): React.CSSProperties => ({
+    width: 48,
+    height: 48,
+    borderRadius: "50%",
+    border: filled ? "none" : "2px solid var(--xp-blue, #5865F2)",
+    background: filled ? "var(--xp-blue, #5865F2)" : "transparent",
+    boxSizing: "border-box",
+    transition: "background 0.12s ease, border 0.12s ease",
+    flexShrink: 0,
+  });
+
   return (
-    <input
-      className="connect-input"
-      type="password"
-      inputMode="numeric"
-      autoFocus={autoFocus}
-      placeholder={placeholder ?? "4-digit PIN"}
-      value={value}
-      maxLength={4}
-      onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 4))}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" && onSubmit) onSubmit();
-      }}
-    />
+    <div
+      style={{ position: "relative", display: "flex", gap: 16, justifyContent: "center", cursor: "text", margin: "12px 0" }}
+      onClick={() => inputRef.current?.focus()}
+    >
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} style={circleStyle(i < value.length)} />
+      ))}
+      {/* Visually hidden but focusable input that captures all keystrokes */}
+      <input
+        ref={inputRef}
+        type="password"
+        inputMode="numeric"
+        maxLength={4}
+        autoFocus={autoFocus}
+        value={value}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        style={{
+          position: "absolute",
+          inset: 0,
+          opacity: 0,
+          width: "100%",
+          height: "100%",
+          cursor: "text",
+          zIndex: 1,
+        }}
+        aria-label="PIN entry"
+      />
+    </div>
   );
 }
 
@@ -96,6 +137,10 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
   const [screen, setScreen] = useState<Screen>("loading");
   const [pin, setPin] = useState("");
   const [pin2, setPin2] = useState("");
+  // Used to programmatically focus the confirm-PIN circle field after the
+  // first field fills.  We toggle this boolean to give the confirm PinField
+  // a fresh autoFocus when the choose-field completes.
+  const [confirmFocus, setConfirmFocus] = useState(false);
   const [phrase, setPhrase] = useState("");
   const [recoveryPhrase, setRecoveryPhrase] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +161,7 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
     setPin("");
     setPin2("");
     setError(null);
+    setConfirmFocus(false);
   };
 
   async function handleCreate() {
@@ -166,17 +212,6 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
       setBusy(false);
     }
   }
-
-  // Auto-submit the unlock once all 4 digits are entered -- no need to also
-  // click "Unlock". A wrong PIN just clears the field so you can retype.
-  useEffect(() => {
-    if (screen === "enter-pin" && pin.length === 4 && !busy) {
-      handleUnlock();
-    }
-    // handleUnlock intentionally omitted: re-running on its identity could
-    // double-submit. The pin/screen/busy guard is what gates this.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pin, screen, busy]);
 
   async function handleRestore() {
     if (pin.length !== 4) return setError("New PIN must be 4 digits.");
@@ -249,8 +284,20 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
       "Set a PIN",
       <>
         <p>Choose a 4-digit PIN. You'll enter it each time you open Farder. It encrypts your identity on this device.</p>
-        <PinField value={pin} onChange={setPin} autoFocus placeholder="Choose PIN" />
-        <PinField value={pin2} onChange={setPin2} placeholder="Confirm PIN" />
+        <p style={{ textAlign: "center", color: "var(--text-muted, #888)", fontSize: 13, margin: "0 0 4px" }}>Choose PIN</p>
+        <PinField
+          value={pin}
+          onChange={(v) => { setPin(v); if (v.length < 4) setConfirmFocus(false); }}
+          autoFocus
+          onComplete={() => setConfirmFocus(true)}
+        />
+        <p style={{ textAlign: "center", color: "var(--text-muted, #888)", fontSize: 13, margin: "0 0 4px" }}>Confirm PIN</p>
+        <PinField
+          value={pin2}
+          onChange={setPin2}
+          autoFocus={confirmFocus}
+          onComplete={handleCreate}
+        />
         <button className="connect-button" disabled={busy} onClick={handleCreate}>
           {busy ? "Creating..." : "Create identity"}
         </button>
@@ -265,8 +312,20 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
       "Secure your account",
       <>
         <p>Your identity key was stored unprotected. Set a 4-digit PIN now to encrypt it on this device.</p>
-        <PinField value={pin} onChange={setPin} autoFocus placeholder="Choose PIN" />
-        <PinField value={pin2} onChange={setPin2} placeholder="Confirm PIN" />
+        <p style={{ textAlign: "center", color: "var(--text-muted, #888)", fontSize: 13, margin: "0 0 4px" }}>Choose PIN</p>
+        <PinField
+          value={pin}
+          onChange={(v) => { setPin(v); if (v.length < 4) setConfirmFocus(false); }}
+          autoFocus
+          onComplete={() => setConfirmFocus(true)}
+        />
+        <p style={{ textAlign: "center", color: "var(--text-muted, #888)", fontSize: 13, margin: "0 0 4px" }}>Confirm PIN</p>
+        <PinField
+          value={pin2}
+          onChange={setPin2}
+          autoFocus={confirmFocus}
+          onComplete={handleMigrate}
+        />
         <button className="connect-button" disabled={busy} onClick={handleMigrate}>
           {busy ? "Securing..." : "Secure account"}
         </button>
@@ -277,7 +336,7 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
     return shell(
       "Enter your PIN",
       <>
-        <PinField value={pin} onChange={setPin} autoFocus onSubmit={handleUnlock} />
+        <PinField value={pin} onChange={setPin} autoFocus onComplete={handleUnlock} />
         <button
           className="connect-button"
           disabled={busy || pin.length !== 4}
@@ -303,7 +362,8 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
           value={phrase}
           onChange={(e) => setPhrase(e.target.value)}
         />
-        <PinField value={pin} onChange={setPin} placeholder="New PIN" />
+        <p style={{ textAlign: "center", color: "var(--text-muted, #888)", fontSize: 13, margin: "0 0 4px" }}>New PIN</p>
+        <PinField value={pin} onChange={setPin} onComplete={handleRestore} />
         <button className="connect-button" disabled={busy} onClick={handleRestore}>
           {busy ? "Restoring..." : "Restore"}
         </button>
