@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -11,6 +12,42 @@ pub struct ManagedServer {
     pub data_dir: String,
     pub template: String,
     pub privacy: String, // "invite-only" or "open"
+    #[serde(default)]
+    pub relayed: bool,
+}
+
+/// How a spawned server is reached.
+pub enum ServerMode {
+    /// Bind a public UDP listener on `port`.
+    Direct { port: u16 },
+    /// Dial out to `relay_addr` and register (no local bind); the stable
+    /// server_id lives in the data dir.
+    Relay { relay_addr: SocketAddr },
+}
+
+/// Build the farder-server CLI args for the given mode. Pure (testable).
+pub fn build_server_args(name: &str, template: &str, data_dir: &std::path::Path, mode: &ServerMode) -> Vec<String> {
+    let db = data_dir.join("server.db").to_string_lossy().into_owned();
+    let files = data_dir.join("files").to_string_lossy().into_owned();
+    let mut args = vec![
+        "--name".into(), name.to_string(),
+        "--template".into(), template.to_string(),
+        "--db".into(), db,
+        "--storage-dir".into(), files,
+    ];
+    match mode {
+        ServerMode::Direct { port } => {
+            args.push("--bind".into());
+            args.push(format!("0.0.0.0:{}", port));
+        }
+        ServerMode::Relay { relay_addr } => {
+            args.push("--relay".into());
+            args.push(relay_addr.to_string());
+            args.push("--data-dir".into());
+            args.push(data_dir.to_string_lossy().into_owned());
+        }
+    }
+    args
 }
 
 /// Tracks all locally-spawned server processes.
@@ -100,30 +137,34 @@ fn find_server_binary() -> Result<PathBuf, String> {
     Err("could not find farder-server binary — build it with 'cargo build -p farder-server'".to_string())
 }
 
-/// Spawn a farder-server process with the given configuration.
+/// Spawn a farder-server process. `relay` = Some((relay_addr, server_id)) starts
+/// it in relay mode (writes the server_id, dials the relay, no bind); None is a
+/// direct server bound to a local port.
 pub fn spawn_server(
     name: &str,
     template: &str,
     _privacy: &str,
+    relay: Option<(SocketAddr, [u8; 32])>,
 ) -> Result<(ManagedServer, Child), String> {
+    // A unique port number is always allocated: it is the bind port for direct
+    // servers, and just a process-table handle for relay servers (which don't bind).
     let port = find_available_port(4435)
         .ok_or_else(|| "no available port found (tried 4435-4534)".to_string())?;
-
     let data_dir = server_data_dir(name)?;
-    let db_path = data_dir.join("server.db");
-    let files_path = data_dir.join("files");
-
-    let bind_addr = format!("0.0.0.0:{}", port);
     let server_bin = find_server_binary()?;
 
+    let mode = match relay {
+        Some((relay_addr, server_id)) => {
+            std::fs::write(data_dir.join("server_id"), server_id)
+                .map_err(|e| format!("failed to write server_id: {}", e))?;
+            ServerMode::Relay { relay_addr }
+        }
+        None => ServerMode::Direct { port },
+    };
+    let args = build_server_args(name, template, &data_dir, &mode);
+
     let child = Command::new(&server_bin)
-        .args([
-            "--bind", &bind_addr,
-            "--name", name,
-            "--template", template,
-            "--db", &db_path.to_string_lossy(),
-            "--storage-dir", &files_path.to_string_lossy(),
-        ])
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -135,34 +176,33 @@ pub fn spawn_server(
         data_dir: data_dir.to_string_lossy().to_string(),
         template: template.to_string(),
         privacy: _privacy.to_string(),
+        relayed: relay.is_some(),
     };
-
     Ok((info, child))
 }
 
-/// Spawn a server using an existing data directory (for restarting on app relaunch).
+/// Spawn a server using an existing data directory (for restarting on app
+/// relaunch). `relay_addr` = Some(addr) respawns in relay mode (reuses the
+/// existing server_id in the data dir); None is a direct server.
 pub fn spawn_server_with_data_dir(
     name: &str,
     template: &str,
     data_dir: &str,
+    relay_addr: Option<SocketAddr>,
 ) -> Result<(ManagedServer, Child), String> {
     let port = find_available_port(4435)
         .ok_or_else(|| "no available port found (tried 4435-4534)".to_string())?;
-
     let data_path = PathBuf::from(data_dir);
-    let db_path = data_path.join("server.db");
-    let files_path = data_path.join("files");
-    let bind_addr = format!("0.0.0.0:{}", port);
     let server_bin = find_server_binary()?;
 
+    let mode = match relay_addr {
+        Some(addr) => ServerMode::Relay { relay_addr: addr },
+        None => ServerMode::Direct { port },
+    };
+    let args = build_server_args(name, template, &data_path, &mode);
+
     let child = Command::new(&server_bin)
-        .args([
-            "--bind", &bind_addr,
-            "--name", name,
-            "--template", template,
-            "--db", &db_path.to_string_lossy(),
-            "--storage-dir", &files_path.to_string_lossy(),
-        ])
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -174,9 +214,34 @@ pub fn spawn_server_with_data_dir(
         data_dir: data_dir.to_string(),
         template: template.to_string(),
         privacy: "invite-only".to_string(),
+        relayed: relay_addr.is_some(),
     };
-
     Ok((info, child))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use std::path::Path;
+
+    #[test]
+    fn relay_mode_args_use_relay_and_data_dir_not_bind() {
+        let addr: SocketAddr = "45.77.70.199:4433".parse().unwrap();
+        let args = build_server_args("MyServer", "blank", Path::new("/tmp/s"), &ServerMode::Relay { relay_addr: addr });
+        assert!(args.iter().any(|a| a == "--relay"));
+        assert!(args.iter().any(|a| a == "45.77.70.199:4433"));
+        assert!(args.iter().any(|a| a == "--data-dir"));
+        assert!(!args.iter().any(|a| a == "--bind"), "relay mode must not bind a port");
+    }
+
+    #[test]
+    fn direct_mode_args_bind_a_port() {
+        let args = build_server_args("MyServer", "blank", Path::new("/tmp/s"), &ServerMode::Direct { port: 4435 });
+        assert!(args.iter().any(|a| a == "--bind"));
+        assert!(args.iter().any(|a| a == "0.0.0.0:4435"));
+        assert!(!args.iter().any(|a| a == "--relay"));
+    }
 }
 
 /// Stop a locally-managed server by port.

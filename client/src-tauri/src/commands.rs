@@ -2303,7 +2303,7 @@ pub async fn create_local_server(
     }
 
     // Spawn the server process
-    let (info, child) = crate::server_manager::spawn_server(&name, &template, &privacy)?;
+    let (info, child) = crate::server_manager::spawn_server(&name, &template, &privacy, None)?;
     let port = info.port;
     let address = format!("127.0.0.1:{}", port);
     let local_data_dir = info.data_dir.clone();
@@ -2569,6 +2569,7 @@ pub fn restart_local_servers(
                 &entry.name,
                 &local.template,
                 &local.data_dir,
+                None,
             ) {
                 Ok((info, child)) => {
                     let new_address = format!("127.0.0.1:{}", info.port);
