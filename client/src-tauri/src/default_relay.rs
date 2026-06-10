@@ -15,5 +15,9 @@ pub struct DefaultRelay {
 }
 
 /// The configured default relay, or `None` until one is deployed and filled in.
+/// Deployed 2026-06-10 on a Vultr VPS (Docker, see docs/deploy/relay.md).
 #[allow(dead_code)]
-pub const DEFAULT_RELAY: Option<DefaultRelay> = None;
+pub const DEFAULT_RELAY: Option<DefaultRelay> = Some(DefaultRelay {
+    addr: "45.77.70.199:4433",
+    cert_fp_hex: "7e3ed9b35aedcf3b42c30500720ca12cb1385ad0a74207b3f977167f1ab48459",
+});
