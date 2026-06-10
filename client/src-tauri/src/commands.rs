@@ -1907,9 +1907,25 @@ pub async fn start_recording() -> Result<(), String> {
         }
     });
 
-    setup_rx
-        .await
-        .map_err(|_| "recording thread ended before it started".to_string())?
+    match setup_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            // cpal setup failed inside spawn_blocking; flag was already reset
+            // there (Err arm at line ~1904), but reset path/flag here too for
+            // belt-and-suspenders clarity.
+            RECORDING.store(false, Ordering::SeqCst);
+            if let Ok(mut g) = RECORDING_PATH.lock() { *g = None; }
+            Err(e)
+        }
+        Err(_) => {
+            // The spawn_blocking thread panicked or was dropped before sending
+            // the setup result — flag was never reset in that thread. Reset it
+            // here so subsequent start_recording calls are not permanently wedged.
+            RECORDING.store(false, Ordering::SeqCst);
+            if let Ok(mut g) = RECORDING_PATH.lock() { *g = None; }
+            Err("recording thread ended before it started".to_string())
+        }
+    }
 }
 
 /// Stop recording and return the path to the WAV file.

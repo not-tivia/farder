@@ -17,6 +17,11 @@ export default function VoiceRecorder({ onRecorded, onCancel }: Props) {
         beginRecording();
         return () => {
             if (timerRef.current) clearInterval(timerRef.current);
+            // Ensure the backend flag is cleared if the component unmounts
+            // while a recording is still live (e.g. navigation away from the
+            // chat). Without this the RECORDING flag stays true and every
+            // subsequent start_recording returns "already recording".
+            api.stopRecording().catch(() => {});
         };
     }, []);
 
