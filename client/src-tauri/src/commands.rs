@@ -2618,24 +2618,28 @@ pub fn restart_local_servers(
 
     for entry in &entries {
         if let Some(ref local) = entry.local {
-            // Reap any zombies pointing at this data dir BEFORE spawning a new
-            // process. Multiple servers on one SQLite DB causes hard-to-debug
-            // contention bugs (the same root cause as the disconnect storm fix).
             reap_orphan_servers_for_data_dir(&local.data_dir);
 
-            // Respawn the server using its saved data directory
+            // A relayed server's id is its relay link (stable across restarts);
+            // respawn it in relay mode and keep the same id. A direct server gets
+            // a fresh local port (and id) each launch.
+            let relay_addr = crate::connection::parse_relay_target(&entry.id).map(|t| t.relay_addr);
             match crate::server_manager::spawn_server_with_data_dir(
                 &entry.name,
                 &local.template,
                 &local.data_dir,
-                None,
+                relay_addr,
             ) {
                 Ok((info, child)) => {
-                    let new_address = format!("127.0.0.1:{}", info.port);
-                    eprintln!("[restart] Respawned '{}' on {}", entry.name, new_address);
+                    let new_id = if relay_addr.is_some() {
+                        entry.id.clone() // relay link is stable
+                    } else {
+                        format!("127.0.0.1:{}", info.port)
+                    };
+                    eprintln!("[restart] Respawned '{}' as {}", entry.name, new_id);
                     procs.register(info, child);
                     restarted.push(ServerEntry {
-                        id: new_address,
+                        id: new_id,
                         name: entry.name.clone(),
                         local: entry.local.clone(),
                     });
