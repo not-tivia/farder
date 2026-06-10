@@ -76,6 +76,70 @@ The full click-to-join flow needs the OS deep-link handler + a live relay and is
 verified on the Windows build (headless guards: the Rust link round-trip test +
 tsc + a node base64 round-trip).
 
+## Creating a relayed server (Phase 4 piece 1)
+
+The create-server flow now offers three reachability choices:
+
+1. **Use the Farder relay (default)** -- the app connects the new server through
+   the configured default relay with no extra input from the user.
+2. **Self-host your own relay** -- the user supplies a custom relay address
+   (`host:port`) and a 64-hex-char certificate fingerprint.
+3. **Direct (advanced / same-network-only)** -- classic local bind; no relay
+   involved. Not suitable for servers that need to be reachable from outside the
+   local network.
+
+`resolve_relay_choice` (in `commands.rs`) validates self-host inputs before
+spawning: the addr must parse as a `SocketAddr` and the fingerprint must be
+exactly 64 lowercase hex characters (32 bytes). It returns `None` for the
+direct path and `Some(RelayTarget)` for the two relay paths.
+
+`default_relay()` (in `default_relay.rs`) is the accessor for the configured
+Farder default relay, returning a `(SocketAddr, cert_fingerprint_bytes)` pair
+parsed from the compile-time constant. Self-host mode uses the caller-supplied
+addr and fingerprint instead.
+
+**Spawn command for a relayed server:**
+
+```
+farder-server --relay <addr> --data-dir <dir>
+```
+
+Note: no `--bind` flag. The client generates a cryptographically random 32-byte
+`server_id` and pre-writes it to `<data_dir>/server_id` before spawning, so the
+server registers under the expected id when it connects to the relay.
+
+**Owner connection and relay link:**
+
+After spawning, the client connects via `connect_via_relay` with an **empty
+owner invite token** (`""`). The server auto-claims the first connection with an
+empty token as owner. The relay link
+
+```
+farder://relay/<addr>/<server_id>/<fp>/
+```
+
+(trailing slash = empty token) is saved as the `ServerEntry` id. Because the
+relay link encodes the relay address, server id, and fingerprint rather than a
+local port, it is **stable across restarts** -- no schema change to `ServerEntry`
+is needed.
+
+**Restart / respawn:**
+
+`restart_local_servers` detects relayed entries by calling
+`parse_relay_target(id)` on each saved id. A `Some` result means the entry is a
+relay link; the server is respawned in relay mode (`--relay <addr> --data-dir
+<dir>`) and the saved id is kept unchanged. Direct servers (where `id` is
+`"ip:port"`) follow the existing port-reassignment path.
+
+**UNVERIFIED flag:** the full create -> register -> join flow has NOT been
+exercised end-to-end. It ships unverified until a Windows build run against the
+live relay (`45.77.70.199:4433`) confirms it. The individual Rust layers
+(default_relay, server_manager relay-mode args, relay_choice validation,
+relay-link round-trip) all have passing unit tests, but the wired-together path
+requires a real relay and display stack.
+
+---
+
 ## Relay UX (Phase 4, pieces 2+3)
 
 - `ConnectResult` carries a `relayed: bool`, threaded into the frontend
