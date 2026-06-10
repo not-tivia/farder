@@ -50,7 +50,7 @@ sudo usermod -aG docker $USER   # then log out and back in
 **Clone the Farder repo on the host:**
 
 ```bash
-git clone https://github.com/your-org/farder.git
+git clone https://github.com/not-tivia/farder.git
 cd farder
 ```
 
