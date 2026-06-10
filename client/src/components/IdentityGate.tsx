@@ -75,18 +75,18 @@ function PinField({
   value: string;
   onChange: (v: string) => void;
   autoFocus?: boolean;
-  onComplete?: () => void;
+  onComplete?: (value: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const next = e.target.value.replace(/\D/g, "").slice(0, 4);
     onChange(next);
-    if (next.length === 4) onComplete?.();
+    if (next.length === 4) onComplete?.(next);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && value.length === 4) onComplete?.();
+    if (e.key === "Enter" && value.length === 4) onComplete?.(value);
   };
 
   const circleStyle = (filled: boolean): React.CSSProperties => ({
@@ -164,9 +164,10 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
     setConfirmFocus(false);
   };
 
-  async function handleCreate() {
+  async function handleCreate(confirmValue?: string) {
+    const c = confirmValue ?? pin2;
     if (pin.length !== 4) return setError("PIN must be 4 digits.");
-    if (pin !== pin2) return setError("PINs do not match.");
+    if (pin !== c) return setError("PINs do not match.");
     setBusy(true);
     setError(null);
     try {
@@ -181,9 +182,10 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
     }
   }
 
-  async function handleMigrate() {
+  async function handleMigrate(confirmValue?: string) {
+    const c = confirmValue ?? pin2;
     if (pin.length !== 4) return setError("PIN must be 4 digits.");
-    if (pin !== pin2) return setError("PINs do not match.");
+    if (pin !== c) return setError("PINs do not match.");
     setBusy(true);
     setError(null);
     try {
@@ -198,11 +200,12 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
     }
   }
 
-  async function handleUnlock() {
+  async function handleUnlock(pinValue?: string) {
+    const p = pinValue ?? pin;
     setBusy(true);
     setError(null);
     try {
-      await api.unlockIdentity(pin);
+      await api.unlockIdentity(p);
       onUnlocked();
     } catch (e) {
       setError("Incorrect PIN.");
@@ -213,12 +216,13 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
     }
   }
 
-  async function handleRestore() {
-    if (pin.length !== 4) return setError("New PIN must be 4 digits.");
+  async function handleRestore(pinValue?: string) {
+    const p = pinValue ?? pin;
+    if (p.length !== 4) return setError("New PIN must be 4 digits.");
     setBusy(true);
     setError(null);
     try {
-      await api.restoreIdentity(phrase.trim(), pin);
+      await api.restoreIdentity(phrase.trim(), p);
       onUnlocked();
     } catch (e) {
       setError("That recovery phrase or PIN was not accepted.");
@@ -298,7 +302,7 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
           autoFocus={confirmFocus}
           onComplete={handleCreate}
         />
-        <button className="connect-button" disabled={busy} onClick={handleCreate}>
+        <button className="connect-button" disabled={busy} onClick={() => handleCreate()}>
           {busy ? "Creating..." : "Create identity"}
         </button>
         <button className="connect-link" onClick={() => { reset(); setScreen("restore"); }}>
@@ -326,7 +330,7 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
           autoFocus={confirmFocus}
           onComplete={handleMigrate}
         />
-        <button className="connect-button" disabled={busy} onClick={handleMigrate}>
+        <button className="connect-button" disabled={busy} onClick={() => handleMigrate()}>
           {busy ? "Securing..." : "Secure account"}
         </button>
       </>,
@@ -340,7 +344,7 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
         <button
           className="connect-button"
           disabled={busy || pin.length !== 4}
-          onClick={handleUnlock}
+          onClick={() => handleUnlock()}
         >
           {busy ? "Unlocking..." : "Unlock"}
         </button>
@@ -364,7 +368,7 @@ export default function IdentityGate({ onUnlocked }: { onUnlocked: () => void })
         />
         <p style={{ textAlign: "center", color: "var(--text-muted, #888)", fontSize: 13, margin: "0 0 4px" }}>New PIN</p>
         <PinField value={pin} onChange={setPin} onComplete={handleRestore} />
-        <button className="connect-button" disabled={busy} onClick={handleRestore}>
+        <button className="connect-button" disabled={busy} onClick={() => handleRestore()}>
           {busy ? "Restoring..." : "Restore"}
         </button>
         <button className="connect-link" onClick={() => { reset(); setScreen("enter-pin"); }}>
