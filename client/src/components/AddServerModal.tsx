@@ -245,35 +245,96 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
 
-              <div className="reachability">
-                <label className="section-label">How will people reach your server?</label>
+              <div className="connect-section">
+                <div className="connect-section-title">How will people reach your server?</div>
+                <div className="relay-cards">
 
-                <label className="relay-option">
-                  <input type="radio" name="relayMode" checked={relayMode === "farder"} onChange={() => setRelayMode("farder")} />
-                  <span><strong>Use the Farder relay</strong> <em>Recommended</em><br />
-                  <small>Members&apos; IPs and yours stay hidden, and it works even behind a home router.</small></span>
-                </label>
-
-                <label className="relay-option">
-                  <input type="radio" name="relayMode" checked={relayMode === "selfhost"} onChange={() => setRelayMode("selfhost")} />
-                  <span><strong>Self-host your own relay</strong> <em>Advanced</em><br />
-                  <small>Point at a relay you run yourself.</small></span>
-                </label>
-                {relayMode === "selfhost" && (
-                  <div className="relay-selfhost-fields">
-                    <input placeholder="Relay address (host:port)" value={relayAddr} onChange={(e) => setRelayAddr(e.target.value)} />
-                    <input placeholder="Cert fingerprint (64 hex characters)" value={relayFp} onChange={(e) => setRelayFp(e.target.value)} />
+                  {/* Farder relay card */}
+                  <div
+                    className={`relay-card${relayMode === "farder" ? " selected" : ""}`}
+                    onClick={() => setRelayMode("farder")}
+                  >
+                    <div className="relay-card-header">
+                      <input
+                        type="radio"
+                        name="relayMode"
+                        checked={relayMode === "farder"}
+                        onChange={() => setRelayMode("farder")}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <span className="relay-card-title">Use the Farder relay</span>
+                      <span className="relay-badge recommended">Recommended</span>
+                    </div>
+                    <div className="relay-card-desc">
+                      Members&apos; IPs and yours stay hidden, and it works even behind a home router.
+                    </div>
                   </div>
-                )}
 
-                <label className="relay-option">
-                  <input type="radio" name="relayMode" checked={relayMode === "direct"} onChange={() => setRelayMode("direct")} />
-                  <span><strong>Direct &mdash; same network only</strong> <em>Advanced</em><br />
-                  <small>Connects straight to your machine. Only reachable on your own network or with port-forwarding, and your IP is visible.</small></span>
-                </label>
+                  {/* Self-host card */}
+                  <div
+                    className={`relay-card${relayMode === "selfhost" ? " selected" : ""}`}
+                    onClick={() => setRelayMode("selfhost")}
+                  >
+                    <div className="relay-card-header">
+                      <input
+                        type="radio"
+                        name="relayMode"
+                        checked={relayMode === "selfhost"}
+                        onChange={() => setRelayMode("selfhost")}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <span className="relay-card-title">Self-host your own relay</span>
+                      <span className="relay-badge advanced">Advanced</span>
+                    </div>
+                    <div className="relay-card-desc">
+                      Point at a relay you run yourself.
+                    </div>
+                    {relayMode === "selfhost" && (
+                      <div className="relay-selfhost-fields">
+                        <input
+                          className="connect-input"
+                          placeholder="Relay address (host:port)"
+                          value={relayAddr}
+                          onChange={(e) => setRelayAddr(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                        <input
+                          className="connect-input"
+                          placeholder="Cert fingerprint (64 hex characters)"
+                          value={relayFp}
+                          onChange={(e) => setRelayFp(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Direct card */}
+                  <div
+                    className={`relay-card${relayMode === "direct" ? " selected" : ""}`}
+                    onClick={() => setRelayMode("direct")}
+                  >
+                    <div className="relay-card-header">
+                      <input
+                        type="radio"
+                        name="relayMode"
+                        checked={relayMode === "direct"}
+                        onChange={() => setRelayMode("direct")}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <span className="relay-card-title">Direct &mdash; same network only</span>
+                      <span className="relay-badge advanced">Advanced</span>
+                    </div>
+                    <div className="relay-card-desc">
+                      Connects straight to your machine. Only reachable on your own network or with
+                      port-forwarding, and your IP is visible.
+                    </div>
+                  </div>
+
+                </div>
 
                 <button type="button" className="learn-more-toggle" onClick={() => setShowRelayInfo(!showRelayInfo)}>
-                  {showRelayInfo ? "Hide details" : "Learn more"}
+                  {showRelayInfo ? "Hide details ^" : "Learn more v"}
                 </button>
                 {showRelayInfo && (
                   <div className="learn-more-body">

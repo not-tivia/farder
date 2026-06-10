@@ -2212,6 +2212,123 @@ body {
   cursor: pointer;
 }
 
+/* ── Relay-choice cards ─────────────────────────────────────── */
+.relay-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.relay-card {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  border: 2px solid var(--xp-input-border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.relay-card:hover {
+  border-color: var(--xp-blue);
+}
+
+.relay-card.selected {
+  border-color: var(--xp-blue);
+  background: rgba(255,111,171,0.1);
+}
+
+.relay-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.relay-card-header input[type="radio"] {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.relay-card-title {
+  font-weight: bold;
+  font-size: 11px;
+  color: var(--xp-text-secondary);
+  flex: 1;
+}
+
+.relay-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: bold;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.relay-badge.recommended {
+  background: rgba(255,111,171,0.18);
+  color: var(--xp-blue-dark);
+}
+
+.relay-badge.advanced {
+  background: rgba(168,118,135,0.15);
+  color: var(--xp-text-muted);
+}
+
+.relay-card-desc {
+  font-size: 10px;
+  color: var(--xp-text-muted);
+  margin-top: 4px;
+  margin-left: 20px;
+  line-height: 1.45;
+}
+
+.relay-selfhost-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  margin-left: 20px;
+}
+
+.relay-selfhost-fields input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.learn-more-toggle {
+  background: none;
+  border: none;
+  color: var(--xp-blue-dark);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 0;
+  text-align: left;
+  margin-top: 4px;
+}
+
+.learn-more-toggle:hover {
+  text-decoration: underline;
+}
+
+.learn-more-body {
+  font-size: 10px;
+  color: var(--xp-text-muted);
+  line-height: 1.5;
+  margin-top: 4px;
+  padding: 8px;
+  border-left: 2px solid var(--xp-input-border);
+}
+
+.learn-more-body p {
+  margin: 0 0 6px;
+}
+
+.learn-more-body p:last-child {
+  margin-bottom: 0;
+}
+
 /* Per-peer voice volume slider (participant context menu) */
 .voice-volume-slider { padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
 .voice-volume-slider label { font-size: 11px; opacity: 0.85; }
