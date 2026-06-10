@@ -1947,6 +1947,236 @@ pub async fn stop_recording() -> Result<String, String> {
     Ok(path)
 }
 
+/// Play a WAV file on the default output device. Reads the entire file and
+/// feeds samples through a cpal output stream, then drops the stream when done.
+/// Used by the "Test mic" flow to play back a just-recorded WAV.
+#[tauri::command]
+pub async fn play_audio_file(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        // Open and decode the WAV file.
+        let mut reader = hound::WavReader::open(&path)
+            .map_err(|e| format!("open wav: {e}"))?;
+        let spec = reader.spec();
+        let sample_rate = spec.sample_rate;
+        let channels = spec.channels as usize;
+
+        // Decode all samples to f32.
+        let samples_f32: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+            (hound::SampleFormat::Int, 16) => reader
+                .samples::<i16>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / 32768.0)
+                .collect(),
+            (hound::SampleFormat::Int, 32) => reader
+                .samples::<i32>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / 2147483648.0)
+                .collect(),
+            (hound::SampleFormat::Float, _) => reader
+                .samples::<f32>()
+                .filter_map(|s| s.ok())
+                .collect(),
+            (fmt, bits) => {
+                return Err(format!("unsupported WAV format: {fmt:?} {bits}bit"));
+            }
+        };
+
+        if samples_f32.is_empty() {
+            return Ok(());
+        }
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| "no output device available".to_string())?;
+        let config = device
+            .default_output_config()
+            .map_err(|e| format!("output config: {e}"))?;
+        let dev_rate = config.sample_rate().0;
+        let dev_channels = config.channels() as usize;
+
+        // Resample from WAV rate to device rate if they differ.
+        let resampled: Vec<f32> = if dev_rate != sample_rate {
+            // Simple linear interpolation resampler (same approach as audio_cpal.rs).
+            let ratio = sample_rate as f64 / dev_rate as f64;
+            let out_len = (samples_f32.len() as f64 / channels as f64 / ratio) as usize * channels;
+            let mut out = Vec::with_capacity(out_len);
+            // Resample per channel then interleave.
+            for ch in 0..channels {
+                let channel_samples: Vec<f32> = samples_f32
+                    .iter()
+                    .skip(ch)
+                    .step_by(channels)
+                    .copied()
+                    .collect();
+                let out_frames = (channel_samples.len() as f64 / ratio) as usize;
+                let mut ch_out: Vec<f32> = Vec::with_capacity(out_frames);
+                let mut pos: f64 = 0.0;
+                while (pos + 1.0) < channel_samples.len() as f64 {
+                    let lo = pos.floor() as usize;
+                    let hi = lo + 1;
+                    let frac = (pos - lo as f64) as f32;
+                    let a = channel_samples[lo];
+                    let b = if hi < channel_samples.len() { channel_samples[hi] } else { a };
+                    ch_out.push(a + (b - a) * frac);
+                    pos += ratio;
+                }
+                // Interleave: we need all channels at the same frame count.
+                if out.is_empty() {
+                    out.resize(ch_out.len() * channels, 0.0);
+                }
+                for (i, s) in ch_out.iter().enumerate() {
+                    if ch + i * channels < out.len() {
+                        out[ch + i * channels] = *s;
+                    }
+                }
+            }
+            out
+        } else {
+            samples_f32.clone()
+        };
+
+        // Upmix or downmix to device channel count.
+        // WAV channels -> device channels by repeating or dropping.
+        let final_samples: Vec<f32> = if dev_channels == channels {
+            resampled
+        } else {
+            // Per-frame: take the WAV frame and replicate mono to all dev channels,
+            // or downmix multi-ch WAV to the device's channel count.
+            let wav_frames = resampled.len() / channels.max(1);
+            let mut out = Vec::with_capacity(wav_frames * dev_channels);
+            for frame in 0..wav_frames {
+                let start = frame * channels;
+                for dc in 0..dev_channels {
+                    let src = if channels == 1 {
+                        resampled[start]
+                    } else {
+                        // Average to mono then broadcast, or map channel by channel.
+                        let wch = dc.min(channels - 1);
+                        resampled[start + wch]
+                    };
+                    out.push(src);
+                }
+            }
+            out
+        };
+
+        // Shared cursor into the final sample buffer.
+        let samples_arc = std::sync::Arc::new(final_samples);
+        let cursor = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let done_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let samples_cb = std::sync::Arc::clone(&samples_arc);
+        let cursor_cb = std::sync::Arc::clone(&cursor);
+        let done_cb = std::sync::Arc::clone(&done_flag);
+
+        let build_and_play = |fmt: cpal::SampleFormat| -> Result<cpal::Stream, String> {
+            match fmt {
+                cpal::SampleFormat::F32 => {
+                    let s = std::sync::Arc::clone(&samples_cb);
+                    let c = std::sync::Arc::clone(&cursor_cb);
+                    let d = std::sync::Arc::clone(&done_cb);
+                    device.build_output_stream(
+                        &config.clone().into(),
+                        move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                            let mut pos = c.lock().unwrap();
+                            let total = s.len();
+                            for o in out.iter_mut() {
+                                if *pos < total {
+                                    *o = s[*pos];
+                                    *pos += 1;
+                                } else {
+                                    *o = 0.0;
+                                    d.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            }
+                        },
+                        |err| eprintln!("[play_audio_file] cpal error: {err}"),
+                        None,
+                    ).map_err(|e| format!("build_output_stream: {e}"))
+                }
+                cpal::SampleFormat::I16 => {
+                    let s = std::sync::Arc::clone(&samples_cb);
+                    let c = std::sync::Arc::clone(&cursor_cb);
+                    let d = std::sync::Arc::clone(&done_cb);
+                    device.build_output_stream(
+                        &config.clone().into(),
+                        move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                            let mut pos = c.lock().unwrap();
+                            let total = s.len();
+                            for o in out.iter_mut() {
+                                if *pos < total {
+                                    *o = (s[*pos] * 32767.0) as i16;
+                                    *pos += 1;
+                                } else {
+                                    *o = 0;
+                                    d.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            }
+                        },
+                        |err| eprintln!("[play_audio_file] cpal error: {err}"),
+                        None,
+                    ).map_err(|e| format!("build_output_stream: {e}"))
+                }
+                cpal::SampleFormat::I32 => {
+                    let s = std::sync::Arc::clone(&samples_cb);
+                    let c = std::sync::Arc::clone(&cursor_cb);
+                    let d = std::sync::Arc::clone(&done_cb);
+                    device.build_output_stream(
+                        &config.clone().into(),
+                        move |out: &mut [i32], _: &cpal::OutputCallbackInfo| {
+                            let mut pos = c.lock().unwrap();
+                            let total = s.len();
+                            for o in out.iter_mut() {
+                                if *pos < total {
+                                    *o = (s[*pos] * 2147483647.0) as i32;
+                                    *pos += 1;
+                                } else {
+                                    *o = 0;
+                                    d.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            }
+                        },
+                        |err| eprintln!("[play_audio_file] cpal error: {err}"),
+                        None,
+                    ).map_err(|e| format!("build_output_stream: {e}"))
+                }
+                other => Err(format!("unsupported output sample format: {other:?}")),
+            }
+        };
+
+        let stream = build_and_play(config.sample_format())?;
+        stream.play().map_err(|e| format!("stream.play: {e}"))?;
+
+        // Poll until playback finishes (all samples consumed) or we time out
+        // (~10 seconds max to avoid a hang if the done flag is never set).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if done_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            {
+                let pos = cursor.lock().unwrap();
+                if *pos >= samples_arc.len() {
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Small tail so the last buffer can drain through the device.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(stream);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))?
+}
+
 // ---------------------------------------------------------------------------
 // Desktop notification command
 // ---------------------------------------------------------------------------

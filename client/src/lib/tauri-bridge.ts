@@ -317,6 +317,10 @@ export async function stopRecording(): Promise<string> {
   return invoke<string>("stop_recording");
 }
 
+export async function playAudioFile(path: string): Promise<void> {
+  return invoke<void>("play_audio_file", { path });
+}
+
 export async function showNotification(title: string, body: string): Promise<void> {
   return invoke<void>("show_notification", { title, body });
 }

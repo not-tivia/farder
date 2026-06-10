@@ -131,6 +131,7 @@ fn main() {
             commands::save_temp_audio,
             commands::start_recording,
             commands::stop_recording,
+            commands::play_audio_file,
             commands::show_notification,
             commands::get_notification_prefs,
             commands::save_notification_prefs,
