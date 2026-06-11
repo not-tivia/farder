@@ -193,6 +193,44 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   const isOwnMessage = ownPk === pkStr;
 
+  // Build the list of message actions mirroring the context menu (same conditions),
+  // so AttachmentDisplay can append them to the merged image right-click menu.
+  // NOTE: these are intentionally plain onClick callbacks, not async — the async
+  // bodies are handled inside the callbacks via void/catch patterns matching above.
+  const messageActions: { label: string; onClick: () => void }[] = [
+    ...(onReply ? [{ label: "Reply", onClick: () => { if (onReply) onReply(message); } }] : []),
+    ...(isOwnMessage ? [{ label: "Edit Message", onClick: () => { setEditing(true); setEditContent(message.content); } }] : []),
+    { label: "Copy Text", onClick: () => { navigator.clipboard.writeText(message.content); } },
+    ...(translationSettings?.enabled ? [{
+      label: "Translate",
+      onClick: () => {
+        if (!translationSettings) return;
+        void translateMessage({
+          messageId: String(message.id),
+          content: message.content,
+          defaultTarget: translationSettings.default_target,
+          authorPublicKeyHex: pkStr,
+          confirmDownload: async (pair) =>
+            new Promise<void>((resolve, reject) => {
+              setPendingDownload({ pair, resolve, reject, inProgress: false });
+            }),
+        });
+      },
+    }] : []),
+    ...(!message.thread_id ? [{
+      label: "Create Thread",
+      onClick: () => {
+        void api.createThread(serverId, message.id).catch((e) => { toast.error(`Couldn't create thread: ${e}`); });
+      },
+    }] : []),
+    ...(isOwnMessage ? [{
+      label: "Delete Message",
+      onClick: () => {
+        void api.deleteMessage(serverId, message.id).catch((e) => { toast.error(`Couldn't delete message: ${e}`); });
+      },
+    }] : []),
+  ];
+
   const { bits: viewerBits } = ownPk
     ? getActorPermissions(activeServer?.members ?? [], roles, ownPk, activeServer?.ownerPublicKey ?? null)
     : { bits: 0n };
@@ -363,6 +401,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
                         attachment={att}
                         messageContent={message.content}
                         serverId={serverId}
+                        messageActions={messageActions}
                       />
                     ))}
                   </div>
@@ -530,11 +569,21 @@ function DismissDialogWhenDone({ messageId, onDone }: { messageId: string; onDon
   return null;
 }
 
-function AttachmentDisplay({ attachment, messageContent, serverId }: { attachment: AttachmentInfo; messageContent: string; serverId: string }) {
+function AttachmentDisplay({
+  attachment,
+  messageContent,
+  serverId,
+  messageActions,
+}: {
+  attachment: AttachmentInfo;
+  messageContent: string;
+  serverId: string;
+  messageActions?: { label: string; onClick: () => void }[];
+}) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; isRightClick: boolean } | null>(null);
   const isImage = attachment.mime_type.startsWith("image/");
   const isAudio = attachment.mime_type.startsWith("audio/");
 
@@ -604,10 +653,11 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
         <img
           src={imageUrl}
           alt={attachment.name}
-          onClick={(e) => setMenu({ x: e.clientX, y: e.clientY })}
+          onClick={(e) => setMenu({ x: e.clientX, y: e.clientY, isRightClick: false })}
           onContextMenu={(e) => {
             e.preventDefault();
-            setMenu({ x: e.clientX, y: e.clientY });
+            e.stopPropagation();
+            setMenu({ x: e.clientX, y: e.clientY, isRightClick: true });
           }}
           style={{ cursor: "pointer", maxWidth: 400, maxHeight: 300, borderRadius: 3 }}
         />
@@ -620,6 +670,20 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
               {/* "Favorite" was removed: it wrote to a legacy favorites store
                   nothing in the UI reads anymore — the book replaced it. */}
               <div className="context-menu-item" onClick={() => { void handleSaveToBook(); }}>Save to book</div>
+              {menu.isRightClick && messageActions && messageActions.length > 0 && (
+                <>
+                  <div className="context-menu-divider" />
+                  {messageActions.map((action) => (
+                    <div
+                      key={action.label}
+                      className="context-menu-item"
+                      onClick={() => { setMenu(null); action.onClick(); }}
+                    >
+                      {action.label}
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
           </>
         )}

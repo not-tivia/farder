@@ -1136,6 +1136,12 @@ body {
   margin: 2px 4px;
 }
 
+.context-menu-divider {
+  height: 1px;
+  background: var(--xp-border);
+  margin: 4px 0;
+}
+
 /* ── Reconnect Overlay ──────────────────────────────────── */
 .reconnect-overlay {
   position: absolute;
