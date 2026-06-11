@@ -594,13 +594,8 @@ function AttachmentDisplay({ attachment, messageContent, serverId }: { attachmen
             <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setMenu(null)} />
             <div className="context-menu" style={{ top: menu.y, left: menu.x }}>
               <div className="context-menu-item" onClick={handleCopyLink}>Copy Image Link</div>
-              <div className="context-menu-item" onClick={async () => {
-                try {
-                  const urlMatch = messageContent.match(/https?:\/\/[^\s]+/);
-                  await api.addFavorite(serverId, attachment.file_id, urlMatch?.[0]);
-                } catch {}
-                setMenu(null);
-              }}>Favorite</div>
+              {/* "Favorite" was removed: it wrote to a legacy favorites store
+                  nothing in the UI reads anymore — the book replaced it. */}
               <div className="context-menu-item" onClick={() => { void handleSaveToBook(); }}>Save to book</div>
             </div>
           </>
