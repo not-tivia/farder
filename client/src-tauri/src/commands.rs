@@ -1892,15 +1892,27 @@ pub fn save_temp_audio(data: String) -> Result<String, String> {
 // Global recording state
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RECORDING_PATH: Mutex<Option<String>> = Mutex::new(None);
+// Monotonic id of the CURRENT recording session. `stop_recording(Some(id))`
+// only stops a matching session, so a stale stop (e.g. from React StrictMode's
+// dev double-mount, or any late async cleanup) is a harmless no-op instead of
+// killing a newer recording it doesn't own.
+static RECORDING_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Start recording audio from the saved input device (or system default). Writes WAV to a temp file.
+/// Start recording audio from the saved input device (or system default).
+/// Writes WAV to a temp file. Returns the new recording's session id; pass it
+/// to `stop_recording` so only the owner can stop this recording.
 #[tauri::command]
-pub async fn start_recording() -> Result<(), String> {
+pub async fn start_recording() -> Result<u64, String> {
     use std::sync::atomic::Ordering;
-    if RECORDING.load(Ordering::SeqCst) {
+    // compare_exchange closes the check-then-store race between two
+    // concurrent starts (both seeing false, both storing true).
+    if RECORDING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return Err("already recording".to_string());
     }
-    RECORDING.store(true, Ordering::SeqCst);
+    let session = RECORDING_SESSION.fetch_add(1, Ordering::SeqCst) + 1;
 
     let tmp_dir = std::env::temp_dir();
     let filename = format!("farder_voice_{}.wav", std::time::SystemTime::now()
@@ -2012,7 +2024,7 @@ pub async fn start_recording() -> Result<(), String> {
     });
 
     match setup_rx.await {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => Ok(session),
         Ok(Err(e)) => {
             // cpal setup failed inside spawn_blocking; flag was already reset
             // there (Err arm at line ~1904), but reset path/flag here too for
@@ -2033,9 +2045,17 @@ pub async fn start_recording() -> Result<(), String> {
 }
 
 /// Stop recording and return the path to the WAV file.
+/// `session`: pass the id returned by `start_recording` to stop ONLY that
+/// recording (a mismatched id errors without touching the live one). `None`
+/// stops whatever is recording (used to recover a wedged/orphaned recording).
 #[tauri::command]
-pub async fn stop_recording() -> Result<String, String> {
+pub async fn stop_recording(session: Option<u64>) -> Result<String, String> {
     use std::sync::atomic::Ordering;
+    if let Some(s) = session {
+        if s != RECORDING_SESSION.load(Ordering::SeqCst) {
+            return Err("stale recording session".to_string());
+        }
+    }
     RECORDING.store(false, Ordering::SeqCst);
     // Give the recording thread a moment to finalize the WAV. Async sleep so we
     // don't block a worker thread.

@@ -13,37 +13,38 @@ export default function VoiceRecorder({ onRecorded, onCancel }: Props) {
     const [filePath, setFilePath] = useState<string | null>(null);
     const [previewing, setPreviewing] = useState(false);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    // True only while THIS component instance owns a live backend recording.
-    // The unmount cleanup must stop ONLY a recording it owns: a blanket stop
-    // raced React StrictMode's dev double-mount (mount A's cleanup landed
-    // after mount B's start and killed B's recording, so Stop then reported
-    // "no recording in progress").
-    const ownsRecordingRef = useRef(false);
+    // The session id of the recording THIS instance owns (from startRecording).
+    // All stops pass it, so a late/stray stop (React StrictMode's dev
+    // double-mount, async cleanup landing after a newer mount started) is
+    // rejected by the backend instead of killing a recording it doesn't own.
+    const sessionRef = useRef<number | null>(null);
 
     useEffect(() => {
         let active = true;
         (async () => {
             try {
                 // Start the backend recording. If a previous instance left one
-                // wedged (StrictMode remount, crashed component), recover by
-                // stopping it and starting fresh instead of failing.
+                // wedged (crashed component, orphaned mount), recover by
+                // stopping it (token-less = stop whatever is live) and retrying.
+                let session: number;
                 try {
-                    await api.startRecording();
+                    session = await api.startRecording();
                 } catch (e) {
                     if (String(e).includes("already recording")) {
                         await api.stopRecording().catch(() => {});
-                        await api.startRecording();
+                        session = await api.startRecording();
                     } else {
                         throw e;
                     }
                 }
                 if (!active) {
-                    // Unmounted while starting (StrictMode): release the backend
-                    // recording so the surviving mount can start cleanly.
-                    api.stopRecording().catch(() => {});
+                    // Unmounted while starting (StrictMode): release OUR session.
+                    // The token makes this safe — if a newer mount already started
+                    // its own recording, this stop is rejected as stale.
+                    api.stopRecording(session).catch(() => {});
                     return;
                 }
-                ownsRecordingRef.current = true;
+                sessionRef.current = session;
                 timerRef.current = setInterval(() => {
                     setDuration(prev => prev + 1);
                 }, 1000);
@@ -57,18 +58,20 @@ export default function VoiceRecorder({ onRecorded, onCancel }: Props) {
         return () => {
             active = false;
             if (timerRef.current) clearInterval(timerRef.current);
-            if (ownsRecordingRef.current) {
-                ownsRecordingRef.current = false;
-                api.stopRecording().catch(() => {});
+            if (sessionRef.current !== null) {
+                const session = sessionRef.current;
+                sessionRef.current = null;
+                api.stopRecording(session).catch(() => {});
             }
         };
     }, []);
 
     async function handleStop() {
         if (timerRef.current) clearInterval(timerRef.current);
-        ownsRecordingRef.current = false;
+        const session = sessionRef.current ?? undefined;
+        sessionRef.current = null;
         try {
-            const path = await api.stopRecording();
+            const path = await api.stopRecording(session);
             setFilePath(path);
             setRecording(false);
         } catch (e) {
@@ -97,9 +100,10 @@ export default function VoiceRecorder({ onRecorded, onCancel }: Props) {
 
     function handleCancel() {
         if (timerRef.current) clearInterval(timerRef.current);
-        if (ownsRecordingRef.current) {
-            ownsRecordingRef.current = false;
-            api.stopRecording().catch(() => {});
+        if (sessionRef.current !== null) {
+            const session = sessionRef.current;
+            sessionRef.current = null;
+            api.stopRecording(session).catch(() => {});
         }
         onCancel();
     }

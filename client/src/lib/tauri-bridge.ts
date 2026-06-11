@@ -309,12 +309,18 @@ export async function saveTempAudio(data: string): Promise<string> {
   return invoke<string>("save_temp_audio", { data });
 }
 
-export async function startRecording(): Promise<void> {
-  return invoke<void>("start_recording");
+/** Starts a recording and returns its session id (pass it to stopRecording). */
+export async function startRecording(): Promise<number> {
+  return invoke<number>("start_recording");
 }
 
-export async function stopRecording(): Promise<string> {
-  return invoke<string>("stop_recording");
+/**
+ * Stops a recording and returns the WAV path. With a session id, only that
+ * recording is stopped (a stale id is rejected without touching a newer
+ * recording). Without one, stops whatever is recording (wedge recovery).
+ */
+export async function stopRecording(session?: number): Promise<string> {
+  return invoke<string>("stop_recording", { session: session ?? null });
 }
 
 export async function playAudioFile(path: string): Promise<void> {

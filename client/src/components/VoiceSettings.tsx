@@ -114,9 +114,9 @@ export default function VoiceSettings() {
     setMicTestError(null);
     setMicTestPhase("recording");
     try {
-      await startRecording();
+      const session = await startRecording();
       await new Promise<void>((resolve) => setTimeout(resolve, MIC_TEST_DURATION_MS));
-      const wavPath = await stopRecording();
+      const wavPath = await stopRecording(session);
       setMicTestPhase("playing");
       await playAudioFile(wavPath);
     } catch (err) {

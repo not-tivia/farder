@@ -955,7 +955,7 @@ Consumed by `play_audio_file` (Test Mic playback) and `voice_join`
 
 ---
 
-### `start_recording() -> Result<(), String>`
+### `start_recording() -> Result<u64, String>`
 
 **What it does:** opens the saved input device (falling back to system default)
 via `cpal`, creates a WAV file in the OS temp directory (filename
@@ -963,20 +963,28 @@ via `cpal`, creates a WAV file in the OS temp directory (filename
 cpal stream runs in `spawn_blocking`. The command awaits a oneshot channel
 that reports success or failure of the stream setup before returning, so a
 missing audio device surfaces immediately rather than silently.
-**Returns:** `Ok(())` once recording has started (not when it ends).
+**Returns:** the new recording's **session id** once recording has started (not
+when it ends). Pass it to `stop_recording` so only the owner can stop this
+recording (protects against stale stops from React StrictMode's dev
+double-mount or late async cleanups).
 **Side effects:** writes to a temp WAV file; acquires the audio input device.
-Globally idempotent -- returns `Err("already recording")` if called twice.
-**invoke name:** `"start_recording"` -> `startRecording()`.
+Returns `Err("already recording")` if a recording is already live (the start
+guard is a `compare_exchange`, so two concurrent starts cannot both win).
+**invoke name:** `"start_recording"` -> `startRecording(): Promise<number>`.
 
 ---
 
-### `stop_recording() -> Result<String, String>`
+### `stop_recording(session: Option<u64>) -> Result<String, String>`
 
-**What it does:** sets the `RECORDING` atomic to false (signals the cpal thread
-to stop), waits 500 ms for WAV finalization, and returns the path to the WAV file.
+**What it does:** stops a recording. With `Some(id)`, only stops the matching
+session — a stale id returns `Err("stale recording session")` WITHOUT touching
+a newer live recording (this is what makes stray/late stops harmless). With
+`None`, stops whatever is recording (wedge recovery). Sets the `RECORDING`
+atomic to false (signals the cpal thread to stop), waits 500 ms for WAV
+finalization, and returns the path to the WAV file.
 **Returns:** absolute path to the WAV file.
 **Side effects:** finalizes the WAV; releases the audio device.
-**invoke name:** `"stop_recording"` → `stopRecording()`.
+**invoke name:** `"stop_recording"` → `stopRecording(session?: number)`.
 
 ---
 
