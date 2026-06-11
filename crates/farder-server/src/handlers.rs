@@ -1001,6 +1001,7 @@ pub fn handle_request(
                     Some((until, reason)) => (Some(until), reason),
                     None => (None, None),
                 };
+                let profile_hash = m.profile_hash.clone();
                 member_infos.push(MemberInfo {
                     public_key: m.public_key,
                     display_name: m.display_name,
@@ -1008,7 +1009,7 @@ pub fn handle_request(
                     role_ids,
                     timeout_until,
                     timeout_reason,
-                    profile_hash: None,
+                    profile_hash,
                 });
             }
             ok(ServerResponse::Members {
@@ -1219,7 +1220,7 @@ pub fn handle_request(
                 role_ids,
                 timeout_until,
                 timeout_reason,
-                profile_hash: None,
+                profile_hash: target_record.profile_hash.clone(),
             };
 
             let mut events = Vec::new();
@@ -1257,7 +1258,7 @@ pub fn handle_request(
                     role_ids,
                     timeout_until,
                     timeout_reason,
-                    profile_hash: None,
+                    profile_hash: other_record.profile_hash.clone(),
                 };
                 let ch_id = ch.id;
                 let last_msgs = messages::fetch_history(conn, ch_id, None, 1, member)?;
@@ -1610,12 +1611,49 @@ pub fn handle_request(
         // ----------------------------------------------------------------
         // Profile sync (storage wired in Task 3/4)
         // ----------------------------------------------------------------
-        ServerRequest::UpdateProfile { .. } => {
-            ok(ServerResponse::Error { reason: "not implemented".into() })
+        ServerRequest::UpdateProfile { profile } => {
+            // 2.5 MB ceiling on the whole signed blob (avatar cap is 2 MB inside).
+            if profile.len() > 2_621_440 {
+                return err("profile too large (max 2.5 MB)");
+            }
+            let signed = match farder_crypto::profile::SignedProfile::from_bytes(&profile) {
+                Ok(p) => p,
+                Err(_) => return err("malformed profile"),
+            };
+            if signed.verify().is_err() {
+                return err("profile signature invalid");
+            }
+            if &signed.data.public_key != member {
+                return err("profile public key does not match authenticated member");
+            }
+            if let Some(status) = &signed.data.status {
+                if status.chars().count() > 128 {
+                    return err("status too long (max 128 characters)");
+                }
+            }
+            if let Some(avatar) = &signed.data.avatar {
+                if let Err(e) = crate::image_validation::validate_image(avatar, true) {
+                    return err(&format!("avatar rejected: {}", e));
+                }
+            }
+
+            let hash = crate::attachments::compute_sha256(&profile);
+            members::set_member_profile(conn, member, &profile, &hash)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::MemberProfileUpdated {
+                        public_key: member.clone(),
+                        profile_hash: Some(hash),
+                    },
+                }],
+            )
         }
 
-        ServerRequest::GetMemberProfile { .. } => {
-            ok(ServerResponse::Error { reason: "not implemented".into() })
+        ServerRequest::GetMemberProfile { member_key } => {
+            let profile = members::get_member_profile(conn, &member_key)?;
+            ok(ServerResponse::MemberProfile { member_key, profile })
         }
     }
 }
@@ -3230,6 +3268,119 @@ mod tests {
                 assert!(*deafened, "deafened flag must be preserved");
             }
             o => panic!("expected StreamStateChanged, got {:?}", o),
+        }
+    }
+
+    fn make_profile(kp: &farder_crypto::identity::Keypair, status: Option<&str>) -> Vec<u8> {
+        farder_crypto::profile::SignedProfile::create(
+            kp, "Tester".to_string(), None, status.map(|s| s.to_string()),
+        ).to_bytes()
+    }
+
+    #[test]
+    fn test_update_profile_stores_and_broadcasts() {
+        let (conn, _owner_pk) = setup();
+        let kp = farder_crypto::identity::Keypair::generate();
+        members::register_member(&conn, &kp.public_key(), "Tester").unwrap();
+
+        let blob = make_profile(&kp, Some("hello"));
+        let expected_hash = farder_crypto::profile::profile_hash_hex(&blob);
+
+        let result = handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob.clone() },
+            "", &fake_state(),
+        ).unwrap();
+
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0].event {
+            ServerEvent::MemberProfileUpdated { public_key, profile_hash } => {
+                assert_eq!(public_key, &kp.public_key());
+                assert_eq!(profile_hash.as_deref(), Some(expected_hash.as_str()));
+            }
+            other => panic!("expected MemberProfileUpdated, got {:?}", other),
+        }
+        assert_eq!(members::get_member_profile(&conn, &kp.public_key()).unwrap().as_deref(), Some(&blob[..]));
+    }
+
+    #[test]
+    fn test_update_profile_rejects_wrong_key() {
+        let (conn, _owner_pk) = setup();
+        let kp_signer = farder_crypto::identity::Keypair::generate();
+        let mallory = add_member(&conn, "Mallory");
+        let blob = make_profile(&kp_signer, None);
+
+        let result = handle_request(
+            &conn, &mallory, false,
+            ServerRequest::UpdateProfile { profile: blob },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Error { .. }));
+        assert!(members::get_member_profile(&conn, &mallory).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_update_profile_rejects_tampered_and_oversize_status() {
+        let (conn, _owner_pk) = setup();
+        let kp = farder_crypto::identity::Keypair::generate();
+        members::register_member(&conn, &kp.public_key(), "Tester").unwrap();
+
+        let mut blob = make_profile(&kp, Some("ok"));
+        let mid = blob.len() / 2;
+        blob[mid] ^= 0xFF;
+        let result = handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Error { .. }));
+
+        let long = "x".repeat(129);
+        let blob = make_profile(&kp, Some(&long));
+        let result = handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Error { .. }));
+    }
+
+    #[test]
+    fn test_get_member_profile_roundtrip_and_members_hash() {
+        let (conn, owner_pk) = setup();
+        let kp = farder_crypto::identity::Keypair::generate();
+        members::register_member(&conn, &kp.public_key(), "Tester").unwrap();
+        let blob = make_profile(&kp, None);
+        let hash = farder_crypto::profile::profile_hash_hex(&blob);
+        handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob.clone() },
+            "", &fake_state(),
+        ).unwrap();
+
+        let result = handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::GetMemberProfile { member_key: kp.public_key() },
+            "", &fake_state(),
+        ).unwrap();
+        match result.response {
+            ServerResponse::MemberProfile { member_key, profile } => {
+                assert_eq!(member_key, kp.public_key());
+                assert_eq!(profile.as_deref(), Some(&blob[..]));
+            }
+            other => panic!("expected MemberProfile, got {:?}", other),
+        }
+
+        let result = handle_request(
+            &conn, &owner_pk, true, ServerRequest::GetMembers, "", &fake_state(),
+        ).unwrap();
+        match result.response {
+            ServerResponse::Members { members: infos } => {
+                let me = infos.iter().find(|m| m.public_key == kp.public_key()).unwrap();
+                assert_eq!(me.profile_hash.as_deref(), Some(hash.as_str()));
+            }
+            other => panic!("expected Members, got {:?}", other),
         }
     }
 
