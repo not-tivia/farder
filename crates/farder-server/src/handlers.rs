@@ -1112,13 +1112,20 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::READ_MESSAGES) {
                 return err("missing READ_MESSAGES permission");
             }
-            crate::reactions::add_reaction(conn, message_id, member, &emoji, file_id)?;
-            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
-                target: EventTarget::Subscribers(msg.channel_id),
-                event: ServerEvent::ReactionAdded {
-                    message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(), file_id,
-                },
-            }])
+            let inserted = crate::reactions::add_reaction(conn, message_id, member, &emoji, file_id)?;
+            // A duplicate (INSERT OR IGNORE no-op) must NOT broadcast: phantom
+            // ReactionAdded events made clients stack counts for re-clicks.
+            let events = if inserted {
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(msg.channel_id),
+                    event: ServerEvent::ReactionAdded {
+                        message_id, channel_id: msg.channel_id, emoji, public_key: member.clone(), file_id,
+                    },
+                }]
+            } else {
+                vec![]
+            };
+            ok_with(ServerResponse::Ok, events)
         }
 
         ServerRequest::RemoveReaction { message_id, emoji, file_id } => {

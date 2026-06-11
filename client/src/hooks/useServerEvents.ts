@@ -9,8 +9,28 @@ import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 // Module-level cache for notification prefs and own public key
 let notifPrefs: NotificationPrefs | null = null;
 api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
+// Own public key, fetched LAZILY: at module load the identity is still
+// PIN-locked, so an eager getPublicKey() fails and would leave this null for
+// the whole session (making every own-reaction event look like someone
+// else's — the stacking-reactions bug). A failed fetch retries next call.
 let cachedOwnPk: string | null = null;
-api.getPublicKey().then(pk => { cachedOwnPk = pk; }).catch(() => {});
+let ownPkPromise: Promise<string | null> | null = null;
+function getOwnPk(): Promise<string | null> {
+  if (cachedOwnPk != null) return Promise.resolve(cachedOwnPk);
+  if (!ownPkPromise) {
+    ownPkPromise = api
+      .getPublicKey()
+      .then((pk) => {
+        cachedOwnPk = pk;
+        return pk;
+      })
+      .catch(() => {
+        ownPkPromise = null; // retry on the next event
+        return null;
+      });
+  }
+  return ownPkPromise;
+}
 
 function checkMentionsOrKeywords(content: string, prefs: NotificationPrefs): boolean {
   if (prefs.keywords.length > 0) {
@@ -180,17 +200,19 @@ export function useServerEvents(): void {
       const data = e.payload as ReactionAddedPayload;
       const serverId = data.server_id;
       if (serverId !== activeRef.current) return;
-      const isMe = cachedOwnPk != null && data.public_key === cachedOwnPk;
-      dispatch({
-        type: "REACTION_ADDED",
-        serverId,
-        payload: {
-          channelId: data.channel_id,
-          messageId: data.message_id,
-          emoji: data.emoji,
-          me: isMe,
-          fileId: data.file_id,
-        },
+      getOwnPk().then((ownPk) => {
+        const isMe = ownPk != null && data.public_key === ownPk;
+        dispatch({
+          type: "REACTION_ADDED",
+          serverId,
+          payload: {
+            channelId: data.channel_id,
+            messageId: data.message_id,
+            emoji: data.emoji,
+            me: isMe,
+            fileId: data.file_id,
+          },
+        });
       });
     }).then(safePush);
 

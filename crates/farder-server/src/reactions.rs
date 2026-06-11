@@ -6,13 +6,16 @@ use std::collections::HashMap;
 
 use crate::db::now;
 
+/// Returns true if a NEW reaction row was inserted, false if it already
+/// existed (INSERT OR IGNORE) — callers must not broadcast a ReactionAdded
+/// event for an ignored duplicate.
 pub fn add_reaction(
     conn: &Connection,
     message_id: u64,
     user_key: &PublicKey,
     emoji: &str,
     file_id: Option<u64>,
-) -> Result<()> {
+) -> Result<bool> {
     if emoji.is_empty() {
         bail!("emoji cannot be empty");
     }
@@ -47,7 +50,7 @@ pub fn add_reaction(
         }
     }
 
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO reactions (message_id, user_key, emoji, file_id, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
@@ -58,7 +61,7 @@ pub fn add_reaction(
             now() as i64,
         ],
     )?;
-    Ok(())
+    Ok(inserted > 0)
 }
 
 pub fn remove_reaction(
