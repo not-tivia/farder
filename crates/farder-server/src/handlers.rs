@@ -1620,11 +1620,14 @@ pub fn handle_request(
                 Ok(p) => p,
                 Err(_) => return err("malformed profile"),
             };
+            if &signed.data.public_key != member {
+                return err("profile public key does not match authenticated member");
+            }
             if signed.verify().is_err() {
                 return err("profile signature invalid");
             }
-            if &signed.data.public_key != member {
-                return err("profile public key does not match authenticated member");
+            if signed.data.display_name.chars().count() > 128 {
+                return err("display name too long (max 128 characters)");
             }
             if let Some(status) = &signed.data.status {
                 if status.chars().count() > 128 {
@@ -3344,6 +3347,18 @@ mod tests {
             "", &fake_state(),
         ).unwrap();
         assert!(matches!(result.response, ServerResponse::Error { .. }));
+
+        // Third leg: display_name of 129 chars should be rejected.
+        let long_name = "y".repeat(129);
+        let blob = farder_crypto::profile::SignedProfile::create(
+            &kp, long_name, None, None,
+        ).to_bytes();
+        let result = handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Error { .. }));
     }
 
     #[test]
@@ -3382,6 +3397,64 @@ mod tests {
             }
             other => panic!("expected Members, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_update_profile_rejects_oversize_blob() {
+        let (conn, _owner_pk) = setup();
+        let kp = farder_crypto::identity::Keypair::generate();
+        members::register_member(&conn, &kp.public_key(), "Tester").unwrap();
+        // A signed profile whose avatar pushes the whole blob past 2.5 MB.
+        let blob = farder_crypto::profile::SignedProfile::create(
+            &kp, "Tester".to_string(), Some(vec![0u8; 2_700_000]), None,
+        ).to_bytes();
+        assert!(blob.len() > 2_621_440);
+        let result = handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Error { .. }));
+        assert!(members::get_member_profile(&conn, &kp.public_key()).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_update_profile_rejects_invalid_avatar_bytes() {
+        let (conn, _owner_pk) = setup();
+        let kp = farder_crypto::identity::Keypair::generate();
+        members::register_member(&conn, &kp.public_key(), "Tester").unwrap();
+        // Garbage avatar bytes (not a valid image) inside a correctly signed profile.
+        let blob = farder_crypto::profile::SignedProfile::create(
+            &kp, "Tester".to_string(), Some(vec![0xABu8; 1024]), None,
+        ).to_bytes();
+        let result = handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Error { .. }));
+        assert!(members::get_member_profile(&conn, &kp.public_key()).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_update_profile_accepts_valid_png_avatar() {
+        let (conn, _owner_pk) = setup();
+        let kp = farder_crypto::identity::Keypair::generate();
+        members::register_member(&conn, &kp.public_key(), "Tester").unwrap();
+        // Encode a real 1x1 PNG with the image crate (already a dependency).
+        let mut png_bytes: Vec<u8> = Vec::new();
+        let img = image::RgbaImage::new(1, 1);
+        img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png).unwrap();
+        let blob = farder_crypto::profile::SignedProfile::create(
+            &kp, "Tester".to_string(), Some(png_bytes), Some("with avatar".to_string()),
+        ).to_bytes();
+        let result = handle_request(
+            &conn, &kp.public_key(), false,
+            ServerRequest::UpdateProfile { profile: blob.clone() },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_eq!(members::get_member_profile(&conn, &kp.public_key()).unwrap().as_deref(), Some(&blob[..]));
     }
 
 }
