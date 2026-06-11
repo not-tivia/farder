@@ -32,10 +32,11 @@ pub fn add_reaction(
 
     // Existing-row check: matched on (message_id, user_key, emoji, file_id).
     // Distinct-emoji-group check uses (emoji, file_id) pair.
+    // file_id uses the 0 sentinel (standard emoji) so equality comparison works.
+    let file_id_stored = file_id.unwrap_or(0) as i64;
     let emoji_exists: bool = conn.query_row(
-        "SELECT COUNT(*) FROM reactions WHERE message_id = ?1 AND emoji = ?2 AND \
-         ((file_id IS NULL AND ?3 IS NULL) OR file_id = ?3)",
-        params![message_id as i64, emoji, file_id.map(|v| v as i64)],
+        "SELECT COUNT(*) FROM reactions WHERE message_id = ?1 AND emoji = ?2 AND file_id = ?3",
+        params![message_id as i64, emoji, file_id_stored],
         |row| row.get::<_, i64>(0),
     )? > 0;
 
@@ -57,7 +58,7 @@ pub fn add_reaction(
             message_id as i64,
             user_key.as_bytes().as_slice(),
             emoji,
-            file_id.map(|v| v as i64),
+            file_id_stored,
             now() as i64,
         ],
     )?;
@@ -73,12 +74,12 @@ pub fn remove_reaction(
 ) -> Result<()> {
     conn.execute(
         "DELETE FROM reactions WHERE message_id = ?1 AND user_key = ?2 AND emoji = ?3 AND \
-         ((file_id IS NULL AND ?4 IS NULL) OR file_id = ?4)",
+         file_id = ?4",
         params![
             message_id as i64,
             user_key.as_bytes().as_slice(),
             emoji,
-            file_id.map(|v| v as i64),
+            file_id.unwrap_or(0) as i64,
         ],
     )?;
     Ok(())
@@ -118,14 +119,15 @@ pub fn get_reactions_for_message(
         params![message_id as i64, requester.as_bytes().as_slice()],
         |row| {
             let emoji: String = row.get(0)?;
-            let file_id: Option<i64> = row.get(1)?;
+            let file_id_raw: i64 = row.get(1)?;
             let count: i64 = row.get(2)?;
             let me: i64 = row.get(3)?;
             Ok(ReactionGroup {
                 emoji,
                 count: count as u32,
                 me: me != 0,
-                file_id: file_id.map(|v| v as u64),
+                // 0 is the sentinel for standard emoji; map back to None.
+                file_id: if file_id_raw == 0 { None } else { Some(file_id_raw as u64) },
             })
         },
     )?;
@@ -171,7 +173,7 @@ pub fn get_reactions_for_messages(
     let rows = stmt.query_map(params_ref.as_slice(), |row| {
         let message_id: i64 = row.get(0)?;
         let emoji: String = row.get(1)?;
-        let file_id: Option<i64> = row.get(2)?;
+        let file_id_raw: i64 = row.get(2)?;
         let count: i64 = row.get(3)?;
         let me: i64 = row.get(4)?;
         Ok((
@@ -180,7 +182,8 @@ pub fn get_reactions_for_messages(
                 emoji,
                 count: count as u32,
                 me: me != 0,
-                file_id: file_id.map(|v| v as u64),
+                // 0 is the sentinel for standard emoji; map back to None.
+                file_id: if file_id_raw == 0 { None } else { Some(file_id_raw as u64) },
             },
         ))
     })?;
@@ -385,6 +388,37 @@ mod tests {
         let result = add_reaction(&conn, msg_id, &user1, "👍", Some(42));
         assert!(result.is_err(), "non-custom emoji with file_id must error");
         assert!(result.unwrap_err().to_string().contains("non-custom emoji must not include file_id"));
+    }
+
+    /// Helper: insert fake file rows for custom-reaction tests.
+    fn insert_file(conn: &rusqlite::Connection, id: i64, uploader: &PublicKey) {
+        let uploader_bytes = uploader.as_bytes().to_vec();
+        conn.execute(
+            "INSERT OR IGNORE INTO files (id, hash, size, mime_type, original_name, uploaded_by, uploaded_at, ref_count) \
+             VALUES (?1, ?2, 100, 'image/png', 'test.png', ?3, 0, 0)",
+            params![id, format!("hash_{}", id), uploader_bytes.as_slice()],
+        ).unwrap();
+    }
+
+    #[test]
+    fn same_user_two_different_custom_images_both_insert() {
+        let (conn, msg_id, user1, _user2) = setup();
+        insert_file(&conn, 11, &user1);
+        insert_file(&conn, 22, &user1);
+        assert!(add_reaction(&conn, msg_id, &user1, ":custom:", Some(11)).unwrap());
+        assert!(add_reaction(&conn, msg_id, &user1, ":custom:", Some(22)).unwrap(), "a second DIFFERENT custom image must insert");
+        // Same image again is still deduped.
+        assert!(!add_reaction(&conn, msg_id, &user1, ":custom:", Some(11)).unwrap());
+        let reactions = get_reactions_for_message(&conn, msg_id, &user1).unwrap();
+        let customs: Vec<_> = reactions.iter().filter(|r| r.emoji == ":custom:").collect();
+        assert_eq!(customs.len(), 2, "two distinct custom reaction groups");
+    }
+
+    #[test]
+    fn standard_emoji_dedupe_still_holds() {
+        let (conn, msg_id, user1, _user2) = setup();
+        assert!(add_reaction(&conn, msg_id, &user1, "\u{1F44D}", None).unwrap());
+        assert!(!add_reaction(&conn, msg_id, &user1, "\u{1F44D}", None).unwrap(), "duplicate standard emoji must be ignored");
     }
 
     #[test]

@@ -194,6 +194,47 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Reactions: move file_id into the uniqueness key (Reaction Book phase 2).
+    // The original PK (message_id, user_key, emoji) ignored file_id, so a user
+    // could hold only ONE ":custom:" reaction per message. SQLite cannot alter
+    // a PK -> rebuild. file_id uses a 0 sentinel (= standard emoji; real file
+    // ids start at 1) because NULLs in a composite PK are mutually distinct
+    // (no dedupe). Idempotent: skip when file_id is already NOT NULL.
+    //
+    // FK NOTE: open_file sets PRAGMA foreign_keys=ON. Row 0 never exists in
+    // the files table (autoincrement starts at 1), so keeping
+    // "REFERENCES files(id)" on the new column would cause FK violations for
+    // every standard-emoji reaction (file_id=0) on production databases.
+    // The REFERENCES clause is therefore OMITTED from reactions_new.
+    let file_id_not_null: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(reactions)")?;
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows.iter().any(|(name, notnull)| name == "file_id" && *notnull == 1)
+    };
+    if !file_id_not_null {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE reactions_new (
+                 message_id INTEGER NOT NULL,
+                 user_key BLOB NOT NULL,
+                 emoji TEXT NOT NULL,
+                 file_id INTEGER NOT NULL DEFAULT 0,
+                 created_at INTEGER NOT NULL,
+                 PRIMARY KEY (message_id, user_key, emoji, file_id),
+                 FOREIGN KEY (message_id) REFERENCES messages(id)
+             );
+             INSERT OR IGNORE INTO reactions_new (message_id, user_key, emoji, file_id, created_at)
+                 SELECT message_id, user_key, emoji, COALESCE(file_id, 0), created_at FROM reactions;
+             DROP TABLE reactions;
+             ALTER TABLE reactions_new RENAME TO reactions;
+             CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
+             COMMIT;",
+        )?;
+    }
+
     // Members: add ban_reason column for moderator-supplied context (Task 1 of Member Moderation).
     let has_ban_reason: bool = {
         let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
