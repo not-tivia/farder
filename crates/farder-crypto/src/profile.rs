@@ -46,6 +46,10 @@ impl SignedProfile {
 
 /// Canonical hash of a serialized SignedProfile: SHA-256 hex of the bytes
 /// produced by `to_bytes`. Used as the cache key and change detector everywhere.
+///
+/// Deliberately a free function over raw bytes (not a method that re-serializes):
+/// consumers must hash the EXACT bytes they received/stored, so the hash always
+/// matches the wire/cache bytes even if serialization were to change.
 pub fn profile_hash_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -94,6 +98,8 @@ mod tests {
         assert!(decoded.verify().is_ok());
         assert_eq!(decoded.display_name(), "Alice");
         assert_eq!(decoded.data.avatar.as_deref(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(decoded.data.status.as_deref(), Some("hi"));
+        assert_eq!(decoded.data.public_key, profile.data.public_key);
     }
 
     #[test]
@@ -101,7 +107,8 @@ mod tests {
         let keypair = Keypair::generate();
         let p1 = SignedProfile::create(&keypair, "Alice".to_string(), None, None);
         let bytes1 = p1.to_bytes();
-        assert_eq!(profile_hash_hex(&bytes1), profile_hash_hex(&bytes1));
+        assert_eq!(p1.to_bytes(), p1.to_bytes());
+        assert_eq!(profile_hash_hex(&p1.to_bytes()), profile_hash_hex(&bytes1));
         assert_eq!(profile_hash_hex(&bytes1).len(), 64);
         let p2 = SignedProfile::create(&keypair, "Alice".to_string(), None, Some("x".to_string()));
         assert_ne!(profile_hash_hex(&bytes1), profile_hash_hex(&p2.to_bytes()));
