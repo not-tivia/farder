@@ -16,6 +16,7 @@ pub struct MemberRecord {
     pub joined_at: u64,
     pub banned: bool,
     pub revoked: bool,
+    pub profile_hash: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -30,10 +31,29 @@ pub fn register_member(conn: &Connection, pk: &PublicKey, display_name: &str) ->
     Ok(())
 }
 
+pub fn set_member_profile(conn: &Connection, pk: &PublicKey, profile: &[u8], hash: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE members SET avatar = ?2, profile_hash = ?3 WHERE public_key = ?1",
+        params![pk.as_bytes().as_slice(), profile, hash],
+    )?;
+    Ok(())
+}
+
+pub fn get_member_profile(conn: &Connection, pk: &PublicKey) -> Result<Option<Vec<u8>>> {
+    let blob: Option<Option<Vec<u8>>> = conn
+        .query_row(
+            "SELECT avatar FROM members WHERE public_key = ?1",
+            params![pk.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(blob.flatten())
+}
+
 pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberRecord>> {
     let row = conn
         .query_row(
-            "SELECT public_key, display_name, joined_at, banned, revoked \
+            "SELECT public_key, display_name, joined_at, banned, revoked, profile_hash \
              FROM members WHERE public_key = ?1",
             params![pk.as_bytes().as_slice()],
             |row| {
@@ -42,14 +62,15 @@ pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberReco
                 let joined_at: i64 = row.get(2)?;
                 let banned: i64 = row.get(3)?;
                 let revoked: i64 = row.get(4)?;
-                Ok((key_bytes, display_name, joined_at, banned, revoked))
+                let profile_hash: Option<String> = row.get(5)?;
+                Ok((key_bytes, display_name, joined_at, banned, revoked, profile_hash))
             },
         )
         .optional()?;
 
     match row {
         None => Ok(None),
-        Some((key_bytes, display_name, joined_at, banned, revoked)) => {
+        Some((key_bytes, display_name, joined_at, banned, revoked, profile_hash)) => {
             let arr: [u8; 32] = key_bytes
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("public_key blob wrong length"))?;
@@ -59,6 +80,7 @@ pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberReco
                 joined_at: joined_at as u64,
                 banned: banned != 0,
                 revoked: revoked != 0,
+                profile_hash,
             }))
         }
     }
@@ -66,7 +88,7 @@ pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberReco
 
 pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT public_key, display_name, joined_at, banned, revoked \
+        "SELECT public_key, display_name, joined_at, banned, revoked, profile_hash \
          FROM members WHERE banned = 0 AND revoked = 0",
     )?;
 
@@ -76,12 +98,13 @@ pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
         let joined_at: i64 = row.get(2)?;
         let banned: i64 = row.get(3)?;
         let revoked: i64 = row.get(4)?;
-        Ok((key_bytes, display_name, joined_at, banned, revoked))
+        let profile_hash: Option<String> = row.get(5)?;
+        Ok((key_bytes, display_name, joined_at, banned, revoked, profile_hash))
     })?;
 
     let mut members = Vec::new();
     for row in rows {
-        let (key_bytes, display_name, joined_at, banned, revoked) = row?;
+        let (key_bytes, display_name, joined_at, banned, revoked, profile_hash) = row?;
         let arr: [u8; 32] = key_bytes
             .try_into()
             .map_err(|_| rusqlite::Error::InvalidColumnType(0, "public_key".into(), rusqlite::types::Type::Blob))?;
@@ -91,6 +114,7 @@ pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
             joined_at: joined_at as u64,
             banned: banned != 0,
             revoked: revoked != 0,
+            profile_hash,
         });
     }
     Ok(members)
@@ -1009,5 +1033,34 @@ mod tests {
 
         clear_timeout(&conn, &pk).unwrap();
         assert_eq!(is_timed_out(&conn, &pk, 1000).unwrap(), None);
+    }
+
+    #[test]
+    fn test_set_and_get_member_profile() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = gen_pk();
+        register_member(&conn, &pk, "Alice").unwrap();
+
+        // No profile initially.
+        assert!(get_member_profile(&conn, &pk).unwrap().is_none());
+        assert!(get_member(&conn, &pk).unwrap().unwrap().profile_hash.is_none());
+
+        let blob = vec![9u8, 8, 7];
+        set_member_profile(&conn, &pk, &blob, "deadbeef").unwrap();
+
+        assert_eq!(get_member_profile(&conn, &pk).unwrap().as_deref(), Some(&blob[..]));
+        assert_eq!(
+            get_member(&conn, &pk).unwrap().unwrap().profile_hash.as_deref(),
+            Some("deadbeef")
+        );
+        // list_members carries the hash too.
+        let listed = list_members(&conn).unwrap();
+        assert_eq!(listed[0].profile_hash.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn test_get_member_profile_unknown_member_is_none() {
+        let conn = db::open_in_memory().unwrap();
+        assert!(get_member_profile(&conn, &gen_pk()).unwrap().is_none());
     }
 }

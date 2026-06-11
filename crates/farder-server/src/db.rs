@@ -271,6 +271,21 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Members: profile_hash column for signed-profile sync. The pre-existing
+    // (never used) `avatar` BLOB column now stores the member's serialized
+    // SignedProfile; profile_hash is its SHA-256 hex (cache key for clients).
+    let has_profile_hash: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "profile_hash")
+    };
+    if !has_profile_hash {
+        conn.execute("ALTER TABLE members ADD COLUMN profile_hash TEXT NULL", [])?;
+    }
+
     // Audit events: forever-retention moderator action log (Phase 2).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS audit_events (
