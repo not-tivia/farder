@@ -89,6 +89,16 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
         setLoading(false);
         return;
       }
+
+      // Invite links (relay or direct-with-code, but NOT setup-token flows) are
+      // funneled through the JoinConfirmModal so the user sees the RELAYED/DIRECT
+      // badge before connecting.  Setup-token flows connect directly.
+      if (!parsed.setupToken) {
+        dispatch({ type: "OPEN_JOIN_CONFIRM", link: inviteInput.trim() });
+        onClose();
+        return;
+      }
+
       const result = await api.connectServer(address, parsed.inviteCode, parsed.setupToken);
       dispatch({ type: "SERVER_ADDED", serverId: address, payload: result });
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: address });

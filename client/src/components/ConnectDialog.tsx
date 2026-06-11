@@ -135,6 +135,17 @@ export default function ConnectDialog() {
         return;
       }
 
+      // Invite links (relay or direct-with-code, but NOT setup-token flows) are
+      // funneled through the JoinConfirmModal so the user sees the RELAYED/DIRECT
+      // badge before connecting.  Setup-token and 64-hex flows connect directly.
+      if (!parsed.setupToken) {
+        dispatch({ type: "OPEN_JOIN_CONFIRM", link: inviteInput.trim() });
+        setInviteInput("");
+        setStep("choice");
+        setLoading(false);
+        return;
+      }
+
       const result = await api.connectServer(address, parsed.inviteCode, parsed.setupToken);
       dispatch({ type: "SERVER_ADDED", serverId: address, payload: result });
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: address });

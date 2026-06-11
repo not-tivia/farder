@@ -22,7 +22,6 @@ function AppInner() {
   const [initializing, setInitializing] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
   const [pendingInvite, setPendingInvite] = useState<string | null>(null);
-  const [joinConfirm, setJoinConfirm] = useState<string | null>(null);
   useServerEvents();
 
   // Handle farder:// deep links passed via CLI argument at launch.
@@ -102,7 +101,7 @@ function AppInner() {
   // Open the confirmation modal instead of auto-joining.
   useEffect(() => {
     if (!unlocked || !pendingInvite) return;
-    setJoinConfirm(pendingInvite);
+    dispatch({ type: "OPEN_JOIN_CONFIRM", link: pendingInvite });
     setPendingInvite(null);
   }, [unlocked, pendingInvite]);
 
@@ -127,11 +126,11 @@ function AppInner() {
   // Modal for confirming a join from an invite link. Extracted so every
   // post-unlock return branch can render it (a brand-new user with no servers
   // who clicks an invite must still see the confirm prompt).
-  const confirmModal = joinConfirm ? (
+  const confirmModal = state.joinConfirmLink ? (
     <JoinConfirmModal
-      relayed={/^farder:\/\/relayd?\//i.test(parseInviteLink(joinConfirm).address ?? "")}
-      onConfirm={() => { const u = joinConfirm; setJoinConfirm(null); void joinFromInvite(u); }}
-      onCancel={() => setJoinConfirm(null)}
+      relayed={/^farder:\/\/relayd?\//i.test(parseInviteLink(state.joinConfirmLink).address ?? "")}
+      onConfirm={() => { const u = state.joinConfirmLink!; dispatch({ type: "CLOSE_JOIN_CONFIRM" }); void joinFromInvite(u); }}
+      onCancel={() => dispatch({ type: "CLOSE_JOIN_CONFIRM" })}
     />
   ) : null;
 

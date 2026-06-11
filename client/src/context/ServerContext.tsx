@@ -30,6 +30,7 @@ export interface AppState {
   serverList: ServerListEntry[];
   servers: Record<string, PerServerState>;
   kickedBanned: { kind: "kick" | "ban"; serverId: string; reason: string | null } | null;
+  joinConfirmLink: string | null;
 }
 
 // Keep old ServerState as alias for backward compat
@@ -63,6 +64,7 @@ const initialAppState: AppState = {
   serverList: [],
   servers: {},
   kickedBanned: null,
+  joinConfirmLink: null,
 };
 
 export type AppAction =
@@ -116,7 +118,9 @@ export type AppAction =
   | { type: "MEMBER_TIMEOUT_CHANGED"; serverId: string; payload: { publicKey: string; untilMs: number | null; reason: string | null } }
   | { type: "YOU_WERE_KICKED"; serverId: string }
   | { type: "YOU_WERE_BANNED"; serverId: string; reason: string | null }
-  | { type: "CLEAR_KICKED_BANNED" };
+  | { type: "CLEAR_KICKED_BANNED" }
+  | { type: "OPEN_JOIN_CONFIRM"; link: string }
+  | { type: "CLOSE_JOIN_CONFIRM" };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -425,6 +429,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case "CLEAR_KICKED_BANNED":
       return { ...state, kickedBanned: null };
+
+    case "OPEN_JOIN_CONFIRM":
+      return { ...state, joinConfirmLink: action.link };
+
+    case "CLOSE_JOIN_CONFIRM":
+      return { ...state, joinConfirmLink: null };
 
     default: {
       // Per-server actions — route to the appropriate server slice
