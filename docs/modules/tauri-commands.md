@@ -979,9 +979,11 @@ guard is a `compare_exchange`, so two concurrent starts cannot both win).
 **What it does:** stops a recording. With `Some(id)`, only stops the matching
 session — a stale id returns `Err("stale recording session")` WITHOUT touching
 a newer live recording (this is what makes stray/late stops harmless). With
-`None`, stops whatever is recording (wedge recovery). Sets the `RECORDING`
-atomic to false (signals the cpal thread to stop), waits 500 ms for WAV
-finalization, and returns the path to the WAV file.
+`None`, stops whatever is recording (wedge recovery). The session check and the
+path claim happen ATOMICALLY under one lock (check-then-sleep-then-take let a
+stale stop steal a newer session's path). Only after claiming does it set the
+`RECORDING` atomic to false (signals the cpal thread to stop), wait 500 ms for
+WAV finalization, and return the path to the WAV file.
 **Returns:** absolute path to the WAV file.
 **Side effects:** finalizes the WAV; releases the audio device.
 **invoke name:** `"stop_recording"` → `stopRecording(session?: number)`.

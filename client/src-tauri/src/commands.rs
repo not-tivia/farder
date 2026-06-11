@@ -1891,7 +1891,11 @@ pub fn save_temp_audio(data: String) -> Result<String, String> {
 
 // Global recording state
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static RECORDING_PATH: Mutex<Option<String>> = Mutex::new(None);
+// The live recording's (session id, wav path). The id rides WITH the path so
+// stop_recording can check-and-take atomically under one lock — a stale stop
+// must never be able to pass an entry check, sleep, and then steal a NEWER
+// session's path (the race the voice recorder hit under StrictMode).
+static RECORDING_PATH: Mutex<Option<(u64, String)>> = Mutex::new(None);
 // Monotonic id of the CURRENT recording session. `stop_recording(Some(id))`
 // only stops a matching session, so a stale stop (e.g. from React StrictMode's
 // dev double-mount, or any late async cleanup) is a harmless no-op instead of
@@ -1920,7 +1924,7 @@ pub async fn start_recording() -> Result<u64, String> {
     let path = tmp_dir.join(&filename);
     let path_str = path.to_string_lossy().to_string();
     if let Ok(mut g) = RECORDING_PATH.lock() {
-        *g = Some(path_str.clone());
+        *g = Some((session, path_str.clone()));
     }
 
     // Read the saved input device name before moving into spawn_blocking.
@@ -2051,20 +2055,31 @@ pub async fn start_recording() -> Result<u64, String> {
 #[tauri::command]
 pub async fn stop_recording(session: Option<u64>) -> Result<String, String> {
     use std::sync::atomic::Ordering;
-    if let Some(s) = session {
-        if s != RECORDING_SESSION.load(Ordering::SeqCst) {
-            return Err("stale recording session".to_string());
+    // Atomically validate the session AND claim the path under one lock. The
+    // earlier version checked the session, slept 500ms, THEN took the path —
+    // letting a stale stop pass the check while its target was still current,
+    // sleep through a newer session starting, and steal the newer path.
+    let path = {
+        let mut g = RECORDING_PATH
+            .lock()
+            .map_err(|_| "recording state poisoned".to_string())?;
+        match g.as_ref() {
+            None => return Err("no recording in progress".to_string()),
+            Some((owner, _)) => {
+                if let Some(s) = session {
+                    if s != *owner {
+                        return Err("stale recording session".to_string());
+                    }
+                }
+                let (_, p) = g.take().expect("checked Some above");
+                p
+            }
         }
-    }
+    };
+    // We own the live recording: signal the cpal thread to stop, then give it a
+    // moment to finalize the WAV. Async sleep so we don't block a worker thread.
     RECORDING.store(false, Ordering::SeqCst);
-    // Give the recording thread a moment to finalize the WAV. Async sleep so we
-    // don't block a worker thread.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let path = RECORDING_PATH
-        .lock()
-        .map_err(|_| "recording state poisoned".to_string())?
-        .take()
-        .ok_or("no recording in progress")?;
     if !std::path::Path::new(&path).exists() {
         return Err("recording failed — no audio file was written".to_string());
     }
