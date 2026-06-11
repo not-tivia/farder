@@ -27,21 +27,23 @@ export default function VoiceRecorder({ onRecorded, onCancel }: Props) {
                 // wedged (crashed component, orphaned mount), recover by
                 // stopping it (token-less = stop whatever is live) and retrying.
                 let session: number;
+                console.log("[voice-recorder] start: requesting");
                 try {
                     session = await api.startRecording();
                 } catch (e) {
+                    console.log("[voice-recorder] start failed:", String(e));
                     if (String(e).includes("already recording")) {
+                        console.log("[voice-recorder] recovering: blanket stop + retry");
                         await api.stopRecording().catch(() => {});
                         session = await api.startRecording();
                     } else {
                         throw e;
                     }
                 }
+                console.log("[voice-recorder] start resolved, session =", session, "(undefined here means the OLD Rust backend is running)");
                 if (!active) {
-                    // Unmounted while starting (StrictMode): release OUR session.
-                    // The token makes this safe — if a newer mount already started
-                    // its own recording, this stop is rejected as stale.
-                    api.stopRecording(session).catch(() => {});
+                    console.log("[voice-recorder] unmounted while starting; releasing session", session);
+                    api.stopRecording(session).catch((e) => console.log("[voice-recorder] release stop rejected (good if stale):", String(e)));
                     return;
                 }
                 sessionRef.current = session;
@@ -61,7 +63,8 @@ export default function VoiceRecorder({ onRecorded, onCancel }: Props) {
             if (sessionRef.current !== null) {
                 const session = sessionRef.current;
                 sessionRef.current = null;
-                api.stopRecording(session).catch(() => {});
+                console.log("[voice-recorder] cleanup: stopping owned session", session);
+                api.stopRecording(session).catch((e) => console.log("[voice-recorder] cleanup stop rejected:", String(e)));
             }
         };
     }, []);
@@ -70,11 +73,14 @@ export default function VoiceRecorder({ onRecorded, onCancel }: Props) {
         if (timerRef.current) clearInterval(timerRef.current);
         const session = sessionRef.current ?? undefined;
         sessionRef.current = null;
+        console.log("[voice-recorder] Stop pressed, stopping session", session);
         try {
             const path = await api.stopRecording(session);
+            console.log("[voice-recorder] stop OK, wav at", path);
             setFilePath(path);
             setRecording(false);
         } catch (e) {
+            console.log("[voice-recorder] stop FAILED:", String(e));
             setError(String(e));
             setRecording(false);
         }
