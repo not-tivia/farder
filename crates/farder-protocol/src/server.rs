@@ -146,6 +146,7 @@ pub struct MemberInfo {
     pub timeout_until: Option<u64>,
     #[serde(default)]
     pub timeout_reason: Option<String>,
+    /// Hex-encoded SHA-256 of the member's canonical serialized SignedProfile.
     #[serde(default)]
     pub profile_hash: Option<String>,
 }
@@ -299,7 +300,7 @@ pub enum ServerResponse {
         owner_public_key: Option<PublicKey>,
     },
     Members { members: Vec<MemberInfo> },
-    MemberProfile { member_key: PublicKey, profile: Option<Vec<u8>> },
+    MemberProfile { member_key: PublicKey, #[serde(default)] profile: Option<Vec<u8>> },
     BannedMembers {
         entries: Vec<BannedMember>,
     },
@@ -339,6 +340,7 @@ pub enum ServerEvent {
     },
     MemberProfileUpdated {
         public_key: PublicKey,
+        /// Hex-encoded SHA-256 of the member's canonical serialized SignedProfile.
         #[serde(default)]
         profile_hash: Option<String>,
     },
@@ -784,8 +786,8 @@ mod tests {
             id: 7,
             body: ServerRequest::UpdateProfile { profile: vec![1, 2, 3] },
         };
-        let bytes = rmp_serde::to_vec(&req).unwrap();
-        let decoded: ClientFrame = rmp_serde::from_slice(&bytes).unwrap();
+        let bytes = codec::encode(&req).unwrap();
+        let decoded: ClientFrame = codec::decode(&bytes).unwrap();
         match decoded {
             ClientFrame::Request { id: 7, body: ServerRequest::UpdateProfile { profile } } => {
                 assert_eq!(profile, vec![1, 2, 3]);
@@ -797,12 +799,27 @@ mod tests {
             public_key: kp.public_key(),
             profile_hash: Some("ab".repeat(32)),
         });
-        let bytes = rmp_serde::to_vec(&ev).unwrap();
-        let _: ServerFrame = rmp_serde::from_slice(&bytes).unwrap();
+        let bytes = codec::encode(&ev).unwrap();
+        let decoded: ServerFrame = codec::decode(&bytes).unwrap();
+        let expected_hash = "ab".repeat(32);
+        match decoded {
+            ServerFrame::Event(ServerEvent::MemberProfileUpdated { public_key, profile_hash }) => {
+                assert_eq!(public_key, kp.public_key());
+                assert_eq!(profile_hash.as_deref(), Some(expected_hash.as_str()));
+            }
+            other => panic!("unexpected decode: {:?}", other),
+        }
 
         let resp = ServerResponse::MemberProfile { member_key: kp.public_key(), profile: None };
-        let bytes = rmp_serde::to_vec(&resp).unwrap();
-        let _: ServerResponse = rmp_serde::from_slice(&bytes).unwrap();
+        let bytes = codec::encode(&resp).unwrap();
+        let decoded: ServerResponse = codec::decode(&bytes).unwrap();
+        match decoded {
+            ServerResponse::MemberProfile { member_key, profile } => {
+                assert_eq!(member_key, kp.public_key());
+                assert!(profile.is_none());
+            }
+            other => panic!("unexpected decode: {:?}", other),
+        }
     }
 
     #[test]
