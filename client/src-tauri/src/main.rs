@@ -16,6 +16,7 @@ mod themes;
 mod tls;
 mod translation;
 mod tray;
+mod profile_sync;
 mod voice;
 mod voice_bridge;
 
@@ -128,6 +129,11 @@ fn main() {
             commands::get_avatar,
             commands::set_server_avatar,
             commands::get_server_avatar,
+            commands::get_profile_status,
+            commands::set_profile_status,
+            commands::set_server_avatar_override,
+            commands::clear_server_avatar_override,
+            commands::get_server_avatar_override,
             commands::save_temp_audio,
             commands::start_recording,
             commands::stop_recording,

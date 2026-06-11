@@ -135,21 +135,12 @@ pub fn get_profile_color() -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn set_avatar(file_path: String) -> Result<String, String> {
+pub async fn set_avatar(state: State<'_, Arc<AppState>>, file_path: String) -> Result<String, String> {
     let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
     let avatar_path = farder_data_dir().join("avatar.png");
     std::fs::write(&avatar_path, &data).map_err(|e| e.to_string())?;
-
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-    let mime = if file_path.ends_with(".png") {
-        "image/png"
-    } else if file_path.ends_with(".gif") {
-        "image/gif"
-    } else {
-        "image/jpeg"
-    };
-    Ok(format!("data:{};base64,{}", mime, b64))
+    crate::profile_sync::push_profile_everywhere(state.inner()).await;
+    Ok(image_data_url(&data))
 }
 
 #[tauri::command]
@@ -195,6 +186,83 @@ pub fn get_server_avatar(server_id: String) -> Option<String> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
     Some(format!("data:image/png;base64,{}", b64))
+}
+
+/// Build a data: URL for raw image bytes, sniffing the mime from magic bytes.
+pub(crate) fn image_data_url(data: &[u8]) -> String {
+    let mime = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if data.starts_with(b"GIF8") {
+        "image/gif"
+    } else if data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    };
+    use base64::Engine;
+    format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(data))
+}
+
+#[tauri::command]
+pub fn get_profile_status() -> Option<String> {
+    let data = std::fs::read_to_string(profile_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v["status"].as_str().map(|s| s.to_string())
+}
+
+#[tauri::command]
+pub async fn set_profile_status(
+    state: State<'_, Arc<AppState>>,
+    status: Option<String>,
+) -> Result<(), String> {
+    let trimmed = status.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(s) = &trimmed {
+        if s.chars().count() > 128 {
+            return Err("status too long (max 128 characters)".to_string());
+        }
+    }
+    let path = profile_path();
+    let mut data: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    match &trimmed {
+        Some(s) => data["status"] = serde_json::json!(s),
+        None => data["status"] = serde_json::Value::Null,
+    }
+    std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())?;
+    crate::profile_sync::push_profile_everywhere(state.inner()).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_server_avatar_override(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    file_path: String,
+) -> Result<String, String> {
+    let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    std::fs::write(crate::profile_sync::override_path(&server_id), &data).map_err(|e| e.to_string())?;
+    let _ = crate::profile_sync::push_profile(&state, &server_id).await;
+    Ok(image_data_url(&data))
+}
+
+#[tauri::command]
+pub async fn clear_server_avatar_override(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<(), String> {
+    let _ = std::fs::remove_file(crate::profile_sync::override_path(&server_id));
+    let _ = crate::profile_sync::push_profile(&state, &server_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_server_avatar_override(server_id: String) -> Option<String> {
+    let data = std::fs::read(crate::profile_sync::override_path(&server_id)).ok()?;
+    Some(image_data_url(&data))
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +634,16 @@ pub async fn connect_server(
             *server_conn.server_name.lock().unwrap() = name.clone();
             // Save to persistent server list
             save_server_entry(&address, &name);
+            // Sync our signed profile to this server in the background.
+            {
+                let state_arc: Arc<AppState> = Arc::clone(state.inner());
+                let sid = address.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::profile_sync::push_profile(&state_arc, &sid).await {
+                        eprintln!("[profile-sync] push after connect to {} failed: {}", sid, e);
+                    }
+                });
+            }
             Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed })
         }
         ServerResponse::Error { reason } => Err(reason),
