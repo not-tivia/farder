@@ -137,9 +137,11 @@ pub fn get_profile_color() -> Option<String> {
 #[tauri::command]
 pub async fn set_avatar(state: State<'_, Arc<AppState>>, file_path: String) -> Result<String, String> {
     let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    crate::profile_sync::validate_avatar_bytes(&data)?;
     let avatar_path = farder_data_dir().join("avatar.png");
     std::fs::write(&avatar_path, &data).map_err(|e| e.to_string())?;
-    crate::profile_sync::push_profile_everywhere(state.inner()).await;
+    let state_arc = Arc::clone(state.inner());
+    tokio::spawn(async move { crate::profile_sync::push_profile_everywhere(&state_arc).await; });
     Ok(image_data_url(&data))
 }
 
@@ -233,7 +235,8 @@ pub async fn set_profile_status(
         None => data["status"] = serde_json::Value::Null,
     }
     std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())?;
-    crate::profile_sync::push_profile_everywhere(state.inner()).await;
+    let state_arc = Arc::clone(state.inner());
+    tokio::spawn(async move { crate::profile_sync::push_profile_everywhere(&state_arc).await; });
     Ok(())
 }
 
@@ -244,8 +247,10 @@ pub async fn set_server_avatar_override(
     file_path: String,
 ) -> Result<String, String> {
     let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    crate::profile_sync::validate_avatar_bytes(&data)?;
     std::fs::write(crate::profile_sync::override_path(&server_id), &data).map_err(|e| e.to_string())?;
-    let _ = crate::profile_sync::push_profile(&state, &server_id).await;
+    crate::profile_sync::push_profile(&state, &server_id).await
+        .map_err(|e| format!("saved locally, but couldn't sync to this server: {}", e))?;
     Ok(image_data_url(&data))
 }
 
@@ -255,7 +260,8 @@ pub async fn clear_server_avatar_override(
     server_id: String,
 ) -> Result<(), String> {
     let _ = std::fs::remove_file(crate::profile_sync::override_path(&server_id));
-    let _ = crate::profile_sync::push_profile(&state, &server_id).await;
+    crate::profile_sync::push_profile(&state, &server_id).await
+        .map_err(|e| format!("saved locally, but couldn't sync to this server: {}", e))?;
     Ok(())
 }
 
@@ -639,7 +645,7 @@ pub async fn connect_server(
                 let state_arc: Arc<AppState> = Arc::clone(state.inner());
                 let sid = address.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = crate::profile_sync::push_profile(&state_arc, &sid).await {
+                    if let Err(e) = crate::profile_sync::push_profile_on_connect(&state_arc, &sid).await {
                         eprintln!("[profile-sync] push after connect to {} failed: {}", sid, e);
                     }
                 });
@@ -3006,6 +3012,16 @@ pub async fn create_local_server(
             owner_public_key,
         } => {
             *server_conn.server_name.lock().unwrap() = srv_name.clone();
+            // Sync our signed profile to the newly created server in the background.
+            {
+                let state_arc: Arc<AppState> = Arc::clone(state.inner());
+                let sid = address.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::profile_sync::push_profile_on_connect(&state_arc, &sid).await {
+                        eprintln!("[profile-sync] push after create to {} failed: {}", sid, e);
+                    }
+                });
+            }
             Ok(serde_json::json!({
                 "address": address,
                 "server_name": srv_name,

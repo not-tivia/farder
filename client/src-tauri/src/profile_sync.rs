@@ -73,6 +73,28 @@ fn record_pushed(server_id: &str, hash: &str) {
     let _ = std::fs::write(pushed_map_path(), serde_json::Value::Object(map).to_string());
 }
 
+// --- avatar validation ------------------------------------------------------
+
+/// Client-side pre-check mirroring the server's avatar rules: accepted format
+/// (PNG/JPEG/GIF/WebP by magic bytes) and <= 2 MB. A bad avatar would otherwise
+/// poison every future profile push (server rejects the whole signed blob).
+pub(crate) fn validate_avatar_bytes(data: &[u8]) -> Result<(), String> {
+    if data.len() > 2 * 1024 * 1024 {
+        return Err(format!(
+            "image too large ({:.1} MB; max 2 MB)",
+            data.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    let ok = data.starts_with(&[0x89, 0x50, 0x4E, 0x47])
+        || data.starts_with(&[0xFF, 0xD8, 0xFF])
+        || data.starts_with(b"GIF8")
+        || (data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP");
+    if !ok {
+        return Err("unsupported image format (only PNG, JPEG, GIF, WebP are allowed)".to_string());
+    }
+    Ok(())
+}
+
 // --- pushing ----------------------------------------------------------------
 
 /// Push the effective profile to one connected server if it changed since the
@@ -109,6 +131,53 @@ pub(crate) async fn push_profile_everywhere(state: &Arc<AppState>) {
         if let Err(e) = push_profile(state, &id).await {
             eprintln!("[profile-sync] push to {} failed: {}", id, e);
         }
+    }
+}
+
+/// Connect-time push: consult the SERVER's stored hash for our own key (ground
+/// truth) rather than trusting the local pushed-map — a server whose DB was
+/// wiped would otherwise never receive our profile again. Falls back to the
+/// plain push when the roster can't be fetched.
+pub(crate) async fn push_profile_on_connect(state: &AppState, server_id: &str) -> Result<(), String> {
+    let keypair = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        match lock.as_ref() {
+            Some(bytes) => Keypair::from_signing_key_bytes(bytes),
+            None => return Ok(()),
+        }
+    };
+    let bytes = build_signed_profile(&keypair, server_id).to_bytes();
+    let hash = profile_hash_hex(&bytes);
+
+    let server_side_hash: Option<Option<String>> =
+        match crate::bridge::send_request(state, server_id, ServerRequest::GetMembers).await {
+            Ok(ServerResponse::Members { members }) => Some(
+                members
+                    .iter()
+                    .find(|m| m.public_key == keypair.public_key())
+                    .and_then(|m| m.profile_hash.clone()),
+            ),
+            _ => None, // roster unavailable -> fall back to pushed-map behaviour
+        };
+
+    match server_side_hash {
+        Some(sh) if sh.as_deref() == Some(hash.as_str()) => {
+            record_pushed(server_id, &hash); // server already current; remember it
+            Ok(())
+        }
+        Some(_) => {
+            // Server is missing/stale on our profile: push unconditionally.
+            match crate::bridge::send_request(state, server_id, ServerRequest::UpdateProfile { profile: bytes }).await {
+                Ok(ServerResponse::Ok) => {
+                    record_pushed(server_id, &hash);
+                    Ok(())
+                }
+                Ok(ServerResponse::Error { reason }) => Err(reason),
+                Ok(other) => Err(format!("unexpected response: {:?}", other)),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        None => push_profile(state, server_id).await,
     }
 }
 
@@ -159,5 +228,14 @@ mod tests {
 
         unsafe { std::env::remove_var("FARDER_DATA"); }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_push_profile_is_noop_when_locked() {
+        let state = crate::state::AppState { signing_key_bytes: std::sync::Mutex::new(None), servers: std::sync::Mutex::new(std::collections::HashMap::new()) };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            assert!(push_profile(&state, "srv-x").await.is_ok());
+        });
     }
 }
