@@ -146,6 +146,8 @@ pub struct MemberInfo {
     pub timeout_until: Option<u64>,
     #[serde(default)]
     pub timeout_reason: Option<String>,
+    #[serde(default)]
+    pub profile_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -239,6 +241,10 @@ pub enum ServerRequest {
     CreateInvite { max_uses: Option<u32>, expires_in_secs: Option<u64>, target_channel: Option<u64> },
     GetServerInfo,
     GetMembers,
+    /// Store the sender's signed profile (serialized `farder_crypto::profile::SignedProfile`).
+    UpdateProfile { profile: Vec<u8> },
+    /// Fetch a member's stored signed profile blob.
+    GetMemberProfile { member_key: PublicKey },
     SetChannelOverride { channel_id: u64, role_id: u64, allow: u64, deny: u64 },
     SetCategoryOverride { category_id: u64, role_id: u64, allow: u64, deny: u64 },
     CreateThread { message_id: u64, name: Option<String> },
@@ -293,6 +299,7 @@ pub enum ServerResponse {
         owner_public_key: Option<PublicKey>,
     },
     Members { members: Vec<MemberInfo> },
+    MemberProfile { member_key: PublicKey, profile: Option<Vec<u8>> },
     BannedMembers {
         entries: Vec<BannedMember>,
     },
@@ -329,6 +336,11 @@ pub enum ServerEvent {
         until_ms: Option<u64>,
         #[serde(default)]
         reason: Option<String>,
+    },
+    MemberProfileUpdated {
+        public_key: PublicKey,
+        #[serde(default)]
+        profile_hash: Option<String>,
     },
     YouWereKicked,
     YouWereBanned {
@@ -763,6 +775,34 @@ mod tests {
         let bytes2 = codec::encode(&status_none).unwrap();
         let decoded2: DeletionStatus = codec::decode(&bytes2).unwrap();
         assert_eq!(decoded2, status_none);
+    }
+
+    #[test]
+    fn test_profile_protocol_roundtrip() {
+        let kp = farder_crypto::identity::Keypair::generate();
+        let req = ClientFrame::Request {
+            id: 7,
+            body: ServerRequest::UpdateProfile { profile: vec![1, 2, 3] },
+        };
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        let decoded: ClientFrame = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            ClientFrame::Request { id: 7, body: ServerRequest::UpdateProfile { profile } } => {
+                assert_eq!(profile, vec![1, 2, 3]);
+            }
+            other => panic!("unexpected decode: {:?}", other),
+        }
+
+        let ev = ServerFrame::Event(ServerEvent::MemberProfileUpdated {
+            public_key: kp.public_key(),
+            profile_hash: Some("ab".repeat(32)),
+        });
+        let bytes = rmp_serde::to_vec(&ev).unwrap();
+        let _: ServerFrame = rmp_serde::from_slice(&bytes).unwrap();
+
+        let resp = ServerResponse::MemberProfile { member_key: kp.public_key(), profile: None };
+        let bytes = rmp_serde::to_vec(&resp).unwrap();
+        let _: ServerResponse = rmp_serde::from_slice(&bytes).unwrap();
     }
 
     #[test]

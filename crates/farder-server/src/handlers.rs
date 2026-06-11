@@ -1008,6 +1008,7 @@ pub fn handle_request(
                     role_ids,
                     timeout_until,
                     timeout_reason,
+                    profile_hash: None,
                 });
             }
             ok(ServerResponse::Members {
@@ -1218,6 +1219,7 @@ pub fn handle_request(
                 role_ids,
                 timeout_until,
                 timeout_reason,
+                profile_hash: None,
             };
 
             let mut events = Vec::new();
@@ -1255,6 +1257,7 @@ pub fn handle_request(
                     role_ids,
                     timeout_until,
                     timeout_reason,
+                    profile_hash: None,
                 };
                 let ch_id = ch.id;
                 let last_msgs = messages::fetch_history(conn, ch_id, None, 1, member)?;
@@ -1602,6 +1605,17 @@ pub fn handle_request(
                 })
                 .collect();
             ok_with(ServerResponse::Ok, events)
+        }
+
+        // ----------------------------------------------------------------
+        // Profile sync (storage wired in Task 3/4)
+        // ----------------------------------------------------------------
+        ServerRequest::UpdateProfile { .. } => {
+            ok(ServerResponse::Error { reason: "not implemented".into() })
+        }
+
+        ServerRequest::GetMemberProfile { .. } => {
+            ok(ServerResponse::Error { reason: "not implemented".into() })
         }
     }
 }
