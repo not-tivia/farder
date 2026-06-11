@@ -320,7 +320,9 @@ export default function Message({ message, memberNames, grouped = false, serverI
           Replying to a message
         </div>
       )}
-      {(deleted || displayContent) && (
+      {/* Attachment-only messages (voice notes, captionless images) have empty
+          content — the body must still render so the attachments do. */}
+      {(deleted || displayContent || message.attachments.length > 0) && (
         <div className={`message-content${deleted ? " deleted-content" : ""}`}>
           {deleted ? (
             <em>This message has been deleted.</em>
