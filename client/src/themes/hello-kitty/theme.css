@@ -2567,3 +2567,33 @@ body {
   background: var(--xp-blue, #0058e6);
   transform: translateX(-1px);
 }
+
+/* Join-confirm relay disclosure */
+.join-relay-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--xp-border);
+  border-radius: 4px;
+  background: var(--xp-panel-bg);
+  font-size: 11px;
+  color: var(--xp-text-normal);
+}
+.join-relay-badge {
+  font-weight: bold;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.join-relay-note.relayed .join-relay-badge {
+  background: var(--xp-blue);
+  color: var(--xp-white);
+}
+.join-relay-note.direct .join-relay-badge {
+  background: var(--xp-sidebar-dark);
+  color: var(--xp-text-normal);
+}

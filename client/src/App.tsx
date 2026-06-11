@@ -129,6 +129,7 @@ function AppInner() {
   // who clicks an invite must still see the confirm prompt).
   const confirmModal = joinConfirm ? (
     <JoinConfirmModal
+      relayed={/^farder:\/\/relayd?\//i.test(parseInviteLink(joinConfirm).address ?? "")}
       onConfirm={() => { const u = joinConfirm; setJoinConfirm(null); void joinFromInvite(u); }}
       onCancel={() => setJoinConfirm(null)}
     />
