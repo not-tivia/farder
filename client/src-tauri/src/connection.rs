@@ -23,6 +23,20 @@ pub struct RelayTarget {
 /// Parse a relay link, or `None` if `s` is not a well-formed relay link (e.g. a
 /// direct `farder://addr/code` link or anything else).
 pub fn parse_relay_target(s: &str) -> Option<RelayTarget> {
+    // Compact default-relay form: farder://relayd/<server_id_hex>/<token>
+    // (token may be empty). Expanded from the compiled-in default relay; a
+    // build with no default relay cannot resolve these (returns None).
+    if let Some(rest) = s.strip_prefix("farder://relayd/") {
+        let (relay_addr, cert_fp) = crate::default_relay::default_relay()?;
+        let mut parts = rest.splitn(2, '/');
+        let server_id = hex::decode(parts.next()?).ok()?;
+        if server_id.is_empty() {
+            return None;
+        }
+        let invite_token = parts.next().unwrap_or("").to_string();
+        return Some(RelayTarget { relay_addr, server_id, cert_fp, invite_token });
+    }
+
     let rest = s.strip_prefix("farder://relay/")?;
     let parts: Vec<&str> = rest.splitn(4, '/').collect();
     if parts.len() != 4 {
@@ -52,6 +66,13 @@ pub fn build_relay_link(target: &RelayTarget, code: &str) -> String {
         hex::encode(&target.cert_fp),
         code
     )
+}
+
+/// Build the COMPACT deep link for a server on the compiled-in default relay:
+/// `farder://relayd/<server_id_hex>/<token>`. Only valid when the server's
+/// relay is the default (the parser re-expands from default_relay()).
+pub fn build_compact_relay_link(server_id: &[u8], code: &str) -> String {
+    format!("farder://relayd/{}/{}", hex::encode(server_id), code)
 }
 
 /// Read a length-prefixed frame (4-byte big-endian length header).
@@ -211,6 +232,38 @@ pub async fn connect_via_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_relayd_link_expands_from_the_default_relay() {
+        let (def_addr, def_fp) = crate::default_relay::default_relay().expect("default relay configured");
+        let sid = vec![7u8; 32];
+        let link = build_compact_relay_link(&sid, "tok123");
+        assert_eq!(link, format!("farder://relayd/{}/tok123", hex::encode(&sid)));
+        let parsed = parse_relay_target(&link).expect("relayd link must parse");
+        assert_eq!(parsed.relay_addr, def_addr);
+        assert_eq!(parsed.cert_fp, def_fp);
+        assert_eq!(parsed.server_id, sid);
+        assert_eq!(parsed.invite_token, "tok123");
+    }
+
+    #[test]
+    fn relayd_link_with_empty_token_parses() {
+        let link = build_compact_relay_link(&vec![7u8; 32], "");
+        let parsed = parse_relay_target(&link).expect("empty-token relayd link must parse");
+        assert!(parsed.invite_token.is_empty());
+    }
+
+    #[test]
+    fn full_form_relay_links_still_parse() {
+        let target = RelayTarget {
+            relay_addr: "1.2.3.4:4433".parse().unwrap(),
+            server_id: vec![1u8; 32],
+            cert_fp: vec![2u8; 32],
+            invite_token: "abc".into(),
+        };
+        let link = build_relay_link(&target, "abc");
+        assert!(parse_relay_target(&link).is_some(), "backward compat: full form must keep parsing");
+    }
 
     #[test]
     fn parses_a_valid_relay_link() {

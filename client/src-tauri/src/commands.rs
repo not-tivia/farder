@@ -1612,7 +1612,16 @@ pub async fn create_invite(
             use base64::Engine;
             let (encoded, deep_link) =
                 if let Some(target) = crate::connection::parse_relay_target(&server_id) {
-                    let deep_link = crate::connection::build_relay_link(&target, &code);
+                    // Servers on the compiled-in default relay get the compact
+                    // form (drops the embedded addr + 64-char fingerprint).
+                    let on_default = crate::default_relay::default_relay()
+                        .map(|(addr, fp)| addr == target.relay_addr && fp == target.cert_fp)
+                        .unwrap_or(false);
+                    let deep_link = if on_default {
+                        crate::connection::build_compact_relay_link(&target.server_id, &code)
+                    } else {
+                        crate::connection::build_relay_link(&target, &code)
+                    };
                     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
                         .encode(deep_link.as_bytes());
                     (encoded, deep_link)

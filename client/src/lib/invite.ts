@@ -45,8 +45,9 @@ export function parseInviteLink(input: string): ParsedInvite {
     return {};
   }
 
-  // Relay deep link: return the whole URL as the address (token embedded).
-  if (/^farder:\/\/relay\//i.test(trimmed)) {
+  // Relay deep link (full or compact default-relay form): return the whole
+  // URL as the address (token embedded; the Rust parser expands relayd/).
+  if (/^farder:\/\/relayd?\//i.test(trimmed)) {
     return { address: trimmed };
   }
 

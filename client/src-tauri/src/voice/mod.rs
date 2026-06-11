@@ -1365,6 +1365,8 @@ mod controller_tests {
                 mode: super::VoiceMode::PushToTalk,
                 peer_volumes: std::collections::HashMap::new(),
                 connection: None,
+                input_device: None,
+                output_device: None,
             },
         )
         .await
@@ -1384,6 +1386,8 @@ mod controller_tests {
                 mode: super::VoiceMode::OpenMic,
                 peer_volumes: std::collections::HashMap::new(),
                 connection: None,
+                input_device: None,
+                output_device: None,
             },
         )
         .await
@@ -1587,6 +1591,8 @@ mod controller_tests {
                 mode: super::VoiceMode::OpenMic,
                 peer_volumes: vols,
                 connection: None,
+                input_device: None,
+                output_device: None,
             },
         )
         .await
