@@ -195,7 +195,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   // Build the list of message actions mirroring the context menu (same conditions),
   // so AttachmentDisplay can append them to the merged image right-click menu.
-  // NOTE: these are intentionally plain onClick callbacks, not async — the async
+  // NOTE: these are intentionally plain onClick callbacks, not async -- the async
   // bodies are handled inside the callbacks via void/catch patterns matching above.
   const messageActions: { label: string; onClick: () => void }[] = [
     ...(onReply ? [{ label: "Reply", onClick: () => { if (onReply) onReply(message); } }] : []),

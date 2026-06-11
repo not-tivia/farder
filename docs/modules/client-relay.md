@@ -169,12 +169,28 @@ requires a real relay and display stack.
   that greyed voice channels and showed a toast ("Voice isn't available over a relay
   yet") has been removed. Voice channels are now fully clickable on relayed servers;
   `ChannelSidebar` no longer suppresses `joinVoice` when `activeServer.relayed`.
-- **Join-confirm:** a `JoinConfirmModal` ("Join this server?") gates a deep-link
-  invite before connecting (replacing 3b's auto-join). It renders in every
-  post-unlock branch (ConnectDialog/no-servers and the main app) so a brand-new user
-  joining their first server via a link still sees it. The modal now also displays a
-  relay-disclosure badge ("RELAYED" or "DIRECT") with a "Learn more" toggle, driven
-  by a `relayed` prop computed in `App.tsx` from the parsed invite address regex.
+- **Universal join gate (Phase 6):** ALL invite paths now funnel through the
+  `JoinConfirmModal` before connecting -- deep links, ConnectDialog paste,
+  AddServerModal paste, AND in-chat invite card "Join" buttons. The gate state
+  (`joinConfirmLink: string | null`) lives in `ServerContext` (`AppState`) and is
+  driven by the `OPEN_JOIN_CONFIRM { link }` / `CLOSE_JOIN_CONFIRM` reducer
+  actions. `App.tsx` renders the modal from context state in every post-unlock
+  branch. Setup-token and 64-hex flows (owner claim) still connect directly --
+  they are not invites.
+- **In-chat invite cards (Phase 6, privacy-safe):** `Message.tsx` scans message
+  text with `INVITE_REGEX` and renders an `InviteEmbed` card below the raw text
+  for each valid invite (validated through `parseInviteLink`; capped at 3 unique
+  per message; deleted messages skipped). The card shows the RELAYED/DIRECT badge
+  and a "Join" button that dispatches `OPEN_JOIN_CONFIRM`. **No network fetch is
+  ever made** -- server name and member count are not shown on the card (requires
+  a future metadata protocol). This is a deliberate privacy constraint: fetching
+  metadata would leak the viewer's IP to the server before consent.
+- **Join-confirm:** a `JoinConfirmModal` ("Join this server?") gates every invite
+  before connecting. It renders in every post-unlock branch (ConnectDialog/no-
+  servers and the main app) so a brand-new user joining their first server via a
+  link still sees it. The modal displays a relay-disclosure badge ("RELAYED" or
+  "DIRECT") with a "Learn more" toggle, driven by a `relayed` prop computed in
+  `App.tsx` from the parsed invite address regex.
 - **Deferred:** creating a relayed server in the app (piece 1) waits on the hosted
   default relay (a user otherwise has no relay address/fingerprint to point at).
 
