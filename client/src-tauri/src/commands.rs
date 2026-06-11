@@ -925,6 +925,13 @@ async fn upload_file_internal_with_channel(
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
+        Some("m4a") => "audio/mp4",
+        Some("flac") => "audio/flac",
+        Some("webm") => "audio/webm",
         Some("pdf") => "application/pdf",
         Some("txt") => "text/plain",
         _ => "application/octet-stream",
@@ -1045,9 +1052,10 @@ pub(crate) async fn download_file_internal(
                 }
             }
 
-            // For images, return as base64 data URL
-            let is_image = mime_type.starts_with("image/");
-            if is_image {
+            // Images and audio render inline in the chat, so return their
+            // bytes as a base64 data URL; everything else saves to disk.
+            let inline = mime_type.starts_with("image/") || mime_type.starts_with("audio/");
+            if inline {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
                 let data_url = format!("data:{};base64,{}", mime_type, b64);
