@@ -17,6 +17,10 @@ import { TranslatedRow } from "./TranslatedRow";
 import { TranslationDownloadDialog } from "./TranslationDownloadDialog";
 import { translateMessage, subscribe as subscribeTranslation, dismiss as dismissTranslation } from "../lib/translation/store";
 import { getTranslationSettings } from "../lib/translation/api";
+import InviteEmbed from "./InviteEmbed";
+import { parseInviteLink } from "../lib/invite";
+
+const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
 interface MessageProps {
   message: MessageInfo;
@@ -368,6 +372,25 @@ export default function Message({ message, memberNames, grouped = false, serverI
           )}
         </div>
       )}
+
+      {!deleted && (() => {
+        const rawMatches = message.content.match(INVITE_REGEX) ?? [];
+        const seen = new Set<string>();
+        const embeds: string[] = [];
+        for (const m of rawMatches) {
+          if (embeds.length >= 3) break;
+          const parsed = parseInviteLink(m);
+          if (!parsed.address) continue;
+          if (seen.has(parsed.address)) continue;
+          seen.add(parsed.address);
+          embeds.push(m);
+        }
+        return embeds.length > 0 ? (
+          <div className="invite-embeds">
+            {embeds.map((m, i) => <InviteEmbed key={i} link={m} />)}
+          </div>
+        ) : null;
+      })()}
 
       <TranslatedRow
         messageId={String(message.id)}

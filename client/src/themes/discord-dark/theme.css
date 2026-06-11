@@ -2589,3 +2589,23 @@ body {
   background: var(--xp-sidebar-dark);
   color: var(--xp-text-normal);
 }
+
+/* Invite embed card (in-chat invite links) */
+.invite-embed {
+  display: block;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--xp-border);
+  background: var(--xp-panel-bg);
+  max-width: 360px;
+  border-radius: 4px;
+}
+.invite-embed-title {
+  font-weight: bold;
+  font-size: 11px;
+  margin-bottom: 4px;
+  color: var(--xp-text-normal);
+}
+.invite-embed-join {
+  margin-top: 6px;
+}
