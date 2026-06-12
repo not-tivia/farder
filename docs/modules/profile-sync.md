@@ -139,7 +139,8 @@ broadcasts `MemberProfileUpdated` to all clients, which `bridge.rs` re-emits as
   calls `push_profile_everywhere` (spawned) after `set_avatar` or
   `set_profile_status`; calls `push_profile` (awaited) after
   `set_server_avatar_override` / `clear_server_avatar_override`; calls
-  `push_profile_on_connect` after `connect_server`.
+  `push_profile_on_connect` after `connect_server` and after
+  `create_local_server`.
 - **`farder_crypto::profile`** — `SignedProfile::create` / `to_bytes` /
   `from_bytes` / `verify`; `profile_hash_hex` (SHA-256 of the serialized blob).
 - **`bridge.rs`** — receives `ServerResponse` from `send_request` calls made by
