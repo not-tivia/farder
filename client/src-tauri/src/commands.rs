@@ -294,14 +294,66 @@ pub async fn get_member_profile(
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(None);
     }
+    // Normalize to lowercase: hex::encode produces lowercase, so uppercase
+    // input would always miss the cache and mismatch the hash check.
+    let hash = hash.to_lowercase();
+
+    // Parse the public key once up front so both paths share the same value.
+    let pk = parse_public_key(&public_key)?;
+
     let cache_dir = farder_data_dir().join("profile_cache");
     let _ = std::fs::create_dir_all(&cache_dir);
     let cache_path = cache_dir.join(&hash);
 
-    let bytes = match std::fs::read(&cache_path) {
-        Ok(b) => b,
+    // Try to load a verified SignedProfile from the on-disk cache.
+    // Cache is keyed by hash alone and the hash comes from the server's member
+    // list — re-check the key binding so a lying server can't repoint one
+    // member's hash at another's cached profile.
+    fn load_verified(
+        bytes: &[u8],
+        pk: &farder_crypto::identity::PublicKey,
+    ) -> Option<SignedProfile> {
+        let signed = SignedProfile::from_bytes(bytes).ok()?;
+        signed.verify().ok()?;
+        if signed.data.public_key != *pk {
+            return None;
+        }
+        Some(signed)
+    }
+
+    let signed: SignedProfile = match std::fs::read(&cache_path) {
+        Ok(cached_bytes) => {
+            match load_verified(&cached_bytes, &pk) {
+                Some(s) => s,
+                None => {
+                    // Cache entry is corrupt, tampered, or points at the wrong
+                    // key — delete it and fall through to a fresh network fetch.
+                    let _ = std::fs::remove_file(&cache_path);
+                    let response = bridge::send_request(
+                        &state, &server_id,
+                        ServerRequest::GetMemberProfile { member_key: pk.clone() },
+                    ).await.map_err(|e| e.to_string())?;
+                    let bytes = match response {
+                        ServerResponse::MemberProfile { profile: Some(b), .. } => b,
+                        ServerResponse::MemberProfile { profile: None, .. } => return Ok(None),
+                        ServerResponse::Error { reason } => return Err(reason),
+                        other => return Err(format!("unexpected response: {:?}", other)),
+                    };
+                    let signed = SignedProfile::from_bytes(&bytes).map_err(|e| e.to_string())?;
+                    signed.verify().map_err(|_| "profile signature invalid".to_string())?;
+                    if signed.data.public_key != pk {
+                        return Err("profile public key mismatch".to_string());
+                    }
+                    if profile_hash_hex(&bytes) != hash {
+                        return Err("profile hash mismatch".to_string());
+                    }
+                    let _ = std::fs::write(&cache_path, &bytes);
+                    signed
+                }
+            }
+        }
         Err(_) => {
-            let pk = parse_public_key(&public_key)?;
+            // Cache miss — fetch from network.
             let response = bridge::send_request(
                 &state, &server_id,
                 ServerRequest::GetMemberProfile { member_key: pk.clone() },
@@ -321,11 +373,10 @@ pub async fn get_member_profile(
                 return Err("profile hash mismatch".to_string());
             }
             let _ = std::fs::write(&cache_path, &bytes);
-            bytes
+            signed
         }
     };
 
-    let signed = SignedProfile::from_bytes(&bytes).map_err(|e| e.to_string())?;
     Ok(Some(MemberProfileView {
         avatar_data_url: signed.data.avatar.as_deref().map(image_data_url),
         status: signed.data.status,
