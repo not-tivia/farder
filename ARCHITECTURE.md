@@ -69,6 +69,20 @@ capture → encode → send and recv → decode → mix → playback pipeline
 (`audio_cpal.rs` bridges real devices, resampling + channel-converting as
 needed). The control bar is gated on the audio engine; the roster on presence.
 
+## Profile sync
+
+Avatars and status text travel as **identity-signed blobs** (`SignedProfile` from
+`farder-crypto`). The client builds a per-server effective profile (per-server
+avatar override ?? global `avatar.png`; global status; display name), signs it
+fresh each time, and pushes it to the server via `ServerRequest::UpdateProfile`.
+The server stores the raw blob in `members.avatar` and a SHA-256 hash in
+`members.profile_hash`. Other clients fetch the blob on demand via
+`ServerRequest::GetMemberProfile`, verify the signature and hash, and cache the
+result in `~/.farder/profile_cache/<hash>`. The `MemberInfo.profile_hash` field
+acts as a cache key: an unchanged hash means the local cache is still valid.
+
+---
+
 ## Cross-cutting things that bite
 
 - **Identity at rest:** `client/src-tauri/src/identity.rs` (`IdentityStore`)

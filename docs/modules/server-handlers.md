@@ -212,13 +212,20 @@ WebRTC session.
 | `OpenDm` | Find or create a DM channel with `target_key`; checks both sides for blocks | Target must be a member; block check | `channels::open_dm_channel` | `DmCreated { channel, participant }` → `All` (only when newly created) |
 | `ListDms` | Return the caller's DM list sorted by most-recent message | None | Read only | None |
 
+### Profile sync
+
+| `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
+|---|---|---|---|---|
+| `UpdateProfile` | Store the caller's signed profile blob. Validates: the blob deserializes as a `SignedProfile`, the embedded signature is valid, the embedded public key matches the authenticated caller, and the avatar (if present) passes the same PNG/JPEG/GIF/WebP + 2 MB rules as the client. Stores raw bytes in `members.avatar` and the SHA-256 hash in `members.profile_hash`. | None (caller's own profile; authentication is the permission) | `members::update_profile` | `MemberProfileUpdated { public_key, profile_hash }` → `All` |
+| `GetMemberProfile` | Fetch the stored signed profile blob for `member_key`. Returns `ServerResponse::MemberProfile { profile: Some(bytes) }` or `None` if the member has no profile yet. | None | Read only | None |
+
 ### Misc
 
 | `ServerRequest` variant | What it does |
 |---|---|
 | `CreateInvite` | Generate an invite code; requires `CREATE_INVITES` (base). Returns `InviteCreated { code }`. No events. |
 | `GetServerInfo` | Return channel list, category list, roles, and member count. No permission check. `name` and `owner_public_key` fields are patched by `connection.rs` after this returns. |
-| `GetMembers` | Return full `MemberInfo` list including role IDs and active timeout data. No permission check. |
+| `GetMembers` | Return full `MemberInfo` list including role IDs and active timeout data. No permission check. `MemberInfo` now includes `profile_hash: Option<String>` (the SHA-256 hex of the member's last pushed profile, or `null` if none). |
 | `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs`. |
 | `FetchUrl` | Returns an immediate `Error`; this variant must be intercepted and handled asynchronously by `connection.rs` before reaching this function. |
 

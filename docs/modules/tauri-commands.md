@@ -171,12 +171,16 @@ agree on the command name; only the storage key differs.
 
 ### `set_avatar(file_path) -> Result<String, String>` / `get_avatar() -> Option<String>`
 
-**What it does:** `set_avatar` reads any image file from `file_path`, saves it
-to `~/.farder/avatar.png`, and returns a base64 data URL. `get_avatar` reads the
-stored PNG and returns a data URL, or `null` if none exists.
+**What it does:** `set_avatar` reads an image from `file_path`, validates it
+(magic-byte sniff: PNG/JPEG/GIF/WebP only; max 2 MB via `profile_sync::validate_avatar_bytes`),
+writes it to `~/.farder/avatar.png`, then spawns a background task that calls
+`push_profile_everywhere` to push the updated profile to every connected server.
+Returns a magic-sniffed data URL. `get_avatar` reads the stored file and returns
+a data URL, or `null` if none exists.
 **Returns (`set_avatar`):** `"data:<mime>;base64,<b64>"` — MIME type inferred
-from extension (`.png`, `.gif`, or `image/jpeg` for everything else).
-**Side effects:** disk write to `avatar.png`.
+from magic bytes (PNG/JPEG/GIF/WebP; falls back to `application/octet-stream`).
+**Side effects:** disk write to `~/.farder/avatar.png`; spawns a tokio task that
+calls `push_profile_everywhere` (network I/O to every connected server).
 **invoke names:** `"set_avatar"` / `"get_avatar"`.
 
 ---
@@ -188,6 +192,100 @@ from extension (`.png`, `.gif`, or `image/jpeg` for everything else).
 and `/` with `_` to produce a safe filename.
 **Returns (`set_server_avatar`):** `"data:image/png;base64,<b64>"`.
 **invoke names:** `"set_server_avatar"` / `"get_server_avatar"`.
+
+---
+
+## Group 2b — Profile sync (status, per-server avatar override, member profile fetch)
+
+These commands are part of the profile-sync feature. They interact with
+`profile_sync.rs`, which builds signed profiles and pushes them to servers.
+
+---
+
+### `get_profile_status() -> Option<String>`
+
+**What it does:** reads the `"status"` field from `~/.farder/profile.json` and
+returns it, or `null` if unset.
+**Side effects:** none (read-only disk access).
+**invoke name:** `"get_profile_status"` → `getProfileStatus()`.
+
+---
+
+### `set_profile_status(status) -> Result<(), String>`
+
+**What it does:** writes `status` (trimmed; `null` or empty string clears it) to
+the `"status"` field in `~/.farder/profile.json`, then spawns a background task
+that calls `push_profile_everywhere` to propagate the change to every connected
+server.
+**Parameters:** `status` — optional string, max 128 characters (after trimming).
+**Returns:** `Ok(())` on success; errors if the string exceeds 128 chars or the
+file write fails.
+**Side effects:** disk write to `~/.farder/profile.json`; spawns a tokio task
+for `push_profile_everywhere` (network I/O).
+**invoke name:** `"set_profile_status"` → `setProfileStatus(status)`.
+
+---
+
+### `set_server_avatar_override(server_id, file_path) -> Result<String, String>`
+
+**What it does:** reads the image at `file_path`, validates it (PNG/JPEG/GIF/WebP
+by magic bytes, max 2 MB), writes it to
+`~/.farder/profile_overrides/<safe_server_id>.img`, then synchronously calls
+`push_profile` to push the updated profile to that server. The per-server
+override takes precedence over the global avatar for that server only.
+**Parameters:** `server_id` — server address string; `file_path` — local image path.
+**Returns:** magic-sniffed data URL of the saved image; errors if validation
+fails or the server sync fails (override is still saved locally in the latter
+case — the error message says so).
+**Side effects:** disk write to `profile_overrides/`; synchronous
+`push_profile` call (network I/O).
+**invoke name:** `"set_server_avatar_override"` → `setServerAvatarOverride(serverId, filePath)`.
+
+---
+
+### `clear_server_avatar_override(server_id) -> Result<(), String>`
+
+**What it does:** deletes `~/.farder/profile_overrides/<safe_server_id>.img`
+(no-op if absent) and calls `push_profile` to push the profile without an
+override (i.e. the global avatar or no avatar) to that server.
+**Side effects:** disk delete; synchronous `push_profile` (network I/O).
+**invoke name:** `"clear_server_avatar_override"` → `clearServerAvatarOverride(serverId)`.
+
+---
+
+### `get_server_avatar_override(server_id) -> Option<String>`
+
+**What it does:** reads `~/.farder/profile_overrides/<safe_server_id>.img` and
+returns a magic-sniffed data URL, or `null` if no override is set.
+**Side effects:** none (read-only disk access).
+**invoke name:** `"get_server_avatar_override"` → `getServerAvatarOverride(serverId)`.
+
+---
+
+### `get_member_profile(server_id, public_key, profile_hash) -> Result<Option<MemberProfileView>, String>`
+
+**What it does:** resolves a member's profile by its hash. Checks the on-disk
+cache (`~/.farder/profile_cache/<hash>`) first; on a hit it re-verifies the
+signature and public-key binding before returning (corrupt or wrong-key entries
+are deleted and re-fetched). On a miss, sends
+`ServerRequest::GetMemberProfile { member_key }` to the server, then verifies
+the returned blob (signature, key match, hash match) before writing it to the
+cache and returning.
+**Parameters:**
+- `server_id` — server to query if the cache misses.
+- `public_key` — the member's public key string (`"vk_<hex>"`).
+- `profile_hash` — 64-char lowercase hex SHA-256 hash; `null` returns `null`
+  immediately.
+**Returns:** `{ avatar_data_url: string | null, status: string | null }` or
+`null` if the server has no profile for that member. Errors on signature or hash
+mismatch.
+**Side effects:** may write to `~/.farder/profile_cache/` (on network fetch) or
+delete a corrupt entry; sends one `GetMemberProfile` request (network I/O) on
+cache miss.
+**Connects to:** `farder_crypto::profile::SignedProfile::from_bytes` + `verify()`;
+the in-process JS cache in `useMemberProfile.ts` (module-level `Map`) which
+deduplicates concurrent requests for the same hash.
+**invoke name:** `"get_member_profile"` → `getMemberProfile(serverId, publicKey, profileHash)`.
 
 ---
 
@@ -1406,6 +1504,9 @@ rewrites `servers.json`.
 | `~/.farder/favorites.json` | disk | Favorites index |
 | `~/.farder/notifications.json` | disk | Notification preferences |
 | `~/.farder/book/items.json` | disk | Book item index |
+| `~/.farder/profile_overrides/<safe_server_id>.img` | disk | Per-server avatar override (raw image bytes); written by `set_server_avatar_override`, cleared by `clear_server_avatar_override` |
+| `~/.farder/profile_cache/<hash>` | disk | Verified signed-profile blobs keyed by SHA-256 hash; written by `get_member_profile` on a network fetch; corrupt entries auto-deleted |
+| `~/.farder/pushed_profiles.json` | disk | Map of `server_id → last successfully pushed profile hash`; owned by `profile_sync.rs` |
 
 ## Integration map
 
@@ -1421,6 +1522,10 @@ rewrites `servers.json`.
 - **`farder_crypto`** — used by `dm_encrypt`/`dm_decrypt`, by the
   `identity.rs` `IdentityStore` commands (Argon2id + AES-256-GCM, BIP39
   recovery), and by `connect_and_authenticate` inside `connect_server`.
+- **`profile_sync.rs`** — called by `set_avatar`, `set_profile_status`,
+  `set_server_avatar_override`, `clear_server_avatar_override`, and
+  `get_member_profile`. Owns the effective-profile logic (override priority,
+  `pushed_profiles.json`, avatar validation, signed-profile build and push).
 - **`tauri-bridge.ts`** — every command's typed TypeScript wrapper; the
   `invoke("X")` strings here must match the Rust function names and the
   `generate_handler!` entries in `main.rs`.

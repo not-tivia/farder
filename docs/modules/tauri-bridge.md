@@ -69,6 +69,7 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `RoleCreated/Updated/Deleted` | `server:role_*` | `role` / `role_id` | role reducers |
 | `TypingStarted` | `server:typing` | `channel_id, public_key` | `TYPING_STARTED` (8s expiry) |
 | `DmCreated` | `server:dm_created` | `channel, participant` | DM list |
+| `MemberProfileUpdated` | `server:member_profile_updated` | `public_key, profile_hash` | `useServerEvents` → `getMembers` refresh (roster re-fetch so new `profile_hash` propagates to all member list consumers) |
 | `MediaJoined` | `server:voice_joined` | `channel_id, public_key, display_name` | `VOICE_JOINED` (roster) |
 | `MediaLeft` | `server:voice_left` | `channel_id, public_key` | `VOICE_LEFT` (roster) |
 | `StreamCallIncoming` / `StreamCallEnded` | — (no-op) | — | DM-call signaling; no UI yet |
