@@ -321,39 +321,23 @@ pub async fn get_member_profile(
         Some(signed)
     }
 
-    let signed: SignedProfile = match std::fs::read(&cache_path) {
+    // Try the cache first; any failure (missing, corrupt, tampered, wrong key)
+    // resolves to None and we fall through to one shared network fetch.
+    let cached: Option<SignedProfile> = match std::fs::read(&cache_path) {
         Ok(cached_bytes) => {
-            match load_verified(&cached_bytes, &pk) {
-                Some(s) => s,
-                None => {
-                    // Cache entry is corrupt, tampered, or points at the wrong
-                    // key — delete it and fall through to a fresh network fetch.
-                    let _ = std::fs::remove_file(&cache_path);
-                    let response = bridge::send_request(
-                        &state, &server_id,
-                        ServerRequest::GetMemberProfile { member_key: pk.clone() },
-                    ).await.map_err(|e| e.to_string())?;
-                    let bytes = match response {
-                        ServerResponse::MemberProfile { profile: Some(b), .. } => b,
-                        ServerResponse::MemberProfile { profile: None, .. } => return Ok(None),
-                        ServerResponse::Error { reason } => return Err(reason),
-                        other => return Err(format!("unexpected response: {:?}", other)),
-                    };
-                    let signed = SignedProfile::from_bytes(&bytes).map_err(|e| e.to_string())?;
-                    signed.verify().map_err(|_| "profile signature invalid".to_string())?;
-                    if signed.data.public_key != pk {
-                        return Err("profile public key mismatch".to_string());
-                    }
-                    if profile_hash_hex(&bytes) != hash {
-                        return Err("profile hash mismatch".to_string());
-                    }
-                    let _ = std::fs::write(&cache_path, &bytes);
-                    signed
-                }
+            let verified = load_verified(&cached_bytes, &pk);
+            if verified.is_none() {
+                // Corrupt, tampered, or wrong-key cache entry — self-heal.
+                let _ = std::fs::remove_file(&cache_path);
             }
+            verified
         }
-        Err(_) => {
-            // Cache miss — fetch from network.
+        Err(_) => None,
+    };
+
+    let signed: SignedProfile = match cached {
+        Some(s) => s,
+        None => {
             let response = bridge::send_request(
                 &state, &server_id,
                 ServerRequest::GetMemberProfile { member_key: pk.clone() },
