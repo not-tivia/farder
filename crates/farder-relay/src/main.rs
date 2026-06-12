@@ -2,6 +2,7 @@ mod config;
 mod datagram;
 mod limits;
 mod listener;
+mod proxy;
 mod router;
 
 use anyhow::Result;
@@ -27,6 +28,7 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(60),  // the rate window
     ));
     let connections = router::new_state();
-    router::serve(endpoint, connections, limiter).await?;
+    let preview = router::new_preview_context()?;
+    router::serve(endpoint, connections, limiter, preview).await?;
     Ok(())
 }

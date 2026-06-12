@@ -22,6 +22,23 @@ pub struct RelayState {
 
 pub type SharedState = Arc<RelayState>;
 
+/// Everything the preview proxy needs at dispatch time.
+pub struct PreviewContext {
+    pub cache: crate::proxy::PreviewCache,
+    pub limiter: crate::limits::ConnectionLimiter,
+    pub out_endpoint: Endpoint,
+}
+
+pub fn new_preview_context() -> Result<Arc<PreviewContext>> {
+    Ok(Arc::new(PreviewContext {
+        cache: crate::proxy::PreviewCache::new(),
+        // Rate-only: effectively no concurrent cap (the connection limiter
+        // already caps connections); 30 previews/min/IP.
+        limiter: crate::limits::ConnectionLimiter::new(usize::MAX, 30, std::time::Duration::from_secs(60)),
+        out_endpoint: crate::proxy::outbound_endpoint()?,
+    }))
+}
+
 pub fn new_state() -> SharedState {
     Arc::new(RelayState {
         servers: RwLock::new(HashMap::new()),
@@ -38,6 +55,7 @@ pub async fn serve(
     endpoint: Endpoint,
     state: SharedState,
     limiter: std::sync::Arc<crate::limits::ConnectionLimiter>,
+    preview: Arc<PreviewContext>,
 ) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let ip = incoming.remote_address().ip();
@@ -50,11 +68,12 @@ pub async fn serve(
             }
         };
         let state = state.clone();
+        let preview = preview.clone();
         tokio::spawn(async move {
             let _guard = guard; // held for the connection's lifetime
             match incoming.await {
                 Ok(conn) => {
-                    if let Err(e) = handle_connection(conn, state).await {
+                    if let Err(e) = handle_connection(conn, state, preview).await {
                         warn!("connection error: {}", e);
                     }
                 }
@@ -65,7 +84,7 @@ pub async fn serve(
     Ok(())
 }
 
-pub async fn handle_connection(conn: Connection, state: SharedState) -> Result<()> {
+pub async fn handle_connection(conn: Connection, state: SharedState, preview: Arc<PreviewContext>) -> Result<()> {
     let remote = conn.remote_address();
     info!("new connection from {}", remote);
     // The first bi-stream carries the role-establishing message.
@@ -78,6 +97,9 @@ pub async fn handle_connection(conn: Connection, state: SharedState) -> Result<(
         }
         Message::RelayConnect { destination_id } => {
             handle_connect(destination_id, conn, send, state).await
+        }
+        Message::ProxyInvitePreview { target, code } => {
+            handle_preview(target, code, conn, send, state, preview).await
         }
         _ => {
             warn!("unexpected first message from {}", remote);
@@ -178,6 +200,56 @@ async fn handle_connect(
             Ok(())
         }
     }
+}
+
+/// Answer a ProxyInvitePreview: rate-limit → cache → fetch (5s budget) →
+/// reply ProxyInvitePreviewResult and let the requester drain.
+async fn handle_preview(
+    target: farder_protocol::messages::PreviewTarget,
+    code: String,
+    client_conn: Connection,
+    mut send: SendStream,
+    state: SharedState,
+    preview: Arc<PreviewContext>,
+) -> Result<()> {
+    use farder_protocol::messages::PreviewOutcome;
+    let ip = client_conn.remote_address().ip();
+    let now = std::time::Instant::now();
+
+    let outcome = if preview.limiter.try_admit(ip, now).is_none() {
+        // Guard dropped immediately when admitted — we use it as a pure rate
+        // limiter here, not a concurrency cap.
+        PreviewOutcome::Unavailable
+    } else {
+        let key = crate::proxy::cache_key(&target, &code);
+        match preview.cache.get(&key, now) {
+            Some(hit) => hit,
+            None => {
+                let registered = match &target {
+                    farder_protocol::messages::PreviewTarget::Registered { server_id } => {
+                        state.servers.read().await.get(server_id).map(|r| r.conn.clone())
+                    }
+                    _ => None,
+                };
+                let fresh = tokio::time::timeout(
+                    crate::proxy::PREVIEW_TIMEOUT,
+                    crate::proxy::fetch_preview(&target, &code, registered, &preview.out_endpoint),
+                )
+                .await
+                .unwrap_or(PreviewOutcome::Unavailable);
+                preview.cache.put(key, fresh.clone(), std::time::Instant::now());
+                fresh
+            }
+        }
+    };
+
+    let reply = codec::encode(&Message::ProxyInvitePreviewResult { outcome })?;
+    write_message(&mut send, &reply).await?;
+    // Same drain pattern as handle_connect's error path: finish and wait so the
+    // buffered reply reaches the peer before the connection drops.
+    let _ = send.finish();
+    client_conn.closed().await;
+    Ok(())
 }
 
 /// Bridge every bi-stream the client opens to a fresh bi-stream on the server's
@@ -328,7 +400,8 @@ mod tests {
         let limiter = std::sync::Arc::new(crate::limits::ConnectionLimiter::new(
             10_000, 10_000, std::time::Duration::from_secs(60),
         ));
-        tokio::spawn(serve(ep, state.clone(), limiter));
+        let preview = new_preview_context().unwrap();
+        tokio::spawn(serve(ep, state.clone(), limiter, preview));
         std::mem::forget(dir);
         (addr, state)
     }
@@ -488,7 +561,8 @@ mod tests {
         let limiter = std::sync::Arc::new(crate::limits::ConnectionLimiter::new(
             1, 10_000, std::time::Duration::from_secs(60),
         ));
-        tokio::spawn(serve(ep, state, limiter));
+        let preview = new_preview_context().unwrap();
+        tokio::spawn(serve(ep, state, limiter, preview));
         std::mem::forget(dir);
 
         // First connection: open it and keep it alive so it holds the only slot.
@@ -705,6 +779,108 @@ mod tests {
         assert_ne!(handle, 0, "handle 0 is reserved");
         std::mem::forget(ep);
         std::mem::forget(cep);
+    }
+
+    /// A fake farder-server double that answers the preview protocol on every
+    /// accepted/bridged stream: reads the 4-byte stamp + Primary role, sends a
+    /// Challenge, then answers GetInvitePreview (valid code "GOOD" only).
+    async fn register_preview_server(relay: SocketAddr, id: Vec<u8>) -> Connection {
+        use farder_protocol::server::{ClientFrame, RelayStreamRole, ServerFrame};
+        let ep = test_client_endpoint();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let reg = codec::encode(&Message::RelayRegister { server_id: id }).unwrap();
+        write_message(&mut send, &reg).await.unwrap();
+        let ack: Message = codec::decode(&read_message(&mut recv).await.unwrap()).unwrap();
+        assert!(matches!(ack, Message::RelayRegistered));
+        let serve_conn = conn.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, mut r)) = serve_conn.accept_bi().await {
+                tokio::spawn(async move {
+                    let mut stamp = [0u8; 4];
+                    if r.read_exact(&mut stamp).await.is_err() { return; }
+                    assert_eq!(u32::from_be_bytes(stamp), 0, "preview streams must be stamped with reserved handle 0");
+                    let role: RelayStreamRole = codec::decode(&read_message(&mut r).await.unwrap()).unwrap();
+                    assert!(matches!(role, RelayStreamRole::Primary));
+                    let ch = codec::encode(&ServerFrame::Challenge { nonce: [7u8; 32] }).unwrap();
+                    write_message(&mut s, &ch).await.unwrap();
+                    let frame: ClientFrame = codec::decode(&read_message(&mut r).await.unwrap()).unwrap();
+                    let answer = match frame {
+                        ClientFrame::GetInvitePreview { code } if code == "GOOD" =>
+                            ServerFrame::InvitePreview { server_name: "Proxied".into(), member_count: 5, online_count: 2 },
+                        ClientFrame::GetInvitePreview { .. } =>
+                            ServerFrame::InvitePreviewError { reason: "invalid".into() },
+                        other => panic!("unexpected frame: {other:?}"),
+                    };
+                    write_message(&mut s, &codec::encode(&answer).unwrap()).await.unwrap();
+                    let _ = s.finish();
+                });
+            }
+        });
+        std::mem::forget(ep);
+        conn
+    }
+
+    async fn ask_preview(relay: SocketAddr, target: farder_protocol::messages::PreviewTarget, code: &str) -> farder_protocol::messages::PreviewOutcome {
+        let ep = test_client_endpoint();
+        let conn = ep.connect(relay, "farder-relay").unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let msg = codec::encode(&Message::ProxyInvitePreview { target, code: code.to_string() }).unwrap();
+        write_message(&mut send, &msg).await.unwrap();
+        let reply: Message = codec::decode(&read_message(&mut recv).await.unwrap()).unwrap();
+        std::mem::forget(ep);
+        match reply {
+            Message::ProxyInvitePreviewResult { outcome } => outcome,
+            other => panic!("expected ProxyInvitePreviewResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxies_preview_to_registered_server() {
+        use farder_protocol::messages::{PreviewOutcome, PreviewTarget};
+        let (relay, _state) = start_relay().await;
+        let id = vec![21u8; 16];
+        let _server = register_preview_server(relay, id.clone()).await;
+
+        match ask_preview(relay, PreviewTarget::Registered { server_id: id.clone() }, "GOOD").await {
+            PreviewOutcome::Preview { server_name, member_count, online_count } => {
+                assert_eq!(server_name, "Proxied");
+                assert_eq!(member_count, 5);
+                assert_eq!(online_count, 2);
+            }
+            other => panic!("expected Preview, got {other:?}"),
+        }
+
+        assert!(matches!(
+            ask_preview(relay, PreviewTarget::Registered { server_id: id }, "BAD").await,
+            PreviewOutcome::Invalid
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_registered_target_is_unavailable() {
+        use farder_protocol::messages::{PreviewOutcome, PreviewTarget};
+        let (relay, _state) = start_relay().await;
+        assert!(matches!(
+            ask_preview(relay, PreviewTarget::Registered { server_id: vec![99u8; 16] }, "GOOD").await,
+            PreviewOutcome::Unavailable
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_preview_refuses_private_addresses() {
+        use farder_protocol::messages::{PreviewOutcome, PreviewTarget};
+        let (relay, _state) = start_relay().await;
+        // Loopback target: SSRF guard must refuse WITHOUT dialing (instant, no 5s timeout).
+        // NOTE: the direct-target happy path is not tested with a real server here because
+        // the SSRF guard correctly refuses 127.0.0.1, which is the only address a test server
+        // can bind. The guard's correctness is verified by the ssrf_guard_refuses_non_global
+        // unit test in proxy.rs, and the ask_server code path is exercised by the
+        // proxies_preview_to_registered_server test above. Do NOT weaken the guard for tests.
+        let started = std::time::Instant::now();
+        let outcome = ask_preview(relay, PreviewTarget::Direct { addr: "127.0.0.1:4433".into() }, "GOOD").await;
+        assert!(matches!(outcome, PreviewOutcome::Unavailable));
+        assert!(started.elapsed() < Duration::from_secs(3), "refusal must be immediate, not a timeout");
     }
 
     #[tokio::test]
