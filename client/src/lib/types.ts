@@ -32,6 +32,7 @@ export interface MemberInfo {
   role_ids: number[];
   timeout_until?: number | null;
   timeout_reason?: string | null;
+  profile_hash?: string | null;
 }
 
 export interface AttachmentInfo {

@@ -281,6 +281,15 @@ export function useServerEvents(): void {
       }).catch((e) => console.error("[members] refresh on join failed:", e));
     }).then(safePush);
 
+    listen("server:member_profile_updated", (e) => {
+      const data = e.payload as { server_id: string };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      api.getMembers(serverId).then(members => {
+        dispatch({ type: "SET_MEMBERS", serverId, payload: members });
+      }).catch((err) => console.error("[members] refresh on profile update failed:", err));
+    }).then(safePush);
+
     listen("server:member_left", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;

@@ -114,6 +114,35 @@ export async function getServerAvatar(serverId: string): Promise<string | null> 
   return invoke<string | null>("get_server_avatar", { serverId });
 }
 
+export interface MemberProfileView {
+  avatar_data_url: string | null;
+  status: string | null;
+}
+
+export async function getMemberProfile(serverId: string, publicKey: string, profileHash: string): Promise<MemberProfileView | null> {
+  return invoke<MemberProfileView | null>("get_member_profile", { serverId, publicKey, profileHash });
+}
+
+export async function getProfileStatus(): Promise<string | null> {
+  return invoke<string | null>("get_profile_status");
+}
+
+export async function setProfileStatus(status: string | null): Promise<void> {
+  return invoke<void>("set_profile_status", { status });
+}
+
+export async function setServerAvatarOverride(serverId: string, filePath: string): Promise<string> {
+  return invoke<string>("set_server_avatar_override", { serverId, filePath });
+}
+
+export async function clearServerAvatarOverride(serverId: string): Promise<void> {
+  return invoke<void>("clear_server_avatar_override", { serverId });
+}
+
+export async function getServerAvatarOverride(serverId: string): Promise<string | null> {
+  return invoke<string | null>("get_server_avatar_override", { serverId });
+}
+
 export async function listFavorites(): Promise<FavoriteEntry[]> {
   return invoke<FavoriteEntry[]>("list_favorites");
 }
