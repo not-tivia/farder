@@ -1107,6 +1107,65 @@ Used by the `Test Mic` flow to play back the just-recorded WAV.
 
 ---
 
+## Group 17b — Invite preview
+
+---
+
+### `get_invite_preview(link) -> Result<InvitePreviewResult, String>`
+
+**What it does:** fetches an invite preview through the relay that owns the
+link (for relay links) or through the build-configured default relay (for direct
+links), without touching any session connection. The command is anonymous —
+no identity is required and the caller's IP never reaches the target server.
+
+**Parameters:**
+- `link` — any Farder invite link form: a relay URL
+  (`farder://relay/<server_id_hex>/<code>`), a direct deep link
+  (`farder://<host:port>/<code>`), or a bare `<host:port>/<code>` string.
+  Setup-token links and bare address links (no invite code segment) return
+  `status: "none"` immediately.
+
+**Returns:** `InvitePreviewResult { status, server_name, member_count, online_count }`.
+`status` is one of:
+- `"ok"` — valid code; `server_name` (truncated to 80 chars), `member_count`,
+  `online_count` are populated.
+- `"invalid"` — the relay confirmed the code is invalid, expired, or exhausted.
+- `"unavailable"` — the relay timed out, the server was unreachable, or the
+  relay refused the request (rate-limited, SSRF-blocked, etc.).
+- `"none"` — the link carries no invite code (setup token, bare address, or
+  unrecognised format).
+
+**Relay-selection rule:**
+- Relay links (`farder://relay/...`) use the relay embedded in the link.
+- Direct links use the build-configured default relay
+  (`crate::default_relay::default_relay()`). If no default relay is configured
+  in this build, the result is `"none"`.
+
+**Cache:** results are cached for 60 s in a session-scoped static
+`PREVIEW_CACHE` (keyed by the raw link string). This mirrors the relay's own
+60 s TTL, so a cached relay answer is double-cached and the relay is never hit
+more than once per minute per distinct link.
+
+**No identity needed:** the command opens a throwaway QUIC connection to the
+relay, sends `ProxyInvitePreview`, reads `ProxyInvitePreviewResult`, and closes
+the connection. It never touches `AppState::servers` or any authenticated
+session.
+
+**Timeout:** 8 s client-side budget (the relay's own budget is 5 s, so the
+relay's result always arrives before this fires under normal conditions).
+
+**Side effects:** none beyond the throwaway network connection and the session
+cache write.
+
+**invoke name:** `"get_invite_preview"` → `getInvitePreview(link)`.
+
+**Seam note:** `parse_direct_invite(link)` in `client/src-tauri/src/connection.rs`
+parses `<host:port>/<code>` and `farder://<host:port>/<code>` forms; it rejects
+setup-token segments and multi-segment relay-style paths. `parse_relay_target`
+handles relay links.
+
+---
+
 ## Group 18 — Invites and account deletion
 
 ---

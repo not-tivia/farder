@@ -200,6 +200,13 @@ cd client && npm run tauri build
 
 ### Updating the relay
 
+> **Important (invite previews):** the relay now serves as a privacy fetch
+> proxy for invite previews. Older relay binaries (pre-invite-preview release)
+> do not speak the `ProxyInvitePreview` protocol. Clients connected to an
+> old relay will see "Preview unavailable" on invite links instead of the
+> server name and member count. Redeploy with `git pull && compose up --build`
+> to enable previews.
+
 **Docker:**
 
 ```bash

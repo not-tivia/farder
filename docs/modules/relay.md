@@ -39,6 +39,44 @@ Each relayed client gets a `u32` **handle** at `RelayConnect`. The relay:
 The relay never reads the media payload (privacy preserved). Datagram sends are
 best-effort (dropped if a peer hasn't enabled datagrams -- e.g. a pre-5b server/client).
 
+## Invite-preview proxy (relay fetch proxy, phase one)
+
+The relay now accepts a third connection role in addition to `RelayRegister` and
+`RelayConnect`: `ProxyInvitePreview`. A client sends this as the first message on
+a fresh connection to ask the relay to fetch an invite preview on its behalf. The
+relay dispatches it to `handle_preview` (in `router.rs`), which applies rate
+limiting, the TTL cache, and a 5 s fetch budget, then replies with
+`ProxyInvitePreviewResult` and closes the connection.
+
+The relay doubles as a privacy fetch proxy: the client's IP never reaches the
+target server. This is the same QUIC infrastructure the relay uses for normal
+client bridging, extended with a short-lived anonymous connection type.
+
+See `docs/modules/relay-proxy.md` for the full guardrail reference (SSRF, rate
+bucket, timeout, code-length cap, cache pressure valve).
+
+## serve_relay_stream — handle-0 gating (relay-originated streams)
+
+When the relay opens a bi-stream on the server's control connection to fetch a
+preview, it prefixes the stream with `0u32` (4 bytes big-endian) as the routing
+handle — the **reserved handle-0 sentinel**. The relay's client-handle allocator
+starts at 1, so no real client stream ever carries handle 0. The server's
+`serve_relay_stream` reads this prefix before the `RelayStreamRole` frame and
+uses it to distinguish relay-originated preview streams from client streams.
+
+## run_relay_primary — cleanup-then-bail rule
+
+If a `RelayStreamRole::Primary` stream arrives stamped with handle 0 and the
+call to `authenticate()` somehow succeeds (only possible if a malicious relay
+operator sends a forged 0-stamped stream that carries a real client auth frame),
+`run_relay_primary` performs full session cleanup — removes the client from
+`state.clients`, `state.voice_connections`, and `state.relay_voice_handles`,
+revokes the session token — and then bails with an error. Without this cleanup
+the ghost entry would inflate the online count and the session token would never
+expire. Preview streams that hit the `GetInvitePreview` arm of `authenticate()`
+bail before registration occurs; this guard is the backstop for the case where a
+non-preview frame slips through on a 0-stamped stream.
+
 ## Backward compatibility
 
 A server/client that predates Phase 5a keeps working: the relay's control stream is

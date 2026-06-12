@@ -229,6 +229,37 @@ WebRTC session.
 | `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs`. |
 | `FetchUrl` | Returns an immediate `Error`; this variant must be intercepted and handled asynchronously by `connection.rs` before reaching this function. |
 
+### Pre-auth: `GetInvitePreview` (relay fetch proxy)
+
+`GetInvitePreview` is **not** a `ServerRequest` — it is a `ClientFrame` handled
+inside `connection.rs::authenticate()` before the normal auth sequence completes.
+It is documented here because it is part of the server's request surface.
+
+**Who sends it:** the relay's preview proxy opens a new bi-stream on the
+server's control connection (handle-0 stamped, `RelayStreamRole::Primary`), the
+server sends a `Challenge`, and the relay replies with
+`ClientFrame::GetInvitePreview { code }` instead of the usual `Authenticate`
+frame.
+
+**What the server does:**
+1. Validates the invite code via `invites::validate_invite` — no DB lock is
+   held beyond the validate call.
+2. **Uniform `Invalid` answer:** expired, exhausted, and nonexistent codes all
+   receive the same `ServerFrame::InvitePreviewError { reason: "invalid" }`
+   response. The reason string is intentionally opaque — a relay or network
+   observer cannot distinguish these cases.
+3. On a valid code, reads the total member count via `members::list_members`
+   and the current online count from `state.clients`, then sends
+   `ServerFrame::InvitePreview { server_name, member_count, online_count }`.
+4. After sending the preview frame, bails with an `Err` so `handle_connection`
+   tears down the stream. This is a **throwaway connection**: no member entry
+   is created, no session token is issued, no `MemberJoined` event is emitted.
+
+**Security note:** the `Err` returned from `authenticate()` on this path is not
+an auth failure — it is normal termination. `connection.rs` logs it at `debug`
+level. The relay's `run_relay_primary` enforces that handle-0 streams never
+progress to a full authenticated session (see `docs/modules/relay.md`).
+
 ---
 
 ## Security model

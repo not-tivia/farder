@@ -13,6 +13,9 @@ pub enum PreviewTarget {
 /// Result of an invite-preview lookup, as relayed back to the requester.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum PreviewOutcome {
+    /// A valid invite code: the server responded with its name and counts.
+    /// `member_count` is the total number of registered members;
+    /// `online_count` is the number of members currently connected.
     Preview { server_name: String, member_count: u32, online_count: u32 },
     /// The server answered: the code is invalid/expired/exhausted. Uniform on
     /// purpose — invalid codes reveal nothing about the server.
@@ -43,6 +46,8 @@ pub enum Message {
     /// Ask the relay to fetch an invite preview on the requester's behalf
     /// (relay fetch proxy, phase one). First message on a fresh connection.
     ProxyInvitePreview { target: PreviewTarget, code: String },
+    /// The relay's answer to a `ProxyInvitePreview` request. Sent by the relay
+    /// after resolving the invite code against the target server.
     ProxyInvitePreviewResult { outcome: PreviewOutcome },
 }
 

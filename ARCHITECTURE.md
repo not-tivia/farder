@@ -69,6 +69,26 @@ capture → encode → send and recv → decode → mix → playback pipeline
 (`audio_cpal.rs` bridges real devices, resampling + channel-converting as
 needed). The control bar is gated on the audio engine; the roster on presence.
 
+## Relay as fetch proxy (invite previews)
+
+The relay doubles as a **privacy fetch proxy** for invite previews (and,
+planned, external embeds). When a client hovers over an invite link before
+joining, it sends `ProxyInvitePreview` to the link's relay (or the default
+relay for direct links) instead of contacting the target server directly. The
+relay fetches the preview on the client's behalf, so the client's IP never
+reaches the server host.
+
+The relay opens a handle-0-stamped `RelayStreamRole::Primary` stream on the
+already-open server control connection, speaks the Challenge /
+GetInvitePreview / InvitePreview exchange (one round trip), and returns
+`ProxyInvitePreviewResult` to the client. Guardrails: 30/min/IP rate bucket,
+5 s fetch timeout, 16 KB answer cap, 256-char code cap, SSRF guard (including
+v4-mapped-IPv6), 60 s TTL cache.
+
+The client-side Tauri command is `get_invite_preview`. See
+`docs/modules/relay-proxy.md` and `docs/modules/tauri-commands.md` for full
+reference.
+
 ## Profile sync
 
 Avatars and status text travel as **identity-signed blobs** (`SignedProfile` from
