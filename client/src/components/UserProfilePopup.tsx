@@ -3,6 +3,8 @@ import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { useApp, useActiveServer } from "../context/ServerContext";
+import { useMemberProfile } from "../hooks/useMemberProfile";
+import { toast } from "../lib/toast";
 
 interface Props {
   member: MemberInfo;
@@ -29,19 +31,29 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
 
   const defaultBannerColor = `hsl(${Math.abs(pkStr.split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % 360}, 50%, 40%)`;
 
+  const { avatarUrl: remoteAvatarUrl, status: remoteStatus } = useMemberProfile(serverId, pkStr, member.profile_hash);
+
   const [bio, setBio] = useState<string | null>(null);
   const [bannerColor, setBannerColor] = useState(defaultBannerColor);
   const [editingBio, setEditingBio] = useState(false);
   const [bioInput, setBioInput] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [overrideUrl, setOverrideUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [editingStatus, setEditingStatus] = useState(false);
+  const [statusInput, setStatusInput] = useState("");
 
   useEffect(() => {
     if (isSelf) {
       api.getBio().then(b => { if (b) setBio(b); });
       api.getProfileColor().then(c => { if (c) setBannerColor(c); });
       api.getAvatar().then(url => { if (url) setAvatarUrl(url); });
+      api.getServerAvatarOverride(serverId).then(url => { if (url) setOverrideUrl(url); });
+      api.getProfileStatus().then(s => { if (s) setStatus(s); });
     }
-  }, [isSelf]);
+  }, [isSelf, serverId]);
+
+  const shownAvatar = isSelf ? (overrideUrl ?? avatarUrl) : remoteAvatarUrl;
 
   async function saveBio() {
     const trimmed = bioInput.trim();
@@ -66,21 +78,44 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
 
         {/* Avatar */}
         <div className="profile-card-avatar-row">
-          <div className="profile-card-avatar" style={{ background: avatarUrl ? "none" : bannerColor }}>
-            {avatarUrl ? (
-              <img src={avatarUrl} alt="avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
+          <div className="profile-card-avatar" style={{ background: shownAvatar ? "none" : bannerColor }}>
+            {shownAvatar ? (
+              <img src={shownAvatar} alt="avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
             ) : (
               initial
             )}
           </div>
           {isSelf && (
-            <button className="avatar-change-btn" onClick={async () => {
-              const path = await api.pickFile();
-              if (path) {
-                const url = await api.setAvatar(path);
-                setAvatarUrl(url);
-              }
-            }}>Change</button>
+            <div className="avatar-change-group">
+              <button className="avatar-change-btn" onClick={async () => {
+                const path = await api.pickFile();
+                if (path) {
+                  try {
+                    const url = await api.setAvatar(path);
+                    setAvatarUrl(url);
+                  } catch (err) {
+                    toast.error(`Couldn't set avatar: ${err}`);
+                  }
+                }
+              }}>Change</button>
+              <button className="avatar-change-btn" onClick={async () => {
+                const path = await api.pickFile();
+                if (path) {
+                  try {
+                    const url = await api.setServerAvatarOverride(serverId, path);
+                    setOverrideUrl(url);
+                  } catch (err) {
+                    toast.error(`Couldn't set server avatar: ${err}`);
+                  }
+                }
+              }}>This server</button>
+              {overrideUrl && (
+                <button className="avatar-change-btn" onClick={async () => {
+                  await api.clearServerAvatarOverride(serverId);
+                  setOverrideUrl(null);
+                }}>Reset</button>
+              )}
+            </div>
           )}
         </div>
 
@@ -88,6 +123,40 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
         <div className="profile-card-body">
           <div className="profile-card-name">{member.display_name}</div>
           <div className="profile-card-id">{pkStr.slice(0, 18)}...</div>
+
+          {(isSelf || remoteStatus) && (
+            <div className="profile-card-status">
+              {isSelf ? (
+                editingStatus ? (
+                  <input
+                    className="profile-card-status-input"
+                    value={statusInput}
+                    maxLength={128}
+                    autoFocus
+                    onChange={(e) => setStatusInput(e.target.value)}
+                    onKeyDown={async (e) => {
+                      if (e.key === "Enter") {
+                        const v = statusInput.trim() || null;
+                        try {
+                          await api.setProfileStatus(v);
+                          setStatus(v);
+                          setEditingStatus(false);
+                        } catch (err) { toast.error(`Couldn't save status: ${err}`); }
+                      }
+                      if (e.key === "Escape") setEditingStatus(false);
+                    }}
+                    placeholder="Set a status..."
+                  />
+                ) : (
+                  <span onClick={() => { setEditingStatus(true); setStatusInput(status || ""); }} style={{ cursor: "text" }}>
+                    {status || "Set a status..."}
+                  </span>
+                )
+              ) : (
+                <span>{remoteStatus}</span>
+              )}
+            </div>
+          )}
 
           <div className="profile-card-divider" />
 

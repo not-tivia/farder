@@ -7,9 +7,41 @@ import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
 import TimedOutBadge from "./TimedOutBadge";
 import { getActorPermissions, isModerator } from "../lib/permissions";
+import MemberAvatar from "./MemberAvatar";
+import { useMemberProfile } from "../hooks/useMemberProfile";
 
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
+
+function MemberRow({ member, serverId, showModBadges, onClick, onContextMenu }: {
+  member: MemberInfo;
+  serverId: string;
+  showModBadges: boolean;
+  onClick: (e: React.MouseEvent) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+}) {
+  const pkStr = publicKeyToString(member.public_key);
+  const { status } = useMemberProfile(serverId, pkStr, member.profile_hash);
+  return (
+    <div className="member-item" onClick={onClick} onContextMenu={onContextMenu}>
+      <MemberAvatar
+        className="member-avatar-mini"
+        serverId={serverId}
+        publicKey={pkStr}
+        profileHash={member.profile_hash}
+        name={member.display_name}
+      />
+      <span className="online-dot" />
+      <span className="member-text">
+        <span className="member-name">{member.display_name}</span>
+        {status && <span className="member-status">{status}</span>}
+      </span>
+      {showModBadges && (
+        <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
+      )}
+    </div>
+  );
+}
 
 export default function MemberSidebar() {
   const activeServer = useActiveServer();
@@ -54,26 +86,18 @@ export default function MemberSidebar() {
         Members — {members.length}
       </div>
       <div className="member-list">
-        {sortedMembers.map((member) => (
-          <div
+        {serverId && sortedMembers.map((member) => (
+          <MemberRow
             key={member.public_key.bytes.join(",")}
-            className="member-item"
+            member={member}
+            serverId={serverId}
+            showModBadges={showModBadges}
             onClick={(e) => setProfilePopup({ member, x: e.clientX, y: e.clientY })}
             onContextMenu={(e) => {
               e.preventDefault();
               setContextMenu({ target: member, position: { x: e.clientX, y: e.clientY } });
             }}
-          >
-            <span className="member-avatar-mini">{(member.display_name || "?").charAt(0).toUpperCase()}</span>
-            <span className="online-dot" />
-            <span className="member-name">{member.display_name}</span>
-            {showModBadges && (
-              <TimedOutBadge
-                untilMs={member.timeout_until}
-                reason={member.timeout_reason}
-              />
-            )}
-          </div>
+          />
         ))}
       </div>
       {profilePopup && serverId && (

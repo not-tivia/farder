@@ -19,6 +19,7 @@ import { translateMessage, subscribe as subscribeTranslation, dismiss as dismiss
 import { getTranslationSettings } from "../lib/translation/api";
 import InviteEmbed from "./InviteEmbed";
 import { parseInviteLink } from "../lib/invite";
+import MemberAvatar from "./MemberAvatar";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
@@ -318,7 +319,13 @@ export default function Message({ message, memberNames, grouped = false, serverI
       )}
       {!grouped && (
         <div className="message-header">
-          <span className="message-avatar">{(displayName || "?").charAt(0).toUpperCase()}</span>
+          <MemberAvatar
+            className="message-avatar"
+            serverId={serverId}
+            publicKey={member ? pkStr : undefined}
+            profileHash={member?.profile_hash}
+            name={displayName || "?"}
+          />
           <span
             className="message-author"
             style={{ color, cursor: member ? "pointer" : undefined }}
