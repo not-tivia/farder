@@ -97,9 +97,48 @@ pub(crate) fn validate_avatar_bytes(data: &[u8]) -> Result<(), String> {
 
 // --- pushing ----------------------------------------------------------------
 
+// Servers whose connection DROPPED while we pushed. A pre-profile-sync server
+// cannot decode UpdateProfile and closes the WHOLE connection; the connect-time
+// push then re-fires after every automatic reconnect, locking the app into an
+// infinite disconnect/reconnect loop. After one transport-level push failure we
+// stop auto-pushing to that server for the rest of the session (app restart,
+// or a server upgrade + restart, clears it).
+static SUPPRESSED_PUSH: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn suppressed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    SUPPRESSED_PUSH.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn is_push_suppressed(server_id: &str) -> bool {
+    suppressed().lock().map(|s| s.contains(server_id)).unwrap_or(false)
+}
+
+fn suppress_push(server_id: &str) {
+    if let Ok(mut s) = suppressed().lock() {
+        s.insert(server_id.to_string());
+    }
+}
+
+fn transport_failure(server_id: &str, e: &str) -> String {
+    suppress_push(server_id);
+    format!(
+        "profile push to {} dropped the connection ({}); the server may be running an older \
+         Farder version — profile sync to it is paused until the app restarts",
+        server_id, e
+    )
+}
+
 /// Push the effective profile to one connected server if it changed since the
 /// last successful push. No-op when the identity is locked.
 pub(crate) async fn push_profile(state: &AppState, server_id: &str) -> Result<(), String> {
+    if is_push_suppressed(server_id) {
+        return Err(format!(
+            "profile sync to {} is paused this session (an earlier push dropped the connection — \
+             the server may need an update)",
+            server_id
+        ));
+    }
     let keypair = {
         let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
         match lock.as_ref() {
@@ -119,7 +158,7 @@ pub(crate) async fn push_profile(state: &AppState, server_id: &str) -> Result<()
         }
         Ok(ServerResponse::Error { reason }) => Err(reason),
         Ok(other) => Err(format!("unexpected response: {:?}", other)),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(transport_failure(server_id, &e.to_string())),
     }
 }
 
@@ -139,6 +178,9 @@ pub(crate) async fn push_profile_everywhere(state: &Arc<AppState>) {
 /// wiped would otherwise never receive our profile again. Falls back to the
 /// plain push when the roster can't be fetched.
 pub(crate) async fn push_profile_on_connect(state: &AppState, server_id: &str) -> Result<(), String> {
+    if is_push_suppressed(server_id) {
+        return Ok(()); // earlier push dropped the connection; stay quiet on reconnects
+    }
     let keypair = {
         let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
         match lock.as_ref() {
@@ -174,7 +216,7 @@ pub(crate) async fn push_profile_on_connect(state: &AppState, server_id: &str) -
                 }
                 Ok(ServerResponse::Error { reason }) => Err(reason),
                 Ok(other) => Err(format!("unexpected response: {:?}", other)),
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(transport_failure(server_id, &e.to_string())),
             }
         }
         None => push_profile(state, server_id).await,
@@ -184,6 +226,33 @@ pub(crate) async fn push_profile_on_connect(state: &AppState, server_id: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_push_suppressed_after_transport_failure() {
+        // Not suppressed initially.
+        assert!(!is_push_suppressed("srv-old"));
+
+        // A transport-level failure marks the server and returns the message.
+        let msg = transport_failure("srv-old", "connection lost");
+        assert!(msg.contains("older"));
+        assert!(is_push_suppressed("srv-old"));
+
+        // push_profile refuses immediately (before touching identity/files);
+        // push_profile_on_connect goes quiet so reconnects don't re-trigger.
+        let state = AppState {
+            signing_key_bytes: std::sync::Mutex::new(None),
+            servers: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let err = push_profile(&state, "srv-old").await.unwrap_err();
+            assert!(err.contains("paused"));
+            assert!(push_profile_on_connect(&state, "srv-old").await.is_ok());
+        });
+
+        // Other servers are unaffected.
+        assert!(!is_push_suppressed("srv-fine"));
+    }
 
     // One combined test: FARDER_DATA is process-global, so parallel tests would
     // race if split. Everything filesystem-dependent lives here.

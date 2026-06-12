@@ -112,6 +112,7 @@ sends `UpdateProfile`); additionally sends one `GetMembers` request.
 |---|---|---|
 | `~/.farder/pushed_profiles.json` | disk (JSON object) | Map of `server_id → last-pushed profile hash (hex)`. Written by `record_pushed`; read by `push_profile` and `push_profile_on_connect`. |
 | `~/.farder/profile_overrides/<safe_id>.img` | disk (raw bytes) | Per-server avatar override; written by `set_server_avatar_override` in `commands.rs`, deleted by `clear_server_avatar_override`. |
+| `SUPPRESSED_PUSH` | in-memory `HashSet<String>` (session-scoped) | Servers whose connection DROPPED during a push. A pre-profile-sync server can't decode `UpdateProfile` and closes the whole connection; without this guard the connect-time push re-fires after every automatic reconnect → infinite disconnect/reconnect loop ("disco ball", found 2026-06-11). After one transport-level push failure, `push_profile` returns a "paused this session" error and `push_profile_on_connect` goes quiet. Cleared by app restart. |
 
 The module does NOT own `avatar.png`, `profile.json`, or the `profile_cache/`
 directory (those belong to `commands.rs`).
