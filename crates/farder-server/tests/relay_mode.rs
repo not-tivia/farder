@@ -539,6 +539,13 @@ async fn invite_preview_over_relay_stamp_zero() {
         other => panic!("expected InvitePreviewError, got {other:?}"),
     }
 
+    // A second valid preview must not have incremented the online count.
+    // Previews are throwaway connections that must never register as clients.
+    match relay_preview(&server_conn, &code).await {
+        ServerFrame::InvitePreview { online_count, .. } => assert_eq!(online_count, 1, "previews must not register as online clients"),
+        other => panic!("expected InvitePreview, got {other:?}"),
+    }
+
     // The preview never registered a member: count is still 1.
     let resp = request(&mut send, &mut recv, 2, ServerRequest::GetMembers).await;
     match resp {
@@ -559,4 +566,84 @@ fn strip_frame(bytes: &[u8]) -> Vec<u8> {
     } else {
         bytes.to_vec()
     }
+}
+
+#[tokio::test]
+async fn handle_zero_stream_cannot_hold_an_authenticated_session() {
+    ensure_provider();
+    let (relay, conns) = start_relay().await;
+    let (server_id, state) = start_relay_server(relay).await;
+
+    // Ensure the server has registered with the relay by connecting a real
+    // client through it. Keep _conn alive until after the malicious exchange
+    // so the server's registration stays warm.
+    let kp_owner = Keypair::generate();
+    let (_ep, _conn) = client_via_relay(relay, &server_id).await;
+    let (_s, _r, _token) = login_primary(&_conn, &kp_owner).await;
+
+    // Grab the server's registration connection from the relay double's map.
+    let server_conn = {
+        let map = conns.read().await;
+        map.get(server_id.as_slice()).expect("server registered").clone()
+    };
+
+    // Act as a MALICIOUS relay: stamp handle 0 on a stream and run a REAL auth.
+    // The server should detect handle==0 after authenticate() succeeds, call
+    // cleanup_session to undo the registration, then drop the stream.
+    let kp = Keypair::generate();
+    let (mut s, mut r) = server_conn.open_bi().await.unwrap();
+    s.write_all(&0u32.to_be_bytes()).await.unwrap(); // reserved relay-originated handle
+    write_framed(&mut s, &codec::encode(&RelayStreamRole::Primary).unwrap()).await;
+
+    // Server speaks Challenge first.
+    let frame_bytes = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut len = [0u8; 4];
+        r.read_exact(&mut len).await?;
+        let n = u32::from_be_bytes(len) as usize;
+        let mut buf = vec![0u8; n];
+        r.read_exact(&mut buf).await?;
+        Ok::<Vec<u8>, anyhow::Error>(buf)
+    })
+    .await
+    .expect("timed out waiting for Challenge")
+    .expect("stream error reading Challenge");
+    let frame: ServerFrame = codec::decode(&frame_bytes).unwrap();
+    let nonce = match frame {
+        ServerFrame::Challenge { nonce } => nonce,
+        other => panic!("expected Challenge, got {other:?}"),
+    };
+
+    // Send a real Authenticate frame (signed nonce, no invite/setup token).
+    let auth = ClientFrame::Authenticate {
+        public_key: kp.public_key(),
+        signed_challenge: kp.sign(&nonce),
+        invite_code: None,
+        setup_token: None,
+    };
+    write_framed(&mut s, &codec::encode(&auth).unwrap()).await;
+
+    // Auth may briefly succeed (Authenticated frame) before the server detects
+    // handle==0, runs cleanup, and kills the stream. Either way, drain until
+    // closed without panicking.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        r.read_to_end(64 * 1024),
+    )
+    .await;
+
+    // Give the server a beat to run cleanup_session.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // No ghost: the would-be member must NOT appear in the online clients map.
+    assert!(
+        !state.clients.read().await.contains_key(kp.public_key().as_bytes()),
+        "handle-0 auth must not leave a registered online client"
+    );
+
+    // No lingering session token: no session entry belongs to kp.public_key().
+    // SessionInfo.public_key is a public field; we can compare directly.
+    assert!(
+        state.sessions.read().await.values().all(|info| &info.public_key != &kp.public_key()),
+        "handle-0 auth must not leave a live session token for the attacker's key"
+    );
 }

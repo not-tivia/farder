@@ -159,9 +159,15 @@ async fn serve_relay_stream(state: Arc<ServerState>, relay_conn: quinn::Connecti
 
 async fn run_relay_primary(state: Arc<ServerState>, relay_conn: quinn::Connection, handle: u32, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
     let outcome = authenticate(&state, &mut send, &mut recv).await?;
-    // A relay-originated (handle 0) stream must never reach an authenticated
-    // session: previews bail inside authenticate(). Belt-and-braces.
-    anyhow::ensure!(handle != 0, "reserved handle 0 cannot authenticate");
+    // A relay-originated (handle 0) stream must never carry an authenticated
+    // session: previews bail inside authenticate(). If a (malicious) relay
+    // stamps 0 on a real client's stream, undo everything authenticate
+    // registered before dropping the connection — otherwise the ghost entry
+    // inflates the online count and the session token never expires.
+    if handle == 0 {
+        cleanup_session(&state, &outcome.public_key, outcome.pk_bytes, &outcome.event_tx, &outcome.session_token).await;
+        anyhow::bail!("reserved handle 0 cannot authenticate");
+    }
     let pk_bytes = outcome.pk_bytes;
     // Phase 5b: bind this relayed member to its routing handle for voice.
     state.voice_connections.write().await.insert(pk_bytes, crate::state::VoiceSink::Relayed { relay: relay_conn.clone(), handle });
