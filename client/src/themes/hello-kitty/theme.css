@@ -2623,3 +2623,50 @@ body {
 .invite-embed-join {
   margin-top: 6px;
 }
+
+/* Profile sync: picture avatars + statuses */
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.member-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.member-status {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--xp-text-muted);
+}
+.avatar-change-group {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.profile-card-status {
+  font-size: 12px;
+  margin: 4px 0;
+  color: var(--xp-text-normal, #4A2937);
+}
+.profile-card-status-input {
+  width: 100%;
+  font-family: var(--xp-font);
+  font-size: 12px;
+  padding: 2px 10px;
+  border: 1.5px solid var(--xp-input-border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--xp-text-normal, #4A2937);
+  outline: none;
+}
+.profile-card-status-input:focus {
+  border-color: var(--xp-blue);
+  box-shadow: 0 0 0 2px rgba(255,111,171,0.2);
+}
