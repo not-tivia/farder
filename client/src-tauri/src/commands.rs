@@ -368,6 +368,145 @@ pub async fn get_member_profile(
 }
 
 // ---------------------------------------------------------------------------
+// Invite preview command
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, serde::Serialize)]
+pub struct InvitePreviewResult {
+    /// "ok" | "invalid" | "unavailable" | "none" (none = link carries no
+    /// previewable invite code, e.g. setup-token or bare-address links).
+    pub status: String,
+    pub server_name: Option<String>,
+    pub member_count: Option<u32>,
+    pub online_count: Option<u32>,
+}
+
+/// Session-scoped preview cache: link → (when, result). 60s TTL mirrors the
+/// relay-side cache; previews are point-in-time data.
+static PREVIEW_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, InvitePreviewResult)>>> =
+    std::sync::OnceLock::new();
+
+fn preview_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, InvitePreviewResult)>> {
+    PREVIEW_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn fetch_preview_via_relay(
+    relay_addr: std::net::SocketAddr,
+    relay_fp: Vec<u8>,
+    target: farder_protocol::messages::PreviewTarget,
+    code: String,
+) -> Result<farder_protocol::messages::PreviewOutcome, String> {
+    use farder_protocol::messages::Message;
+    let endpoint = crate::tls::make_pinned_relay_endpoint(relay_fp).map_err(|e| e.to_string())?;
+    let conn = endpoint
+        .connect(relay_addr, "farder-relay")
+        .map_err(|e| e.to_string())?
+        .await
+        .map_err(|e| e.to_string())?;
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    let msg = farder_protocol::codec::encode(&Message::ProxyInvitePreview { target, code })
+        .map_err(|e| e.to_string())?;
+    crate::connection::write_frame(&mut send, &msg)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply_bytes = crate::connection::read_frame(&mut recv)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply: Message = farder_protocol::codec::decode(&reply_bytes).map_err(|e| e.to_string())?;
+    conn.close(0u32.into(), b"preview done");
+    // endpoint is dropped here, which is fine — the connection is already closed
+    match reply {
+        Message::ProxyInvitePreviewResult { outcome } => Ok(outcome),
+        other => Err(format!("unexpected relay reply: {:?}", other)),
+    }
+}
+
+/// Fetch an invite preview through a relay (the link's own relay for relayed
+/// invites; the default Farder relay for direct invites). Throwaway connection;
+/// never touches session connections. LAZY ONLY (PIN-lock rule) — needs no
+/// identity at all: previews are anonymous.
+#[tauri::command]
+pub async fn get_invite_preview(link: String) -> Result<InvitePreviewResult, String> {
+    use farder_protocol::messages::{PreviewOutcome, PreviewTarget};
+
+    let none_result = InvitePreviewResult {
+        status: "none".into(),
+        server_name: None,
+        member_count: None,
+        online_count: None,
+    };
+
+    // Cache first.
+    {
+        let cache = preview_cache().lock().map_err(|e| e.to_string())?;
+        if let Some((at, hit)) = cache.get(&link) {
+            if at.elapsed() < std::time::Duration::from_secs(60) {
+                return Ok(hit.clone());
+            }
+        }
+    }
+
+    // Work out (relay endpoint, target, code) from the link form.
+    let (relay_addr, relay_fp, target, code) =
+        if let Some(t) = crate::connection::parse_relay_target(&link) {
+            if t.invite_token.is_empty() {
+                return Ok(none_result);
+            }
+            (
+                t.relay_addr,
+                t.cert_fp.clone(),
+                PreviewTarget::Registered { server_id: t.server_id.clone() },
+                t.invite_token.clone(),
+            )
+        } else if let Some((addr, code)) = crate::connection::parse_direct_invite(&link) {
+            let Some((def_addr, def_fp)) = crate::default_relay::default_relay() else {
+                return Ok(none_result); // no default relay in this build → no direct previews
+            };
+            (def_addr, def_fp, PreviewTarget::Direct { addr }, code)
+        } else {
+            return Ok(none_result);
+        };
+
+    // 8s client-side budget (the relay's own budget is 5s).
+    let outcome = match tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        fetch_preview_via_relay(relay_addr, relay_fp, target, code),
+    )
+    .await
+    {
+        Ok(Ok(o)) => o,
+        Ok(Err(_)) | Err(_) => PreviewOutcome::Unavailable,
+    };
+
+    let result = match outcome {
+        PreviewOutcome::Preview { server_name, member_count, online_count } => InvitePreviewResult {
+            status: "ok".into(),
+            server_name: Some(server_name.chars().take(80).collect()),
+            member_count: Some(member_count),
+            online_count: Some(online_count),
+        },
+        PreviewOutcome::Invalid => InvitePreviewResult {
+            status: "invalid".into(),
+            server_name: None,
+            member_count: None,
+            online_count: None,
+        },
+        PreviewOutcome::Unavailable => InvitePreviewResult {
+            status: "unavailable".into(),
+            server_name: None,
+            member_count: None,
+            online_count: None,
+        },
+    };
+
+    preview_cache()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(link, (std::time::Instant::now(), result.clone()));
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------
 

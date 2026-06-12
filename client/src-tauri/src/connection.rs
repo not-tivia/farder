@@ -229,6 +229,27 @@ pub async fn connect_via_relay(
     Ok((conn, send, recv, session_token))
 }
 
+/// Parse a DIRECT invite link into (server_addr, invite_code), mirroring the
+/// frontend's parseInviteLink rules for the two direct forms that carry a code:
+/// `farder://host:port/code` and bare `host:port/code`. Setup-token links and
+/// code-less links return None (no preview possible).
+pub fn parse_direct_invite(s: &str) -> Option<(String, String)> {
+    let trimmed = s.trim();
+    if trimmed.starts_with("farder://relay") {
+        return None; // relay forms are parse_relay_target's job
+    }
+    let rest = trimmed.strip_prefix("farder://").unwrap_or(trimmed);
+    let (addr, token) = rest.split_once('/')?;
+    if token.is_empty() || token.starts_with("setup:") {
+        return None;
+    }
+    // addr must look like host:port (same loose rule the frontend uses).
+    if !addr.contains(':') {
+        return None;
+    }
+    Some((addr.to_string(), token.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +338,23 @@ mod tests {
         assert_eq!(back.server_id, target.server_id);
         assert_eq!(back.cert_fp, target.cert_fp);
         assert_eq!(back.invite_token, "NEWCODE");
+    }
+
+    #[test]
+    fn direct_invite_links_parse_and_relay_or_tokenless_forms_do_not() {
+        assert_eq!(
+            parse_direct_invite("farder://203.0.113.7:4433/AbCd1234"),
+            Some(("203.0.113.7:4433".to_string(), "AbCd1234".to_string()))
+        );
+        assert_eq!(
+            parse_direct_invite("203.0.113.7:4433/AbCd1234"),
+            Some(("203.0.113.7:4433".to_string(), "AbCd1234".to_string()))
+        );
+        assert!(parse_direct_invite("farder://203.0.113.7:4433/setup:aabb").is_none());
+        assert!(parse_direct_invite("203.0.113.7:4433").is_none());
+        assert!(parse_direct_invite("farder://relay/1.2.3.4:1/aa/bb/code").is_none());
+        assert!(parse_direct_invite("farder://relayd/aabb/code").is_none());
+        assert!(parse_direct_invite("AbCd1234").is_none());
     }
 }
 
