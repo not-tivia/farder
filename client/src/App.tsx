@@ -129,6 +129,7 @@ function AppInner() {
   const confirmModal = state.joinConfirmLink ? (
     <JoinConfirmModal
       relayed={/^farder:\/\/relayd?\//i.test(parseInviteLink(state.joinConfirmLink).address ?? "")}
+      link={state.joinConfirmLink}
       onConfirm={() => { const u = state.joinConfirmLink!; dispatch({ type: "CLOSE_JOIN_CONFIRM" }); void joinFromInvite(u); }}
       onCancel={() => dispatch({ type: "CLOSE_JOIN_CONFIRM" })}
     />

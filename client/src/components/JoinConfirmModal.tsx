@@ -1,15 +1,19 @@
 import { useState } from "react";
+import { useInvitePreview } from "../hooks/useInvitePreview";
 
 export default function JoinConfirmModal({
   relayed,
+  link,
   onConfirm,
   onCancel,
 }: {
   relayed: boolean;
+  link?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const [showInfo, setShowInfo] = useState(false);
+  const preview = useInvitePreview(link);
   return (
     <div className="modal-overlay" onClick={onCancel}>
       <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
@@ -18,7 +22,11 @@ export default function JoinConfirmModal({
           <button className="modal-close" onClick={onCancel}>X</button>
         </div>
         <div className="modal-body">
-          <p>You&apos;ve been invited to a Farder server. Join it?</p>
+          <p>
+            {preview.status === "ok" && preview.serverName
+              ? <>You&apos;ve been invited to <strong>{preview.serverName}</strong>. Join it?</>
+              : <>You&apos;ve been invited to a Farder server. Join it?</>}
+          </p>
           <div className={`join-relay-note ${relayed ? "relayed" : "direct"}`}>
             <span className="join-relay-badge">{relayed ? "RELAYED" : "DIRECT"}</span>
             <span>

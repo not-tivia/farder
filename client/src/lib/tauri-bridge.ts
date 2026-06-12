@@ -720,3 +720,16 @@ export async function listAuditEvents(
 ): Promise<AuditEvent[]> {
   return invoke<AuditEvent[]>("list_audit_events", { serverId, beforeId, limit });
 }
+
+// ── Invite previews ───────────────────────────────────────────────────────────
+
+export interface InvitePreviewResult {
+  status: "ok" | "invalid" | "unavailable" | "none";
+  server_name: string | null;
+  member_count: number | null;
+  online_count: number | null;
+}
+
+export async function getInvitePreview(link: string): Promise<InvitePreviewResult> {
+  return invoke<InvitePreviewResult>("get_invite_preview", { link });
+}
