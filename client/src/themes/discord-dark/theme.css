@@ -2611,6 +2611,9 @@ body {
   font-size: 11px;
   margin-bottom: 4px;
   color: var(--xp-text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .invite-embed-join {
   margin-top: 6px;
@@ -2660,4 +2663,17 @@ body {
 }
 .profile-card-status-input:focus {
   border-color: var(--xp-blue);
+}
+
+/* Invite previews */
+.invite-embed-counts {
+  font-size: 12px;
+  color: var(--xp-text-muted);
+  margin: 2px 0;
+}
+.invite-embed-state {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--xp-text-muted);
+  margin: 2px 0;
 }
