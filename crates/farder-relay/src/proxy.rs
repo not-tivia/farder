@@ -174,6 +174,14 @@ async fn ask_server(send: &mut SendStream, recv: &mut RecvStream, code: &str) ->
     }
 }
 
+/// Direct-mode preview exchange on an established connection: the SERVER opens
+/// the primary stream (mirror of the real client's accept_bi), then we speak
+/// Challenge → GetInvitePreview → answer on it.
+pub async fn preview_over_direct_conn(conn: &Connection, code: &str) -> Result<PreviewOutcome> {
+    let (mut s, mut r) = conn.accept_bi().await?;
+    ask_server(&mut s, &mut r, code).await
+}
+
 /// Resolve and fetch a preview for `target`. Errors collapse to Unavailable at
 /// the call site; this returns Result for `?` ergonomics on transport ops.
 pub async fn fetch_preview(
@@ -204,8 +212,7 @@ pub async fn fetch_preview(
                     return Ok(PreviewOutcome::Unavailable);
                 }
                 let conn = out_endpoint.connect(sock, "farder-server")?.await?;
-                let (mut s, mut r) = conn.open_bi().await?;
-                let outcome = ask_server(&mut s, &mut r, code).await;
+                let outcome = preview_over_direct_conn(&conn, code).await;
                 conn.close(0u32.into(), b"preview done");
                 outcome
             }

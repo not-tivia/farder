@@ -934,4 +934,66 @@ mod tests {
         assert_eq!(got, b"ping");
         std::mem::forget(cep);
     }
+
+    /// Spin up a QUIC server that behaves like a direct-mode farder-server:
+    /// for each incoming connection it OPENS a bi-stream (server-initiated,
+    /// mirroring `crates/farder-server/src/connection.rs`), sends a Challenge,
+    /// reads GetInvitePreview, and answers with InvitePreview or InvitePreviewError.
+    async fn start_direct_preview_server() -> SocketAddr {
+        use farder_protocol::server::{ClientFrame, ServerFrame};
+        ensure_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let ep = crate::listener::create_endpoint("127.0.0.1:0".parse().unwrap(), dir.path()).unwrap();
+        let addr = ep.local_addr().unwrap();
+        std::mem::forget(dir);
+        tokio::spawn(async move {
+            while let Some(inc) = ep.accept().await {
+                tokio::spawn(async move {
+                    let Ok(conn) = inc.await else { return };
+                    // Direct mode: the SERVER opens the primary stream.
+                    let Ok((mut s, mut r)) = conn.open_bi().await else { return };
+                    let ch = codec::encode(&ServerFrame::Challenge { nonce: [9u8; 32] }).unwrap();
+                    write_message(&mut s, &ch).await.unwrap();
+                    let Ok(buf) = read_message(&mut r).await else { return };
+                    let frame: ClientFrame = codec::decode(&buf).unwrap();
+                    let answer = match frame {
+                        ClientFrame::GetInvitePreview { code } if code == "GOOD" =>
+                            ServerFrame::InvitePreview { server_name: "DirectSrv".into(), member_count: 3, online_count: 1 },
+                        ClientFrame::GetInvitePreview { .. } =>
+                            ServerFrame::InvitePreviewError { reason: "invalid".into() },
+                        other => panic!("unexpected frame: {other:?}"),
+                    };
+                    write_message(&mut s, &codec::encode(&answer).unwrap()).await.unwrap();
+                    let _ = s.finish();
+                    // Hold the connection open until the peer closes.
+                    conn.closed().await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn direct_preview_exchange_speaks_server_initiated_stream() {
+        use farder_protocol::messages::PreviewOutcome;
+        let addr = start_direct_preview_server().await;
+        let ep = crate::proxy::outbound_endpoint().unwrap();
+        let conn = ep.connect(addr, "farder-server").unwrap().await.unwrap();
+        match crate::proxy::preview_over_direct_conn(&conn, "GOOD").await.unwrap() {
+            PreviewOutcome::Preview { server_name, member_count, online_count } => {
+                assert_eq!(server_name, "DirectSrv");
+                assert_eq!(member_count, 3);
+                assert_eq!(online_count, 1);
+            }
+            other => panic!("expected Preview, got {other:?}"),
+        }
+        conn.close(0u32.into(), b"done");
+        let conn2 = ep.connect(addr, "farder-server").unwrap().await.unwrap();
+        assert!(matches!(
+            crate::proxy::preview_over_direct_conn(&conn2, "BAD").await.unwrap(),
+            PreviewOutcome::Invalid
+        ));
+        conn2.close(0u32.into(), b"done");
+        std::mem::forget(ep);
+    }
 }
