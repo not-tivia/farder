@@ -139,12 +139,14 @@ fn relay_server_endpoint() -> Endpoint {
     Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap()
 }
 
-/// Start the test-double relay on an ephemeral port; return its address.
-async fn start_relay() -> SocketAddr {
+/// Start the test-double relay on an ephemeral port; return its address and
+/// a clone of the ConnectionMap so callers can grab server registration conns.
+async fn start_relay() -> (SocketAddr, ConnectionMap) {
     ensure_provider();
     let ep = relay_server_endpoint();
     let addr = ep.local_addr().unwrap();
     let conns: ConnectionMap = Arc::new(RwLock::new(HashMap::new()));
+    let conns_ret = conns.clone();
     tokio::spawn(async move {
         while let Some(incoming) = ep.accept().await {
             let conns = conns.clone();
@@ -173,7 +175,7 @@ async fn start_relay() -> SocketAddr {
             });
         }
     });
-    addr
+    (addr, conns_ret)
 }
 
 async fn relay_register(server_id: Vec<u8>, conn: Connection, mut send: SendStream, conns: ConnectionMap) {
@@ -327,7 +329,7 @@ async fn request(send: &mut SendStream, recv: &mut RecvStream, id: u32, body: Se
 #[tokio::test]
 async fn relayed_client_logs_in_and_makes_a_request() {
     ensure_provider();
-    let relay = start_relay().await;
+    let (relay, _conns) = start_relay().await;
     let (server_id, _state) = start_relay_server(relay).await;
 
     let (_ep, conn) = client_via_relay(relay, &server_id).await;
@@ -355,7 +357,7 @@ async fn relayed_client_logs_in_and_makes_a_request() {
 #[tokio::test]
 async fn relayed_client_uploads_a_file() {
     ensure_provider();
-    let relay = start_relay().await;
+    let (relay, _conns) = start_relay().await;
     let (server_id, _state) = start_relay_server(relay).await;
 
     let (_ep, conn) = client_via_relay(relay, &server_id).await;
@@ -443,7 +445,7 @@ async fn relayed_client_uploads_a_file() {
 #[tokio::test]
 async fn bad_session_token_is_rejected() {
     ensure_provider();
-    let relay = start_relay().await;
+    let (relay, _conns) = start_relay().await;
     let (server_id, _state) = start_relay_server(relay).await;
 
     let (_ep, conn) = client_via_relay(relay, &server_id).await;
@@ -481,6 +483,68 @@ async fn bad_session_token_is_rejected() {
         matches!(resp, ServerResponse::ServerInfo { .. }),
         "primary session must keep working after a bad-token stream was rejected: {resp:?}"
     );
+}
+
+/// Act as the RELAY itself: open a preview stream on the server's registration
+/// connection — stamped with reserved handle 0 — and ask GetInvitePreview.
+async fn relay_preview(server_conn: &Connection, code: &str) -> ServerFrame {
+    let (mut s, mut r) = server_conn.open_bi().await.unwrap();
+    s.write_all(&0u32.to_be_bytes()).await.unwrap(); // relay-originated marker
+    write_framed(&mut s, &codec::encode(&RelayStreamRole::Primary).unwrap()).await;
+    // Server speaks Challenge first; a preview client ignores the nonce.
+    let frame: ServerFrame = codec::decode(&read_framed(&mut r).await).unwrap();
+    assert!(matches!(frame, ServerFrame::Challenge { .. }), "expected Challenge first");
+    let ask = ClientFrame::GetInvitePreview { code: code.to_string() };
+    write_framed(&mut s, &codec::encode(&ask).unwrap()).await;
+    codec::decode(&read_framed(&mut r).await).unwrap()
+}
+
+#[tokio::test]
+async fn invite_preview_over_relay_stamp_zero() {
+    ensure_provider();
+    let (relay, conns) = start_relay().await;
+    let (server_id, _state) = start_relay_server(relay).await;
+
+    // Owner logs in (auto-claim) and creates an invite — the only valid code.
+    let kp = Keypair::generate();
+    let (_ep, conn) = client_via_relay(relay, &server_id).await;
+    let (mut send, mut recv, _token) = login_primary(&conn, &kp).await;
+    let resp = request(&mut send, &mut recv, 1, ServerRequest::CreateInvite {
+        max_uses: None, expires_in_secs: None, target_channel: None,
+    }).await;
+    let code = match resp {
+        ServerResponse::InviteCreated { code } => code,
+        other => panic!("expected InviteCreated, got {other:?}"),
+    };
+
+    // Grab the server's registration connection from the relay double's map.
+    let server_conn = {
+        let map = conns.read().await;
+        map.get(server_id.as_slice()).expect("server registered").clone()
+    };
+
+    // Valid code → preview with name + counts (owner is the 1 member, online).
+    match relay_preview(&server_conn, &code).await {
+        ServerFrame::InvitePreview { server_name, member_count, online_count } => {
+            assert_eq!(server_name, "Test Server", "preview must carry the server name");
+            assert_eq!(member_count, 1, "owner is the only member");
+            assert_eq!(online_count, 1, "owner is connected");
+        }
+        other => panic!("expected InvitePreview, got {other:?}"),
+    }
+
+    // Invalid code → uniform error, nothing leaked.
+    match relay_preview(&server_conn, "ZZZZZZZZ").await {
+        ServerFrame::InvitePreviewError { reason } => assert_eq!(reason, "invalid"),
+        other => panic!("expected InvitePreviewError, got {other:?}"),
+    }
+
+    // The preview never registered a member: count is still 1.
+    let resp = request(&mut send, &mut recv, 2, ServerRequest::GetMembers).await;
+    match resp {
+        ServerResponse::Members { members } => assert_eq!(members.len(), 1),
+        other => panic!("expected Members, got {other:?}"),
+    }
 }
 
 /// Strip a single 4-byte length prefix if present, returning the inner payload

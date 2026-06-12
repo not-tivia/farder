@@ -140,18 +140,28 @@ async fn serve_relay_stream(state: Arc<ServerState>, relay_conn: quinn::Connecti
     let mut hb = [0u8; 4];
     recv.read_exact(&mut hb).await?;
     let handle = u32::from_be_bytes(hb);
-    anyhow::ensure!(handle != 0, "relay sent reserved routing handle 0");
     let role: RelayStreamRole = codec::decode(&read_framed(&mut recv).await?)?;
     match role {
+        // Handle 0 = RELAY-ORIGINATED stream (invite preview). Real client
+        // streams always carry a relay-stamped handle >= 1 (the relay stamps
+        // authoritatively; clients cannot forge the prefix). Preview streams
+        // never authenticate, so 0 is rejected at the auth/voice-binding point
+        // in run_relay_primary instead of here.
         RelayStreamRole::Primary => run_relay_primary(state, relay_conn, handle, send, recv).await,
-        // The routing handle is consumed above but unused for Session streams:
-        // auxiliary streams are authenticated by their session token, not the handle.
-        RelayStreamRole::Session { token } => run_relay_aux(state, send, recv, token).await,
+        RelayStreamRole::Session { token } => {
+            anyhow::ensure!(handle != 0, "relay sent reserved routing handle 0");
+            // The routing handle is consumed above but unused for Session streams:
+            // auxiliary streams are authenticated by their session token, not the handle.
+            run_relay_aux(state, send, recv, token).await
+        }
     }
 }
 
 async fn run_relay_primary(state: Arc<ServerState>, relay_conn: quinn::Connection, handle: u32, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
     let outcome = authenticate(&state, &mut send, &mut recv).await?;
+    // A relay-originated (handle 0) stream must never reach an authenticated
+    // session: previews bail inside authenticate(). Belt-and-braces.
+    anyhow::ensure!(handle != 0, "reserved handle 0 cannot authenticate");
     let pk_bytes = outcome.pk_bytes;
     // Phase 5b: bind this relayed member to its routing handle for voice.
     state.voice_connections.write().await.insert(pk_bytes, crate::state::VoiceSink::Relayed { relay: relay_conn.clone(), handle });

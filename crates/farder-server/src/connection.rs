@@ -1,4 +1,4 @@
-use crate::{attachments, auth, channels, events::EventTarget, handlers, members, permissions, state::{EventSender, ServerState}};
+use crate::{attachments, auth, channels, events::EventTarget, handlers, invites, members, permissions, state::{EventSender, ServerState}};
 use anyhow::{Context, Result};
 use farder_crypto::identity::PublicKey;
 use farder_protocol::{codec, server::*};
@@ -436,6 +436,33 @@ pub(crate) async fn authenticate(
             invite_code,
             setup_token,
         } => (public_key, signed_challenge, invite_code, setup_token),
+        ClientFrame::GetInvitePreview { code } => {
+            // Pre-auth, code-gated preview (relay fetch proxy phase one). The
+            // connection is throwaway: answer one frame and bail out of auth.
+            let valid_member_count = {
+                let conn_db = state.db.lock().unwrap();
+                match invites::validate_invite(&conn_db, &code)? {
+                    Ok(_info) => Some(members::list_members(&conn_db)?.len() as u32),
+                    Err(_reason) => None, // uniform: invalid/expired/exhausted all look the same
+                }
+            };
+            match valid_member_count {
+                Some(member_count) => {
+                    let online_count = state.clients.read().await.len() as u32;
+                    send_server_frame(send, &ServerFrame::InvitePreview {
+                        server_name: state.server_name.clone(),
+                        member_count,
+                        online_count,
+                    }).await?;
+                }
+                None => {
+                    send_server_frame(send, &ServerFrame::InvitePreviewError {
+                        reason: "invalid".to_string(),
+                    }).await?;
+                }
+            }
+            anyhow::bail!("served invite preview (throwaway connection, not an auth failure)");
+        }
         _ => {
             let _ = send_server_frame(
                 send,
