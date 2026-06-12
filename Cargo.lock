@@ -682,6 +682,7 @@ dependencies = [
  "bytes",
  "clap",
  "farder-protocol",
+ "hex",
  "quinn",
  "rcgen",
  "rustls",
