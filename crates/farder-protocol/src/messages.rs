@@ -1,6 +1,27 @@
 use farder_crypto::identity::PublicKey;
 use serde::{Deserialize, Serialize};
 
+/// What the relay should query for an invite preview.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum PreviewTarget {
+    /// A server registered with THIS relay (relayed server).
+    Registered { server_id: Vec<u8> },
+    /// A direct server the relay should dial on the requester's behalf.
+    Direct { addr: String },
+}
+
+/// Result of an invite-preview lookup, as relayed back to the requester.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum PreviewOutcome {
+    Preview { server_name: String, member_count: u32, online_count: u32 },
+    /// The server answered: the code is invalid/expired/exhausted. Uniform on
+    /// purpose — invalid codes reveal nothing about the server.
+    Invalid,
+    /// Timeout, dial failure, SSRF refusal, rate-limit refusal, or an
+    /// undecodable answer.
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
     RelayConnect { destination_id: Vec<u8> },
@@ -19,6 +40,10 @@ pub enum Message {
     DmFileHeader { sender: PublicKey, encrypted_header: Vec<u8> },
     DmFileChunk { sender: PublicKey, encrypted_chunk: Vec<u8> },
     DmFileComplete { sender: PublicKey },
+    /// Ask the relay to fetch an invite preview on the requester's behalf
+    /// (relay fetch proxy, phase one). First message on a fresh connection.
+    ProxyInvitePreview { target: PreviewTarget, code: String },
+    ProxyInvitePreviewResult { outcome: PreviewOutcome },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -105,6 +130,45 @@ mod tests {
         let encoded = codec::encode(&Message::RelayRegistered).expect("encode failed");
         let decoded: Message = codec::decode(&encoded).expect("decode failed");
         assert!(matches!(decoded, Message::RelayRegistered));
+    }
+
+    #[test]
+    fn test_roundtrip_proxy_invite_preview() {
+        let msg = Message::ProxyInvitePreview {
+            target: PreviewTarget::Registered { server_id: vec![1u8; 32] },
+            code: "AbCd1234".to_string(),
+        };
+        let encoded = codec::encode(&msg).expect("encode failed");
+        match codec::decode::<Message>(&encoded).expect("decode failed") {
+            Message::ProxyInvitePreview { target: PreviewTarget::Registered { server_id }, code } => {
+                assert_eq!(server_id, vec![1u8; 32]);
+                assert_eq!(code, "AbCd1234");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let msg = Message::ProxyInvitePreview {
+            target: PreviewTarget::Direct { addr: "203.0.113.7:4433".to_string() },
+            code: "x".to_string(),
+        };
+        let encoded = codec::encode(&msg).unwrap();
+        assert!(matches!(
+            codec::decode::<Message>(&encoded).unwrap(),
+            Message::ProxyInvitePreview { target: PreviewTarget::Direct { .. }, .. }
+        ));
+
+        for outcome in [
+            PreviewOutcome::Preview { server_name: "The Spot".into(), member_count: 12, online_count: 3 },
+            PreviewOutcome::Invalid,
+            PreviewOutcome::Unavailable,
+        ] {
+            let msg = Message::ProxyInvitePreviewResult { outcome: outcome.clone() };
+            let encoded = codec::encode(&msg).unwrap();
+            match codec::decode::<Message>(&encoded).unwrap() {
+                Message::ProxyInvitePreviewResult { outcome: o } => assert_eq!(o, outcome),
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
     }
 
     #[test]

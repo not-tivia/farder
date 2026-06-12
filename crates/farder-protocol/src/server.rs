@@ -202,6 +202,9 @@ pub enum ClientFrame {
         id: u32,
         body: ServerRequest,
     },
+    /// Pre-auth invite preview: sent INSTEAD of Authenticate after the
+    /// Challenge. Valid-code-gated; the connection is throwaway.
+    GetInvitePreview { code: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -281,6 +284,9 @@ pub enum ServerFrame {
     AuthError { reason: String },
     Response { request_id: u32, body: ServerResponse },
     Event(ServerEvent),
+    InvitePreview { server_name: String, member_count: u32, online_count: u32 },
+    /// Uniform for invalid/expired/exhausted codes — reveals nothing.
+    InvitePreviewError { reason: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -416,6 +422,31 @@ mod tests {
     use super::*;
     use crate::codec;
     use farder_crypto::identity::Keypair;
+
+    #[test]
+    fn test_invite_preview_frames_roundtrip() {
+        let f = ClientFrame::GetInvitePreview { code: "AbCd1234".to_string() };
+        let bytes = codec::encode(&f).unwrap();
+        match codec::decode::<ClientFrame>(&bytes).unwrap() {
+            ClientFrame::GetInvitePreview { code } => assert_eq!(code, "AbCd1234"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let f = ServerFrame::InvitePreview { server_name: "The Spot".into(), member_count: 12, online_count: 3 };
+        let bytes = codec::encode(&f).unwrap();
+        match codec::decode::<ServerFrame>(&bytes).unwrap() {
+            ServerFrame::InvitePreview { server_name, member_count, online_count } => {
+                assert_eq!(server_name, "The Spot");
+                assert_eq!(member_count, 12);
+                assert_eq!(online_count, 3);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let f = ServerFrame::InvitePreviewError { reason: "invalid".into() };
+        let bytes = codec::encode(&f).unwrap();
+        assert!(matches!(codec::decode::<ServerFrame>(&bytes).unwrap(), ServerFrame::InvitePreviewError { .. }));
+    }
 
     #[test]
     fn test_roundtrip_client_frame_authenticate() {
