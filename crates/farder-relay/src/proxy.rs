@@ -40,7 +40,16 @@ pub fn is_global_ip(ip: IpAddr) -> bool {
                 )
         }
         IpAddr::V6(v6) => {
+            // Classic bypass: ::ffff:127.0.0.1 etc. — judge the embedded v4
+            // address by v4 rules. Also refuse 6to4/NAT64 prefixes that embed
+            // v4 addresses we can't easily judge.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_global_ip(std::net::IpAddr::V4(v4));
+            }
             let seg = v6.segments();
+            if seg[0] == 0x2002 || (seg[0] == 0x64 && seg[1] == 0xff9b) {
+                return false;
+            }
             !(v6.is_loopback()
                 || v6.is_multicast()
                 || v6.is_unspecified()
@@ -99,6 +108,11 @@ pub fn cache_key(target: &PreviewTarget, code: &str) -> (String, String) {
 /// Permissive client endpoint for dialing DIRECT farder servers — they use
 /// self-signed certs and the Farder client itself accepts them the same way,
 /// so this matches the ecosystem's existing trust model for direct connects.
+///
+/// NOTE: this binds `0.0.0.0:0` (v4-only), so IPv6 direct targets will fail
+/// the QUIC connect and collapse to `Unavailable` by construction today.
+/// `is_global_ip` must remain v6-correct anyway so the SSRF guard is sound
+/// if this is ever upgraded to a dual-stack (`[::]`) socket.
 pub fn outbound_endpoint() -> Result<Endpoint> {
     #[derive(Debug)]
     struct SkipVerify;
@@ -210,10 +224,14 @@ mod tests {
         for bad in [
             "127.0.0.1", "10.0.0.1", "172.16.5.5", "192.168.1.1", "169.254.0.7",
             "0.0.0.0", "100.64.0.1", "::1", "fe80::1", "fc00::1", "::",
+            // v4-mapped IPv6 (classic SSRF bypass)
+            "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:192.168.1.1",
+            // 6to4 (2002::/16) and NAT64 (64:ff9b::/96) tunnels
+            "2002:7f00:1::", "64:ff9b::7f00:1",
         ] {
             assert!(!is_global_ip(bad.parse().unwrap()), "{bad} must be refused");
         }
-        for good in ["203.0.113.7", "45.77.70.199", "2607:f8b0::1"] {
+        for good in ["203.0.113.7", "45.77.70.199", "2607:f8b0::1", "::ffff:8.8.8.8"] {
             assert!(is_global_ip(good.parse().unwrap()), "{good} must be allowed");
         }
     }

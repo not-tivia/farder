@@ -216,7 +216,12 @@ async fn handle_preview(
     let ip = client_conn.remote_address().ip();
     let now = std::time::Instant::now();
 
-    let outcome = if preview.limiter.try_admit(ip, now).is_none() {
+    // Invite codes are 8 chars today; anything huge is abuse — it would flow
+    // into the cache key and be forwarded to the target server. Uniform
+    // Invalid (not Unavailable): a hostile requester learns nothing.
+    let outcome = if code.len() > 256 {
+        PreviewOutcome::Invalid
+    } else if preview.limiter.try_admit(ip, now).is_none() {
         // Guard dropped immediately when admitted — we use it as a pure rate
         // limiter here, not a concurrency cap.
         PreviewOutcome::Unavailable
@@ -881,6 +886,19 @@ mod tests {
         let outcome = ask_preview(relay, PreviewTarget::Direct { addr: "127.0.0.1:4433".into() }, "GOOD").await;
         assert!(matches!(outcome, PreviewOutcome::Unavailable));
         assert!(started.elapsed() < Duration::from_secs(3), "refusal must be immediate, not a timeout");
+    }
+
+    #[tokio::test]
+    async fn oversized_code_is_rejected_as_invalid() {
+        use farder_protocol::messages::{PreviewOutcome, PreviewTarget};
+        let (relay, _state) = start_relay().await;
+        let id = vec![22u8; 16];
+        let _server = register_preview_server(relay, id.clone()).await;
+        let huge = "x".repeat(100_000);
+        let started = std::time::Instant::now();
+        let outcome = ask_preview(relay, PreviewTarget::Registered { server_id: id }, &huge).await;
+        assert!(matches!(outcome, PreviewOutcome::Invalid));
+        assert!(started.elapsed() < Duration::from_secs(3), "must reject without contacting the server");
     }
 
     #[tokio::test]
