@@ -271,6 +271,67 @@ pub fn get_server_avatar_override(server_id: String) -> Option<String> {
     Some(image_data_url(&data))
 }
 
+#[derive(serde::Serialize)]
+pub struct MemberProfileView {
+    pub avatar_data_url: Option<String>,
+    pub status: Option<String>,
+}
+
+/// Resolve a member's profile by its hash: disk cache first, otherwise fetch
+/// from the server and verify (signature, key match, hash match) before caching.
+/// LAZY ONLY — never call at module load (PIN-lock; see eb1511d lesson).
+#[tauri::command]
+pub async fn get_member_profile(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    public_key: String,
+    profile_hash: Option<String>,
+) -> Result<Option<MemberProfileView>, String> {
+    use farder_crypto::profile::{profile_hash_hex, SignedProfile};
+
+    let Some(hash) = profile_hash else { return Ok(None) };
+    // The hash is used as a filename — accept only 64 hex chars.
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let cache_dir = farder_data_dir().join("profile_cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let cache_path = cache_dir.join(&hash);
+
+    let bytes = match std::fs::read(&cache_path) {
+        Ok(b) => b,
+        Err(_) => {
+            let pk = parse_public_key(&public_key)?;
+            let response = bridge::send_request(
+                &state, &server_id,
+                ServerRequest::GetMemberProfile { member_key: pk.clone() },
+            ).await.map_err(|e| e.to_string())?;
+            let bytes = match response {
+                ServerResponse::MemberProfile { profile: Some(b), .. } => b,
+                ServerResponse::MemberProfile { profile: None, .. } => return Ok(None),
+                ServerResponse::Error { reason } => return Err(reason),
+                other => return Err(format!("unexpected response: {:?}", other)),
+            };
+            let signed = SignedProfile::from_bytes(&bytes).map_err(|e| e.to_string())?;
+            signed.verify().map_err(|_| "profile signature invalid".to_string())?;
+            if signed.data.public_key != pk {
+                return Err("profile public key mismatch".to_string());
+            }
+            if profile_hash_hex(&bytes) != hash {
+                return Err("profile hash mismatch".to_string());
+            }
+            let _ = std::fs::write(&cache_path, &bytes);
+            bytes
+        }
+    };
+
+    let signed = SignedProfile::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    Ok(Some(MemberProfileView {
+        avatar_data_url: signed.data.avatar.as_deref().map(image_data_url),
+        status: signed.data.status,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------

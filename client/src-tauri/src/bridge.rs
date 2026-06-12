@@ -82,6 +82,8 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:member_unbanned", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string() })),
         ServerEvent::MemberTimeoutChanged { public_key, until_ms, reason } =>
             app.emit("server:member_timeout_changed", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string(), "until_ms": until_ms, "reason": reason })),
+        ServerEvent::MemberProfileUpdated { public_key, profile_hash } =>
+            app.emit("server:member_profile_updated", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string(), "profile_hash": profile_hash })),
         ServerEvent::YouWereKicked =>
             app.emit("server:you_were_kicked", serde_json::json!({ "server_id": sid })),
         ServerEvent::YouWereBanned { reason } =>

@@ -134,6 +134,7 @@ fn main() {
             commands::set_server_avatar_override,
             commands::clear_server_avatar_override,
             commands::get_server_avatar_override,
+            commands::get_member_profile,
             commands::save_temp_audio,
             commands::start_recording,
             commands::stop_recording,
