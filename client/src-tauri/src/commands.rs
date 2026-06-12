@@ -438,7 +438,7 @@ pub async fn get_invite_preview(link: String) -> Result<InvitePreviewResult, Str
 
     // Cache first.
     {
-        let cache = preview_cache().lock().map_err(|e| e.to_string())?;
+        let cache = preview_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, hit)) = cache.get(&link) {
             if at.elapsed() < std::time::Duration::from_secs(60) {
                 return Ok(hit.clone());
@@ -501,7 +501,7 @@ pub async fn get_invite_preview(link: String) -> Result<InvitePreviewResult, Str
 
     preview_cache()
         .lock()
-        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|e| e.into_inner())
         .insert(link, (std::time::Instant::now(), result.clone()));
     Ok(result)
 }
