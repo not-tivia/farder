@@ -446,9 +446,14 @@ pub async fn get_invite_preview(link: String) -> Result<InvitePreviewResult, Str
         }
     }
 
+    // Web-wrapped invites (https://farder.gg/join/<b64>) — the form create_invite
+    // hands out — carry the real deep link inside; unwrap before parsing.
+    let effective: String =
+        crate::connection::unwrap_web_invite(&link).unwrap_or_else(|| link.clone());
+
     // Work out (relay endpoint, target, code) from the link form.
     let (relay_addr, relay_fp, target, code) =
-        if let Some(t) = crate::connection::parse_relay_target(&link) {
+        if let Some(t) = crate::connection::parse_relay_target(&effective) {
             if t.invite_token.is_empty() {
                 return Ok(none_result);
             }
@@ -458,7 +463,7 @@ pub async fn get_invite_preview(link: String) -> Result<InvitePreviewResult, Str
                 PreviewTarget::Registered { server_id: t.server_id.clone() },
                 t.invite_token.clone(),
             )
-        } else if let Some((addr, code)) = crate::connection::parse_direct_invite(&link) {
+        } else if let Some((addr, code)) = crate::connection::parse_direct_invite(&effective) {
             let Some((def_addr, def_fp)) = crate::default_relay::default_relay() else {
                 return Ok(none_result); // no default relay in this build → no direct previews
             };

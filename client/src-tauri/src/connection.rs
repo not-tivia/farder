@@ -243,11 +243,31 @@ pub fn parse_direct_invite(s: &str) -> Option<(String, String)> {
     if token.is_empty() || token.starts_with("setup:") {
         return None;
     }
-    // addr must look like host:port (same loose rule the frontend uses).
-    if !addr.contains(':') {
+    // addr must be host:port with a NUMERIC port — this also rejects scheme
+    // prefixes ("https:" from an unwrapped web URL) being mis-read as an
+    // address, which previously sent garbage Direct targets to the relay.
+    let (_, port) = addr.rsplit_once(':')?;
+    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     Some((addr.to_string(), token.to_string()))
+}
+
+/// Unwrap a `https://farder.gg/join/<base64url>` web invite into the inner
+/// deep link it carries — the form `create_invite` actually hands out and the
+/// frontend's parseInviteLink decodes. Returns None when `s` is not a
+/// farder.gg join link (callers fall back to parsing `s` itself).
+pub fn unwrap_web_invite(s: &str) -> Option<String> {
+    use base64::Engine;
+    let t = s.trim();
+    let rest = t
+        .strip_prefix("https://farder.gg/join/")
+        .or_else(|| t.strip_prefix("http://farder.gg/join/"))
+        .or_else(|| t.strip_prefix("farder.gg/join/"))?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(rest.as_bytes())
+        .ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 #[cfg(test)]
@@ -341,6 +361,24 @@ mod tests {
     }
 
     #[test]
+    fn web_invites_unwrap_to_their_inner_deep_link() {
+        use base64::Engine;
+        // Mirror create_invite's encoding of a compact relayd link.
+        let inner = format!("farder://relayd/{}/AbCd1234", hex::encode([7u8; 32]));
+        let wrapped = format!(
+            "https://farder.gg/join/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inner.as_bytes())
+        );
+        assert_eq!(unwrap_web_invite(&wrapped).as_deref(), Some(inner.as_str()));
+        // Scheme-less form too.
+        let bare = wrapped.strip_prefix("https://").unwrap();
+        assert_eq!(unwrap_web_invite(bare).as_deref(), Some(inner.as_str()));
+        // Non-join links and garbage payloads do not unwrap.
+        assert!(unwrap_web_invite("farder://relayd/aabb/code").is_none());
+        assert!(unwrap_web_invite("https://farder.gg/join/!!!notb64!!!").is_none());
+    }
+
+    #[test]
     fn direct_invite_links_parse_and_relay_or_tokenless_forms_do_not() {
         assert_eq!(
             parse_direct_invite("farder://203.0.113.7:4433/AbCd1234"),
@@ -354,6 +392,9 @@ mod tests {
         assert!(parse_direct_invite("203.0.113.7:4433").is_none());
         assert!(parse_direct_invite("farder://relay/1.2.3.4:1/aa/bb/code").is_none());
         assert!(parse_direct_invite("farder://relayd/aabb/code").is_none());
+        // Web URLs must never be mis-read as host:port (the port is not numeric).
+        assert!(parse_direct_invite("https://farder.gg/join/ZmFyZGVy").is_none());
+        assert!(parse_direct_invite("https://example.com/whatever").is_none());
         assert!(parse_direct_invite("AbCd1234").is_none());
     }
 }
