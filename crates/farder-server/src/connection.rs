@@ -1040,7 +1040,6 @@ pub(crate) async fn process_inbound_voice_frame(
 #[cfg(test)]
 mod voice_relay_tests {
     use super::*;
-    use bytes::Bytes;
 
     fn outer_audio_dgram(session: &[u8; 16], ciphertext: &[u8]) -> bytes::Bytes {
         use farder_protocol::media_datagram::OuterHeader;
