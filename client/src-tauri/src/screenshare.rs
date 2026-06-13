@@ -19,14 +19,19 @@ pub fn run_encode_loop(
     rx: Receiver<VideoFrame>,
     mut encoder: H264Encoder,
     stop: Arc<AtomicBool>,
+    force_keyframe: Arc<AtomicBool>,
     mut sink: impl FnMut(EncodedFrame),
 ) {
-    encoder.force_keyframe();
+    encoder.force_keyframe(); // first frame is always a keyframe
     while !stop.load(Ordering::Relaxed) {
         let frame = match rx.recv() {
             Ok(f) => f,
-            Err(_) => break, // capture ended
+            Err(_) => break,
         };
+        // A viewer joined mid-stream: emit a fresh IDR so they can start.
+        if force_keyframe.swap(false, Ordering::Relaxed) {
+            encoder.force_keyframe();
+        }
         match encoder.encode(&frame) {
             Ok(encoded) => sink(encoded),
             Err(e) => eprintln!("[screenshare] encode dropped a frame: {e}"),
@@ -85,7 +90,7 @@ pub async fn start_screenshare_preview(
                 return;
             }
         };
-        run_encode_loop(rx, encoder, stop, move |enc| {
+        run_encode_loop(rx, encoder, stop, Arc::new(AtomicBool::new(false)), move |enc| {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&enc.data);
             let _ = app_for_loop.emit(
@@ -134,7 +139,7 @@ mod tests {
         let stop_for_sink = stop.clone();
         let count_for_sink = count.clone();
         let collected_for_sink = collected.clone();
-        run_encode_loop(rx, encoder, stop.clone(), move |enc| {
+        run_encode_loop(rx, encoder, stop.clone(), Arc::new(AtomicBool::new(false)), move |enc| {
             collected_for_sink.lock().unwrap().push(enc);
             if count_for_sink.fetch_add(1, Ordering::Relaxed) + 1 >= 5 {
                 stop_for_sink.store(true, Ordering::Relaxed);
@@ -156,5 +161,32 @@ mod tests {
             }
         }
         assert!(decoded_any, "encoded preview frames must decode");
+    }
+
+    #[test]
+    fn force_keyframe_flag_injects_a_midstream_keyframe() {
+        let backend = MockDisplayBackend::new();
+        let rx = backend
+            .start_capture("mock-display", DisplayFormat { fps: 30, max_width: 160, max_height: 120 })
+            .unwrap();
+        let encoder = H264Encoder::new().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let force = Arc::new(AtomicBool::new(false));
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let keyframe_after_force = Arc::new(AtomicBool::new(false));
+        let stop_s = stop.clone();
+        let force_s = force.clone();
+        let count_s = count.clone();
+        let kaf = keyframe_after_force.clone();
+        run_encode_loop(rx, encoder, stop.clone(), force.clone(), move |enc| {
+            let n = count_s.fetch_add(1, Ordering::Relaxed);
+            // After a few frames, request a keyframe; the NEXT frame must be one.
+            if n == 3 { force_s.store(true, Ordering::Relaxed); }
+            if n == 4 && enc.is_keyframe { kaf.store(true, Ordering::Relaxed); }
+            if n + 1 >= 6 { stop_s.store(true, Ordering::Relaxed); }
+        });
+        backend.stop_capture().unwrap();
+        assert!(keyframe_after_force.load(Ordering::Relaxed), "frame after force flag must be a keyframe");
     }
 }
