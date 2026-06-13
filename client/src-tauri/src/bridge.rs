@@ -122,12 +122,9 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             Ok(())
         }
         ServerEvent::TrackEnabled { session_id, kind, .. } => {
-            if !matches!(kind, farder_protocol::server::TrackKind::Audio) {
-                return;
-            }
             // We need the peer's PublicKey to register/display them. The
             // StreamKeyOffer that precedes TrackEnabled carries `sender`,
-            // which the controller has already stashed in `peer_keys` keyed
+            // which the controller has already stashed in `peer_pubkeys` keyed
             // by session_id. Look it up there.
             if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
                 let ctrl = (*ctrl).clone();
@@ -146,13 +143,10 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             Ok(())
         }
         ServerEvent::TrackDisabled { session_id, kind, .. } => {
-            if !matches!(kind, farder_protocol::server::TrackKind::Audio) {
-                return;
-            }
             if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
                 let ctrl = (*ctrl).clone();
                 tokio::spawn(async move {
-                    ctrl.on_peer_track_disabled(session_id).await;
+                    ctrl.on_peer_track_disabled(session_id, kind).await;
                 });
             }
             Ok(())

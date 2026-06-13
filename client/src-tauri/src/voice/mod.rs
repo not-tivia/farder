@@ -444,6 +444,8 @@ struct ActiveCall {
     peer_keys: HashMap<(SessionId, TrackKind), [u8; 32]>,
     /// Per-session peer public key (set on the first key offer for the session).
     peer_pubkeys: HashMap<SessionId, PublicKey>,
+    /// Per-session video recv tasks (independent of the audio `peers` map).
+    video_peers: HashMap<SessionId, VideoPeerEntry>,
     /// session_id → (muted, deafened) learned from StreamJoined / StreamStateChanged.
     /// Seeds VoicePeer when the matching TrackEnabled registers the peer.
     peer_status: HashMap<SessionId, (bool, bool)>,
@@ -459,6 +461,12 @@ struct PeerEntry {
     pubkey: PublicKey,
     recv_handle: JoinHandle<()>,
     /// Held so the dispatcher's route stays valid for this peer.
+    #[allow(dead_code)]
+    datagram_tx: mpsc::UnboundedSender<Bytes>,
+}
+
+struct VideoPeerEntry {
+    recv_handle: JoinHandle<()>,
     #[allow(dead_code)]
     datagram_tx: mpsc::UnboundedSender<Bytes>,
 }
@@ -679,6 +687,7 @@ impl VoiceController {
                 peers: HashMap::new(),
                 peer_keys: HashMap::new(),
                 peer_pubkeys: HashMap::new(),
+                video_peers: HashMap::new(),
                 peer_status: HashMap::new(),
                 peer_volumes: config.peer_volumes.clone(),
                 gate_is_ptt: matches!(config.mode, VoiceMode::PushToTalk),
@@ -870,18 +879,23 @@ impl VoiceController {
         }
     }
 
-    /// Server announced a peer enabled an audio track. Spawn a RecvTask,
-    /// register a per-peer ring with the mixer, and register a dispatcher
-    /// route so inbound datagrams get to this peer.
+    /// Server announced a peer enabled a track. Dispatches to the audio or
+    /// video handler based on `kind`.
     pub async fn on_peer_track_enabled(
         &self,
         session_id: SessionId,
         peer_pubkey: PublicKey,
         kind: TrackKind,
     ) {
-        if !matches!(kind, TrackKind::Audio) {
-            return;
+        match kind {
+            TrackKind::Audio => self.on_peer_audio_track_enabled(session_id, peer_pubkey).await,
+            TrackKind::Video => self.on_peer_video_track_enabled(session_id, peer_pubkey).await,
         }
+    }
+
+    /// Spawn an audio RecvTask, register a per-peer ring with the mixer, and
+    /// register a dispatcher route so inbound datagrams get to this peer.
+    async fn on_peer_audio_track_enabled(&self, session_id: SessionId, peer_pubkey: PublicKey) {
         let mut inner = self.inner.lock().await;
         let deafened_flag = inner.deafened.clone();
         let call = match inner.active.as_mut() {
@@ -959,9 +973,69 @@ impl VoiceController {
             .emit("voice://state-changed", serde_json::to_value(&snap).unwrap_or_default());
     }
 
-    /// Peer disabled their audio track (mute) or otherwise stopped sending.
-    /// Tear down their recv task + dispatcher route, drop their ring.
-    pub async fn on_peer_track_disabled(&self, session_id: SessionId) {
+    /// Spawn a video recv task for the peer and register a dispatcher route
+    /// so inbound video datagrams get to this peer's recv task.
+    async fn on_peer_video_track_enabled(&self, session_id: SessionId, _peer_pubkey: PublicKey) {
+        let emitter = self.emitter.clone();
+        let mut inner = self.inner.lock().await;
+        let call = match inner.active.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if call.video_peers.contains_key(&session_id) {
+            return; // already running
+        }
+        let stream_key = match call.peer_keys.get(&(session_id, TrackKind::Video)) {
+            Some(k) => *k,
+            None => {
+                eprintln!("[voice] TrackEnabled(Video) for session with no video key; missing StreamKeyOffer(Video)?");
+                return;
+            }
+        };
+        let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
+        let dispatcher = call.server.dispatcher();
+        let tx_for_register = tx.clone();
+        tokio::spawn(async move {
+            dispatcher.register(session_id, TrackKind::Video, tx_for_register).await;
+        });
+
+        let session_hex = hex::encode(session_id);
+        let recv_handle = tokio::spawn(async move {
+            crate::voice::recv_video::run(
+                crate::voice::recv_video::RecvVideoConfig { session_id, stream_key, datagram_rx: rx },
+                move |v| {
+                    use base64::Engine;
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&v.data);
+                    emitter.emit(
+                        "voice://peer-video-frame",
+                        serde_json::json!({ "session": session_hex, "data": b64, "key": v.is_keyframe, "seq": v.seq }),
+                    );
+                },
+            )
+            .await;
+        });
+
+        call.video_peers.insert(session_id, VideoPeerEntry { recv_handle, datagram_tx: tx });
+    }
+
+    /// Peer disabled a track. For Video: tears down the video recv task +
+    /// dispatcher route. For Audio: tears down their recv task + dispatcher
+    /// route + drops their ring, then re-emits the full state snapshot.
+    pub async fn on_peer_track_disabled(&self, session_id: SessionId, kind: TrackKind) {
+        if matches!(kind, TrackKind::Video) {
+            let mut inner = self.inner.lock().await;
+            if let Some(call) = inner.active.as_mut() {
+                if let Some(entry) = call.video_peers.remove(&session_id) {
+                    entry.recv_handle.abort();
+                    let dispatcher = call.server.dispatcher();
+                    tokio::spawn(async move {
+                        dispatcher.unregister(&session_id, TrackKind::Video).await;
+                    });
+                }
+            }
+            return;
+        }
+        // Audio teardown: remove peer, ring, dispatcher route, and re-emit state.
         let snap = {
             let mut inner = self.inner.lock().await;
             let removed_pubkey: Option<PublicKey> = {
@@ -1001,7 +1075,7 @@ impl VoiceController {
     /// Peer left the stream entirely (different event from TrackDisabled but
     /// same controller-side cleanup).
     pub async fn on_peer_stream_left(&self, session_id: SessionId) {
-        self.on_peer_track_disabled(session_id).await;
+        self.on_peer_track_disabled(session_id, TrackKind::Audio).await;
     }
 
     /// A peer's StreamJoined arrived — remember their initial mute/deafen so
