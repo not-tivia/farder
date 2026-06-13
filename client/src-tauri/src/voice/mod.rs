@@ -1255,30 +1255,43 @@ impl VoiceController {
         // share so we can tear it down after releasing the lock (we can't drop the
         // lock while `call` borrows it). `bail` carries the error for that path.
         let mut share = Some(VideoShareState { stop, force_keyframe, backend, video_key, thread });
-        let bail: Option<&'static str> = {
+        // On a bail path we carry both the error message AND whether to disable
+        // the Video track during teardown. The track toggle is a single
+        // per-connection on/off (not refcounted), so we must only disable it when
+        // nobody else owns it — i.e. the call ended. On a lost start-share race
+        // the winning start legitimately enabled the track; disabling it here
+        // would clobber the winner's live share.
+        let bail: Option<(&'static str, bool)> = {
             let mut inner = self.inner.lock().await;
             match inner.active.as_mut() {
                 // Lost a concurrent-start race: another start already installed a
                 // video_share. Do NOT overwrite (that would leak theirs) — bail
-                // and tear down the share we just built.
-                Some(call) if call.video_share.is_some() => Some("already sharing your screen"),
+                // and tear down the share we just built. Leave the track enabled:
+                // it's the winner's, not ours.
+                Some(call) if call.video_share.is_some() => {
+                    Some(("already sharing your screen", false))
+                }
                 Some(call) => {
                     call.video_share = share.take();
                     None
                 }
-                // The call ended while we were starting.
-                None => Some("not in a voice channel"),
+                // The call ended while we were starting. Nobody else owns the
+                // track, so disable the one we enabled above.
+                None => Some(("not in a voice channel", true)),
             }
             // `inner` lock dropped here.
         };
-        if let Some(msg) = bail {
+        if let Some((msg, disable_track)) = bail {
             // `share` was not stored on a bail path, so the Option still owns it.
             if let Some(s) = share.take() {
                 shutdown_video_share(s);
             }
-            // We enabled the Video track above; best-effort disable so we don't
-            // leave it enabled with no share behind it.
-            let _ = server.disable_track(TrackKind::Video).await;
+            // We enabled the Video track above; best-effort disable it only when
+            // nobody else owns it (call ended), so we don't leave it enabled with
+            // no share behind it — but never clobber a race winner's track.
+            if disable_track {
+                let _ = server.disable_track(TrackKind::Video).await;
+            }
             return Err(msg.into());
         }
         Ok(())
