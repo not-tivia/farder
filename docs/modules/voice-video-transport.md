@@ -225,7 +225,7 @@ reassembled H.264 frame.
 | Field | Type | Description |
 |---|---|---|
 | `session` | `string` | Hex-encoded `session_id` of the sending peer (lower-case, 32 hex chars) |
-| `pubkey` | `string` | Sending peer's `PublicKey` rendered via `to_string()` — lets the viewer label/clean up the tile (Phase C2) |
+| `pubkey` | `string` | Sending peer's public key as `vk_` + 64 lowercase hex chars of the sender's 32-byte public key (matches `publicKeyToString()` in the frontend) — lets the viewer label/clean up the tile by identity (Phase C2) |
 | `data` | `string` | Base64-encoded H.264 Annex-B frame (SPS/PPS inline before IDR) |
 | `key` | `boolean` | `true` if this is an IDR/keyframe; `false` for delta frames |
 | `seq` | `number` | Frame sequence number from the inner header (u64, monotonically increasing) |

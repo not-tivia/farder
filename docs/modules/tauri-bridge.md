@@ -91,7 +91,7 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 
 **`voice://peer-video-frame` payload fields:**
 - `session` — Hex-encoded `session_id` of the sending peer (lower-case, 32 hex chars). Use this to route the frame to the correct per-peer `VideoDecoder` instance — one decoder per session, never shared.
-- `pubkey` — Sending peer's `PublicKey` rendered via `to_string()` (Phase C2). Lets the viewer label the tile and clean it up by identity rather than only by transient session id.
+- `pubkey` — Sending peer's public key as `vk_` + 64 lowercase hex chars of the sender's 32-byte public key (matches `publicKeyToString()` in the frontend). Lets the viewer label the tile and clean it up by identity rather than only by transient session id.
 - `data` — Base64-encoded H.264 Annex-B NAL byte stream. SPS/PPS are inline before each IDR. Configure the WebCodecs `VideoDecoder` WITHOUT a `description` (Annex-B input, not AVCC).
 - `key` — `true` if this is an IDR/keyframe. Gate delta frames until the first keyframe has been received (key-first invariant).
 - `seq` — Frame sequence number from the inner AEAD header (u64). Monotonically increasing per sender. Can be used to detect gaps and request a keyframe (Phase C2).
