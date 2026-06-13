@@ -1118,9 +1118,26 @@ impl VoiceController {
     /// A peer's StreamJoined arrived — remember their initial mute/deafen so
     /// it seeds the VoicePeer when their TrackEnabled registers them.
     pub async fn on_peer_stream_joined(&self, session_id: SessionId, muted: bool, deafened: bool) {
-        let mut inner = self.inner.lock().await;
-        if let Some(call) = inner.active.as_mut() {
-            call.peer_status.insert(session_id, (muted, deafened));
+        let reoffer = {
+            let mut inner = self.inner.lock().await;
+            match inner.active.as_mut() {
+                Some(call) => {
+                    call.peer_status.insert(session_id, (muted, deafened));
+                    // If we're sharing, re-offer the video key to everyone (the
+                    // new member is now in get_media_state) and force a keyframe
+                    // so they can start decoding immediately. Capture what we need
+                    // to offer AFTER releasing the lock (don't hold the inner lock
+                    // across the offer_video_key await).
+                    call.video_share.as_ref().map(|s| {
+                        s.force_keyframe.store(true, Ordering::Relaxed);
+                        (call.server.clone(), call.channel_id, s.video_key)
+                    })
+                }
+                None => None,
+            }
+        };
+        if let Some((server, channel_id, video_key)) = reoffer {
+            let _ = offer_video_key(&server, channel_id, &video_key).await;
         }
     }
 
@@ -1856,6 +1873,79 @@ mod controller_tests {
             .expect("peer present");
         assert!(peer.muted, "seeded mute must carry into the new VoicePeer");
         assert!(peer.deafened, "seeded deafen must carry into the new VoicePeer");
+    }
+
+    // When a viewer joins mid-share, on_peer_stream_joined must (a) re-offer the
+    // Video stream key so the late joiner can decrypt (the new member is now in
+    // get_media_state), and (b) set the force_keyframe flag so the encoder emits
+    // a fresh IDR the new viewer can start decoding from. Uses the mock display
+    // backend so it runs headless in WSL (same as the Task 3 share test).
+    #[tokio::test]
+    async fn on_peer_stream_joined_reoffers_video_key_and_forces_keyframe_mid_share() {
+        std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
+        let (ctrl, _emitter) = make_controller();
+
+        // One remote member already in the channel so start_screen_share wraps+
+        // offers the video key once.
+        let peer = VoiceMember {
+            public_key: Keypair::generate().public_key(),
+            display_name: "peer".into(),
+            joined_at: 0,
+        };
+        let server = FakeServerSession::new_with_members(vec![peer]);
+        ctrl.join(7, server.clone()).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240).await.unwrap();
+
+        // Exactly one Video offer so far (from start_screen_share).
+        assert_eq!(
+            server
+                .offered_kinds
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|k| **k == TrackKind::Video)
+                .count(),
+            1,
+            "precondition: one Video offer after start_screen_share"
+        );
+
+        // A new viewer joins the channel mid-share.
+        let new_sid: SessionId = [42u8; 16];
+        ctrl.on_peer_stream_joined(new_sid, false, false).await;
+
+        // (a) A SECOND Video offer must have been recorded (the late-joiner
+        // re-offer), so the new member can decrypt the stream.
+        assert_eq!(
+            server
+                .offered_kinds
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|k| **k == TrackKind::Video)
+                .count(),
+            2,
+            "joining mid-share must re-offer the Video key; offered={:?}",
+            server.offered_kinds.lock().unwrap()
+        );
+
+        // The seed map still got the new peer's mute/deafen (unchanged behavior).
+        // (b) force_keyframe must be set so the encoder emits a fresh IDR.
+        {
+            let inner = ctrl.inner.lock().await;
+            let call = inner.active.as_ref().expect("still in call");
+            assert_eq!(
+                call.peer_status.get(&new_sid),
+                Some(&(false, false)),
+                "peer_status seeding must still happen for the new peer"
+            );
+            let share = call.video_share.as_ref().expect("sharing");
+            assert!(
+                share.force_keyframe.load(Ordering::Relaxed),
+                "force_keyframe must be set when a viewer joins mid-share"
+            );
+        }
+
+        ctrl.leave().await.unwrap();
     }
 
     #[tokio::test]
