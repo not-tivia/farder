@@ -732,6 +732,13 @@ impl VoiceController {
                     d.unregister(&sid, TrackKind::Audio).await;
                 });
             }
+            for (sid, entry) in call.video_peers.drain() {
+                entry.recv_handle.abort();
+                let d = dispatcher.clone();
+                tokio::spawn(async move {
+                    d.unregister(&sid, TrackKind::Video).await;
+                });
+            }
             call.peer_rings.lock().expect("peer_rings poisoned").clear();
         }
 
