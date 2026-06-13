@@ -88,7 +88,22 @@ function loadBookIndex(): Promise<void> {
   return bookIndexLoadPromise;
 }
 
-function renderContent(text: string, memberNames: Record<string, string>, ownDisplayName: string | null) {
+// Capturing-group variant of INVITE_REGEX: split() keeps the matched links.
+// Fresh non-global tester per call below — a shared /g regex is stateful.
+const INVITE_SPLIT_REGEX = /((?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+)/gi;
+
+function isInviteLink(s: string): boolean {
+  return /^(?:(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+)$/i.test(s);
+}
+
+function copyInviteLink(link: string) {
+  navigator.clipboard?.writeText(link).then(
+    () => toast.success("Invite link copied"),
+    () => {},
+  );
+}
+
+function renderMentions(text: string, memberNames: Record<string, string>, ownDisplayName: string | null) {
   const parts = text.split(/(@\w+)/g);
   return parts.map((part, i) => {
     if (part.startsWith("@")) {
@@ -107,6 +122,31 @@ function renderContent(text: string, memberNames: Record<string, string>, ownDis
       }
     }
     return <span key={i}>{part}</span>;
+  });
+}
+
+function renderContent(text: string, memberNames: Record<string, string>, ownDisplayName: string | null) {
+  // Farder invite URLs display as a compact pill (the invite card below the
+  // message carries the details); clicking the pill copies the full link.
+  // The underlying message content is untouched — only the display changes.
+  const segments = text.split(INVITE_SPLIT_REGEX);
+  return segments.map((seg, si) => {
+    if (seg && isInviteLink(seg)) {
+      return (
+        <span
+          key={`pill-${si}`}
+          className="invite-link-pill"
+          title={seg}
+          onClick={(e) => {
+            e.stopPropagation();
+            copyInviteLink(seg);
+          }}
+        >
+          {"\u2709 Server invite"}
+        </span>
+      );
+    }
+    return <span key={`seg-${si}`}>{renderMentions(seg, memberNames, ownDisplayName)}</span>;
   });
 }
 

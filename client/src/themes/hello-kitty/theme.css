@@ -2686,3 +2686,21 @@ body {
   color: var(--xp-text-muted);
   margin: 2px 0;
 }
+
+/* Invite link pill (raw invite URLs render as this chip in message text) */
+.invite-link-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  margin: 0 2px;
+  border: 1.5px solid var(--xp-border);
+  border-radius: 10px;
+  background: var(--xp-panel-bg);
+  color: var(--xp-text-normal);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.invite-link-pill:hover {
+  border-color: var(--xp-blue);
+}
