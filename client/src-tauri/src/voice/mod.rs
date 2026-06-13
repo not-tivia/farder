@@ -452,6 +452,11 @@ struct ActiveCall {
     /// pubkey hex -> gain, snapshotted from settings at join. Seeds new peers.
     peer_volumes: HashMap<String, f32>,
     gate_is_ptt: bool,
+    /// Our own stream session id (from JoinStream). Video share seals frames
+    /// under this session, same as audio.
+    my_session_id: SessionId,
+    /// The channel we're in (for re-querying members on a late-joiner re-offer).
+    channel_id: u64,
     /// Connection-quality poller task; aborted on leave. `None` when no
     /// QUIC connection was supplied (e.g. tests).
     quality_poller: Option<JoinHandle<()>>,
@@ -691,6 +696,8 @@ impl VoiceController {
                 peer_status: HashMap::new(),
                 peer_volumes: config.peer_volumes.clone(),
                 gate_is_ptt: matches!(config.mode, VoiceMode::PushToTalk),
+                my_session_id: session_id,
+                channel_id,
                 quality_poller,
             });
             inner.state.clone()
