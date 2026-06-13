@@ -91,6 +91,134 @@ impl OuterHeader {
     }
 }
 
+use std::collections::HashMap;
+
+/// Split a sealed frame into one or more datagrams (each = outer header +
+/// payload slice). `max_payload` must be >= 1. A frame that fits in one
+/// datagram becomes a single `frag_count = 1` datagram.
+pub fn fragment(
+    track_kind: TrackKind,
+    session_id: &SessionId,
+    frame_id: u32,
+    sealed: &[u8],
+    max_payload: usize,
+) -> Vec<Vec<u8>> {
+    let max_payload = max_payload.max(1);
+    let frag_count = sealed.len().div_ceil(max_payload).max(1);
+    let frag_count_u16 = frag_count.min(u16::MAX as usize) as u16;
+    let mut out = Vec::with_capacity(frag_count);
+    for (i, chunk) in sealed.chunks(max_payload).enumerate() {
+        let mut buf = Vec::with_capacity(MEDIA_DGRAM_HEADER_LEN + chunk.len());
+        OuterHeader {
+            track_kind,
+            session_id: *session_id,
+            frame_id,
+            frag_index: i as u16,
+            frag_count: frag_count_u16,
+        }
+        .write_to(&mut buf);
+        buf.extend_from_slice(chunk);
+        out.push(buf);
+    }
+    // An empty sealed frame still produces one empty-payload datagram so the
+    // receiver completes it (chunks() yields nothing for an empty slice).
+    if out.is_empty() {
+        let mut buf = Vec::with_capacity(MEDIA_DGRAM_HEADER_LEN);
+        OuterHeader { track_kind, session_id: *session_id, frame_id, frag_index: 0, frag_count: 1 }
+            .write_to(&mut buf);
+        out.push(buf);
+    }
+    out
+}
+
+struct Partial {
+    frag_count: u16,
+    parts: Vec<Option<Vec<u8>>>,
+    received: u16,
+    touch: u64,
+}
+
+/// Reassembles datagrams of one peer-track into complete sealed frames.
+/// Drop-late / drop-incomplete: only the most-recently-touched `max_frames`
+/// in-progress frames are kept; older incomplete frames are evicted.
+pub struct Reassembler {
+    frames: HashMap<u32, Partial>,
+    max_frames: usize,
+    clock: u64,
+}
+
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self::with_capacity(4)
+    }
+}
+
+impl Reassembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(max_frames: usize) -> Self {
+        Self { frames: HashMap::new(), max_frames: max_frames.max(1), clock: 0 }
+    }
+
+    /// Number of in-progress (incomplete) frames currently buffered.
+    pub fn in_progress_len(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Feed one parsed datagram. Returns the completed sealed frame if this
+    /// datagram finished one. `header.frag_index < header.frag_count` is
+    /// guaranteed by `OuterHeader::parse`.
+    pub fn accept(&mut self, header: &OuterHeader, payload: &[u8]) -> Option<Vec<u8>> {
+        // Single-fragment fast path: no buffering.
+        if header.frag_count == 1 {
+            return Some(payload.to_vec());
+        }
+        self.clock += 1;
+        let now = self.clock;
+        let cap = header.frag_count as usize;
+
+        let entry = self.frames.entry(header.frame_id).or_insert_with(|| Partial {
+            frag_count: header.frag_count,
+            parts: vec![None; cap],
+            received: 0,
+            touch: now,
+        });
+
+        // A frag_count mismatch for the same frame_id means corruption/reuse —
+        // restart this frame's buffer.
+        if entry.frag_count != header.frag_count {
+            *entry = Partial { frag_count: header.frag_count, parts: vec![None; cap], received: 0, touch: now };
+        }
+        entry.touch = now;
+
+        let slot = &mut entry.parts[header.frag_index as usize];
+        if slot.is_none() {
+            *slot = Some(payload.to_vec());
+            entry.received += 1;
+        }
+
+        let done = entry.received == entry.frag_count;
+        if done {
+            let entry = self.frames.remove(&header.frame_id).unwrap();
+            let mut sealed = Vec::new();
+            for part in entry.parts {
+                sealed.extend_from_slice(&part.expect("all parts present when received == frag_count"));
+            }
+            return Some(sealed);
+        }
+
+        // Evict the least-recently-touched frame if over capacity.
+        if self.frames.len() > self.max_frames {
+            if let Some((&oldest, _)) = self.frames.iter().min_by_key(|(_, p)| p.touch) {
+                self.frames.remove(&oldest);
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +291,85 @@ mod tests {
         zero[22..24].copy_from_slice(&0u16.to_be_bytes()); // frag_index = 0
         zero[24..26].copy_from_slice(&0u16.to_be_bytes()); // frag_count = 0
         assert_eq!(OuterHeader::parse(&zero), Err(MediaDgramError::BadFragmentation));
+    }
+
+    #[test]
+    fn fragment_single_when_under_cap() {
+        let dgrams = fragment(TrackKind::Audio, &sid(), 5, b"small-sealed-frame", 1100);
+        assert_eq!(dgrams.len(), 1);
+        let (h, payload) = OuterHeader::parse(&dgrams[0]).unwrap();
+        assert_eq!(h.frag_count, 1);
+        assert_eq!(h.frag_index, 0);
+        assert_eq!(h.frame_id, 5);
+        assert_eq!(payload, b"small-sealed-frame");
+    }
+
+    #[test]
+    fn fragment_splits_when_over_cap() {
+        let sealed: Vec<u8> = (0..2500u32).map(|i| i as u8).collect();
+        let dgrams = fragment(TrackKind::Video, &sid(), 9, &sealed, 1000);
+        assert_eq!(dgrams.len(), 3); // ceil(2500 / 1000)
+        for (i, d) in dgrams.iter().enumerate() {
+            let (h, _) = OuterHeader::parse(d).unwrap();
+            assert_eq!(h.frag_count, 3);
+            assert_eq!(h.frag_index as usize, i);
+            assert_eq!(h.frame_id, 9);
+            assert_eq!(h.track_kind, TrackKind::Video);
+        }
+    }
+
+    fn feed(reasm: &mut Reassembler, dgram: &[u8]) -> Option<Vec<u8>> {
+        let (h, payload) = OuterHeader::parse(dgram).unwrap();
+        reasm.accept(&h, payload)
+    }
+
+    #[test]
+    fn reassemble_single_fragment_completes_immediately() {
+        let dgrams = fragment(TrackKind::Audio, &sid(), 1, b"abc", 1100);
+        let mut r = Reassembler::new();
+        assert_eq!(feed(&mut r, &dgrams[0]).as_deref(), Some(&b"abc"[..]));
+    }
+
+    #[test]
+    fn reassemble_multi_in_order() {
+        let sealed: Vec<u8> = (0..2500u32).map(|i| i as u8).collect();
+        let dgrams = fragment(TrackKind::Video, &sid(), 1, &sealed, 1000);
+        let mut r = Reassembler::new();
+        assert!(feed(&mut r, &dgrams[0]).is_none());
+        assert!(feed(&mut r, &dgrams[1]).is_none());
+        assert_eq!(feed(&mut r, &dgrams[2]), Some(sealed));
+    }
+
+    #[test]
+    fn reassemble_multi_out_of_order() {
+        let sealed: Vec<u8> = (0..2500u32).map(|i| (i * 3) as u8).collect();
+        let dgrams = fragment(TrackKind::Video, &sid(), 1, &sealed, 1000);
+        let mut r = Reassembler::new();
+        assert!(feed(&mut r, &dgrams[2]).is_none());
+        assert!(feed(&mut r, &dgrams[0]).is_none());
+        assert_eq!(feed(&mut r, &dgrams[1]), Some(sealed));
+    }
+
+    #[test]
+    fn reassemble_duplicate_fragment_is_idempotent() {
+        let sealed: Vec<u8> = (0..1500u32).map(|i| i as u8).collect();
+        let dgrams = fragment(TrackKind::Video, &sid(), 1, &sealed, 1000);
+        let mut r = Reassembler::new();
+        assert!(feed(&mut r, &dgrams[0]).is_none());
+        assert!(feed(&mut r, &dgrams[0]).is_none()); // duplicate, must not "complete"
+        assert_eq!(feed(&mut r, &dgrams[1]), Some(sealed));
+    }
+
+    #[test]
+    fn reassemble_incomplete_frame_is_evicted_not_leaked() {
+        // Start many frames, each missing a fragment; the buffer must stay bounded.
+        let mut r = Reassembler::with_capacity(4);
+        for frame_id in 0..100u32 {
+            let sealed: Vec<u8> = (0..1500u32).map(|i| i as u8).collect();
+            let dgrams = fragment(TrackKind::Video, &sid(), frame_id, &sealed, 1000);
+            // feed only fragment 0 — never completes
+            assert!(feed(&mut r, &dgrams[0]).is_none());
+        }
+        assert!(r.in_progress_len() <= 4, "reassembly buffer must stay bounded");
     }
 }
