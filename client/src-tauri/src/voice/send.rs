@@ -14,6 +14,8 @@ use crate::voice::gate::GateMode;
 use crate::voice::SessionId;
 use bytes::Bytes;
 use farder_crypto::media::seal_audio_packet_to_wire;
+use farder_protocol::media_datagram::{fragment, DEFAULT_MAX_DGRAM_PAYLOAD};
+use farder_protocol::server::TrackKind;
 use std::sync::{atomic::{AtomicBool, AtomicU32, Ordering}, mpsc, Arc, Mutex};
 use tokio::sync::watch;
 
@@ -51,6 +53,7 @@ pub fn run(
         }
     };
     let mut seq: u64 = 0;
+    let mut frame_id: u32 = 0;
     let mut speaking = false;
     let mut consec_below: u32 = 0;
     let mut frame_count: u64 = 0;
@@ -138,8 +141,17 @@ pub fn run(
             }
         };
 
-        (cfg.datagram_sink)(Bytes::from(frame_bytes));
+        for dgram in fragment(
+            TrackKind::Audio,
+            &cfg.session_id,
+            frame_id,
+            &frame_bytes,
+            DEFAULT_MAX_DGRAM_PAYLOAD,
+        ) {
+            (cfg.datagram_sink)(Bytes::from(dgram));
+        }
         seq = seq.saturating_add(1);
+        frame_id = frame_id.wrapping_add(1);
     }
 }
 
@@ -230,5 +242,26 @@ mod tests {
         run(cfg, muted, speak_tx);
 
         assert_eq!(sink.lock().unwrap().len(), 0, "Ptt(false) must block all frames");
+    }
+
+    #[test]
+    fn emitted_datagrams_have_the_outer_header_and_route_to_session() {
+        use farder_protocol::media_datagram::OuterHeader;
+        use farder_protocol::server::TrackKind;
+        let (cfg, tx, sink) = build_cfg();
+        let session = cfg.session_id;
+        let muted = Arc::new(AtomicBool::new(false));
+        let (speak_tx, _speak_rx) = watch::channel(false);
+
+        tx.send(make_sine_chunk(440.0, OPUS_FRAME_SAMPLES_MONO)).unwrap();
+        drop(tx);
+        run(cfg, muted, speak_tx);
+
+        let emitted = sink.lock().unwrap();
+        assert_eq!(emitted.len(), 1, "one chunk -> one datagram (audio is single-fragment)");
+        let (header, _payload) = OuterHeader::parse(&emitted[0]).expect("valid outer header");
+        assert_eq!(header.track_kind, TrackKind::Audio);
+        assert_eq!(header.session_id, session);
+        assert_eq!(header.frag_count, 1);
     }
 }
