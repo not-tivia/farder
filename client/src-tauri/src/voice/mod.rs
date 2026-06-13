@@ -736,6 +736,14 @@ impl VoiceController {
             // Best-effort protocol shutdown; ignore errors so leave is
             // robust against a broken connection.
             let _ = call.server.disable_track(TrackKind::Audio).await;
+            // Tear down any active screen share BEFORE the call is dropped, so
+            // the capture+encode thread ends and stops emitting datagrams on the
+            // old connection. Dropping VideoShareState does NOT stop it; we must
+            // set stop + call stop_capture explicitly (the whole stream is going
+            // away so we don't bother disabling the Video track here).
+            if let Some(s) = call.video_share.take() {
+                shutdown_video_share(s);
+            }
             let _ = call.server.leave_stream().await;
             // Stop the audio pipeline (closes channels → send/mixer exit).
             if let Some(p) = call.pipeline.take() {
@@ -1231,13 +1239,47 @@ impl VoiceController {
             });
         });
 
-        // Enable the Video track (after capture is up).
-        server.enable_track(TrackKind::Video).await?;
+        // Enable the Video track (after capture is up). If this fails the thread
+        // is already running with no handle stored, so tear it down before
+        // returning rather than leaking the capture+encode thread + backend.
+        if let Err(e) = server.enable_track(TrackKind::Video).await {
+            stop.store(true, Ordering::Relaxed);
+            let _ = backend.stop_capture();
+            return Err(e);
+        }
 
-        // Record share state.
-        let mut inner = self.inner.lock().await;
-        if let Some(call) = inner.active.as_mut() {
-            call.video_share = Some(VideoShareState { stop, force_keyframe, backend, video_key, thread });
+        // Record share state. Decide the outcome while borrowing `inner`; only
+        // hand the just-built share to the call when we're actually storing it.
+        // Held in an Option so the borrow checker tracks the move via `.take()`
+        // (unconditional from its view): on a bail path the Option still owns the
+        // share so we can tear it down after releasing the lock (we can't drop the
+        // lock while `call` borrows it). `bail` carries the error for that path.
+        let mut share = Some(VideoShareState { stop, force_keyframe, backend, video_key, thread });
+        let bail: Option<&'static str> = {
+            let mut inner = self.inner.lock().await;
+            match inner.active.as_mut() {
+                // Lost a concurrent-start race: another start already installed a
+                // video_share. Do NOT overwrite (that would leak theirs) — bail
+                // and tear down the share we just built.
+                Some(call) if call.video_share.is_some() => Some("already sharing your screen"),
+                Some(call) => {
+                    call.video_share = share.take();
+                    None
+                }
+                // The call ended while we were starting.
+                None => Some("not in a voice channel"),
+            }
+            // `inner` lock dropped here.
+        };
+        if let Some(msg) = bail {
+            // `share` was not stored on a bail path, so the Option still owns it.
+            if let Some(s) = share.take() {
+                shutdown_video_share(s);
+            }
+            // We enabled the Video track above; best-effort disable so we don't
+            // leave it enabled with no share behind it.
+            let _ = server.disable_track(TrackKind::Video).await;
+            return Err(msg.into());
         }
         Ok(())
     }
@@ -1252,14 +1294,24 @@ impl VoiceController {
             }
         };
         if let Some(s) = share {
-            s.stop.store(true, Ordering::Relaxed);
-            let _ = s.backend.stop_capture();
+            shutdown_video_share(s);
             if let Some(server) = server {
                 let _ = server.disable_track(TrackKind::Video).await;
             }
         }
         Ok(())
     }
+}
+
+/// Tear down a screen share: stop the capture+encode thread by setting `stop`
+/// AND calling `backend.stop_capture()` (which drops the capture sender so
+/// `rx.recv()` errors and `run_encode_loop` breaks). Both are required — see
+/// the module note: dropping a VideoShareState stops nothing on its own.
+/// (Video track disable is handled by the caller where it has the server; on a
+/// full call teardown the whole stream is going away so the track dies with it.)
+fn shutdown_video_share(s: VideoShareState) {
+    s.stop.store(true, Ordering::Relaxed);
+    let _ = s.backend.stop_capture();
 }
 
 /// Wrap `video_key` for every current channel member (except self) and offer it.
@@ -1272,9 +1324,13 @@ async fn offer_video_key(server: &Arc<dyn ServerSession>, channel_id: u64, video
         .iter()
         .filter(|m| m.public_key.as_bytes() != &my_pk)
         .filter_map(|m| {
-            farder_crypto::media::wrap_stream_key_for_peer(video_key, &my_sk, m.public_key.as_bytes())
-                .ok()
-                .map(|w| (m.public_key.clone(), w))
+            match farder_crypto::media::wrap_stream_key_for_peer(video_key, &my_sk, m.public_key.as_bytes()) {
+                Ok(w) => Some((m.public_key.clone(), w)),
+                Err(e) => {
+                    eprintln!("[voice] failed to wrap video key for a peer: {e}");
+                    None
+                }
+            }
         })
         .collect();
     if !wrapped.is_empty() {
@@ -1930,6 +1986,55 @@ mod controller_tests {
             server.disabled_kinds.lock().unwrap()
         );
 
+        ctrl.leave().await.unwrap();
+    }
+
+    // Regression for C1: leave() must tear down an active screen share, not
+    // leak it. The MockDisplayBackend exposes no public stop-capture counter,
+    // so the strongest available observable is behavioral: after start +
+    // leave() while sharing, the share state must be gone — proven by (a)
+    // stop_screen_share() being a clean no-op (nothing left to stop) and (b) a
+    // fresh start_screen_share after rejoining succeeding rather than hitting
+    // stale "already sharing" state. A leaked share (video_share not taken on
+    // leave) would carry over and a fresh start would have to overwrite it.
+    #[tokio::test]
+    async fn leave_while_sharing_tears_down_share_no_stale_state() {
+        std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
+        let (ctrl, _emitter) = make_controller();
+
+        let peer = VoiceMember {
+            public_key: Keypair::generate().public_key(),
+            display_name: "peer".into(),
+            joined_at: 0,
+        };
+        let server = FakeServerSession::new_with_members(vec![peer]);
+        ctrl.join(7, server.clone()).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240).await.unwrap();
+
+        // Leave WITHOUT first calling stop_screen_share: leave() must shut down
+        // the active share itself.
+        ctrl.leave().await.unwrap();
+        assert!(ctrl.state().await.channel_id.is_none(), "left the call");
+
+        // No active call → stop_screen_share is a clean no-op (the share was
+        // already torn down by leave(), not still dangling).
+        ctrl.stop_screen_share().await.unwrap();
+
+        // Rejoin and start again: must succeed (no stale "already sharing"
+        // VideoShareState carried over from the previous call).
+        ctrl.join(7, server.clone()).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240)
+            .await
+            .expect("fresh start after leave must succeed; stale share would block it");
+
+        // And starting a SECOND time in this fresh call is still correctly
+        // rejected (proving the new share installed cleanly, not the old one).
+        assert!(
+            ctrl.start_screen_share(15, 320, 240).await.is_err(),
+            "second start in the fresh call must still error while sharing"
+        );
+
+        ctrl.stop_screen_share().await.unwrap();
         ctrl.leave().await.unwrap();
     }
 }
