@@ -112,11 +112,11 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:role_deleted", serde_json::json!({ "server_id": sid, "role_id": role_id })),
         ServerEvent::RoleUpdated { role } =>
             app.emit("server:role_updated", serde_json::json!({ "server_id": sid, "role": role })),
-        ServerEvent::StreamKeyOffer { session_id, sender, wrapped_key, .. } => {
+        ServerEvent::StreamKeyOffer { session_id, sender, kind, wrapped_key, .. } => {
             if let Some(ctrl) = app.try_state::<Arc<crate::voice::VoiceController>>() {
                 let ctrl = (*ctrl).clone();
                 tokio::spawn(async move {
-                    ctrl.on_stream_key_offer(session_id, sender, wrapped_key).await;
+                    ctrl.on_stream_key_offer(session_id, kind, sender, wrapped_key).await;
                 });
             }
             Ok(())

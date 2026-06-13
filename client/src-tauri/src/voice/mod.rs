@@ -437,10 +437,11 @@ struct ActiveCall {
     pipeline: Option<Box<dyn VoicePipelineHandle>>,
     peer_rings: crate::voice::mixer::PeerRings,
     peers: HashMap<SessionId, PeerEntry>,
-    /// Per-peer stream keys delivered via StreamKeyOffer events.
-    /// Stored separately from `peers` because the offer typically arrives
-    /// before the matching TrackEnabled.
-    peer_keys: HashMap<SessionId, ([u8; 32], PublicKey)>,
+    /// Per-(peer-session, track) stream keys delivered via StreamKeyOffer events.
+    /// A peer's session has independent audio + video keys.
+    peer_keys: HashMap<(SessionId, TrackKind), [u8; 32]>,
+    /// Per-session peer public key (set on the first key offer for the session).
+    peer_pubkeys: HashMap<SessionId, PublicKey>,
     /// session_id → (muted, deafened) learned from StreamJoined / StreamStateChanged.
     /// Seeds VoicePeer when the matching TrackEnabled registers the peer.
     peer_status: HashMap<SessionId, (bool, bool)>,
@@ -539,7 +540,7 @@ impl VoiceController {
         inner
             .active
             .as_ref()
-            .and_then(|c| c.peer_keys.get(session_id).map(|(_, pk)| pk.clone()))
+            .and_then(|c| c.peer_pubkeys.get(session_id).cloned())
     }
 
     /// Back-compat join used by existing tests: Open Mic, no saved volumes.
@@ -675,6 +676,7 @@ impl VoiceController {
                 peer_rings,
                 peers: HashMap::new(),
                 peer_keys: HashMap::new(),
+                peer_pubkeys: HashMap::new(),
                 peer_status: HashMap::new(),
                 peer_volumes: config.peer_volumes.clone(),
                 gate_is_ptt: matches!(config.mode, VoiceMode::PushToTalk),
@@ -840,6 +842,7 @@ impl VoiceController {
     pub async fn on_stream_key_offer(
         &self,
         session_id: SessionId,
+        kind: TrackKind,
         sender_pubkey: PublicKey,
         wrapped_key: Vec<u8>,
     ) {
@@ -856,7 +859,8 @@ impl VoiceController {
             sender_pubkey.as_bytes(),
         ) {
             Ok(key) => {
-                call.peer_keys.insert(session_id, (key, sender_pubkey));
+                call.peer_keys.insert((session_id, kind), key);
+                call.peer_pubkeys.insert(session_id, sender_pubkey);
             }
             Err(e) => {
                 eprintln!("[voice] unwrap_stream_key: {e}");
@@ -885,11 +889,11 @@ impl VoiceController {
         if call.peers.contains_key(&session_id) {
             return; // already running
         }
-        let stream_key = match call.peer_keys.get(&session_id) {
-            Some((k, _)) => *k,
+        let stream_key = match call.peer_keys.get(&(session_id, TrackKind::Audio)) {
+            Some(k) => *k,
             None => {
                 eprintln!(
-                    "[voice] TrackEnabled for unknown session_id; missing StreamKeyOffer?"
+                    "[voice] TrackEnabled(Audio) for unknown session; missing StreamKeyOffer?"
                 );
                 return;
             }
@@ -1479,7 +1483,7 @@ mod controller_tests {
             our_kp.public_key().as_bytes(),
         )
         .unwrap();
-        ctrl.on_stream_key_offer([0xAA; 16], peer_kp.public_key(), wrapped)
+        ctrl.on_stream_key_offer([0xAA; 16], TrackKind::Audio, peer_kp.public_key(), wrapped)
             .await;
         // No public accessor to peek peer_keys, but if we got here without
         // panicking, the unwrap path is exercised.
@@ -1514,7 +1518,7 @@ mod controller_tests {
         .unwrap();
         // We register with `pk` as the peer pubkey for the UI VoicePeer; the
         // key offer's sender pubkey only matters for the unwrap round-trip.
-        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped)
+        ctrl.on_stream_key_offer(sid, TrackKind::Audio, peer_kp.public_key(), wrapped)
             .await;
         ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio)
             .await;
@@ -1551,7 +1555,7 @@ mod controller_tests {
             our_kp.public_key().as_bytes(),
         )
         .unwrap();
-        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped)
+        ctrl.on_stream_key_offer(sid, TrackKind::Audio, peer_kp.public_key(), wrapped)
             .await;
         ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio)
             .await;
@@ -1587,7 +1591,7 @@ mod controller_tests {
             our_kp.public_key().as_bytes(),
         )
         .unwrap();
-        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped)
+        ctrl.on_stream_key_offer(sid, TrackKind::Audio, peer_kp.public_key(), wrapped)
             .await;
         ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio)
             .await;
@@ -1646,7 +1650,7 @@ mod controller_tests {
             our_kp.public_key().as_bytes(),
         )
         .unwrap();
-        ctrl.on_stream_key_offer(sid, peer_kp.public_key(), wrapped).await;
+        ctrl.on_stream_key_offer(sid, TrackKind::Audio, peer_kp.public_key(), wrapped).await;
         ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::Audio).await;
 
         assert_eq!(live_gain_for(&ctrl, &sid).await, Some(0.5), "seeded from saved volume");
