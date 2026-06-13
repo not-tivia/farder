@@ -1012,7 +1012,7 @@ impl VoiceController {
 
     /// Spawn a video recv task for the peer and register a dispatcher route
     /// so inbound video datagrams get to this peer's recv task.
-    async fn on_peer_video_track_enabled(&self, session_id: SessionId, _peer_pubkey: PublicKey) {
+    async fn on_peer_video_track_enabled(&self, session_id: SessionId, peer_pubkey: PublicKey) {
         let emitter = self.emitter.clone();
         let mut inner = self.inner.lock().await;
         let call = match inner.active.as_mut() {
@@ -1037,6 +1037,7 @@ impl VoiceController {
         });
 
         let session_hex = hex::encode(session_id);
+        let peer_hex = peer_pubkey.to_string();
         let recv_handle = tokio::spawn(async move {
             crate::voice::recv_video::run(
                 crate::voice::recv_video::RecvVideoConfig { session_id, stream_key, datagram_rx: rx },
@@ -1045,7 +1046,7 @@ impl VoiceController {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&v.data);
                     emitter.emit(
                         "voice://peer-video-frame",
-                        serde_json::json!({ "session": session_hex, "data": b64, "key": v.is_keyframe, "seq": v.seq }),
+                        serde_json::json!({ "session": session_hex, "pubkey": peer_hex, "data": b64, "key": v.is_keyframe, "seq": v.seq }),
                     );
                 },
             )

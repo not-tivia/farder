@@ -82,7 +82,7 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 | Event name | Emitted by | Payload | Consumer |
 |---|---|---|---|
 | `"screenshare:frame"` | `start_screenshare_preview` encode thread (`screenshare.rs`) | `{ data: string, key: boolean, ts: number }` | `ScreensharePreview.tsx` → WebCodecs `VideoDecoder` → `<canvas>` |
-| `"voice://peer-video-frame"` | Video recv task inside `on_peer_video_track_enabled` (`voice/mod.rs`) | `{ session: string, data: string, key: boolean, seq: number }` | Phase C2 per-peer video tile → WebCodecs `VideoDecoder` |
+| `"voice://peer-video-frame"` | Video recv task inside `on_peer_video_track_enabled` (`voice/mod.rs`) | `{ session: string, pubkey: string, data: string, key: boolean, seq: number }` | Phase C2 per-peer video tile → WebCodecs `VideoDecoder` |
 
 **`screenshare:frame` payload fields:**
 - `data` — Base64-encoded Annex-B H.264 frame. Annex-B means start-code-prefixed NALs (`0x00 0x00 0x00 0x01`), with SPS/PPS inline before each IDR. The WebCodecs `VideoDecoder` must be configured WITHOUT a `description` to accept Annex-B input.
@@ -91,6 +91,7 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 
 **`voice://peer-video-frame` payload fields:**
 - `session` — Hex-encoded `session_id` of the sending peer (lower-case, 32 hex chars). Use this to route the frame to the correct per-peer `VideoDecoder` instance — one decoder per session, never shared.
+- `pubkey` — Sending peer's `PublicKey` rendered via `to_string()` (Phase C2). Lets the viewer label the tile and clean it up by identity rather than only by transient session id.
 - `data` — Base64-encoded H.264 Annex-B NAL byte stream. SPS/PPS are inline before each IDR. Configure the WebCodecs `VideoDecoder` WITHOUT a `description` (Annex-B input, not AVCC).
 - `key` — `true` if this is an IDR/keyframe. Gate delta frames until the first keyframe has been received (key-first invariant).
 - `seq` — Frame sequence number from the inner AEAD header (u64). Monotonically increasing per sender. Can be used to detect gaps and request a keyframe (Phase C2).

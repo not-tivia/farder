@@ -2987,6 +2987,23 @@ pub async fn voice_leave(
 }
 
 #[tauri::command]
+pub async fn voice_start_screen_share(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+    fps: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Result<(), String> {
+    voice.start_screen_share(fps, max_width, max_height).await
+}
+
+#[tauri::command]
+pub async fn voice_stop_screen_share(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+) -> Result<(), String> {
+    voice.stop_screen_share().await
+}
+
+#[tauri::command]
 pub async fn voice_set_mute(
     voice: State<'_, Arc<crate::voice::VoiceController>>,
     muted: bool,

@@ -163,6 +163,8 @@ fn main() {
             commands::get_voice_state,
             commands::voice_join,
             commands::voice_leave,
+            commands::voice_start_screen_share,
+            commands::voice_stop_screen_share,
             commands::voice_set_mute,
             commands::voice_set_deafen,
             commands::voice_get_state,

@@ -464,6 +464,14 @@ export async function voiceLeave(): Promise<void> {
   return invoke("voice_leave");
 }
 
+export async function voiceStartScreenShare(fps: number, maxWidth: number, maxHeight: number): Promise<void> {
+  return invoke<void>("voice_start_screen_share", { fps, maxWidth, maxHeight });
+}
+
+export async function voiceStopScreenShare(): Promise<void> {
+  return invoke<void>("voice_stop_screen_share");
+}
+
 export async function voiceSetMute(muted: boolean): Promise<void> {
   return invoke("voice_set_mute", { muted });
 }

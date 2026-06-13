@@ -917,6 +917,34 @@ releases audio devices.
 
 ---
 
+### `voice_start_screen_share(voice, fps, max_width, max_height) -> Result<(), String>`
+
+**What it does:** starts capturing the screen and transmitting it as a video
+track in the active call. Delegates to `VoiceController::start_screen_share`,
+which opens the capture source, spawns the H.264 encode loop at the given `fps`
+(downscaled to fit `max_width`/`max_height`), and offers the video stream key to
+peers. Errors if not in a call.
+**Side effects:** spawns capture + encode tasks; mutates `VoiceController` state;
+causes peers to receive `voice://peer-video-frame` events (now tagged with the
+sharer's `pubkey`).
+**Connects to:** `VoiceController::start_screen_share`.
+**invoke name:** `"voice_start_screen_share"` → `voiceStartScreenShare()`
+(args `{ fps, maxWidth, maxHeight }`; Tauri maps snake_case Rust params to
+camelCase JS keys).
+
+---
+
+### `voice_stop_screen_share(voice) -> Result<(), String>`
+
+**What it does:** stops the local screen-share: aborts the capture/encode tasks
+and disables the video track so peers tear down their video tiles.
+**Side effects:** mutates `VoiceController` state; peers receive a
+track-disabled signal.
+**Connects to:** `VoiceController::stop_screen_share`.
+**invoke name:** `"voice_stop_screen_share"` → `voiceStopScreenShare()`.
+
+---
+
 ### `voice_set_mute(voice, muted) -> Result<(), String>`
 
 **What it does:** mutes or unmutes the local microphone (stops sending encoded
