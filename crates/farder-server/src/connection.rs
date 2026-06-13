@@ -995,13 +995,15 @@ pub(crate) async fn process_inbound_voice_frame(
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
     };
     let raw: &[u8] = &bytes;
-    let channel_id_opt: Option<u64> = if raw.len() >= crate::media_stream::MEDIA_FRAME_HEADER_LEN {
-        let mut sid = [0u8; crate::media_stream::SESSION_ID_LEN];
-        sid.copy_from_slice(&raw[12..12 + crate::media_stream::SESSION_ID_LEN]);
-        let channels = state.media.channels.read().unwrap();
-        channels.iter().find(|(_ch, st)| st.sessions.contains_key(&sid)).map(|(ch, _)| *ch)
-    } else {
-        None
+    let channel_id_opt: Option<u64> = match farder_protocol::media_datagram::OuterHeader::parse(raw) {
+        Ok((header, _payload)) => {
+            let channels = state.media.channels.read().unwrap();
+            channels
+                .iter()
+                .find(|(_ch, st)| st.sessions.contains_key(&header.session_id))
+                .map(|(ch, _)| *ch)
+        }
+        Err(_) => None,
     };
     let channel_id = match channel_id_opt {
         Some(c) => c,
@@ -1039,6 +1041,22 @@ pub(crate) async fn process_inbound_voice_frame(
 mod voice_relay_tests {
     use super::*;
     use bytes::Bytes;
+
+    fn outer_audio_dgram(session: &[u8; 16], ciphertext: &[u8]) -> bytes::Bytes {
+        use farder_protocol::media_datagram::OuterHeader;
+        use farder_protocol::server::TrackKind;
+        let mut v = Vec::new();
+        OuterHeader {
+            track_kind: TrackKind::Audio,
+            session_id: *session,
+            frame_id: 0,
+            frag_index: 0,
+            frag_count: 1,
+        }
+        .write_to(&mut v);
+        v.extend_from_slice(ciphertext);
+        bytes::Bytes::from(v)
+    }
 
     async fn loopback_pair() -> (quinn::Connection, quinn::Connection) {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1079,7 +1097,7 @@ mod voice_relay_tests {
     #[tokio::test]
     async fn relayed_fanout_tags_recipient_handle() {
         use crate::state::{ServerState, VoiceSink};
-        use crate::media_stream::{build_media_frame, ServerSession, MediaConfig, StreamState};
+        use crate::media_stream::{ServerSession, MediaConfig, StreamState};
         use farder_protocol::server::TrackKind;
         use std::collections::{HashMap, HashSet};
         use std::sync::Arc;
@@ -1121,8 +1139,8 @@ mod voice_relay_tests {
             vc.insert(bob_conn, VoiceSink::Relayed { relay: relay_tx_side.clone(), handle: h_bob });
         }
 
-        let frame = build_media_frame(TrackKind::Audio, 1, &alice_session, b"opaque-ct");
-        process_inbound_voice_frame(&state, alice_conn, Bytes::from(frame.clone()), &config).await;
+        let frame = outer_audio_dgram(&alice_session, b"opaque-ct");
+        process_inbound_voice_frame(&state, alice_conn, frame.clone(), &config).await;
 
         let got = tokio::time::timeout(std::time::Duration::from_secs(5), relay_rx.read_datagram())
             .await.expect("no datagram emitted").unwrap();

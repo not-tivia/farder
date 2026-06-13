@@ -189,7 +189,7 @@ impl Default for MediaConfig {
     fn default() -> Self {
         Self {
             audio_max_bps: 64_000,
-            video_max_bps: 2_000_000,
+            video_max_bps: 8_000_000,
         }
     }
 }
@@ -223,12 +223,12 @@ pub fn on_frame_ingress(
     raw: &[u8],
     now_ms: u64,
 ) -> IngressDecision {
-    let frame = match parse_media_frame(raw) {
-        Ok(f) => f,
-        Err(e) => return IngressDecision::Drop(DropReason::ParseError(e)),
+    let (header, _payload) = match farder_protocol::media_datagram::OuterHeader::parse(raw) {
+        Ok(h) => h,
+        Err(_e) => return IngressDecision::Drop(DropReason::ParseError(MediaFrameError::TooShort)),
     };
 
-    let session = match state.sessions.get_mut(&frame.session_id) {
+    let session = match state.sessions.get_mut(&header.session_id) {
         Some(s) => s,
         None => return IngressDecision::Drop(DropReason::UnknownSession),
     };
@@ -236,28 +236,27 @@ pub fn on_frame_ingress(
     if session.connection_pk != *sending_connection_pk {
         return IngressDecision::Drop(DropReason::SessionConnectionMismatch);
     }
-    if !session.active_tracks.contains(&frame.kind) {
+    if !session.active_tracks.contains(&header.track_kind) {
         return IngressDecision::Drop(DropReason::TrackNotEnabled);
     }
 
-    // Per-track token bucket lookup (lazy-init on first frame of a kind).
-    let cap = match frame.kind {
+    let cap = match header.track_kind {
         TrackKind::Audio => config.audio_max_bps,
         TrackKind::Video => config.video_max_bps,
     };
-    let bucket = session.buckets.entry(frame.kind).or_insert_with(|| TokenBucket::new(cap));
+    let bucket = session.buckets.entry(header.track_kind).or_insert_with(|| TokenBucket::new(cap));
 
     if !bucket.try_consume(raw.len() as u64) {
         return IngressDecision::Drop(DropReason::BandwidthCap);
     }
 
-    match frame.kind {
+    match header.track_kind {
         TrackKind::Audio => session.last_audio_frame_ms = Some(now_ms),
         TrackKind::Video => session.last_video_frame_ms = Some(now_ms),
     }
 
     let channel_id = session.channel_id;
-    let sender_session = frame.session_id;
+    let sender_session = header.session_id;
     let recipients: Vec<SessionId> = state.sessions.iter()
         .filter_map(|(sid, s)| {
             if *sid != sender_session
@@ -358,6 +357,24 @@ mod tests {
 
     fn sample_session() -> SessionId {
         [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    }
+
+    use farder_protocol::media_datagram::OuterHeader;
+
+    /// Build a single-fragment outer media datagram carrying `ciphertext`
+    /// (the wire format the server now routes on).
+    fn outer_dgram(kind: TrackKind, session: &SessionId, ciphertext: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        OuterHeader {
+            track_kind: kind,
+            session_id: *session,
+            frame_id: 0,
+            frag_index: 0,
+            frag_count: 1,
+        }
+        .write_to(&mut v);
+        v.extend_from_slice(ciphertext);
+        v
     }
 
     #[test]
@@ -470,7 +487,7 @@ mod tests {
         let mut state = StreamState::new();
         let config = MediaConfig::default();
         let bogus = [99u8; 16];
-        let frame = build_media_frame(TrackKind::Audio, 1, &bogus, b"x");
+        let frame = outer_dgram(TrackKind::Audio, &bogus, b"x");
         match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Drop(DropReason::UnknownSession) => {}
             _ => panic!("expected UnknownSession drop"),
@@ -483,7 +500,7 @@ mod tests {
         let config = MediaConfig::default();
         let session = [1u8; 16];
         install_session(&mut state, session, [1u8; 32], 100, true);
-        let frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
+        let frame = outer_dgram(TrackKind::Audio, &session, b"x");
         match on_frame_ingress(&mut state, &config, &[2u8; 32], &frame, 0) {
             IngressDecision::Drop(DropReason::SessionConnectionMismatch) => {}
             _ => panic!("expected SessionConnectionMismatch drop"),
@@ -496,7 +513,7 @@ mod tests {
         let config = MediaConfig::default();
         let session = [1u8; 16];
         install_session(&mut state, session, [1u8; 32], 100, false); // no audio
-        let frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
+        let frame = outer_dgram(TrackKind::Audio, &session, b"x");
         match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Drop(DropReason::TrackNotEnabled) => {}
             _ => panic!("expected TrackNotEnabled drop"),
@@ -513,7 +530,7 @@ mod tests {
         install_session(&mut state, sender, [1u8; 32], 100, true);
         install_session(&mut state, other, [2u8; 32], 100, true);
         install_session(&mut state, other_channel, [3u8; 32], 999, true);
-        let frame = build_media_frame(TrackKind::Audio, 1, &sender, b"x");
+        let frame = outer_dgram(TrackKind::Audio, &sender, b"x");
         match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Forward { recipients } => {
                 assert_eq!(recipients, vec![other]);
@@ -531,7 +548,7 @@ mod tests {
         install_session(&mut state, sender, [1u8; 32], 100, true);
         install_session(&mut state, other, [2u8; 32], 100, true);
         state.deafened.insert(other);
-        let frame = build_media_frame(TrackKind::Audio, 1, &sender, b"x");
+        let frame = outer_dgram(TrackKind::Audio, &sender, b"x");
         match on_frame_ingress(&mut state, &config, &[1u8; 32], &frame, 0) {
             IngressDecision::Forward { recipients } => assert!(recipients.is_empty()),
             _ => panic!("expected Forward"),
@@ -624,12 +641,11 @@ mod tests {
 
         // Alice builds an audio frame. The ciphertext bytes here are opaque
         // (representing what the AEAD would produce in real flow).
-        let frame = build_media_frame(
-            TrackKind::Audio, 1, &alice_session, b"opaque-ciphertext-bytes",
-        );
+        let frame = outer_dgram(TrackKind::Audio, &alice_session, b"opaque-ciphertext-bytes");
 
-        // The 28-byte header MUST NOT contain Alice's pubkey anywhere.
-        let header = &frame[..MEDIA_FRAME_HEADER_LEN];
+        // The outer header MUST NOT contain Alice's pubkey anywhere.
+        use farder_protocol::media_datagram::MEDIA_DGRAM_HEADER_LEN;
+        let header = &frame[..MEDIA_DGRAM_HEADER_LEN];
         let alice_pk_bytes = alice_pk.as_bytes();
         for window_start in 0..header.len().saturating_sub(32) {
             assert_ne!(
@@ -678,7 +694,7 @@ mod tests {
         });
 
         // Frame for audio -- dropped because Audio isn't enabled yet.
-        let audio_frame = build_media_frame(TrackKind::Audio, 1, &session, b"x");
+        let audio_frame = outer_dgram(TrackKind::Audio, &session, b"x");
         match on_frame_ingress(&mut state, &config, &conn, &audio_frame, 0) {
             IngressDecision::Drop(DropReason::TrackNotEnabled) => {}
             _ => panic!("expected TrackNotEnabled drop for audio"),
@@ -694,7 +710,7 @@ mod tests {
         }
 
         // Video frame still dropped -- Video not yet enabled.
-        let video_frame = build_media_frame(TrackKind::Video, 1, &session, b"y");
+        let video_frame = outer_dgram(TrackKind::Video, &session, b"y");
         match on_frame_ingress(&mut state, &config, &conn, &video_frame, 0) {
             IngressDecision::Drop(DropReason::TrackNotEnabled) => {}
             _ => panic!("expected TrackNotEnabled drop for video"),
