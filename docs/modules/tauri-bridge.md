@@ -74,6 +74,22 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `MediaLeft` | `server:voice_left` | `channel_id, public_key` | `VOICE_LEFT` (roster) |
 | `StreamCallIncoming` / `StreamCallEnded` | — (no-op) | — | DM-call signaling; no UI yet |
 
+## Local events (not from the server — emitted directly by Tauri commands)
+
+These events are emitted by Tauri commands (not routed through `dispatch_event`)
+and consumed by frontend components rather than `useServerEvents.ts`.
+
+| Event name | Emitted by | Payload | Consumer |
+|---|---|---|---|
+| `"screenshare:frame"` | `start_screenshare_preview` encode thread (`screenshare.rs`) | `{ data: string, key: boolean, ts: number }` | `ScreensharePreview.tsx` → WebCodecs `VideoDecoder` → `<canvas>` |
+
+**`screenshare:frame` payload fields:**
+- `data` — Base64-encoded Annex-B H.264 frame. Annex-B means start-code-prefixed NALs (`0x00 0x00 0x00 0x01`), with SPS/PPS inline before each IDR. The WebCodecs `VideoDecoder` must be configured WITHOUT a `description` to accept Annex-B input.
+- `key` — `true` if the frame is an IDR or I keyframe. The consumer must not decode delta frames (`key: false`) until the first keyframe has been received.
+- `ts` — Capture timestamp in **milliseconds** (monotonic since capture started). The WebCodecs API expects `EncodedVideoChunk.timestamp` in **microseconds**; multiply by 1000 before passing to the decoder.
+
+---
+
 ## Events routed to the VoiceController (not emitted to the UI)
 
 These spawn a task that calls a `VoiceController` method instead of emitting a

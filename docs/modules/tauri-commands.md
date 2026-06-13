@@ -1547,6 +1547,60 @@ rewrites `servers.json`.
 
 ---
 
+## Group 24 — Screenshare preview (`screenshare.rs`)
+
+These commands start and stop the Phase B local capture→encode→emit loopback.
+No server connection is needed. See `docs/modules/screenshare-capture-codec.md`
+for the full design reference.
+
+---
+
+### `start_screenshare_preview(app, fps, max_width, max_height) -> Result<(), String>`
+
+**What it does:** starts a local screen-capture and H.264 encode loop. Picks the
+first available display source from the platform backend (Windows Graphics
+Capture on Windows; mock gradient frames on other platforms). Spawns a dedicated
+thread that constructs an `H264Encoder` (which is `!Send` and must stay on its
+own thread), then continuously captures frames, encodes them to Annex-B H.264,
+and emits each as a `screenshare:frame` Tauri event with a base64 payload.
+Forces a keyframe at loop start so a fresh WebCodecs decoder can begin decoding
+immediately.
+
+**Parameters:**
+- `fps` — requested frame rate; passed to `DisplayFormat` (advisory for the WGC backend).
+- `max_width`, `max_height` — advisory max frame dimensions; WGC captures at native resolution in Phase B; downscaling is Phase C.
+
+**Returns:** `Ok(())` once the capture and encode thread are running.
+**Errors:**
+- `"a screenshare preview is already running"` — only one preview at a time.
+- Encoder init failure (pre-flight `H264Encoder::new()` check).
+- Backend `start_capture` failure (no capture sources, bad format, WGC API error).
+
+**Side effects:** calls `make_display_backend()` and `backend.start_capture()`;
+stores the `ActivePreview` in a process-global static slot; spawns one
+`std::thread` (the encode loop); emits `screenshare:frame` events until stopped.
+
+**Connects to:** `ScreensharePreview.tsx` via the `screenshare:frame` event.
+**invoke name:** `"start_screenshare_preview"` → `startScreensharePreview(fps, maxWidth, maxHeight)`.
+
+---
+
+### `stop_screenshare_preview() -> Result<(), String>`
+
+**What it does:** stops the active preview. Sets the encode loop's stop flag
+(causing `run_encode_loop` to exit on its next iteration) and calls
+`backend.stop_capture()` (which tears down the WGC session or joins the mock
+generator thread). Idempotent — calling when no preview is running is a no-op.
+
+**Returns:** `Ok(())` always (unless the internal mutex is poisoned).
+**Side effects:** takes `ActivePreview` from the static slot; sets the `AtomicBool`
+stop flag; calls `backend.stop_capture()`. After this returns, the encode thread
+will exit and no further `screenshare:frame` events will be emitted.
+
+**invoke name:** `"stop_screenshare_preview"` → `stopScreensharePreview()`.
+
+---
+
 ## State it owns
 
 | Field / variable | Type | What it tracks, when it's mutated |
@@ -1566,6 +1620,7 @@ rewrites `servers.json`.
 | `~/.farder/profile_overrides/<safe_server_id>.img` | disk | Per-server avatar override (raw image bytes); written by `set_server_avatar_override`, cleared by `clear_server_avatar_override` |
 | `~/.farder/profile_cache/<hash>` | disk | Verified signed-profile blobs keyed by SHA-256 hash; written by `get_member_profile` on a network fetch; corrupt entries auto-deleted |
 | `~/.farder/pushed_profiles.json` | disk | Map of `server_id → last successfully pushed profile hash`; owned by `profile_sync.rs` |
+| `ACTIVE` (screenshare) | `OnceLock<Mutex<Option<ActivePreview>>>` (static in `screenshare.rs`) | The single active preview (stop flag + backend); set by `start_screenshare_preview`, cleared by `stop_screenshare_preview` |
 
 ## Integration map
 
@@ -1588,6 +1643,9 @@ rewrites `servers.json`.
 - **`tauri-bridge.ts`** — every command's typed TypeScript wrapper; the
   `invoke("X")` strings here must match the Rust function names and the
   `generate_handler!` entries in `main.rs`.
+- **`screenshare.rs`** (`DisplayBackend`, `H264Encoder`, `run_encode_loop`) — called by
+  `start_screenshare_preview` / `stop_screenshare_preview`; see
+  `docs/modules/screenshare-capture-codec.md`.
 
 ## Known gotchas
 

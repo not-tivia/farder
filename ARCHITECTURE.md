@@ -77,6 +77,15 @@ route on the cleartext outer header and never decrypt — the AEAD-sealed inner
 frame (`farder-crypto::media`) is the unchanged security boundary carried as the
 payload. See `docs/modules/media-datagram.md` for the full reference.
 
+**Screensharing (Phase B — local loopback):** Windows Graphics Capture (`display_wgc.rs`,
+`windows-capture` 2.0.0) grabs RGBA frames from the selected monitor; `H264Encoder`
+(`video_encoder.rs`, openh264) converts them to Annex-B H.264 at 3 Mbps / 30 fps;
+the encode loop (`screenshare.rs`) emits each encoded frame as a base64 Tauri event
+(`screenshare:frame`); and `ScreensharePreview.tsx` decodes them via the WebCodecs
+`VideoDecoder` API and paints a canvas. Phase B is a local loopback — no networking.
+Phase C will carry the encoded video over the Phase A datagram transport.
+See `docs/modules/screenshare-capture-codec.md` for the full reference.
+
 ## Relay as fetch proxy (invite previews)
 
 The relay doubles as a **privacy fetch proxy** for invite previews (and,
