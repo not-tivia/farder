@@ -25,6 +25,9 @@ export interface UseVoice {
   connectionQuality: { rttMs: number; lossPct: number } | null;
   peerVolume: (pubkey: string) => number;
   setPeerVolume: (pubkey: string, v: number) => Promise<void>;
+  isSharing: boolean;
+  startShare: () => Promise<void>;
+  stopShare: () => Promise<void>;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -49,6 +52,7 @@ export function useVoice(): UseVoice {
   const [connectionQuality, setConnectionQuality] =
     useState<{ rttMs: number; lossPct: number } | null>(null);
   const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>({});
+  const [isSharing, setIsSharing] = useState(false);
 
   const applyState = useCallback((s: api.VoiceState) => {
     const n = normalize(s);
@@ -61,6 +65,7 @@ export function useVoice(): UseVoice {
       setLocalSpeaking(false);
       setTransmitting(false);
       setConnectionQuality(null);
+      setIsSharing(false);
     }
   }, []);
 
@@ -88,6 +93,15 @@ export function useVoice(): UseVoice {
     return () => { cleanupRan = true; unlisten.forEach((u) => u()); };
   }, [applyState]);
 
+  const startShare = useCallback(async () => {
+    await api.voiceStartScreenShare(30, 1280, 720);
+    setIsSharing(true);
+  }, []);
+  const stopShare = useCallback(async () => {
+    try { await api.voiceStopScreenShare(); } catch {}
+    setIsSharing(false);
+  }, []);
+
   const join = useCallback((serverId: string, channelId: number) => api.voiceJoin(serverId, channelId), []);
   const leave = useCallback(() => api.voiceLeave(), []);
   const setMute = useCallback((m: boolean) => api.voiceSetMute(m), []);
@@ -112,5 +126,5 @@ export function useVoice(): UseVoice {
     await api.voiceSetPeerVolume(pubkey, clamped);
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare };
 }

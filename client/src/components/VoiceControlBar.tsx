@@ -73,6 +73,12 @@ export default function VoiceControlBar({ voice, channelName, selfInitial, onDis
           aria-pressed={voice.deafened}
           onClick={() => voice.setDeafen(!voice.deafened)}
         ><span>&#x1F3A7;</span></button>
+        <button
+          className={`vcb-btn${voice.isSharing ? " active" : ""}`}
+          title={voice.isSharing ? "Stop sharing your screen" : "Share your screen"}
+          aria-pressed={voice.isSharing}
+          onClick={() => { void (voice.isSharing ? voice.stopShare() : voice.startShare()); }}
+        ><span>&#x1F5A5;</span></button>
         <button className="vcb-btn leave" title="Disconnect" onClick={() => (onDisconnect ? onDisconnect() : voice.leave())}><span>&#x2716;</span></button>
       </div>
       <div className="vcb-e2e"><span>&#x1F512;</span> End-to-end encrypted</div>
