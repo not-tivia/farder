@@ -96,6 +96,10 @@ use std::collections::HashMap;
 /// Split a sealed frame into one or more datagrams (each = outer header +
 /// payload slice). `max_payload` must be >= 1. A frame that fits in one
 /// datagram becomes a single `frag_count = 1` datagram.
+///
+/// Precondition: `sealed.len() <= max_payload * u16::MAX` (i.e. at most 65535
+/// fragments). Real media frames are far below this; violating it is a bug
+/// (debug-asserted) and yields aliased fragment indices in release.
 pub fn fragment(
     track_kind: TrackKind,
     session_id: &SessionId,
@@ -105,6 +109,11 @@ pub fn fragment(
 ) -> Vec<Vec<u8>> {
     let max_payload = max_payload.max(1);
     let frag_count = sealed.len().div_ceil(max_payload).max(1);
+    debug_assert!(
+        frag_count <= u16::MAX as usize,
+        "sealed frame too large to fragment: {} fragments exceeds u16::MAX (frame {} bytes, max_payload {})",
+        frag_count, sealed.len(), max_payload
+    );
     let frag_count_u16 = frag_count.min(u16::MAX as usize) as u16;
     let mut out = Vec::with_capacity(frag_count);
     for (i, chunk) in sealed.chunks(max_payload).enumerate() {
@@ -170,6 +179,11 @@ impl Reassembler {
     /// Feed one parsed datagram. Returns the completed sealed frame if this
     /// datagram finished one. `header.frag_index < header.frag_count` is
     /// guaranteed by `OuterHeader::parse`.
+    ///
+    /// # Panics
+    /// Panics if `header.frag_index >= header.frag_count`. Datagrams produced
+    /// by `OuterHeader::parse` always satisfy this; only hand-constructed
+    /// headers can violate it.
     pub fn accept(&mut self, header: &OuterHeader, payload: &[u8]) -> Option<Vec<u8>> {
         // Single-fragment fast path: no buffering.
         if header.frag_count == 1 {
@@ -371,5 +385,44 @@ mod tests {
             assert!(feed(&mut r, &dgrams[0]).is_none());
         }
         assert!(r.in_progress_len() <= 4, "reassembly buffer must stay bounded");
+    }
+
+    #[test]
+    fn fragment_empty_sealed_yields_one_empty_payload_datagram() {
+        let dgrams = fragment(TrackKind::Audio, &sid(), 1, b"", 1100);
+        assert_eq!(dgrams.len(), 1);
+        let (h, payload) = OuterHeader::parse(&dgrams[0]).unwrap();
+        assert_eq!(h.frag_count, 1);
+        assert!(payload.is_empty());
+        // And it round-trips through the reassembler to an empty frame.
+        let mut r = Reassembler::new();
+        assert_eq!(feed(&mut r, &dgrams[0]).as_deref(), Some(&b""[..]));
+    }
+
+    #[test]
+    fn fragment_coerces_zero_max_payload_to_one() {
+        // max_payload 0 must not divide-by-zero; it's coerced to 1 -> one datagram per byte.
+        let dgrams = fragment(TrackKind::Video, &sid(), 1, b"abc", 0);
+        assert_eq!(dgrams.len(), 3);
+        for (i, d) in dgrams.iter().enumerate() {
+            let (h, payload) = OuterHeader::parse(d).unwrap();
+            assert_eq!(h.frag_count, 3);
+            assert_eq!(h.frag_index as usize, i);
+            assert_eq!(payload.len(), 1);
+        }
+    }
+
+    #[test]
+    fn reassemble_frag_count_mismatch_restarts_cleanly() {
+        // Same frame_id reused with a different frag_count must reset the buffer
+        // (no panic, no stale completion).
+        let sealed_a: Vec<u8> = (0..2500u32).map(|i| i as u8).collect();   // 3 frags @1000
+        let sealed_b: Vec<u8> = (0..1500u32).map(|i| (i + 1) as u8).collect(); // 2 frags @1000
+        let a = fragment(TrackKind::Video, &sid(), 7, &sealed_a, 1000);
+        let b = fragment(TrackKind::Video, &sid(), 7, &sealed_b, 1000); // same frame_id, fewer frags
+        let mut r = Reassembler::new();
+        assert!(feed(&mut r, &a[0]).is_none());            // buffers under frag_count=3
+        assert!(feed(&mut r, &b[0]).is_none());            // mismatch -> reset to frag_count=2
+        assert_eq!(feed(&mut r, &b[1]), Some(sealed_b));   // completes the NEW frame cleanly
     }
 }
