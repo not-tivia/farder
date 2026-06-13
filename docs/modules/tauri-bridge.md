@@ -82,11 +82,20 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 | Event name | Emitted by | Payload | Consumer |
 |---|---|---|---|
 | `"screenshare:frame"` | `start_screenshare_preview` encode thread (`screenshare.rs`) | `{ data: string, key: boolean, ts: number }` | `ScreensharePreview.tsx` → WebCodecs `VideoDecoder` → `<canvas>` |
+| `"voice://peer-video-frame"` | Video recv task inside `on_peer_video_track_enabled` (`voice/mod.rs`) | `{ session: string, data: string, key: boolean, seq: number }` | Phase C2 per-peer video tile → WebCodecs `VideoDecoder` |
 
 **`screenshare:frame` payload fields:**
 - `data` — Base64-encoded Annex-B H.264 frame. Annex-B means start-code-prefixed NALs (`0x00 0x00 0x00 0x01`), with SPS/PPS inline before each IDR. The WebCodecs `VideoDecoder` must be configured WITHOUT a `description` to accept Annex-B input.
 - `key` — `true` if the frame is an IDR or I keyframe. The consumer must not decode delta frames (`key: false`) until the first keyframe has been received.
 - `ts` — Capture timestamp in **milliseconds** (monotonic since capture started). The WebCodecs API expects `EncodedVideoChunk.timestamp` in **microseconds**; multiply by 1000 before passing to the decoder.
+
+**`voice://peer-video-frame` payload fields:**
+- `session` — Hex-encoded `session_id` of the sending peer (lower-case, 32 hex chars). Use this to route the frame to the correct per-peer `VideoDecoder` instance — one decoder per session, never shared.
+- `data` — Base64-encoded H.264 Annex-B NAL byte stream. SPS/PPS are inline before each IDR. Configure the WebCodecs `VideoDecoder` WITHOUT a `description` (Annex-B input, not AVCC).
+- `key` — `true` if this is an IDR/keyframe. Gate delta frames until the first keyframe has been received (key-first invariant).
+- `seq` — Frame sequence number from the inner AEAD header (u64). Monotonically increasing per sender. Can be used to detect gaps and request a keyframe (Phase C2).
+
+This event is emitted per decrypted video frame by the controller's video recv task (one task per peer, spawned by `on_peer_video_track_enabled`). It is NOT emitted by the server bridge — the frame is decrypted on the receiver, then forwarded to the webview. See `docs/modules/voice-video-transport.md` for the full transport reference.
 
 ---
 
@@ -97,9 +106,11 @@ webview event. The controller then emits its own `voice://*` events.
 
 | `ServerEvent` | Controller call | Effect |
 |---|---|---|
-| `StreamKeyOffer` | `on_stream_key_offer(session_id, sender, wrapped_key)` | stash the peer's wrapped per-call key |
-| `TrackEnabled` (Audio) | `on_peer_track_enabled(session_id, pk, kind)` | register the peer's audio ring (pk looked up via `peer_pubkey_for`) |
-| `TrackDisabled` (Audio) | `on_peer_track_disabled(session_id)` | drop the peer's ring |
+| `StreamKeyOffer` | `on_stream_key_offer(session_id, kind, sender, wrapped_key)` | unwrap and stash the peer's wrapped per-call key (keyed by `(session_id, kind)`) |
+| `TrackEnabled` (Audio) | `on_peer_track_enabled(session_id, pk, TrackKind::Audio)` | register the peer's audio ring (pk looked up via `peer_pubkey_for`) |
+| `TrackEnabled` (Video) | `on_peer_track_enabled(session_id, pk, TrackKind::Video)` | register dispatcher route + spawn video recv task; emits `voice://peer-video-frame` per frame |
+| `TrackDisabled` (Audio) | `on_peer_track_disabled(session_id, TrackKind::Audio)` | drop the peer's ring and audio recv task |
+| `TrackDisabled` (Video) | `on_peer_track_disabled(session_id, TrackKind::Video)` | abort the video recv task and unregister the dispatcher route |
 | `StreamLeft` | `on_peer_stream_left(session_id)` | remove the peer |
 | `TrackActivityChanged` | `on_peer_activity(session_id, kind, active)` | speaking indicator |
 | `StreamStateChanged` | `on_peer_stream_state(session_id, muted, deafened)` | peer mute/deafen |

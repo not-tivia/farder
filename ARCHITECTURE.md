@@ -83,8 +83,19 @@ payload. See `docs/modules/media-datagram.md` for the full reference.
 the encode loop (`screenshare.rs`) emits each encoded frame as a base64 Tauri event
 (`screenshare:frame`); and `ScreensharePreview.tsx` decodes them via the WebCodecs
 `VideoDecoder` API and paints a canvas. Phase B is a local loopback — no networking.
-Phase C will carry the encoded video over the Phase A datagram transport.
 See `docs/modules/screenshare-capture-codec.md` for the full reference.
+
+**Screensharing (Phase C1 — video transport):** inbound media datagrams now route per
+`(session_id, track_kind)` so a single peer session can carry independent audio and
+video frame streams. Audio and video are independently keyed (separate AEAD keys per
+`TrackKind`), sealed, fragmented, and reassembled using the same Phase A
+`media_datagram` layer. On the receiver, each decrypted video frame is forwarded to the
+webview as the `voice://peer-video-frame` Tauri event (`{ session, data: base64 Annex-B
+H.264, key, seq }`), where Phase C2's per-peer video tile will decode it via WebCodecs.
+The server is unchanged — it routes video datagrams identically to audio. The audio
+path is unaffected. Phase C2 (the share trigger, video-key offer, per-peer video tile,
+keyframe-on-join, late-joiner re-offer) is not yet implemented.
+See `docs/modules/voice-video-transport.md` for the full transport reference.
 
 ## Relay as fetch proxy (invite previews)
 
