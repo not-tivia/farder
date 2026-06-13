@@ -96,7 +96,7 @@ pub struct JoinConfig {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// MediaInboundDispatcher (unchanged from Task 6).
+// MediaInboundDispatcher — re-keyed by (session_id, track_kind) in Phase C1.
 // ────────────────────────────────────────────────────────────────────────────
 
 use bytes::Bytes;
@@ -104,32 +104,31 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-/// Routes inbound media datagrams to the right RecvTask by session_id.
-/// The session_id is read from the cleartext outer header via
-/// `farder_protocol::media_datagram::OuterHeader::parse` (Phase A); the
-/// payload behind it is the sealed frame, possibly fragmented.
+/// Routes inbound media datagrams to the right RecvTask by (session_id, track_kind).
+/// A peer's session carries BOTH audio and video frame streams (distinguished by
+/// the cleartext outer header's track_kind); each track gets its own recv task.
 #[derive(Default)]
 pub struct MediaInboundDispatcher {
-    routes: Mutex<HashMap<SessionId, mpsc::UnboundedSender<Bytes>>>,
+    routes: Mutex<HashMap<(SessionId, TrackKind), mpsc::UnboundedSender<Bytes>>>,
 }
 
 impl MediaInboundDispatcher {
-    pub async fn register(&self, session_id: SessionId, tx: mpsc::UnboundedSender<Bytes>) {
-        self.routes.lock().await.insert(session_id, tx);
+    pub async fn register(&self, session_id: SessionId, kind: TrackKind, tx: mpsc::UnboundedSender<Bytes>) {
+        self.routes.lock().await.insert((session_id, kind), tx);
     }
 
-    pub async fn unregister(&self, session_id: &SessionId) {
-        self.routes.lock().await.remove(session_id);
+    pub async fn unregister(&self, session_id: &SessionId, kind: TrackKind) {
+        self.routes.lock().await.remove(&(*session_id, kind));
     }
 
     pub async fn dispatch(&self, bytes: Bytes) {
         use farder_protocol::media_datagram::OuterHeader;
-        let sid = match OuterHeader::parse(&bytes) {
-            Ok((header, _payload)) => header.session_id,
+        let (session_id, track_kind) = match OuterHeader::parse(&bytes) {
+            Ok((header, _payload)) => (header.session_id, header.track_kind),
             Err(_) => return, // not a valid media datagram
         };
         let routes = self.routes.lock().await;
-        if let Some(tx) = routes.get(&sid) {
+        if let Some(tx) = routes.get(&(session_id, track_kind)) {
             let _ = tx.send(bytes);
         }
     }
@@ -160,7 +159,7 @@ mod dispatcher_tests {
         let dispatcher = MediaInboundDispatcher::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sid: SessionId = [7u8; 16];
-        dispatcher.register(sid, tx).await;
+        dispatcher.register(sid, TrackKind::Audio, tx).await;
 
         let frame = outer_audio_dgram(&sid);
         dispatcher.dispatch(frame.clone()).await;
@@ -186,11 +185,36 @@ mod dispatcher_tests {
         let dispatcher = MediaInboundDispatcher::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sid: SessionId = [3u8; 16];
-        dispatcher.register(sid, tx).await;
-        dispatcher.unregister(&sid).await;
+        dispatcher.register(sid, TrackKind::Audio, tx).await;
+        dispatcher.unregister(&sid, TrackKind::Audio).await;
 
         dispatcher.dispatch(outer_audio_dgram(&sid)).await;
         assert!(rx.try_recv().is_err(), "unregistered session must not receive");
+    }
+
+    #[tokio::test]
+    async fn dispatch_separates_audio_and_video_for_same_session() {
+        use farder_protocol::media_datagram::OuterHeader;
+        use farder_protocol::server::TrackKind;
+        let dispatcher = MediaInboundDispatcher::default();
+        let sid: SessionId = [5u8; 16];
+        let (atx, mut arx) = mpsc::unbounded_channel();
+        let (vtx, mut vrx) = mpsc::unbounded_channel();
+        dispatcher.register(sid, TrackKind::Audio, atx).await;
+        dispatcher.register(sid, TrackKind::Video, vtx).await;
+
+        fn dgram(sid: &SessionId, kind: TrackKind) -> Bytes {
+            let mut v = Vec::new();
+            OuterHeader { track_kind: kind, session_id: *sid, frame_id: 0, frag_index: 0, frag_count: 1 }
+                .write_to(&mut v);
+            v.extend_from_slice(b"payload");
+            Bytes::from(v)
+        }
+        dispatcher.dispatch(dgram(&sid, TrackKind::Video)).await;
+        dispatcher.dispatch(dgram(&sid, TrackKind::Audio)).await;
+        assert!(arx.try_recv().is_ok(), "audio route gets the audio datagram");
+        assert!(vrx.try_recv().is_ok(), "video route gets the video datagram");
+        assert!(arx.try_recv().is_err(), "audio route does NOT get the video datagram");
     }
 }
 
@@ -692,7 +716,7 @@ impl VoiceController {
                 peer.recv_handle.abort();
                 let d = dispatcher.clone();
                 tokio::spawn(async move {
-                    d.unregister(&sid).await;
+                    d.unregister(&sid, TrackKind::Audio).await;
                 });
             }
             call.peer_rings.lock().expect("peer_rings poisoned").clear();
@@ -888,7 +912,7 @@ impl VoiceController {
         let dispatcher = call.server.dispatcher();
         let tx_for_register = tx.clone();
         tokio::spawn(async move {
-            dispatcher.register(session_id, tx_for_register).await;
+            dispatcher.register(session_id, TrackKind::Audio, tx_for_register).await;
         });
 
         let recv_handle = tokio::spawn(async move {
@@ -950,7 +974,7 @@ impl VoiceController {
                         .remove(&session_id);
                     let dispatcher = call.server.dispatcher();
                     tokio::spawn(async move {
-                        dispatcher.unregister(&session_id).await;
+                        dispatcher.unregister(&session_id, TrackKind::Audio).await;
                     });
                     Some(peer.pubkey)
                 } else {
