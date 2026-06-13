@@ -1128,16 +1128,20 @@ impl VoiceController {
                     // so they can start decoding immediately. Capture what we need
                     // to offer AFTER releasing the lock (don't hold the inner lock
                     // across the offer_video_key await).
-                    call.video_share.as_ref().map(|s| {
+                    if let Some(s) = call.video_share.as_ref() {
                         s.force_keyframe.store(true, Ordering::Relaxed);
-                        (call.server.clone(), call.channel_id, s.video_key)
-                    })
+                        Some((call.server.clone(), call.channel_id, s.video_key))
+                    } else {
+                        None
+                    }
                 }
                 None => None,
             }
         };
         if let Some((server, channel_id, video_key)) = reoffer {
-            let _ = offer_video_key(&server, channel_id, &video_key).await;
+            if let Err(e) = offer_video_key(&server, channel_id, &video_key).await {
+                eprintln!("[voice] re-offer of video key on peer join failed: {e}");
+            }
         }
     }
 
