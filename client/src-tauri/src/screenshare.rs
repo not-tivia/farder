@@ -26,10 +26,10 @@ pub fn run_encode_loop(
     while !stop.load(Ordering::Relaxed) {
         let frame = match rx.recv() {
             Ok(f) => f,
-            Err(_) => break,
+            Err(_) => break, // capture ended
         };
         // A viewer joined mid-stream: emit a fresh IDR so they can start.
-        if force_keyframe.swap(false, Ordering::Relaxed) {
+        if force_keyframe.swap(false, Ordering::AcqRel) {
             encoder.force_keyframe();
         }
         match encoder.encode(&frame) {
@@ -188,5 +188,29 @@ mod tests {
         });
         backend.stop_capture().unwrap();
         assert!(keyframe_after_force.load(Ordering::Relaxed), "frame after force flag must be a keyframe");
+    }
+
+    #[test]
+    fn no_force_flag_keeps_midstream_frames_as_deltas() {
+        let backend = MockDisplayBackend::new();
+        let rx = backend
+            .start_capture("mock-display", DisplayFormat { fps: 30, max_width: 160, max_height: 120 })
+            .unwrap();
+        let encoder = H264Encoder::new().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let force = Arc::new(AtomicBool::new(false)); // never set
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let midstream_was_key = Arc::new(AtomicBool::new(false));
+        let stop_s = stop.clone();
+        let count_s = count.clone();
+        let mwk = midstream_was_key.clone();
+        run_encode_loop(rx, encoder, stop.clone(), force.clone(), move |enc| {
+            let n = count_s.fetch_add(1, Ordering::Relaxed);
+            if n == 4 && enc.is_keyframe { mwk.store(true, Ordering::Relaxed); }
+            if n + 1 >= 6 { stop_s.store(true, Ordering::Relaxed); }
+        });
+        backend.stop_capture().unwrap();
+        assert!(!midstream_was_key.load(Ordering::Relaxed), "without the force flag, frame 4 must be a delta, not a keyframe");
     }
 }
