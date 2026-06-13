@@ -52,6 +52,10 @@ export function useVoice(): UseVoice {
   const [connectionQuality, setConnectionQuality] =
     useState<{ rttMs: number; lossPct: number } | null>(null);
   const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>({});
+  // Known C2 limitation: if the backend capture source terminates on its own
+  // (window closed, display unplugged), the send thread exits but no event is
+  // emitted, so isSharing stays true until the user stops manually or leaves.
+  // Phase E adds a backend-stop event to reconcile this.
   const [isSharing, setIsSharing] = useState(false);
 
   const applyState = useCallback((s: api.VoiceState) => {
@@ -94,6 +98,9 @@ export function useVoice(): UseVoice {
   }, [applyState]);
 
   const startShare = useCallback(async () => {
+    // No catch: a start failure leaves isSharing=false (correct); the rejection
+    // surfaces as an unhandledrejection, consistent with toggleTransmit. Phase E
+    // adds user-facing error feedback.
     await api.voiceStartScreenShare(30, 1280, 720);
     setIsSharing(true);
   }, []);
