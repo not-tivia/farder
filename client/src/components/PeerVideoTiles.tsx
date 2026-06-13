@@ -59,21 +59,26 @@ export default function PeerVideoTiles() {
       lastSeen.current[p.session] = Date.now();
       setSessions((prev) => prev[p.session] ? prev : { ...prev, [p.session]: { pubkey: p.pubkey } });
       const dec = decoders.current[p.session];
-      if (dec) dec.decode(p);
-      // else: the canvas isn't mounted yet this tick; the next frame (or the
-      // forced keyframe) lands once the decoder is created in the effect below.
+      if (dec) {
+        dec.decode(p);
+      } else {
+        const canvas = canvasRefs.current[p.session];
+        if (canvas) {
+          // Recreate a decoder that was dropped (first mount or post-error) and
+          // feed this frame; it'll start once a keyframe arrives.
+          const d = new PeerDecoder(canvas, () => { decoders.current[p.session]?.close(); delete decoders.current[p.session]; });
+          decoders.current[p.session] = d;
+          d.decode(p);
+        }
+        // else: canvas not mounted yet this tick; next frame will create it.
+      }
     });
     return () => { unlisten.then((u) => u()); };
   }, []);
 
-  // Create a decoder when a session's canvas mounts; reap sessions idle > 3s.
+  // Reap sessions idle > 3s. Decoders are created synchronously in the canvas
+  // ref callback (and re-created on demand in the frame listener), not here.
   useEffect(() => {
-    for (const session of Object.keys(sessions)) {
-      const canvas = canvasRefs.current[session];
-      if (canvas && !decoders.current[session]) {
-        decoders.current[session] = new PeerDecoder(canvas, () => {});
-      }
-    }
     const t = setInterval(() => {
       const now = Date.now();
       setSessions((prev) => {
@@ -83,6 +88,8 @@ export default function PeerVideoTiles() {
           if (now - (lastSeen.current[s] ?? 0) > 3000) {
             decoders.current[s]?.close();
             delete decoders.current[s];
+            delete canvasRefs.current[s];
+            delete lastSeen.current[s];
             delete next[s];
             changed = true;
           }
@@ -91,7 +98,7 @@ export default function PeerVideoTiles() {
       });
     }, 1000);
     return () => clearInterval(t);
-  }, [sessions]);
+  }, []);
 
   // Close ALL decoders on unmount so leaving the view doesn't leak VideoDecoders.
   useEffect(() => {
@@ -107,7 +114,20 @@ export default function PeerVideoTiles() {
     <div className="peer-video-tiles">
       {entries.map(([session, info]) => (
         <div key={session} className="peer-video-tile">
-          <canvas ref={(el) => { canvasRefs.current[session] = el; }} className="peer-video-canvas" />
+          <canvas
+            ref={(el) => {
+              canvasRefs.current[session] = el;
+              if (el && !decoders.current[session]) {
+                decoders.current[session] = new PeerDecoder(el, () => {
+                  // Decoder errored (corrupt stream): drop it so the next frame
+                  // for this session recreates it and re-gates on a keyframe.
+                  decoders.current[session]?.close();
+                  delete decoders.current[session];
+                });
+              }
+            }}
+            className="peer-video-canvas"
+          />
           <div className="peer-video-label">{info.pubkey.slice(0, 8)}&hellip; is sharing</div>
         </div>
       ))}
