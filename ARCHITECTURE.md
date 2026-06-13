@@ -69,6 +69,14 @@ capture → encode → send and recv → decode → mix → playback pipeline
 (`audio_cpal.rs` bridges real devices, resampling + channel-converting as
 needed). The control bar is gated on the audio engine; the roster on presence.
 
+**Media datagram transport (Phase A):** media travels as fragmentable QUIC
+datagrams behind a unified 26-byte cleartext outer header
+(`farder-protocol::media_datagram`). Audio is always a single fragment; video
+(introduced in later screensharing phases) spans several. The relay and server
+route on the cleartext outer header and never decrypt — the AEAD-sealed inner
+frame (`farder-crypto::media`) is the unchanged security boundary carried as the
+payload. See `docs/modules/media-datagram.md` for the full reference.
+
 ## Relay as fetch proxy (invite previews)
 
 The relay doubles as a **privacy fetch proxy** for invite previews (and,

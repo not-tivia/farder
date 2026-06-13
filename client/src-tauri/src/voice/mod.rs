@@ -105,7 +105,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
 /// Routes inbound media datagrams to the right RecvTask by session_id.
-/// Frame layout from sub-project #2: bytes[12..28] = session_id (16 bytes).
+/// The session_id is read from the cleartext outer header via
+/// `farder_protocol::media_datagram::OuterHeader::parse` (Phase A); the
+/// payload behind it is the sealed frame, possibly fragmented.
 #[derive(Default)]
 pub struct MediaInboundDispatcher {
     routes: Mutex<HashMap<SessionId, mpsc::UnboundedSender<Bytes>>>,
