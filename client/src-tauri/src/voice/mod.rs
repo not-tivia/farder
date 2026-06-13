@@ -460,6 +460,8 @@ struct ActiveCall {
     /// Connection-quality poller task; aborted on leave. `None` when no
     /// QUIC connection was supplied (e.g. tests).
     quality_poller: Option<JoinHandle<()>>,
+    /// Active outbound screen share (None = not sharing). One per call.
+    video_share: Option<VideoShareState>,
 }
 
 struct PeerEntry {
@@ -474,6 +476,18 @@ struct VideoPeerEntry {
     recv_handle: JoinHandle<()>,
     #[allow(dead_code)]
     datagram_tx: mpsc::UnboundedSender<Bytes>,
+}
+
+struct VideoShareState {
+    stop: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    force_keyframe: Arc<AtomicBool>,
+    backend: Box<dyn crate::display::DisplayBackend>,
+    /// The video stream key (for re-offering to late joiners).
+    #[allow(dead_code)]
+    video_key: [u8; 32],
+    #[allow(dead_code)]
+    thread: std::thread::JoinHandle<()>,
 }
 
 /// Map a u64 channel_id (server-side identifier) into the controller's
@@ -699,6 +713,7 @@ impl VoiceController {
                 my_session_id: session_id,
                 channel_id,
                 quality_poller,
+                video_share: None,
             });
             inner.state.clone()
         };
@@ -1166,6 +1181,106 @@ impl VoiceController {
             );
         }
     }
+
+    /// Start sharing our screen into the active call: derive a video key, offer
+    /// it to current members, enable the Video track, and drive the Phase B
+    /// capture->encode loop into the C1 VideoSender over this call's connection.
+    pub async fn start_screen_share(&self, fps: u32, max_width: u32, max_height: u32) -> Result<(), String> {
+        // Fail-fast: validate the encoder can init (it's built inside the thread).
+        drop(crate::video_encoder::H264Encoder::new()?);
+
+        let (server, my_session_id, channel_id, my_pk_bytes, already) = {
+            let inner = self.inner.lock().await;
+            match inner.active.as_ref() {
+                Some(c) => {
+                    let kp = c.server.my_keypair();
+                    (c.server.clone(), c.my_session_id, c.channel_id, *kp.public_key().as_bytes(), c.video_share.is_some())
+                }
+                None => return Err("not in a voice channel".into()),
+            }
+        };
+        if already {
+            return Err("already sharing your screen".into());
+        }
+
+        // Derive + offer the video key to current members.
+        let video_key = farder_crypto::media::derive_stream_key();
+        offer_video_key(&server, channel_id, &video_key).await?;
+
+        // Start capture.
+        let backend = crate::display::make_display_backend();
+        let sources = backend.enumerate_sources()?;
+        let source_id = sources.first().map(|s| s.id.clone()).ok_or("no capture source")?;
+        let rx = backend.start_capture(&source_id, crate::display::DisplayFormat { fps, max_width, max_height })?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let force_keyframe = Arc::new(AtomicBool::new(false));
+
+        // Spawn the capture->encode->send thread (encoder is !Send -> built inside).
+        let stop_t = stop.clone();
+        let force_t = force_keyframe.clone();
+        let server_t = server.clone();
+        let thread = std::thread::spawn(move || {
+            let encoder = match crate::video_encoder::H264Encoder::new() {
+                Ok(e) => e,
+                Err(e) => { eprintln!("[voice] video encoder init failed: {e}"); return; }
+            };
+            let mut sender = crate::voice::send_video::VideoSender::new(video_key, my_session_id, my_pk_bytes);
+            crate::screenshare::run_encode_loop(rx, encoder, stop_t, force_t, move |enc| {
+                sender.send(&enc, |b| { let _ = server_t.send_datagram(b); });
+            });
+        });
+
+        // Enable the Video track (after capture is up).
+        server.enable_track(TrackKind::Video).await?;
+
+        // Record share state.
+        let mut inner = self.inner.lock().await;
+        if let Some(call) = inner.active.as_mut() {
+            call.video_share = Some(VideoShareState { stop, force_keyframe, backend, video_key, thread });
+        }
+        Ok(())
+    }
+
+    /// Stop sharing: tear down capture, stop the send loop, disable the track.
+    pub async fn stop_screen_share(&self) -> Result<(), String> {
+        let (share, server) = {
+            let mut inner = self.inner.lock().await;
+            match inner.active.as_mut() {
+                Some(c) => (c.video_share.take(), Some(c.server.clone())),
+                None => (None, None),
+            }
+        };
+        if let Some(s) = share {
+            s.stop.store(true, Ordering::Relaxed);
+            let _ = s.backend.stop_capture();
+            if let Some(server) = server {
+                let _ = server.disable_track(TrackKind::Video).await;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Wrap `video_key` for every current channel member (except self) and offer it.
+async fn offer_video_key(server: &Arc<dyn ServerSession>, channel_id: u64, video_key: &[u8; 32]) -> Result<(), String> {
+    let participants = server.get_media_state(channel_id).await?;
+    let keypair = server.my_keypair();
+    let my_sk = *keypair.signing_key_bytes();
+    let my_pk = *keypair.public_key().as_bytes();
+    let wrapped: Vec<(PublicKey, Vec<u8>)> = participants
+        .iter()
+        .filter(|m| m.public_key.as_bytes() != &my_pk)
+        .filter_map(|m| {
+            farder_crypto::media::wrap_stream_key_for_peer(video_key, &my_sk, m.public_key.as_bytes())
+                .ok()
+                .map(|w| (m.public_key.clone(), w))
+        })
+        .collect();
+    if !wrapped.is_empty() {
+        server.offer_stream_key(TrackKind::Video, wrapped).await?;
+    }
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1186,20 +1301,27 @@ mod controller_tests {
         canned_session_id: SessionId,
         set_mute_calls: StdMutex<Vec<bool>>,
         set_deafen_calls: StdMutex<Vec<bool>>,
+        /// Extra members returned from get_media_state (besides ourselves).
+        members: StdMutex<Vec<VoiceMember>>,
+        /// TrackKinds passed to offer_stream_key / enable_track / disable_track,
+        /// so video-share tests can assert the Video track specifically.
+        offered_kinds: StdMutex<Vec<TrackKind>>,
+        enabled_kinds: StdMutex<Vec<TrackKind>>,
+        disabled_kinds: StdMutex<Vec<TrackKind>>,
     }
 
     impl FakeServerSession {
         fn new() -> Arc<Self> {
-            Arc::new(Self {
-                keypair: Some(Arc::new(Keypair::generate())),
-                dispatcher: Arc::new(MediaInboundDispatcher::default()),
-                calls: StdMutex::new(Vec::new()),
-                canned_session_id: [9u8; 16],
-                set_mute_calls: StdMutex::new(Vec::new()),
-                set_deafen_calls: StdMutex::new(Vec::new()),
-            })
+            Self::build([9u8; 16], Vec::new())
         }
         fn new_with_sid(sid: SessionId) -> Arc<Self> {
+            Self::build(sid, Vec::new())
+        }
+        /// Build a fake whose get_media_state returns the given extra members.
+        fn new_with_members(members: Vec<VoiceMember>) -> Arc<Self> {
+            Self::build([9u8; 16], members)
+        }
+        fn build(sid: SessionId, members: Vec<VoiceMember>) -> Arc<Self> {
             Arc::new(Self {
                 keypair: Some(Arc::new(Keypair::generate())),
                 dispatcher: Arc::new(MediaInboundDispatcher::default()),
@@ -1207,6 +1329,10 @@ mod controller_tests {
                 canned_session_id: sid,
                 set_mute_calls: StdMutex::new(Vec::new()),
                 set_deafen_calls: StdMutex::new(Vec::new()),
+                members: StdMutex::new(members),
+                offered_kinds: StdMutex::new(Vec::new()),
+                enabled_kinds: StdMutex::new(Vec::new()),
+                disabled_kinds: StdMutex::new(Vec::new()),
             })
         }
         fn calls(&self) -> Vec<String> {
@@ -1232,22 +1358,25 @@ mod controller_tests {
             _channel_id: u64,
         ) -> Result<Vec<VoiceMember>, String> {
             self.log("get_media_state");
-            Ok(vec![])
+            Ok(self.members.lock().unwrap().clone())
         }
         async fn offer_stream_key(
             &self,
-            _k: TrackKind,
+            k: TrackKind,
             _w: Vec<(PublicKey, Vec<u8>)>,
         ) -> Result<(), String> {
             self.log("offer_stream_key");
+            self.offered_kinds.lock().unwrap().push(k);
             Ok(())
         }
-        async fn enable_track(&self, _k: TrackKind) -> Result<(), String> {
+        async fn enable_track(&self, k: TrackKind) -> Result<(), String> {
             self.log("enable_track");
+            self.enabled_kinds.lock().unwrap().push(k);
             Ok(())
         }
-        async fn disable_track(&self, _k: TrackKind) -> Result<(), String> {
+        async fn disable_track(&self, k: TrackKind) -> Result<(), String> {
             self.log("disable_track");
+            self.disabled_kinds.lock().unwrap().push(k);
             Ok(())
         }
         async fn set_mute(&self, muted: bool) -> Result<(), String> {
@@ -1752,6 +1881,54 @@ mod controller_tests {
         // Negative clamps to 0.0.
         ctrl.set_peer_volume(hex.clone(), -1.0).await.unwrap();
         assert_eq!(live_gain_for(&ctrl, &sid).await, Some(0.0), "clamped to 0.0");
+
+        ctrl.leave().await.unwrap();
+    }
+
+    // Full controller path for screen share: join (1 peer in the channel),
+    // start sharing, assert the Video stream-key offer + Video TrackEnabled
+    // were recorded, then stop and assert Video TrackDisabled. Uses the mock
+    // display backend (headless) and the bundled openh264 software encoder so
+    // this runs without a GPU/display in WSL.
+    #[tokio::test]
+    async fn start_then_stop_screen_share_offers_enables_and_disables_video() {
+        std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
+        let (ctrl, _emitter) = make_controller();
+
+        // One remote member in the channel so the video key gets wrapped+offered.
+        let peer = VoiceMember {
+            public_key: Keypair::generate().public_key(),
+            display_name: "peer".into(),
+            joined_at: 0,
+        };
+        let server = FakeServerSession::new_with_members(vec![peer]);
+        ctrl.join(7, server.clone()).await.unwrap();
+
+        ctrl.start_screen_share(15, 320, 240).await.unwrap();
+
+        assert!(
+            server.offered_kinds.lock().unwrap().contains(&TrackKind::Video),
+            "start_screen_share must offer a Video stream key; offered={:?}",
+            server.offered_kinds.lock().unwrap()
+        );
+        assert!(
+            server.enabled_kinds.lock().unwrap().contains(&TrackKind::Video),
+            "start_screen_share must enable the Video track; enabled={:?}",
+            server.enabled_kinds.lock().unwrap()
+        );
+
+        // Starting again while sharing must be rejected.
+        assert!(
+            ctrl.start_screen_share(15, 320, 240).await.is_err(),
+            "second start_screen_share must error while already sharing"
+        );
+
+        ctrl.stop_screen_share().await.unwrap();
+        assert!(
+            server.disabled_kinds.lock().unwrap().contains(&TrackKind::Video),
+            "stop_screen_share must disable the Video track; disabled={:?}",
+            server.disabled_kinds.lock().unwrap()
+        );
 
         ctrl.leave().await.unwrap();
     }
