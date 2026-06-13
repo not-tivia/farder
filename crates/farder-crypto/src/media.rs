@@ -239,6 +239,53 @@ pub fn open_audio_wire_frame(
     Ok((seq, speaker_pk, opus_packet))
 }
 
+/// Build a 28-byte VIDEO media-frame header (mirrors build_audio_header).
+fn build_video_header(seq: u64, session_id: &SessionId) -> [u8; MEDIA_FRAME_HEADER_LEN] {
+    let mut hdr = [0u8; MEDIA_FRAME_HEADER_LEN];
+    hdr[0] = MEDIA_FRAME_VERSION;
+    hdr[1] = MEDIA_FRAME_TYPE_VIDEO;
+    hdr[4..12].copy_from_slice(&seq.to_be_bytes());
+    hdr[12..28].copy_from_slice(session_id);
+    hdr
+}
+
+/// One-shot: seal an H.264 frame payload into the complete video wire frame
+/// `header(28) || ciphertext+tag`. The header is the AEAD AAD.
+pub fn seal_video_frame_to_wire(
+    key: &[u8; 32],
+    seq: u64,
+    session_id: &SessionId,
+    speaker_pk: &[u8; 32],
+    h264_payload: &[u8],
+) -> Result<Vec<u8>> {
+    let hdr = build_video_header(seq, session_id);
+    let ciphertext = seal_media_frame(key, seq, session_id, &hdr, speaker_pk, h264_payload)?;
+    let mut wire = Vec::with_capacity(MEDIA_FRAME_HEADER_LEN + ciphertext.len());
+    wire.extend_from_slice(&hdr);
+    wire.extend_from_slice(&ciphertext);
+    Ok(wire)
+}
+
+/// One-shot: open + verify a full video wire frame. Returns `(seq, speaker_pk, h264_payload)`.
+pub fn open_video_wire_frame(key: &[u8; 32], wire: &[u8]) -> Result<(u64, [u8; 32], Vec<u8>)> {
+    if wire.len() < MEDIA_FRAME_HEADER_LEN {
+        return Err(anyhow!("video wire frame too short: {} bytes", wire.len()));
+    }
+    if wire[0] != MEDIA_FRAME_VERSION {
+        return Err(anyhow!("bad media frame version: 0x{:02x}", wire[0]));
+    }
+    if wire[1] != MEDIA_FRAME_TYPE_VIDEO {
+        return Err(anyhow!("expected video frame type 0x{:02x}, got 0x{:02x}", MEDIA_FRAME_TYPE_VIDEO, wire[1]));
+    }
+    let seq = u64::from_be_bytes(wire[4..12].try_into().unwrap());
+    let mut session_id = [0u8; SESSION_ID_LEN];
+    session_id.copy_from_slice(&wire[12..28]);
+    let header_aad = &wire[..MEDIA_FRAME_HEADER_LEN];
+    let ciphertext = &wire[MEDIA_FRAME_HEADER_LEN..];
+    let (speaker_pk, h264) = open_media_frame(key, seq, &session_id, header_aad, ciphertext)?;
+    Ok((seq, speaker_pk, h264))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +429,29 @@ mod tests {
         let n1 = media_frame_nonce(&session, 1);
         let n2 = media_frame_nonce(&session, 2);
         assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn seal_open_video_wire_roundtrip() {
+        let key = derive_stream_key();
+        let session = fixed_session_id();
+        let speaker = fixed_speaker_pk();
+        let h264 = vec![0u8, 0, 0, 1, 0x67, 1, 2, 3]; // stand-in Annex-B bytes
+        let wire = seal_video_frame_to_wire(&key, 9, &session, &speaker, &h264).unwrap();
+        // Inner header type byte must be VIDEO (0x02 at offset 1).
+        assert_eq!(wire[1], MEDIA_FRAME_TYPE_VIDEO);
+        let (seq, got_speaker, got_h264) = open_video_wire_frame(&key, &wire).unwrap();
+        assert_eq!(seq, 9);
+        assert_eq!(got_speaker, speaker);
+        assert_eq!(got_h264, h264);
+    }
+
+    #[test]
+    fn open_video_rejects_audio_frame() {
+        let key = derive_stream_key();
+        let session = fixed_session_id();
+        let speaker = fixed_speaker_pk();
+        let audio_wire = seal_audio_packet_to_wire(&key, 1, &session, &speaker, b"opus").unwrap();
+        assert!(open_video_wire_frame(&key, &audio_wire).is_err(), "video open must reject an audio frame");
     }
 }
