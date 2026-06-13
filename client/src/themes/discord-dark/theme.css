@@ -2710,3 +2710,9 @@ body {
   color: var(--xp-text-muted);
   margin: 4px 0;
 }
+
+/* Phase C2: per-peer screen-share video tiles */
+.peer-video-tiles { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; }
+.peer-video-tile { display: flex; flex-direction: column; gap: 4px; }
+.peer-video-canvas { max-width: 100%; max-height: 360px; background: #000; border: 1px solid var(--xp-border); }
+.peer-video-label { font-size: 12px; color: var(--xp-text-muted); }

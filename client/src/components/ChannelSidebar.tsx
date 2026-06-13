@@ -12,6 +12,7 @@ import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
 import SettingsModal from "./settings/SettingsModal";
 import VoiceControlBar from "./VoiceControlBar";
+import PeerVideoTiles from "./PeerVideoTiles";
 import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
 import { useVoice } from "../hooks/useVoice";
 
@@ -524,6 +525,7 @@ export default function ChannelSidebar() {
             </>
           )}
         </div>
+        {activeServer?.currentVoiceChannelId != null && <PeerVideoTiles />}
         {activeServer?.currentVoiceChannelId != null && (
           <VoiceControlBar
             voice={voice}
