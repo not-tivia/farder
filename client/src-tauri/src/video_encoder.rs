@@ -4,7 +4,8 @@
 //! openh264 decoder is used here only in tests to prove the output is valid.
 
 use crate::display::VideoFrame;
-use openh264::encoder::{Encoder, FrameType};
+use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod};
+use openh264::OpenH264API;
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
 
 /// One encoded H.264 frame.
@@ -23,7 +24,14 @@ pub struct H264Encoder {
 
 impl H264Encoder {
     pub fn new() -> Result<Self, String> {
-        let enc = Encoder::new().map_err(|e| format!("openh264 encoder init: {e}"))?;
+        // 3 Mbps, 30 fps, keyframe every ~60 frames (~2 s). These are starting
+        // values; Phase C/quality tuning revisits them (and NVENC in phase 2).
+        let config = EncoderConfig::new()
+            .bitrate(BitRate::from_bps(3_000_000))
+            .max_frame_rate(FrameRate::from_hz(30.0))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(60));
+        let enc = Encoder::with_api_config(OpenH264API::from_source(), config)
+            .map_err(|e| format!("openh264 encoder init: {e}"))?;
         Ok(Self { enc })
     }
 
