@@ -8,6 +8,8 @@ mod commands;
 mod connection;
 mod default_relay;
 mod display;
+#[cfg(windows)]
+mod display_wgc;
 mod identity;
 mod opus_codec;
 mod state;
