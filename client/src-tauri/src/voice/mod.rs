@@ -10,6 +10,7 @@ pub mod jitter;
 pub mod mixer;
 pub mod recv;
 pub mod send;
+pub mod send_video;
 
 use farder_crypto::identity::PublicKey;
 use serde::{Deserialize, Serialize};
