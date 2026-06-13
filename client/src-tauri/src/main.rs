@@ -19,6 +19,7 @@ mod tls;
 mod translation;
 mod tray;
 mod profile_sync;
+mod screenshare;
 mod video_encoder;
 mod voice;
 mod voice_bridge;
@@ -216,6 +217,8 @@ fn main() {
             translation::list_local_models,
             translation::delete_model,
             translation::get_model_paths,
+            screenshare::start_screenshare_preview,
+            screenshare::stop_screenshare_preview,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

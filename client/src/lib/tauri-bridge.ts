@@ -733,3 +733,13 @@ export interface InvitePreviewResult {
 export async function getInvitePreview(link: string): Promise<InvitePreviewResult> {
   return invoke<InvitePreviewResult>("get_invite_preview", { link });
 }
+
+// ── Screenshare preview (Phase B loopback) ────────────────────────────────────
+
+export async function startScreensharePreview(fps: number, maxWidth: number, maxHeight: number): Promise<void> {
+  return invoke<void>("start_screenshare_preview", { fps, maxWidth, maxHeight });
+}
+
+export async function stopScreensharePreview(): Promise<void> {
+  return invoke<void>("stop_screenshare_preview");
+}
