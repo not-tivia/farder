@@ -17,6 +17,7 @@ mod tls;
 mod translation;
 mod tray;
 mod profile_sync;
+mod video_encoder;
 mod voice;
 mod voice_bridge;
 
