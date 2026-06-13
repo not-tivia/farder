@@ -22,6 +22,7 @@ import {
 import SettingsSection from "./settings/SettingsSection";
 import RadioOption from "./settings/RadioOption";
 import KeybindRow from "./settings/KeybindRow";
+import ScreensharePreview from "./ScreensharePreview";
 
 // Keep in sync with sensitivity_to_threshold() in the Rust voice module.
 function thresholdFor(sensitivity: number): number {
@@ -237,6 +238,11 @@ export default function VoiceSettings() {
             Mic test failed: {micTestError}
           </p>
         )}
+      </SettingsSection>
+
+      <div className="settings-divider" />
+      <SettingsSection label="Screen Share (preview &mdash; Phase B)">
+        <ScreensharePreview />
       </SettingsSection>
 
       {mode === "PushToTalk" && (
