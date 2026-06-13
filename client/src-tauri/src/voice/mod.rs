@@ -9,6 +9,7 @@ pub mod gate;
 pub mod jitter;
 pub mod mixer;
 pub mod recv;
+pub mod recv_video;
 pub mod send;
 pub mod send_video;
 
