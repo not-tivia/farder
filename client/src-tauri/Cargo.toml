@@ -34,6 +34,15 @@ uuid = { version = "1", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2"
+# H.264 software encoder/decoder for screensharing. Default `source` feature
+# builds the bundled OpenH264 C/C++ via cc (nasm optional). Builds on all
+# platforms (validated on Linux + Windows 2026-06-12).
+openh264 = "0.9.3"
+
+[target.'cfg(windows)'.dependencies]
+# Windows Graphics Capture — screen/window/fullscreen capture. Windows-only;
+# on other hosts the mock display backend is used and this isn't compiled.
+windows-capture = "2.0.0"
 
 [dev-dependencies]
 tempfile = "3"
