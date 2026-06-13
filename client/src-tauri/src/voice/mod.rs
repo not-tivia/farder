@@ -121,11 +121,11 @@ impl MediaInboundDispatcher {
     }
 
     pub async fn dispatch(&self, bytes: Bytes) {
-        if bytes.len() < 28 {
-            return; // not a valid sealed media frame
-        }
-        let mut sid = [0u8; 16];
-        sid.copy_from_slice(&bytes[12..28]);
+        use farder_protocol::media_datagram::OuterHeader;
+        let sid = match OuterHeader::parse(&bytes) {
+            Ok((header, _payload)) => header.session_id,
+            Err(_) => return, // not a valid media datagram
+        };
         let routes = self.routes.lock().await;
         if let Some(tx) = routes.get(&sid) {
             let _ = tx.send(bytes);
@@ -137,6 +137,22 @@ impl MediaInboundDispatcher {
 mod dispatcher_tests {
     use super::*;
 
+    fn outer_audio_dgram(session: &SessionId) -> Bytes {
+        use farder_protocol::media_datagram::OuterHeader;
+        use farder_protocol::server::TrackKind;
+        let mut v = Vec::new();
+        OuterHeader {
+            track_kind: TrackKind::Audio,
+            session_id: *session,
+            frame_id: 0,
+            frag_index: 0,
+            frag_count: 1,
+        }
+        .write_to(&mut v);
+        v.extend_from_slice(b"opaque-sealed-frame-bytes");
+        Bytes::from(v)
+    }
+
     #[tokio::test]
     async fn dispatch_routes_to_registered_session() {
         let dispatcher = MediaInboundDispatcher::default();
@@ -144,10 +160,8 @@ mod dispatcher_tests {
         let sid: SessionId = [7u8; 16];
         dispatcher.register(sid, tx).await;
 
-        // Build a 28-byte minimum frame with session_id at [12..28].
-        let mut frame = vec![0u8; 32];
-        frame[12..28].copy_from_slice(&sid);
-        dispatcher.dispatch(Bytes::from(frame.clone())).await;
+        let frame = outer_audio_dgram(&sid);
+        dispatcher.dispatch(frame.clone()).await;
 
         let received = rx.try_recv().expect("dispatched frame must arrive");
         assert_eq!(received.len(), frame.len());
@@ -156,9 +170,7 @@ mod dispatcher_tests {
     #[tokio::test]
     async fn dispatch_drops_unknown_session() {
         let dispatcher = MediaInboundDispatcher::default();
-        let mut frame = vec![0u8; 32];
-        frame[12..28].copy_from_slice(&[9u8; 16]);
-        dispatcher.dispatch(Bytes::from(frame)).await; // must not panic
+        dispatcher.dispatch(outer_audio_dgram(&[9u8; 16])).await; // must not panic
     }
 
     #[tokio::test]
@@ -175,9 +187,7 @@ mod dispatcher_tests {
         dispatcher.register(sid, tx).await;
         dispatcher.unregister(&sid).await;
 
-        let mut frame = vec![0u8; 32];
-        frame[12..28].copy_from_slice(&sid);
-        dispatcher.dispatch(Bytes::from(frame)).await;
+        dispatcher.dispatch(outer_audio_dgram(&sid)).await;
         assert!(rx.try_recv().is_err(), "unregistered session must not receive");
     }
 }

@@ -11,6 +11,7 @@ use crate::voice::jitter::JitterBuffer;
 use crate::voice::SessionId;
 use bytes::Bytes;
 use farder_crypto::media::open_audio_wire_frame;
+use farder_protocol::media_datagram::{OuterHeader, Reassembler};
 use std::collections::VecDeque;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use tokio::sync::mpsc;
@@ -75,13 +76,22 @@ pub async fn run(cfg: RecvTaskConfig) {
         }
     };
     let mut jitter = JitterBuffer::new();
+    let mut reassembler = Reassembler::new();
     let mut datagram_rx = cfg.datagram_rx;
 
     while let Some(bytes) = datagram_rx.recv().await {
         if cfg.deafened.load(Ordering::Acquire) {
             continue;
         }
-        let (seq, _speaker_pk, opus_pkt) = match open_audio_wire_frame(&cfg.stream_key, &bytes) {
+        let (header, payload) = match OuterHeader::parse(&bytes) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let sealed = match reassembler.accept(&header, payload) {
+            Some(s) => s,
+            None => continue, // fragment buffered; frame not complete yet
+        };
+        let (seq, _speaker_pk, opus_pkt) = match open_audio_wire_frame(&cfg.stream_key, &sealed) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("[voice::recv] open: {e}");
@@ -119,7 +129,19 @@ mod tests {
         let pkt = enc.encode(&pcm).unwrap();
         let speaker_pk = [0xCCu8; 32];
         let wire = seal_audio_packet_to_wire(stream_key, seq, session_id, &speaker_pk, &pkt).unwrap();
-        Bytes::from(wire)
+        use farder_protocol::media_datagram::OuterHeader;
+        use farder_protocol::server::TrackKind;
+        let mut dgram = Vec::new();
+        OuterHeader {
+            track_kind: TrackKind::Audio,
+            session_id: *session_id,
+            frame_id: seq as u32,
+            frag_index: 0,
+            frag_count: 1,
+        }
+        .write_to(&mut dgram);
+        dgram.extend_from_slice(&wire);
+        Bytes::from(dgram)
     }
 
     #[tokio::test]
