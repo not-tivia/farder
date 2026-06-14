@@ -4,9 +4,11 @@
 //! on Windows as 48 kHz float, BEFORE writing the Phase D plan. cpal 0.15 (the
 //! mic path) can't do loopback, so screen-audio needs this WASAPI path.
 //!
-//! This version SCANS EVERY output (render) device and captures ~1.5s from each,
-//! reporting the peak level — so it finds which device your sound is actually on
-//! (Windows' "default" device may be an idle HDMI/AVR/surround endpoint).
+//! It scans EVERY output (render) device and captures briefly from each,
+//! reporting the peak level — so it finds which device your sound is actually
+//! on. Each device is probed on a throwaway worker thread with a timeout, so a
+//! wedged/virtual endpoint (e.g. a Steam virtual speaker) is skipped instead of
+//! freezing the whole probe.
 //!
 //! RUN IT WHILE SOMETHING IS PLAYING (music/video/a game).
 
@@ -22,16 +24,19 @@ fn main() {
         eprintln!("\nPROBE FAILED: {e}");
         std::process::exit(1);
     }
+    // Hard-exit so any detached, wedged worker thread can't keep us alive.
+    std::process::exit(0);
 }
 
 #[cfg(windows)]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::Duration;
     use wasapi::*;
 
     initialize_mta().ok()?;
     let enumerator = DeviceEnumerator::new()?;
-
-    // Remember the default render device's id so we can mark it in the list.
     let default_id = enumerator
         .get_default_device(&Direction::Render)
         .ok()
@@ -39,36 +44,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let collection = enumerator.get_device_collection(&Direction::Render)?;
     let n = collection.get_nbr_devices()?;
-    println!("Found {n} output (render) device(s). Capturing ~1.5s from each.");
+    println!("Found {n} output (render) device(s). Probing each (max ~2.5s each).");
     println!("Make sure audio is PLAYING now.\n");
 
-    let want_rate: usize = 48_000;
-    let want_channels: usize = 2;
-
-    use std::io::Write;
     for i in 0..n {
-        let device = match collection.get_device_at_index(i) {
-            Ok(d) => d,
+        // Read the name/id in the MAIN thread (quick, safe).
+        let (name, id) = match collection.get_device_at_index(i) {
+            Ok(d) => (
+                d.get_friendlyname().unwrap_or_else(|_| "<unknown>".into()),
+                d.get_id().ok(),
+            ),
             Err(e) => {
-                println!("[{i}] <error opening device: {e}>");
+                println!("[{i}] <error: {e}>");
                 continue;
             }
         };
-        let name = device.get_friendlyname().unwrap_or_else(|_| "<unknown>".into());
-        let is_default = device.get_id().ok().as_deref() == default_id.as_deref();
-        let tag = if is_default { " (DEFAULT)" } else { "" };
-
-        // Print BEFORE capturing so progress is visible and a wedged device is
-        // obvious (it'll be the last name printed).
+        let tag = if id.as_deref() == default_id.as_deref() { " (DEFAULT)" } else { "" };
         print!("[{i}]{tag} {name} ... ");
         let _ = std::io::stdout().flush();
 
-        match capture_peak(&device, want_rate, want_channels) {
-            Ok((frames, peak, native)) => {
+        // Capture on a worker thread so a wedged device can't freeze us.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(capture_index(i));
+        });
+        match rx.recv_timeout(Duration::from_millis(2500)) {
+            Ok(Ok((frames, peak, native))) => {
                 let verdict = if peak > 0.0001 { "<== AUDIO IS HERE" } else { "(silent)" };
                 println!("native {native} | {frames} frames | peak {peak:.5}  {verdict}");
             }
-            Err(e) => println!("(could not capture: {e})"),
+            Ok(Err(e)) => println!("(could not capture: {e})"),
+            Err(_) => println!("(timed out / device wedged — skipped)"),
         }
     }
 
@@ -78,17 +84,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Open one render device in loopback (Capture direction), capture ~1.5s at
-/// 48 kHz/2ch f32 (autoconvert), and return (frames, peak_amplitude, native_fmt).
+/// Worker-thread entry: own COM init, re-enumerate, capture device `i`.
+/// Returns a String error (Send) so it can cross the channel.
 #[cfg(windows)]
-fn capture_peak(
-    device: &wasapi::Device,
-    want_rate: usize,
-    want_channels: usize,
-) -> Result<(u64, f32, String), Box<dyn std::error::Error>> {
+fn capture_index(i: u32) -> Result<(u64, f32, String), String> {
+    capture_index_inner(i).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn capture_index_inner(i: u32) -> Result<(u64, f32, String), Box<dyn std::error::Error>> {
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
     use wasapi::*;
+
+    initialize_mta().ok()?; // COM for THIS thread
+    let enumerator = DeviceEnumerator::new()?;
+    let collection = enumerator.get_device_collection(&Direction::Render)?;
+    let device = collection.get_device_at_index(i)?;
 
     let mut audio_client = device.get_iaudioclient()?;
     let mix = audio_client.get_mixformat()?;
@@ -99,6 +111,8 @@ fn capture_peak(
         mix.get_bitspersample(),
     );
 
+    let want_rate: usize = 48_000;
+    let want_channels: usize = 2;
     let desired = WaveFormat::new(32, 32, &SampleType::Float, want_rate, want_channels, None);
     let (_def_time, min_time) = audio_client.get_device_period()?;
     let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: min_time };
@@ -111,10 +125,6 @@ fn capture_peak(
     let mut bytes: VecDeque<u8> = VecDeque::new();
     let mut frames: u64 = 0;
     let mut peak: f32 = 0.0;
-
-    // HARD wall-clock cap: ~1.2s per device no matter what. Some phantom/idle
-    // endpoints fire buffer-ready events but never deliver samples — capping on
-    // real time (not on a frame target) guarantees we always move on.
     let deadline = Instant::now() + Duration::from_millis(1200);
     while Instant::now() < deadline {
         capture_client.read_from_device_to_deque(&mut bytes)?;
@@ -131,8 +141,7 @@ fn capture_peak(
             samples += 1;
         }
         frames += (samples as u64) / (want_channels as u64);
-        // Short wait (~100ms) so we poll and re-check the deadline promptly.
-        let _ = h_event.wait_for_event(1_000_000);
+        let _ = h_event.wait_for_event(1_000_000); // ~100ms poll
     }
     audio_client.stop_stream()?;
     Ok((frames, peak, native))
