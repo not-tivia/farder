@@ -100,7 +100,10 @@ fn capture_loop(device_id: Option<String>, tx: &mpsc::Sender<PcmChunk>, stop: &A
                 mono = Vec::with_capacity(OPUS_FRAME_SAMPLES_MONO);
             }
         }
-        let _ = h_event.wait_for_event(200_000);
+        // Fallback timeout in MILLISECONDS (wasapi's wait_for_event takes ms).
+        // In EventsShared mode the event fires every device period (~10ms), so
+        // this only bounds how long we block before re-checking `stop`.
+        let _ = h_event.wait_for_event(200);
     }
     let _ = audio_client.stop_stream();
     Ok(())
