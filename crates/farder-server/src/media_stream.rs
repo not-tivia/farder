@@ -64,6 +64,7 @@ pub fn build_media_frame(
     let type_byte = match kind {
         TrackKind::Audio => MEDIA_FRAME_TYPE_AUDIO,
         TrackKind::Video => MEDIA_FRAME_TYPE_VIDEO,
+        TrackKind::ScreenAudio => MEDIA_FRAME_TYPE_AUDIO, // inner frame == audio crypto
     };
     let mut buf = Vec::with_capacity(MEDIA_FRAME_HEADER_LEN + ciphertext.len());
     buf.push(MEDIA_FRAME_VERSION);
@@ -152,6 +153,7 @@ pub struct ServerSession {
     pub buckets: HashMap<TrackKind, TokenBucket>,
     pub last_audio_frame_ms: Option<u64>,
     pub last_video_frame_ms: Option<u64>,
+    pub last_screen_audio_frame_ms: Option<u64>,
 }
 
 impl StreamState {
@@ -243,6 +245,7 @@ pub fn on_frame_ingress(
     let cap = match header.track_kind {
         TrackKind::Audio => config.audio_max_bps,
         TrackKind::Video => config.video_max_bps,
+        TrackKind::ScreenAudio => config.audio_max_bps,
     };
     let bucket = session.buckets.entry(header.track_kind).or_insert_with(|| TokenBucket::new(cap));
 
@@ -253,6 +256,7 @@ pub fn on_frame_ingress(
     match header.track_kind {
         TrackKind::Audio => session.last_audio_frame_ms = Some(now_ms),
         TrackKind::Video => session.last_video_frame_ms = Some(now_ms),
+        TrackKind::ScreenAudio => session.last_screen_audio_frame_ms = Some(now_ms),
     }
 
     let channel_id = session.channel_id;
@@ -302,13 +306,14 @@ pub fn compute_activity_transitions(
     let mut new_active = HashMap::new();
 
     for (sid, session) in &state.sessions {
-        for kind in [TrackKind::Audio, TrackKind::Video] {
+        for kind in [TrackKind::Audio, TrackKind::Video, TrackKind::ScreenAudio] {
             if !session.active_tracks.contains(&kind) {
                 continue;
             }
             let last_ms = match kind {
                 TrackKind::Audio => session.last_audio_frame_ms,
                 TrackKind::Video => session.last_video_frame_ms,
+                TrackKind::ScreenAudio => session.last_screen_audio_frame_ms,
             };
             let is_active = match last_ms {
                 Some(t) => now_ms.saturating_sub(t) < ACTIVITY_TIMEOUT_MS,
@@ -479,6 +484,7 @@ mod tests {
             buckets: HashMap::new(),
             last_audio_frame_ms: None,
             last_video_frame_ms: None,
+            last_screen_audio_frame_ms: None,
         });
     }
 
@@ -625,6 +631,7 @@ mod tests {
             buckets: HashMap::new(),
             last_audio_frame_ms: None,
             last_video_frame_ms: None,
+            last_screen_audio_frame_ms: None,
         });
         let mut bob_tracks = HashSet::new();
         bob_tracks.insert(TrackKind::Audio);
@@ -637,6 +644,7 @@ mod tests {
             buckets: HashMap::new(),
             last_audio_frame_ms: None,
             last_video_frame_ms: None,
+            last_screen_audio_frame_ms: None,
         });
 
         // Alice builds an audio frame. The ciphertext bytes here are opaque
@@ -691,6 +699,7 @@ mod tests {
             buckets: HashMap::new(),
             last_audio_frame_ms: None,
             last_video_frame_ms: None,
+            last_screen_audio_frame_ms: None,
         });
 
         // Frame for audio -- dropped because Audio isn't enabled yet.
@@ -722,5 +731,67 @@ mod tests {
             IngressDecision::Forward { .. } => {}
             _ => panic!("expected Forward for video"),
         }
+    }
+
+    /// ScreenAudio uses the AUDIO bandwidth cap, not the video cap.
+    ///
+    /// We configure audio_max_bps=500 and video_max_bps=8_000_000.
+    /// A ScreenAudio frame of 1000 bytes should be denied with BandwidthCap
+    /// (because 1000 > 500/2 initial tokens), proving the audio bucket — not
+    /// the video bucket — gates the frame.
+    #[test]
+    fn screen_audio_uses_audio_cap() {
+        let mut state = StreamState::new();
+        // Deliberately tiny audio cap so a single medium frame exceeds it,
+        // but video cap is enormous (proving we picked the right branch).
+        let config = MediaConfig { audio_max_bps: 500, video_max_bps: 8_000_000 };
+        let session = [7u8; 16];
+        let conn = [0xcc; 32];
+        let mut tracks = HashSet::new();
+        tracks.insert(TrackKind::ScreenAudio);
+        state.sessions.insert(session, ServerSession {
+            connection_pk: conn,
+            channel_id: 200,
+            public_key: fake_pubkey(0xcc),
+            display_name: "screensharer".into(),
+            active_tracks: tracks,
+            buckets: HashMap::new(),
+            last_audio_frame_ms: None,
+            last_video_frame_ms: None,
+            last_screen_audio_frame_ms: None,
+        });
+
+        // Frame larger than audio_max_bps / 2 (initial tokens) — must be denied.
+        let big_frame = outer_dgram(TrackKind::ScreenAudio, &session, &vec![0u8; 1000]);
+        match on_frame_ingress(&mut state, &config, &conn, &big_frame, 0) {
+            IngressDecision::Drop(DropReason::BandwidthCap) => {}
+            _ => panic!("expected BandwidthCap drop for ScreenAudio over audio cap"),
+        }
+    }
+
+    /// ScreenAudio activity stamp is tracked independently in last_screen_audio_frame_ms.
+    #[test]
+    fn screen_audio_activity_transition() {
+        let mut state = StreamState::new();
+        let session = [8u8; 16];
+        let mut tracks = HashSet::new();
+        tracks.insert(TrackKind::ScreenAudio);
+        state.sessions.insert(session, ServerSession {
+            connection_pk: [0u8; 32],
+            channel_id: 300,
+            public_key: fake_pubkey(0),
+            display_name: "s".into(),
+            active_tracks: tracks,
+            buckets: HashMap::new(),
+            last_audio_frame_ms: None,
+            last_video_frame_ms: None,
+            last_screen_audio_frame_ms: Some(1000),
+        });
+        let prev = HashMap::new();
+        // At t=1100 (100ms after last frame) — within 300ms threshold, should fire active=true.
+        let (transitions, _) = compute_activity_transitions(&state, &prev, 1100);
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].kind, TrackKind::ScreenAudio);
+        assert!(transitions[0].active);
     }
 }

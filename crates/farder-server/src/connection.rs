@@ -1129,6 +1129,7 @@ mod voice_relay_tests {
                     connection_pk: conn_pk, channel_id: 99, public_key: pk,
                     display_name: name.into(), active_tracks: tracks,
                     buckets: HashMap::new(), last_audio_frame_ms: None, last_video_frame_ms: None,
+                    last_screen_audio_frame_ms: None,
                 });
             }
         }

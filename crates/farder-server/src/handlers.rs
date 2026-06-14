@@ -1445,6 +1445,7 @@ pub fn handle_request(
                 buckets: std::collections::HashMap::new(),
                 last_audio_frame_ms: None,
                 last_video_frame_ms: None,
+                last_screen_audio_frame_ms: None,
             });
             drop(channels_map);
 
