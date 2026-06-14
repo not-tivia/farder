@@ -1157,8 +1157,9 @@ impl VoiceController {
     }
 
     /// Peer disabled a track. For Video: tears down the video recv task +
-    /// dispatcher route. For Audio: tears down their recv task + dispatcher
-    /// route + drops their ring, then re-emits the full state snapshot.
+    /// dispatcher route, then emits `voice://peer-video-sharing {sharing:false}`
+    /// so the UI clears the LIVE badge. For Audio: tears down their recv task +
+    /// dispatcher route + drops their ring, then re-emits the full state snapshot.
     pub async fn on_peer_track_disabled(&self, session_id: SessionId, kind: TrackKind) {
         if matches!(kind, TrackKind::Video) {
             let shed_pubkey: Option<String> = {
