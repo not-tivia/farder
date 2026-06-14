@@ -2,7 +2,7 @@
 
 > **File(s):** `client/src-tauri/src/commands.rs`, `client/src-tauri/src/themes.rs`, `client/src-tauri/src/tenor.rs`, `client/src-tauri/src/translation.rs`, `client/src-tauri/src/book.rs`
 > **Layer:** Tauri command
-> **Last reviewed:** 2026-06-04
+> **Last reviewed:** 2026-06-14
 
 ## Purpose
 
@@ -917,7 +917,23 @@ releases audio devices.
 
 ---
 
-### `voice_start_screen_share(voice, fps, max_width, max_height, audio_device_id) -> Result<(), String>`
+### `list_display_sources() -> Result<Vec<DisplaySource>, String>`
+
+**What it does:** enumerates the displays (monitors) available to capture, for the
+video-source picker in the voice control bar (Phase E). Takes no args. Delegates to
+`display::make_display_backend().enumerate_sources()`. Single-window capture is
+deferred — sources are currently all `kind: "Screen"`.
+**Returns:** a list of `{ id, kind, label, width, height }` (`DisplaySource`;
+`kind` is `"Screen"` or `"Window"`); `id` is the opaque source id passed back as
+`source_id` to `voice_start_screen_share`. On error — a `String`.
+**Side effects:** none (read-only enumeration).
+**Connects to:** `display::DisplayBackend::enumerate_sources`; the returned `id`
+feeds `voice_start_screen_share`'s `source_id`.
+**invoke name:** `"list_display_sources"` → `listDisplaySources()`.
+
+---
+
+### `voice_start_screen_share(voice, fps, max_width, max_height, source_id, audio_device_id) -> Result<(), String>`
 
 **What it does:** starts capturing the screen and transmitting it as a video
 track in the active call. Delegates to `VoiceController::start_screen_share`,
@@ -927,9 +943,13 @@ peers. As of Phase D it also best-effort captures game/system audio from
 `audio_device_id` and transmits it as a separate `ScreenAudio` track (own key,
 own loop); if audio capture fails the share continues video-only. Errors if not
 in a call.
-**Parameters:** `audio_device_id` — `Option<String>`; the `id` of an output
-device from `list_audio_output_devices`, or `null`/omitted for the system
-default render device.
+**Parameters:**
+- `source_id` — `Option<String>` (Phase E); the `id` of a display from
+  `list_display_sources`, or `null`/omitted to capture the first source.
+- `audio_device_id` — `Option<String>`; the `id` of an output device from
+  `list_audio_output_devices`, or `null`/omitted for the system default render
+  device.
+
 **Side effects:** spawns capture + encode tasks (and, when audio capture
 succeeds, a WASAPI-loopback capture thread + screen-audio send loop); mutates
 `VoiceController` state; causes peers to receive `voice://peer-video-frame`
@@ -937,9 +957,9 @@ events (tagged with the sharer's `pubkey`) and, with screen audio, an extra
 mixed-in `ScreenAudio` stream.
 **Connects to:** `VoiceController::start_screen_share`.
 **invoke name:** `"voice_start_screen_share"` →
-`voiceStartScreenShare(fps, maxWidth, maxHeight, audioDeviceId)` (args
-`{ fps, maxWidth, maxHeight, audioDeviceId }`; Tauri maps snake_case Rust params
-to camelCase JS keys).
+`voiceStartScreenShare(fps, maxWidth, maxHeight, sourceId, audioDeviceId)` (args
+`{ fps, maxWidth, maxHeight, sourceId, audioDeviceId }`; Tauri maps snake_case
+Rust params to camelCase JS keys).
 
 ---
 
@@ -1014,6 +1034,22 @@ survives reconnects.
 **Side effects:** calls `VoiceController::set_peer_volume`; writes `peer_volumes`
 to `settings.json`.
 **invoke name:** `"voice_set_peer_volume"` → `voiceSetPeerVolume()`.
+
+---
+
+### `voice_set_screen_audio_gain(voice, pubkey_hex, gain) -> Result<(), String>`
+
+**What it does:** sets the per-peer game/screen-audio playback gain for the peer
+identified by `pubkey_hex` (Phase E). Modeled on `voice_set_peer_volume` but
+applies to that peer's `ScreenAudio` ring (independent of their microphone
+volume) and is **ephemeral** — it is NOT persisted to `settings.json`, so it
+resets on reconnect. No-op if the peer has no active screen-audio ring.
+**Parameters:** `gain` — `f32` playback multiplier for the peer's screen-audio
+ring. Backs the per-tile game-audio slider in the click-to-watch viewer.
+**Side effects:** calls `VoiceController::set_screen_audio_gain` (mutates the
+`screen_audio_rings` gain); no disk write.
+**invoke name:** `"voice_set_screen_audio_gain"` →
+`voiceSetScreenAudioGain(pubkeyHex, gain)`.
 
 ---
 

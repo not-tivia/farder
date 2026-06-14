@@ -2,7 +2,7 @@
 
 > **File(s):** `client/src-tauri/src/bridge.rs`
 > **Layer:** Tauri bridge
-> **Last reviewed:** 2026-06-04
+> **Last reviewed:** 2026-06-14
 
 ## Purpose
 
@@ -83,6 +83,7 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 |---|---|---|---|
 | `"screenshare:frame"` | `start_screenshare_preview` encode thread (`screenshare.rs`) | `{ data: string, key: boolean, ts: number }` | `ScreensharePreview.tsx` → WebCodecs `VideoDecoder` → `<canvas>` |
 | `"voice://peer-video-frame"` | Video recv task inside `on_peer_video_track_enabled` (`voice/mod.rs`) | `{ session: string, pubkey: string, data: string, key: boolean, seq: number }` | Phase C2 per-peer video tile → WebCodecs `VideoDecoder` |
+| `"voice://peer-video-sharing"` | `on_peer_track_enabled` / `on_peer_track_disabled` (Video) (`voice/mod.rs`) | `{ pubkey: string, sharing: boolean }` | Phase E `useVoice` → `sharingPeers` set → LIVE badge in `ChannelSidebar` |
 
 **`screenshare:frame` payload fields:**
 - `data` — Base64-encoded Annex-B H.264 frame. Annex-B means start-code-prefixed NALs (`0x00 0x00 0x00 0x01`), with SPS/PPS inline before each IDR. The WebCodecs `VideoDecoder` must be configured WITHOUT a `description` to accept Annex-B input.
@@ -97,6 +98,10 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 - `seq` — Frame sequence number from the inner AEAD header (u64). Monotonically increasing per sender. Can be used to detect gaps and request a keyframe (Phase C2).
 
 This event is emitted per decrypted video frame by the controller's video recv task (one task per peer, spawned by `on_peer_video_track_enabled`). It is NOT emitted by the server bridge — the frame is decrypted on the receiver, then forwarded to the webview. See `docs/modules/voice-video-transport.md` for the full transport reference.
+
+**`voice://peer-video-sharing` payload fields (Phase E):**
+- `pubkey` — Sharing peer's public key (`vk_` + 64 lowercase hex chars).
+- `sharing` — `true` when that peer's Video track is enabled, `false` when disabled. Emitted by the controller on video track enable/disable so the UI knows who is live without waiting for the first decoded frame. `useVoice` maintains a `sharingPeers` set from it (drives the LIVE badge); the backend never emits it for the local client, so the set only ever contains *other* peers.
 
 ---
 

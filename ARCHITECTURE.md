@@ -111,6 +111,11 @@ the same E2EE/datagram path, captured best-effort via WASAPI loopback of a selec
 device (`list_audio_output_devices`) and mixed at its own (independent) volume on the viewer;
 the volume slider + polished UI are Phase E.
 
+**Screensharing (Phase E — share UI, feature-complete):** screensharing is now feature-complete
+across all five phases (A-E): a user picks a monitor (`list_display_sources`) and a game-audio
+device, shares into a voice channel, and peers see a LIVE badge and click to watch with an
+independent per-peer game-audio volume (`voice_set_screen_audio_gain`) — all E2EE.
+
 ## Relay as fetch proxy (invite previews)
 
 The relay doubles as a **privacy fetch proxy** for invite previews (and,

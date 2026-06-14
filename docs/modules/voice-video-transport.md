@@ -1,4 +1,4 @@
-# Voice video transport (Phase C1 + C2 + D)
+# Voice video transport (Phase C1 + C2 + D + E)
 
 > **File(s):** `client/src-tauri/src/voice/mod.rs` (dispatcher + controller + share lifecycle),
 > `client/src-tauri/src/voice/send_video.rs`,
@@ -10,7 +10,7 @@
 > `client/src/components/PeerVideoTiles.tsx` (viewer),
 > `crates/farder-crypto/src/media.rs` (`seal_video_frame_to_wire` / `open_video_wire_frame`)
 > **Layer:** Voice engine
-> **Last reviewed:** 2026-06-13
+> **Last reviewed:** 2026-06-14
 
 ## Purpose
 
@@ -374,8 +374,8 @@ The tile labels itself with the first 8 chars of the sharer's `pubkey`.
 Phase D adds a THIRD media track, `TrackKind::ScreenAudio`, so a sharer's game/system
 audio travels alongside their screen video over the same E2EE/datagram path. It is a
 separate track with its own key, its own send loop, and an independent viewer mixer ring
-— it is NOT mixed into the sharer's microphone. The volume slider and polished UI are
-**Phase E**; the receive gain is a fixed `1.0` default for now.
+— it is NOT mixed into the sharer's microphone. The volume slider and polished UI ship in
+**Phase E** (see below); Phase D's receive gain is a fixed `1.0` default.
 
 ### `TrackKind::ScreenAudio` — wire model
 
@@ -465,8 +465,63 @@ On `TrackEnabled(ScreenAudio)`, `on_peer_screen_audio_track_enabled(session_id, 
    is independent of any peer's microphone volume.
 
 `on_peer_track_disabled(ScreenAudio)` removes the `screen_audio_peers` entry, drops the ring,
-and unregisters the dispatcher route. **The independent volume slider is Phase E** — Phase D
+and unregisters the dispatcher route. The independent volume slider is **Phase E** — Phase D
 ships the plumbing at a fixed `1.0` gain.
+
+---
+
+## Phase E — share UI (feature-complete)
+
+Phase E is the final screensharing phase: it adds the user-facing share UI on top of the
+Phase C/D plumbing. No new transport — it surfaces the existing pipeline (monitor picker,
+who-is-live signalling, click-to-watch viewer, and the per-peer game-audio slider that
+Phase D deferred). This completes the **5-phase arc (A-E)**.
+
+### `list_display_sources` + `source_id` on start-share
+
+`list_display_sources()` enumerates the capturable displays as
+`[{ id, kind, label, width, height }]` (via `display::make_display_backend().enumerate_sources()`),
+backing a video-source `<select>` in the voice control bar. The chosen id is threaded
+through as a new `source_id: Option<String>` parameter on
+`start_screen_share(fps, max_width, max_height, source_id, audio_device_id)` (and the
+`voice_start_screen_share` command). `None` captures the first source. **Single-window
+capture is deferred** — sources are currently all `kind: "Screen"` (whole monitors).
+
+### `voice://peer-video-sharing` event
+
+Emitted by the controller on video track **enable** (`on_peer_track_enabled`, Video) and
+**disable** (`on_peer_track_disabled`, Video), payload `{ pubkey, sharing }`. This lets the
+UI know **who is live** without waiting for the first decoded `voice://peer-video-frame`.
+`useVoice` maintains a `sharingPeers` set from it. The backend never emits it for the local
+client, so the set only ever contains *other* peers (hence `someoneElseSharing =
+sharingPeers.size > 0`).
+
+### `voice_set_screen_audio_gain(pubkey_hex, gain)` — per-peer game-audio volume
+
+The command + `VoiceController::set_screen_audio_gain` controller method set the gain on a
+peer's `ScreenAudio` ring in `screen_audio_rings` (the ring Phase D inserted at a fixed
+`1.0`). Modeled on `set_peer_volume` but **ephemeral** — it is NOT persisted to
+`settings.json` and resets on reconnect, and it is independent of the peer's microphone
+volume. No-op if the peer has no active screen-audio ring. Backs the per-tile game-audio
+slider in the viewer.
+
+### Frontend
+
+- **Video-source picker + one-sharer guard** (`VoiceControlBar`): a `<select>` populated
+  from `displaySources` drives `sourceId`; the Share button is disabled when
+  `someoneElseSharing` (one sharer per channel).
+- **LIVE badge** (`ChannelSidebar`): the participant whose pubkey is in `sharingPeers`
+  (from `voice://peer-video-sharing`) shows a LIVE badge.
+- **Click-to-watch viewer** (`PeerVideoTiles`): tiles are gated on a `watching` set
+  (`toggleWatch(pubkey)`); a peer's stream is only decoded/rendered while they are being
+  watched. Each tile has a per-peer game-audio slider (`setGameAudioVolume` →
+  `voice_set_screen_audio_gain`), a close control, and an enlarge control.
+- `useVoice` gained `displaySources` / `sourceId` / `setSourceId`, `sharingPeers` /
+  `someoneElseSharing`, and `watching` / `toggleWatch` / `setGameAudioVolume`.
+
+With Phase E, screensharing is **feature-complete**: pick a monitor + game-audio device,
+share into a voice channel, and peers see a LIVE badge and click to watch with an
+independent game-audio volume — all E2EE.
 
 ---
 
@@ -487,6 +542,7 @@ ships the plumbing at a fixed `1.0` gain.
 | Event name | Payload shape | When | Who listens |
 |---|---|---|---|
 | `"voice://peer-video-frame"` | `{ session: string, pubkey: string, data: string, key: boolean, seq: number }` | Per decrypted, reassembled video frame | Phase C2 frontend per-peer video tile (WebCodecs decoder) |
+| `"voice://peer-video-sharing"` | `{ pubkey: string, sharing: boolean }` | On a peer's Video track enable/disable | Phase E `useVoice` → `sharingPeers` → LIVE badge |
 
 ## Events / requests consumed
 

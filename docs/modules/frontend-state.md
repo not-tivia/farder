@@ -2,7 +2,7 @@
 
 > **File(s):** `client/src/context/ServerContext.tsx`, `client/src/hooks/useServerEvents.ts`, `client/src/hooks/useVoice.ts`
 > **Layer:** Frontend context / Frontend hook
-> **Last reviewed:** 2026-06-04
+> **Last reviewed:** 2026-06-14
 
 ## Purpose
 
@@ -209,7 +209,7 @@ Cross-reference: every event in this table must have a corresponding emit arm in
 
 ## `useVoice` — audio call hook
 
-`useVoice()` is the single hook the UI uses for everything voice-call related. It owns its own local `useState` variables; it does NOT read from `ServerContext`. On mount it hydrates from `api.voiceGetState()` and subscribes to four `voice://*` Tauri events. On unmount it unlistens all four.
+`useVoice()` is the single hook the UI uses for everything voice-call related. It owns its own local `useState` variables; it does NOT read from `ServerContext`. On mount it hydrates from `api.voiceGetState()` and subscribes to five `voice://*` Tauri events. On unmount it unlistens all of them.
 
 ### Returned interface
 
@@ -230,8 +230,14 @@ Cross-reference: every event in this table must have a corresponding emit arm in
 | `peerVolume(pubkey)` | `(string) => number` | Returns the playback gain for a peer (0–2, default 1.0); loaded from persisted settings |
 | `setPeerVolume(pubkey, v)` | `(string, number) => Promise<void>` | Optimistically updates the local gain map and persists via `api.voiceSetPeerVolume`; clamps to 0–2 |
 | `isSharing` | `boolean` | Whether the local user is currently screen-sharing. Local `useState` only — there is no `voice://` event for share state, so it is set/cleared by `startShare`/`stopShare` and stays `true` until the user stops manually or leaves |
-| `startShare()` | `() => Promise<void>` | Starts a local screen share via `api.voiceStartScreenShare(30, 1280, 720)`, then sets `isSharing`. No catch — a start failure leaves `isSharing` false and surfaces as an unhandled rejection (Phase E adds user-facing error feedback) |
+| `startShare()` | `() => Promise<void>` | Starts a local screen share via `api.voiceStartScreenShare(30, 1280, 720, sourceId, audioDeviceId)`, then sets `isSharing` |
 | `stopShare()` | `() => Promise<void>` | Stops the local share via `api.voiceStopScreenShare()` (errors swallowed) and clears `isSharing` |
+| `displaySources` | `api.DisplaySource[]` | Available capture displays (Phase E), hydrated from `api.listDisplaySources()`; backs the video-source `<select>` in the voice control bar |
+| `sourceId` / `setSourceId(id)` | `string \| null` / `(string \| null) => void` | Selected display id passed to `startShare`; defaults to the first source. `null` = capture the first source |
+| `sharingPeers` | `Set<string>` | Pubkeys of peers currently sharing video (Phase E), driven by the `voice://peer-video-sharing` event; backs the LIVE badge. Never contains the local client |
+| `someoneElseSharing` | `boolean` | `sharingPeers.size > 0` — true when another peer is sharing; used to disable the local Share button (one sharer per channel) |
+| `watching` / `toggleWatch(pubkey)` | `Set<string>` / `(string) => void` | Click-to-watch gating set (Phase E); `PeerVideoTiles` only renders/decodes a peer's video while that peer's pubkey is in `watching`. `toggleWatch` adds/removes it |
+| `setGameAudioVolume(pubkey, gain)` | `(string, number) => void` | Sets the per-peer game/screen-audio volume via `api.voiceSetScreenAudioGain` (Phase E); backs the per-tile game-audio slider. Ephemeral (not persisted) |
 
 (The viewer side — decoding peers' shared video into per-peer WebCodecs tiles —
 lives in `client/src/components/PeerVideoTiles.tsx`, which listens for the
@@ -246,6 +252,7 @@ See `docs/modules/voice-video-transport.md` for the share lifecycle + viewer.)
 | `voice://local-speaking` | `api.VoiceLocalSpeakingPayload` | Sets `localSpeaking` |
 | `voice://peer-speaking` | `api.VoicePeerSpeakingPayload` | Patches `speaking` on the matching peer in `peers` by `pubkey`; no-op if the peer isn't in the list yet (next `state-changed` will fill it) |
 | `voice://connection-quality` | `api.ConnectionQualityPayload` | Sets `connectionQuality` |
+| `voice://peer-video-sharing` | `{ pubkey: string, sharing: boolean }` | Adds/removes the peer's pubkey in `sharingPeers` (Phase E); drives the LIVE badge and `someoneElseSharing` |
 
 These events are emitted by the `VoiceController` in `client/src-tauri/src/voice/mod.rs`, not by `bridge.rs`. They are a separate event namespace from `server:*`.
 
