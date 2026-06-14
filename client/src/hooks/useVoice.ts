@@ -113,7 +113,7 @@ export function useVoice(): UseVoice {
     // No catch: a start failure leaves isSharing=false (correct); the rejection
     // surfaces as an unhandledrejection, consistent with toggleTransmit. Phase E
     // adds user-facing error feedback.
-    await api.voiceStartScreenShare(30, 1280, 720, audioDeviceId);
+    await api.voiceStartScreenShare(30, 1280, 720, null, audioDeviceId);
     setIsSharing(true);
   }, [audioDeviceId]);
   const stopShare = useCallback(async () => {

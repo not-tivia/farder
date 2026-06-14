@@ -2990,14 +2990,20 @@ pub async fn voice_leave(
 }
 
 #[tauri::command]
+pub async fn list_display_sources() -> Result<Vec<crate::display::DisplaySource>, String> {
+    crate::display::make_display_backend().enumerate_sources()
+}
+
+#[tauri::command]
 pub async fn voice_start_screen_share(
     voice: State<'_, Arc<crate::voice::VoiceController>>,
     fps: u32,
     max_width: u32,
     max_height: u32,
+    source_id: Option<String>,
     audio_device_id: Option<String>,
 ) -> Result<(), String> {
-    voice.start_screen_share(fps, max_width, max_height, audio_device_id).await
+    voice.start_screen_share(fps, max_width, max_height, source_id, audio_device_id).await
 }
 
 #[tauri::command]

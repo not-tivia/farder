@@ -464,8 +464,14 @@ export async function voiceLeave(): Promise<void> {
   return invoke("voice_leave");
 }
 
-export async function voiceStartScreenShare(fps: number, maxWidth: number, maxHeight: number, audioDeviceId: string | null): Promise<void> {
-  return invoke<void>("voice_start_screen_share", { fps, maxWidth, maxHeight, audioDeviceId });
+export type DisplaySourceKind = "Screen" | "Window";
+export interface DisplaySource { id: string; kind: DisplaySourceKind; label: string; width: number; height: number; }
+export async function listDisplaySources(): Promise<DisplaySource[]> {
+  return invoke<DisplaySource[]>("list_display_sources");
+}
+
+export async function voiceStartScreenShare(fps: number, maxWidth: number, maxHeight: number, sourceId: string | null, audioDeviceId: string | null): Promise<void> {
+  return invoke<void>("voice_start_screen_share", { fps, maxWidth, maxHeight, sourceId, audioDeviceId });
 }
 
 export async function voiceStopScreenShare(): Promise<void> {

@@ -1352,7 +1352,7 @@ impl VoiceController {
     /// Start sharing our screen into the active call: derive a video key, offer
     /// it to current members, enable the Video track, and drive the Phase B
     /// capture->encode loop into the C1 VideoSender over this call's connection.
-    pub async fn start_screen_share(&self, fps: u32, max_width: u32, max_height: u32, audio_device_id: Option<String>) -> Result<(), String> {
+    pub async fn start_screen_share(&self, fps: u32, max_width: u32, max_height: u32, source_id: Option<String>, audio_device_id: Option<String>) -> Result<(), String> {
         // Fail-fast: validate the encoder can init (it's built inside the thread).
         drop(crate::video_encoder::H264Encoder::new()?);
 
@@ -1376,8 +1376,13 @@ impl VoiceController {
 
         // Start capture.
         let backend = crate::display::make_display_backend();
-        let sources = backend.enumerate_sources()?;
-        let source_id = sources.first().map(|s| s.id.clone()).ok_or("no capture source")?;
+        let source_id = match source_id {
+            Some(id) => id,
+            None => {
+                let sources = backend.enumerate_sources()?;
+                sources.first().map(|s| s.id.clone()).ok_or("no capture source")?
+            }
+        };
         let rx = backend.start_capture(&source_id, crate::display::DisplayFormat { fps, max_width, max_height })?;
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -2101,7 +2106,7 @@ mod controller_tests {
         };
         let server = FakeServerSession::new_with_members(vec![peer]);
         ctrl.join(7, server.clone()).await.unwrap();
-        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None, None).await.unwrap();
 
         // Exactly one Video offer so far (from start_screen_share).
         assert_eq!(
@@ -2355,7 +2360,7 @@ mod controller_tests {
         let server = FakeServerSession::new_with_members(vec![peer]);
         ctrl.join(7, server.clone()).await.unwrap();
 
-        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None, None).await.unwrap();
 
         assert!(
             server.offered_kinds.lock().unwrap().contains(&TrackKind::Video),
@@ -2370,7 +2375,7 @@ mod controller_tests {
 
         // Starting again while sharing must be rejected.
         assert!(
-            ctrl.start_screen_share(15, 320, 240, None).await.is_err(),
+            ctrl.start_screen_share(15, 320, 240, None, None).await.is_err(),
             "second start_screen_share must error while already sharing"
         );
 
@@ -2403,7 +2408,7 @@ mod controller_tests {
         let server = FakeServerSession::new_with_members(vec![peer]);
         ctrl.join(7, server.clone()).await.unwrap();
 
-        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None, None).await.unwrap();
 
         assert!(
             server.offered_kinds.lock().unwrap().contains(&TrackKind::ScreenAudio),
@@ -2446,7 +2451,7 @@ mod controller_tests {
         };
         let server = FakeServerSession::new_with_members(vec![peer]);
         ctrl.join(7, server.clone()).await.unwrap();
-        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None, None).await.unwrap();
 
         // Leave WITHOUT first calling stop_screen_share: leave() must shut down
         // the active share itself.
@@ -2460,14 +2465,14 @@ mod controller_tests {
         // Rejoin and start again: must succeed (no stale "already sharing"
         // VideoShareState carried over from the previous call).
         ctrl.join(7, server.clone()).await.unwrap();
-        ctrl.start_screen_share(15, 320, 240, None)
+        ctrl.start_screen_share(15, 320, 240, None, None)
             .await
             .expect("fresh start after leave must succeed; stale share would block it");
 
         // And starting a SECOND time in this fresh call is still correctly
         // rejected (proving the new share installed cleanly, not the old one).
         assert!(
-            ctrl.start_screen_share(15, 320, 240, None).await.is_err(),
+            ctrl.start_screen_share(15, 320, 240, None, None).await.is_err(),
             "second start in the fresh call must still error while sharing"
         );
 
