@@ -43,6 +43,10 @@ pub fn parse_media_frame(buf: &[u8]) -> Result<MediaFrame<'_>, MediaFrameError> 
     if buf[0] != MEDIA_FRAME_VERSION {
         return Err(MediaFrameError::BadVersion(buf[0]));
     }
+    // NOTE: a ScreenAudio inner frame carries the AUDIO type byte (0x01) and so
+    // parses back as TrackKind::Audio here. That's intentional and harmless: the
+    // server routes/caps on the OUTER datagram header (OuterHeader::parse), not
+    // this inner byte. build_media_frame mirrors this (ScreenAudio -> 0x01).
     let kind = match buf[1] {
         MEDIA_FRAME_TYPE_AUDIO => TrackKind::Audio,
         MEDIA_FRAME_TYPE_VIDEO => TrackKind::Video,
@@ -247,6 +251,10 @@ pub fn on_frame_ingress(
         TrackKind::Video => config.video_max_bps,
         TrackKind::ScreenAudio => config.audio_max_bps,
     };
+    // Each TrackKind gets its OWN bucket. Audio (mic) and ScreenAudio (game)
+    // both use audio_max_bps but as SEPARATE buckets on purpose: a sharer sends
+    // both at once, and isolating them means mic jitter can't starve game audio
+    // (or vice versa). This is a deliberate v1 choice, not an oversight.
     let bucket = session.buckets.entry(header.track_kind).or_insert_with(|| TokenBucket::new(cap));
 
     if !bucket.try_consume(raw.len() as u64) {
