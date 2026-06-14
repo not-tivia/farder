@@ -1246,7 +1246,7 @@ impl VoiceController {
                     // new member is now in get_media_state) and force a keyframe
                     // so they can start decoding immediately. Capture what we need
                     // to offer AFTER releasing the lock (don't hold the inner lock
-                    // across the offer_video_key await).
+                    // across the offer_track_key await).
                     if let Some(s) = call.video_share.as_ref() {
                         s.force_keyframe.store(true, Ordering::Relaxed);
                         Some((call.server.clone(), call.channel_id, s.video_key, s.screen_audio_key))
