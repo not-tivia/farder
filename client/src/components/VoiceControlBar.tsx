@@ -73,6 +73,17 @@ export default function VoiceControlBar({ voice, channelName, selfInitial, onDis
           aria-pressed={voice.deafened}
           onClick={() => voice.setDeafen(!voice.deafened)}
         ><span>&#x1F3A7;</span></button>
+        <select
+          className="vcb-audio-source"
+          title="Game-audio source (which output device to capture)"
+          value={voice.audioDeviceId ?? ""}
+          onChange={(e) => voice.setAudioDeviceId(e.target.value)}
+          disabled={voice.isSharing}
+        >
+          {voice.audioDevices.map((d) => (
+            <option key={d.id} value={d.id}>{d.name}{d.is_default ? " (default)" : ""}</option>
+          ))}
+        </select>
         <button
           className={`vcb-btn${voice.isSharing ? " active" : ""}`}
           title={voice.isSharing ? "Stop sharing your screen" : "Share your screen"}

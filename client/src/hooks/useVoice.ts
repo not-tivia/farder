@@ -28,6 +28,9 @@ export interface UseVoice {
   isSharing: boolean;
   startShare: () => Promise<void>;
   stopShare: () => Promise<void>;
+  audioDevices: api.AudioOutputDevice[];
+  audioDeviceId: string | null;
+  setAudioDeviceId: (id: string | null) => void;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -57,6 +60,15 @@ export function useVoice(): UseVoice {
   // emitted, so isSharing stays true until the user stops manually or leaves.
   // Phase E adds a backend-stop event to reconcile this.
   const [isSharing, setIsSharing] = useState(false);
+  const [audioDevices, setAudioDevices] = useState<api.AudioOutputDevice[]>([]);
+  const [audioDeviceId, setAudioDeviceId] = useState<string | null>(null);
+  useEffect(() => {
+    api.listAudioOutputDevices().then((d) => {
+      setAudioDevices(d);
+      const def = d.find((x) => x.is_default);
+      setAudioDeviceId((cur) => cur ?? def?.id ?? d[0]?.id ?? null);
+    }).catch(() => {});
+  }, []);
 
   const applyState = useCallback((s: api.VoiceState) => {
     const n = normalize(s);
@@ -101,9 +113,9 @@ export function useVoice(): UseVoice {
     // No catch: a start failure leaves isSharing=false (correct); the rejection
     // surfaces as an unhandledrejection, consistent with toggleTransmit. Phase E
     // adds user-facing error feedback.
-    await api.voiceStartScreenShare(30, 1280, 720, null);
+    await api.voiceStartScreenShare(30, 1280, 720, audioDeviceId);
     setIsSharing(true);
-  }, []);
+  }, [audioDeviceId]);
   const stopShare = useCallback(async () => {
     try { await api.voiceStopScreenShare(); } catch {}
     setIsSharing(false);
@@ -133,5 +145,5 @@ export function useVoice(): UseVoice {
     await api.voiceSetPeerVolume(pubkey, clamped);
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId };
 }

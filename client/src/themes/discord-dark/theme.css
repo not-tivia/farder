@@ -2117,6 +2117,15 @@ body {
 .vcb-btn.active { background: rgba(237,106,94,0.22); color: #ed6a5e; }
 .vcb-btn.leave { flex: 0 0 40px; background: rgba(237,106,94,0.18); color: #f08a8a; }
 .vcb-e2e { display: flex; align-items: center; gap: 5px; color: #5b8c6e; font-size: 10px; margin-top: 8px; }
+.vcb-audio-source {
+  max-width: 160px;
+  font-size: 12px;
+  padding: 2px 4px;
+  background: var(--xp-panel-bg);
+  color: var(--xp-text-normal);
+  border: 1px solid var(--xp-border);
+  border-radius: 3px;
+}
 
 /* ── Server Choice Screen ──────────────────────────────────── */
 .server-choice {
