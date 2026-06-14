@@ -229,6 +229,14 @@ Cross-reference: every event in this table must have a corresponding emit arm in
 | `toggleTransmit()` | `() => Promise<void>` | Calls `api.voiceToggleTransmit`; state refreshes via `voice://state-changed` |
 | `peerVolume(pubkey)` | `(string) => number` | Returns the playback gain for a peer (0–2, default 1.0); loaded from persisted settings |
 | `setPeerVolume(pubkey, v)` | `(string, number) => Promise<void>` | Optimistically updates the local gain map and persists via `api.voiceSetPeerVolume`; clamps to 0–2 |
+| `isSharing` | `boolean` | Whether the local user is currently screen-sharing. Local `useState` only — there is no `voice://` event for share state, so it is set/cleared by `startShare`/`stopShare` and stays `true` until the user stops manually or leaves |
+| `startShare()` | `() => Promise<void>` | Starts a local screen share via `api.voiceStartScreenShare(30, 1280, 720)`, then sets `isSharing`. No catch — a start failure leaves `isSharing` false and surfaces as an unhandled rejection (Phase E adds user-facing error feedback) |
+| `stopShare()` | `() => Promise<void>` | Stops the local share via `api.voiceStopScreenShare()` (errors swallowed) and clears `isSharing` |
+
+(The viewer side — decoding peers' shared video into per-peer WebCodecs tiles —
+lives in `client/src/components/PeerVideoTiles.tsx`, which listens for the
+`voice://peer-video-frame` event directly rather than going through `useVoice`.
+See `docs/modules/voice-video-transport.md` for the share lifecycle + viewer.)
 
 ### `voice://*` events consumed
 

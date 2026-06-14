@@ -97,6 +97,14 @@ path is unaffected. Phase C2 (the share trigger, video-key offer, per-peer video
 keyframe-on-join, late-joiner re-offer) is not yet implemented.
 See `docs/modules/voice-video-transport.md` for the full transport reference.
 
+**Screensharing (Phase C2 — end-to-end):** screen-sharing is now wired end-to-end
+(capture -> H.264 encode -> C1 video transport -> peer decode -> per-peer WebCodecs
+tile), one sharer per call: the Share button drives `voice_start_screen_share`, which
+derives + offers the video key, enables the Video track, and drives the C1 `VideoSender`
+from the capture loop; viewers decode each `voice://peer-video-frame` in `PeerVideoTiles.tsx`
+(keyframe-on-join + late-joiner re-offer keep mid-share joiners in sync). Game audio
+capture and the polished share UI are later phases (D/E).
+
 ## Relay as fetch proxy (invite previews)
 
 The relay doubles as a **privacy fetch proxy** for invite previews (and,

@@ -1,8 +1,10 @@
-# Voice video transport (Phase C1)
+# Voice video transport (Phase C1 + C2)
 
-> **File(s):** `client/src-tauri/src/voice/mod.rs` (dispatcher + controller),
+> **File(s):** `client/src-tauri/src/voice/mod.rs` (dispatcher + controller + share lifecycle),
 > `client/src-tauri/src/voice/send_video.rs`,
 > `client/src-tauri/src/voice/recv_video.rs`,
+> `client/src-tauri/src/screenshare.rs` (`run_encode_loop`),
+> `client/src/components/PeerVideoTiles.tsx` (viewer),
 > `crates/farder-crypto/src/media.rs` (`seal_video_frame_to_wire` / `open_video_wire_frame`)
 > **Layer:** Voice engine
 > **Last reviewed:** 2026-06-13
@@ -25,8 +27,9 @@ for WebCodecs decoding.
 - Late-joiner re-offer of the video key
 - The per-peer video tile in the frontend UI
 
-All of the above are **Phase C2**. Phase C1 delivers only the primitives; nothing
-user-visible changes.
+All of the above are **Phase C2** — now implemented; see the
+"Phase C2 — share lifecycle + viewer" section below. Phase C1 delivered only the
+primitives; this section documents how C2 wires them to the capture loop and UI.
 
 ---
 
@@ -250,6 +253,95 @@ audio presence; the video UI state is Phase C2).
 `leave()` drains both `call.peers` (audio) and `call.video_peers` (video),
 aborting recv tasks and unregistering dispatcher routes for each. Audio teardown
 emits `voice://state-changed`; video teardown does not (same reason as above).
+`leave()` also takes any local `call.video_share` and calls
+`shutdown_video_share` on it, so leaving a call while sharing tears the capture
+loop down too (see Phase C2 below).
+
+---
+
+## Phase C2 — share lifecycle + viewer
+
+Phase C2 makes screensharing end-to-end: it adds the user-facing share trigger,
+drives the C1 `VideoSender` from the Phase B capture loop, and decodes each
+peer's stream into a WebCodecs tile in the UI. The C1 transport primitives are
+unchanged; C2 wires them to the capture/encode loop and the frontend.
+
+### `start_screen_share(fps, max_width, max_height) -> Result<(), String>`
+
+The local share entry point on `VoiceController`. One sharer per call.
+
+1. Fail-fast: constructs and drops a throwaway `H264Encoder` so an unusable
+   encoder errors before any state is touched.
+2. Locks `inner`, requires an active call (else `"not in a voice channel"`), and
+   reads whether a `video_share` already exists. If so, returns
+   `"already sharing your screen"` — **the one-sharer-per-call guard**.
+3. Derives a fresh per-call VIDEO stream key (`derive_stream_key`) and offers it
+   to the current channel members via the `offer_video_key` helper (wraps the key
+   per peer with `wrap_stream_key_for_peer`, skipping self, and calls
+   `offer_stream_key(Video, …)`).
+4. Starts the Phase B capture backend, then spawns the capture→encode→send
+   thread: it builds the `H264Encoder` (kept off the async runtime because the
+   encoder is `!Send`), constructs a `VideoSender` (the C1 stateful sealer), and
+   runs `run_encode_loop`, whose sink calls `VideoSender::send(frame, |b| server.send_datagram(b))`
+   for every encoded frame. The loop also receives a `force_keyframe:
+   Arc<AtomicBool>` flag (see below).
+5. Enables the Video track (`enable_track(Video)`) so peers set up their recv
+   pipeline. If that fails, the just-spawned thread is torn down before returning.
+6. Stores `VideoShareState { stop, force_keyframe, backend, video_key, thread }`
+   in `call.video_share`. A concurrent-start race that lost (another
+   `video_share` already present) tears down the share it built without clobbering
+   the winner; a call that ended mid-start tears down and disables the track.
+
+### `stop_screen_share() -> Result<(), String>`
+
+Takes `call.video_share` (if any), calls `shutdown_video_share` on it (sets the
+`stop` flag AND `backend.stop_capture()` — both are required to break
+`run_encode_loop`), then `disable_track(Video)` so peers tear down their video
+tiles. No-op if not sharing or not in a call. Teardown also happens on `leave()`.
+
+### `run_encode_loop` mid-stream `force_keyframe`
+
+`run_encode_loop` (in `screenshare.rs`) gained a `force_keyframe:
+Arc<AtomicBool>` parameter. When the flag is set, the encoder is told to emit a
+fresh IDR on the next frame and the flag is cleared. This is how a late joiner
+gets a keyframe without restarting the share.
+
+### Keyframe-on-join + late-joiner re-offer (`on_peer_stream_joined`)
+
+When a new peer joins the call (`on_peer_stream_joined`) and we are currently
+sharing, the controller:
+
+- sets the share's `force_keyframe` flag so the encoder emits a fresh IDR the new
+  viewer can start decoding from immediately, and
+- re-offers the video key via `offer_video_key` — the new member is now in
+  `get_media_state`, so the re-offer wraps the existing `video_key` for the
+  enlarged member set (the offer runs after the `inner` lock is released).
+
+Without this, a peer joining mid-share would never receive the video key and
+would wait indefinitely for a keyframe.
+
+### Frontend viewer — `PeerVideoTiles.tsx`
+
+`client/src/components/PeerVideoTiles.tsx`, mounted in `ChannelSidebar` above the
+voice control bar, renders one tile per sharing peer. It listens for
+`voice://peer-video-frame` (documented above, carries `session`, `pubkey`,
+`data`, `key`, `seq`):
+
+- **Lazy per-session decoder:** one `PeerDecoder` (WebCodecs `VideoDecoder` +
+  canvas) is created lazily on the first frame for a `session`. Keyed by
+  `session` so each H.264 stream gets its own decoder (mixing streams corrupts
+  output — see the C1 gotcha). Configured for Annex-B (`configure()` with no
+  `description`, `optimizeForLatency`).
+- **Key-gated:** frames are dropped until the first keyframe (`p.key`) for that
+  session arrives, enforcing the key-first invariant before feeding deltas.
+- **Error self-heal:** on a decoder error (corrupt stream) the decoder is closed
+  and dropped; the next frame for that session recreates it and re-gates on a
+  keyframe.
+- **3s idle reap:** a timer closes and drops any session's decoder when no frame
+  has arrived for >3s, and removes its tile. All decoders are also closed on
+  unmount so leaving the view never leaks `VideoDecoder`s.
+
+The tile labels itself with the first 8 chars of the sharer's `pubkey`.
 
 ---
 
@@ -260,6 +352,7 @@ emits `voice://state-changed`; video teardown does not (same reason as above).
 | `ActiveCall.peer_keys` | `HashMap<(SessionId, TrackKind), [u8; 32]>` | Per-track stream keys; populated by `on_stream_key_offer`, read by `on_peer_*_track_enabled` |
 | `ActiveCall.peer_pubkeys` | `HashMap<SessionId, PublicKey>` | Long-lived identity keys; populated by the first `on_stream_key_offer` for each session |
 | `ActiveCall.video_peers` | `HashMap<SessionId, VideoPeerEntry>` | Live video recv tasks; populated by `on_peer_video_track_enabled`, drained by `leave` / `on_peer_track_disabled(Video)` |
+| `ActiveCall.video_share` | `Option<VideoShareState>` | The LOCAL outbound share (one per call): `stop`/`force_keyframe` flags, capture `backend`, `video_key`, encode `thread`. Set by `start_screen_share`, taken by `stop_screen_share` / `leave` |
 | `MediaInboundDispatcher.routes` | `Mutex<HashMap<(SessionId, TrackKind), UnboundedSender<Bytes>>>` | Dispatch table; one entry per registered (session, track) pair |
 
 ## Events emitted
