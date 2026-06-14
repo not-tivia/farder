@@ -1,0 +1,21 @@
+# THROWAWAY probe for Screensharing Phase D (game/screen audio).
+# Validates that WASAPI output-device LOOPBACK capture builds + runs on the
+# owner's Windows box and reports the capture format, BEFORE we write the
+# Phase D implementation plan (cpal 0.15 can't do loopback; this confirms the
+# `wasapi` crate approach). Detached from the parent workspace on purpose.
+# DELETE this whole folder once Phase D ships.
+[package]
+name = "phaseD-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Empty workspace table = standalone; do NOT join /home/deez/farder's workspace.
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.23.0"
+
+[[bin]]
+name = "phaseD-probe"
+path = "src/main.rs"
