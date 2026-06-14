@@ -1079,6 +1079,7 @@ impl VoiceController {
 
         let session_hex = hex::encode(session_id);
         let peer_hex = peer_pubkey.to_string();
+        let peer_hex_for_emit = peer_hex.clone();
         let recv_handle = tokio::spawn(async move {
             crate::voice::recv_video::run(
                 crate::voice::recv_video::RecvVideoConfig { session_id, stream_key, datagram_rx: rx },
@@ -1095,6 +1096,11 @@ impl VoiceController {
         });
 
         call.video_peers.insert(session_id, VideoPeerEntry { recv_handle, datagram_tx: tx });
+        drop(inner);
+        self.emitter.emit(
+            "voice://peer-video-sharing",
+            serde_json::json!({ "pubkey": peer_hex_for_emit, "sharing": true }),
+        );
     }
 
     /// Spawn a screen/game-audio RecvTask for the peer, register an independent
@@ -1155,15 +1161,29 @@ impl VoiceController {
     /// route + drops their ring, then re-emits the full state snapshot.
     pub async fn on_peer_track_disabled(&self, session_id: SessionId, kind: TrackKind) {
         if matches!(kind, TrackKind::Video) {
-            let mut inner = self.inner.lock().await;
-            if let Some(call) = inner.active.as_mut() {
-                if let Some(entry) = call.video_peers.remove(&session_id) {
-                    entry.recv_handle.abort();
-                    let dispatcher = call.server.dispatcher();
-                    tokio::spawn(async move {
-                        dispatcher.unregister(&session_id, TrackKind::Video).await;
-                    });
+            let shed_pubkey: Option<String> = {
+                let mut inner = self.inner.lock().await;
+                if let Some(call) = inner.active.as_mut() {
+                    if let Some(entry) = call.video_peers.remove(&session_id) {
+                        let pubkey_str = call.peer_pubkeys.get(&session_id).map(|p| p.to_string());
+                        entry.recv_handle.abort();
+                        let dispatcher = call.server.dispatcher();
+                        tokio::spawn(async move {
+                            dispatcher.unregister(&session_id, TrackKind::Video).await;
+                        });
+                        pubkey_str
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
+            }; // lock released here
+            if let Some(pubkey) = shed_pubkey {
+                self.emitter.emit(
+                    "voice://peer-video-sharing",
+                    serde_json::json!({ "pubkey": pubkey, "sharing": false }),
+                );
             }
             return;
         }
@@ -2477,6 +2497,79 @@ mod controller_tests {
         );
 
         ctrl.stop_screen_share().await.unwrap();
+        ctrl.leave().await.unwrap();
+    }
+
+    // Task E2: enabling a peer's Video track must emit voice://peer-video-sharing
+    // with sharing:true, and disabling it (or a stream left) must emit sharing:false.
+    // Mirrors the ScreenAudio seeding pattern: offer the Video key then TrackEnabled,
+    // then TrackDisabled, asserting both events fire with the correct pubkey.
+    #[tokio::test]
+    async fn peer_video_track_enable_disable_emits_sharing_events() {
+        let (ctrl, fake, emitter) = setup_joined_call().await;
+        let sid: SessionId = [42u8; 16];
+
+        // Seed the video key for this session via on_stream_key_offer so
+        // on_peer_video_track_enabled finds it in peer_keys and peer_pubkeys.
+        // In the real protocol the same keypair identifies both the StreamKeyOffer
+        // sender and the TrackEnabled peer, so we use peer_kp.public_key() for both.
+        let peer_kp = Keypair::generate();
+        let our_kp = fake.my_keypair();
+        let key = farder_crypto::media::derive_stream_key();
+        let wrapped = farder_crypto::media::wrap_stream_key_for_peer(
+            &key,
+            peer_kp.signing_key_bytes(),
+            our_kp.public_key().as_bytes(),
+        )
+        .unwrap();
+        let peer_pk = peer_kp.public_key();
+        ctrl.on_stream_key_offer(sid, TrackKind::Video, peer_pk.clone(), wrapped)
+            .await;
+
+        // Enable the video track: must emit sharing:true with the peer's pubkey.
+        let expected_pubkey = peer_pk.to_string();
+        ctrl.on_peer_track_enabled(sid, peer_pk.clone(), TrackKind::Video).await;
+
+        let events_after_enable = emitter.events();
+        let enable_event = events_after_enable
+            .iter()
+            .find(|(e, _)| e == "voice://peer-video-sharing")
+            .expect("voice://peer-video-sharing must be emitted on video track enable");
+        assert_eq!(
+            enable_event.1.get("sharing").and_then(|v| v.as_bool()),
+            Some(true),
+            "sharing must be true on enable; payload={:?}",
+            enable_event.1
+        );
+        assert_eq!(
+            enable_event.1.get("pubkey").and_then(|v| v.as_str()),
+            Some(expected_pubkey.as_str()),
+            "pubkey must match the peer's key on enable; payload={:?}",
+            enable_event.1
+        );
+
+        // Disable the video track: must emit sharing:false with the same pubkey.
+        ctrl.on_peer_track_disabled(sid, TrackKind::Video).await;
+
+        let events_after_disable = emitter.events();
+        let disable_event = events_after_disable
+            .iter()
+            .rev()
+            .find(|(e, _)| e == "voice://peer-video-sharing")
+            .expect("voice://peer-video-sharing must be emitted on video track disable");
+        assert_eq!(
+            disable_event.1.get("sharing").and_then(|v| v.as_bool()),
+            Some(false),
+            "sharing must be false on disable; payload={:?}",
+            disable_event.1
+        );
+        assert_eq!(
+            disable_event.1.get("pubkey").and_then(|v| v.as_str()),
+            Some(expected_pubkey.as_str()),
+            "pubkey must match the peer's key on disable; payload={:?}",
+            disable_event.1
+        );
+
         ctrl.leave().await.unwrap();
     }
 }
