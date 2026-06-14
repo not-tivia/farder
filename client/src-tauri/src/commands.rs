@@ -2851,6 +2851,9 @@ fn parse_track_kind(kind: &str) -> Result<farder_protocol::server::TrackKind, St
     match kind {
         "audio" | "Audio" => Ok(farder_protocol::server::TrackKind::Audio),
         "video" | "Video" => Ok(farder_protocol::server::TrackKind::Video),
+        "screenAudio" | "screen_audio" | "ScreenAudio" => {
+            Ok(farder_protocol::server::TrackKind::ScreenAudio)
+        }
         other => Err(format!("invalid track kind: {other}")),
     }
 }
