@@ -23,6 +23,7 @@ pub enum ChannelType {
 pub enum TrackKind {
     Audio,
     Video,
+    ScreenAudio,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

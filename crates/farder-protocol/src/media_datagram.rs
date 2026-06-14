@@ -8,7 +8,8 @@
 
 use crate::server::TrackKind;
 use farder_crypto::media::{
-    MEDIA_FRAME_TYPE_AUDIO, MEDIA_FRAME_TYPE_VIDEO, SessionId, SESSION_ID_LEN,
+    MEDIA_FRAME_TYPE_AUDIO, MEDIA_FRAME_TYPE_SCREEN_AUDIO, MEDIA_FRAME_TYPE_VIDEO, SessionId,
+    SESSION_ID_LEN,
 };
 
 /// Version byte for the outer media datagram header (distinct from the inner
@@ -44,6 +45,7 @@ fn track_kind_to_byte(k: TrackKind) -> u8 {
     match k {
         TrackKind::Audio => MEDIA_FRAME_TYPE_AUDIO,
         TrackKind::Video => MEDIA_FRAME_TYPE_VIDEO,
+        TrackKind::ScreenAudio => MEDIA_FRAME_TYPE_SCREEN_AUDIO,
     }
 }
 
@@ -51,6 +53,7 @@ fn byte_to_track_kind(b: u8) -> Option<TrackKind> {
     match b {
         MEDIA_FRAME_TYPE_AUDIO => Some(TrackKind::Audio),
         MEDIA_FRAME_TYPE_VIDEO => Some(TrackKind::Video),
+        MEDIA_FRAME_TYPE_SCREEN_AUDIO => Some(TrackKind::ScreenAudio),
         _ => None,
     }
 }
@@ -410,6 +413,14 @@ mod tests {
             assert_eq!(h.frag_index as usize, i);
             assert_eq!(payload.len(), 1);
         }
+    }
+
+    #[test]
+    fn screen_audio_track_kind_round_trips_through_outer_byte() {
+        let sid = [9u8; 16];
+        let dgrams = fragment(TrackKind::ScreenAudio, &sid, 0, b"opaque", DEFAULT_MAX_DGRAM_PAYLOAD);
+        let (hdr, _payload) = OuterHeader::parse(&dgrams[0]).expect("valid header");
+        assert_eq!(hdr.track_kind, TrackKind::ScreenAudio);
     }
 
     #[test]

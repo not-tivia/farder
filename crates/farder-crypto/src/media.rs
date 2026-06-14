@@ -71,6 +71,11 @@ pub const MEDIA_FRAME_VERSION: u8 = 0x02;
 pub const MEDIA_FRAME_TYPE_AUDIO: u8 = 0x01;
 /// Type byte for a video track (buf[1]).
 pub const MEDIA_FRAME_TYPE_VIDEO: u8 = 0x02;
+/// Type byte for a screen-audio track in the OUTER datagram header (routing).
+/// NOTE: the INNER sealed frame for screen audio reuses the AUDIO byte (0x01)
+/// because it is encrypted/decrypted with seal_audio_packet_to_wire /
+/// open_audio_wire_frame — only the outer routing identity differs.
+pub const MEDIA_FRAME_TYPE_SCREEN_AUDIO: u8 = 0x03;
 /// Total byte length of the fixed media-frame header that precedes the
 /// AEAD ciphertext: version(1) + type(1) + track_id(1) + codec_id(1) +
 /// seq(8) + session_id(16) = 28 bytes.
