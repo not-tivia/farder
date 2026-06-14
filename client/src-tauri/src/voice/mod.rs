@@ -1216,7 +1216,14 @@ impl VoiceController {
     /// Peer left the stream entirely (different event from TrackDisabled but
     /// same controller-side cleanup).
     pub async fn on_peer_stream_left(&self, session_id: SessionId) {
+        // A peer leaving the call emits only StreamLeft (no per-track TrackDisabled),
+        // so we must tear down every track kind for this session here — otherwise a
+        // sharing peer's video/screen-audio recv task + ring leak (the screen-audio
+        // ring would keep being mixed as silence forever). Each on_peer_track_disabled
+        // arm guards on presence, so calling it for a kind the peer never had is a no-op.
         self.on_peer_track_disabled(session_id, TrackKind::Audio).await;
+        self.on_peer_track_disabled(session_id, TrackKind::Video).await;
+        self.on_peer_track_disabled(session_id, TrackKind::ScreenAudio).await;
     }
 
     /// A peer's StreamJoined arrived — remember their initial mute/deafen so
@@ -2116,6 +2123,74 @@ mod controller_tests {
             .expect("peer present");
         assert!(!peer.muted, "stale mute seed must not survive a leave");
         assert!(!peer.deafened, "stale deafen seed must not survive a leave");
+    }
+
+    #[tokio::test]
+    async fn peer_stream_left_tears_down_screen_audio_ring() {
+        // A peer sharing screen audio leaves the call (StreamLeft only — no
+        // per-track TrackDisabled). on_peer_stream_left must tear down the
+        // ScreenAudio recv task + ring, not just Audio. Otherwise the orphaned
+        // screen-audio ring keeps being summed into the mix forever.
+        let (ctrl, fake, _emitter) = setup_joined_call().await;
+        let sid: SessionId = [11u8; 16];
+        let pk = PublicKey::from_bytes([7u8; 32]);
+
+        // Seed a ScreenAudio track the same way audio is seeded: offer the
+        // ScreenAudio key for this session, then TrackEnabled(ScreenAudio).
+        let peer_kp = Keypair::generate();
+        let our_kp = fake.my_keypair();
+        let key = farder_crypto::media::derive_stream_key();
+        let wrapped = farder_crypto::media::wrap_stream_key_for_peer(
+            &key,
+            peer_kp.signing_key_bytes(),
+            our_kp.public_key().as_bytes(),
+        )
+        .unwrap();
+        ctrl.on_stream_key_offer(sid, TrackKind::ScreenAudio, peer_kp.public_key(), wrapped)
+            .await;
+        ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::ScreenAudio)
+            .await;
+
+        // Precondition: the screen-audio ring + peer entry are present.
+        {
+            let inner = ctrl.inner.lock().await;
+            let call = inner.active.as_ref().expect("still in call");
+            assert_eq!(
+                call.screen_audio_rings
+                    .lock()
+                    .expect("screen_audio_rings poisoned")
+                    .len(),
+                1,
+                "ScreenAudio ring must be seeded before the leave"
+            );
+            assert_eq!(
+                call.screen_audio_peers.len(),
+                1,
+                "ScreenAudio peer entry must be seeded before the leave"
+            );
+        }
+
+        // The peer leaves the call: StreamLeft only.
+        ctrl.on_peer_stream_left(sid).await;
+
+        // The screen-audio ring AND the peer entry must both be gone.
+        {
+            let inner = ctrl.inner.lock().await;
+            let call = inner.active.as_ref().expect("still in call");
+            assert!(
+                call.screen_audio_rings
+                    .lock()
+                    .expect("screen_audio_rings poisoned")
+                    .is_empty(),
+                "on_peer_stream_left must drop the ScreenAudio ring (mix leak)"
+            );
+            assert!(
+                call.screen_audio_peers.is_empty(),
+                "on_peer_stream_left must drop the ScreenAudio peer entry (recv-task leak)"
+            );
+        }
+
+        ctrl.leave().await.unwrap();
     }
 
     async fn live_gain_for(ctrl: &VoiceController, sid: &SessionId) -> Option<f32> {
