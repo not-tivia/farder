@@ -464,8 +464,8 @@ export async function voiceLeave(): Promise<void> {
   return invoke("voice_leave");
 }
 
-export async function voiceStartScreenShare(fps: number, maxWidth: number, maxHeight: number): Promise<void> {
-  return invoke<void>("voice_start_screen_share", { fps, maxWidth, maxHeight });
+export async function voiceStartScreenShare(fps: number, maxWidth: number, maxHeight: number, audioDeviceId: string | null): Promise<void> {
+  return invoke<void>("voice_start_screen_share", { fps, maxWidth, maxHeight, audioDeviceId });
 }
 
 export async function voiceStopScreenShare(): Promise<void> {
@@ -750,4 +750,12 @@ export async function startScreensharePreview(fps: number, maxWidth: number, max
 
 export async function stopScreensharePreview(): Promise<void> {
   return invoke<void>("stop_screenshare_preview");
+}
+
+// ── Screen-audio output device enumeration (Phase D Task 7) ──────────────────
+
+export interface AudioOutputDevice { id: string; name: string; is_default: boolean; }
+
+export async function listAudioOutputDevices(): Promise<AudioOutputDevice[]> {
+  return invoke<AudioOutputDevice[]>("list_audio_output_devices");
 }

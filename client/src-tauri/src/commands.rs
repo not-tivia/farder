@@ -3027,6 +3027,11 @@ pub async fn voice_get_state(
     Ok(voice.state().await)
 }
 
+#[tauri::command]
+pub async fn list_audio_output_devices() -> Result<Vec<crate::screen_audio::OutputDevice>, String> {
+    crate::screen_audio::list_output_devices()
+}
+
 // ---------------------------------------------------------------------------
 // Local server management commands
 // ---------------------------------------------------------------------------
