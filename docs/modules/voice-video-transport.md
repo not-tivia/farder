@@ -1,8 +1,11 @@
-# Voice video transport (Phase C1 + C2)
+# Voice video transport (Phase C1 + C2 + D)
 
 > **File(s):** `client/src-tauri/src/voice/mod.rs` (dispatcher + controller + share lifecycle),
 > `client/src-tauri/src/voice/send_video.rs`,
 > `client/src-tauri/src/voice/recv_video.rs`,
+> `client/src-tauri/src/voice/send_screen_audio.rs` (Phase D screen-audio send loop),
+> `client/src-tauri/src/screen_audio.rs` (Phase D capture seam + mock),
+> `client/src-tauri/src/screen_audio_wasapi.rs` (Phase D, `cfg(windows)` WASAPI loopback),
 > `client/src-tauri/src/screenshare.rs` (`run_encode_loop`),
 > `client/src/components/PeerVideoTiles.tsx` (viewer),
 > `crates/farder-crypto/src/media.rs` (`seal_video_frame_to_wire` / `open_video_wire_frame`)
@@ -366,6 +369,107 @@ The tile labels itself with the first 8 chars of the sharer's `pubkey`.
 
 ---
 
+## Phase D — screen/game audio
+
+Phase D adds a THIRD media track, `TrackKind::ScreenAudio`, so a sharer's game/system
+audio travels alongside their screen video over the same E2EE/datagram path. It is a
+separate track with its own key, its own send loop, and an independent viewer mixer ring
+— it is NOT mixed into the sharer's microphone. The volume slider and polished UI are
+**Phase E**; the receive gain is a fixed `1.0` default for now.
+
+### `TrackKind::ScreenAudio` — wire model
+
+- **Outer routing byte `0x03`** (`MEDIA_FRAME_TYPE_SCREEN_AUDIO`): the cleartext outer
+  header carries its own `track_kind` so the dispatcher, server, and relay route it
+  independently of mic audio (`0x01`) and video (`0x02`).
+- **Inner sealed frame reuses the AUDIO crypto** — the inner frame's type byte is the
+  AUDIO byte `0x01`, and it is sealed/opened with `seal_audio_packet_to_wire` /
+  `open_audio_wire_frame` (NOT a new video-style seal). Screen audio is just Opus audio
+  under a different stream key; only the outer routing byte distinguishes it.
+  (`media_stream.rs` maps `ScreenAudio -> MEDIA_FRAME_TYPE_AUDIO` for the inner byte.)
+- **Bandwidth cap = the AUDIO cap.** The server gives each `TrackKind` its own
+  token bucket, but `ScreenAudio` is capped on `audio_max_bps` (same budget shape as
+  mic audio), not the video cap.
+- **Server activity field.** The server's per-session media state gains
+  `last_screen_audio_frame_ms: Option<u64>`, stamped independently of the audio/video
+  activity fields whenever a `ScreenAudio` frame is accepted.
+
+### Capture (`screen_audio.rs` seam + `screen_audio_wasapi.rs`)
+
+`screen_audio.rs` is the platform-agnostic seam. It defines `OutputDevice { id, name,
+is_default }`, the `ScreenAudioCapture` trait (a running capture; `stop()` is idempotent),
+`list_output_devices()`, and `start_capture(device_id: Option<String>)`. The seam delivers
+**48 kHz MONO** `PcmChunk`s of exactly `OPUS_FRAME_SAMPLES_MONO` samples each — matching the
+voice send path's contract.
+
+- **`cfg(windows)` → `screen_audio_wasapi.rs`** (wasapi 0.23): WASAPI output-device
+  **loopback**. It picks the default or a selected RENDER device, calls
+  `initialize_client` in the CAPTURE direction (this is what makes it loopback),
+  uses `StreamMode::EventsShared { autoconvert: true, .. }` to autoconvert to
+  48 kHz / 2-channel f32, then **downmixes stereo → mono** (`(L+R)*0.5`) and chunks to
+  `OPUS_FRAME_SAMPLES_MONO`. `list_output_devices()` enumerates render devices via
+  `DeviceEnumerator` and flags the default. **This file is NOT compiled on Linux.**
+- **`cfg(not(windows))` → mock.** A 440 Hz sine tone on a thread, same chunk shape, so the
+  pipeline is testable headlessly; `list_output_devices()` returns a single
+  `"Mock Output (no WASAPI)"` entry.
+- **Capture runs on its own thread.** The capture loop is a dedicated `std::thread`, not on
+  the async runtime. **Virtual-endpoint-wedge caveat:** loopback of certain virtual output
+  endpoints (e.g. some virtual cables / "no device" sinks) can wedge the WASAPI event wait;
+  the loop uses a finite `wait_for_event(200)` (milliseconds) fallback timeout so it always
+  re-checks the `stop` flag and tears down cleanly rather than blocking forever.
+
+### Send loop (`voice/send_screen_audio.rs`)
+
+`run(ScreenAudioSendConfig, stop)` mirrors the voice encode tail with **no APM / gate /
+mute** (game audio is sent unconditionally while sharing): `PcmChunk` → Opus encode (mono,
+`OPUS_DEFAULT_BITRATE_BPS`) → `seal_audio_packet_to_wire` under the **ScreenAudio stream
+key** → `fragment(TrackKind::ScreenAudio, …)` → `datagram_sink`. `seq` advances per chunk
+(including on skipped/error frames, to never reuse a nonce); `frame_id` advances per emitted
+frame. One mono Opus frame fits in a single datagram in practice.
+
+### Controller integration (`voice/mod.rs`)
+
+`start_screen_share(fps, max_width, max_height, audio_device_id)` (the same entry point as
+Phase C2, now with `audio_device_id`) drives screen audio as **best-effort** alongside video:
+
+- It derives a SEPARATE per-call `ScreenAudio` stream key (independent of the video key),
+  offers it via `offer_track_key(TrackKind::ScreenAudio, …)`, spawns the
+  `send_screen_audio::run` loop fed by `screen_audio::start_capture(audio_device_id)`, and
+  calls `enable_track(TrackKind::ScreenAudio)`.
+- **Best-effort:** if capture fails to start, the share continues **video-only** — no
+  `ScreenAudio` key is offered, no track is enabled, and `start_screen_share` still succeeds.
+- The state is stored on the `VideoShareState` as `screen_audio_key: Option<[u8;32]>`,
+  `screen_audio_stop: Arc<AtomicBool>`, and `screen_audio_capture` (the live capture handle).
+- **Late joiner re-offer + re-enable** (`on_peer_stream_joined`): if a `screen_audio_key`
+  exists, the controller re-offers it and re-calls `enable_track(ScreenAudio)` for the
+  enlarged member set — the same three-step pattern as video (key first on the ordered
+  connection, then the re-broadcast `TrackEnabled` brings up the late joiner's recv route).
+- **Teardown:** `stop_screen_share`, `leave`, and `shutdown_video_share` set
+  `screen_audio_stop`, drop the capture handle, and disable the `ScreenAudio` track.
+  `on_peer_stream_left` now tears down **all three** track kinds (Audio, Video, ScreenAudio).
+
+### Viewer path (`on_peer_screen_audio_track_enabled`)
+
+On `TrackEnabled(ScreenAudio)`, `on_peer_screen_audio_track_enabled(session_id, _pubkey)`:
+
+1. Skips if `screen_audio_peers` already has the session (de-dupe; late-joiner re-enable is a
+   no-op for existing viewers).
+2. Looks up `(session_id, TrackKind::ScreenAudio)` in `peer_keys`; if the
+   `StreamKeyOffer(ScreenAudio)` has not arrived, logs a warning and returns (same
+   key-before-enable invariant as video).
+3. Inserts a **separate** ring into `screen_audio_rings` with an **INDEPENDENT gain**
+   (default `1.0`) — distinct from that peer's voice gain. Registers the dispatcher route as
+   `(session_id, TrackKind::ScreenAudio)` and spawns the audio recv task that decodes into
+   the ring.
+4. The mixer sums `screen_audio_rings` into the output frame at its own gain, so screen audio
+   is independent of any peer's microphone volume.
+
+`on_peer_track_disabled(ScreenAudio)` removes the `screen_audio_peers` entry, drops the ring,
+and unregisters the dispatcher route. **The independent volume slider is Phase E** — Phase D
+ships the plumbing at a fixed `1.0` gain.
+
+---
+
 ## State it owns
 
 | Field | Type | What it tracks, when it's mutated |
@@ -373,7 +477,9 @@ The tile labels itself with the first 8 chars of the sharer's `pubkey`.
 | `ActiveCall.peer_keys` | `HashMap<(SessionId, TrackKind), [u8; 32]>` | Per-track stream keys; populated by `on_stream_key_offer`, read by `on_peer_*_track_enabled` |
 | `ActiveCall.peer_pubkeys` | `HashMap<SessionId, PublicKey>` | Long-lived identity keys; populated by the first `on_stream_key_offer` for each session |
 | `ActiveCall.video_peers` | `HashMap<SessionId, VideoPeerEntry>` | Live video recv tasks; populated by `on_peer_video_track_enabled`, drained by `leave` / `on_peer_track_disabled(Video)` |
-| `ActiveCall.video_share` | `Option<VideoShareState>` | The LOCAL outbound share (one per call): `stop`/`force_keyframe` flags, capture `backend`, `video_key`, encode `thread`. Set by `start_screen_share`, taken by `stop_screen_share` / `leave` |
+| `ActiveCall.video_share` | `Option<VideoShareState>` | The LOCAL outbound share (one per call): `stop`/`force_keyframe` flags, capture `backend`, `video_key`, encode `thread`. Phase D also stores `screen_audio_key: Option<[u8;32]>`, `screen_audio_stop`, and `screen_audio_capture` here. Set by `start_screen_share`, taken by `stop_screen_share` / `leave` |
+| `ActiveCall.screen_audio_peers` | `HashMap<SessionId, ScreenAudioPeerEntry>` | Live screen-audio recv tasks (Phase D); populated by `on_peer_screen_audio_track_enabled`, drained by `leave` / `on_peer_track_disabled(ScreenAudio)` / `on_peer_stream_left` |
+| `ActiveCall.screen_audio_rings` | `mixer::PeerRings` | Per-peer screen-audio mixer rings with INDEPENDENT gain (default `1.0`), summed into the output frame separately from voice rings (Phase D) |
 | `MediaInboundDispatcher.routes` | `Mutex<HashMap<(SessionId, TrackKind), UnboundedSender<Bytes>>>` | Dispatch table; one entry per registered (session, track) pair |
 
 ## Events emitted
@@ -389,6 +495,9 @@ The tile labels itself with the first 8 chars of the sharer's `pubkey`.
 | `ServerEvent::StreamKeyOffer { kind: Video, ... }` | `bridge.rs` | `on_stream_key_offer(session_id, TrackKind::Video, sender_pubkey, wrapped_key)` — unwraps and stores the video stream key |
 | `ServerEvent::TrackEnabled { kind: Video, ... }` | `bridge.rs` | `on_peer_video_track_enabled` — registers dispatcher route and spawns video recv task |
 | `ServerEvent::TrackDisabled { kind: Video, ... }` | `bridge.rs` | `on_peer_track_disabled(session_id, TrackKind::Video)` — tears down the recv task and unregisters the route |
+| `ServerEvent::StreamKeyOffer { kind: ScreenAudio, ... }` | `bridge.rs` | `on_stream_key_offer(session_id, TrackKind::ScreenAudio, …)` — unwraps and stores the screen-audio stream key (Phase D) |
+| `ServerEvent::TrackEnabled { kind: ScreenAudio, ... }` | `bridge.rs` | `on_peer_screen_audio_track_enabled` — registers the dispatcher route and spawns the screen-audio recv task into `screen_audio_rings` (Phase D) |
+| `ServerEvent::TrackDisabled { kind: ScreenAudio, ... }` | `bridge.rs` | `on_peer_track_disabled(session_id, TrackKind::ScreenAudio)` — tears down the recv task, drops the ring, unregisters the route (Phase D) |
 
 ## Integration map
 

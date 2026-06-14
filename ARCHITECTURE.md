@@ -105,6 +105,12 @@ from the capture loop; viewers decode each `voice://peer-video-frame` in `PeerVi
 (keyframe-on-join + late-joiner re-offer keep mid-share joiners in sync). Game audio
 capture and the polished share UI are later phases (D/E).
 
+**Screensharing (Phase D — game/screen audio):** game audio now flows as a third media
+track (`ScreenAudio`, own outer byte `0x03`, inner frame reusing the audio E2EE seal) over
+the same E2EE/datagram path, captured best-effort via WASAPI loopback of a selectable output
+device (`list_audio_output_devices`) and mixed at its own (independent) volume on the viewer;
+the volume slider + polished UI are Phase E.
+
 ## Relay as fetch proxy (invite previews)
 
 The relay doubles as a **privacy fetch proxy** for invite previews (and,

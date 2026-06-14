@@ -917,20 +917,29 @@ releases audio devices.
 
 ---
 
-### `voice_start_screen_share(voice, fps, max_width, max_height) -> Result<(), String>`
+### `voice_start_screen_share(voice, fps, max_width, max_height, audio_device_id) -> Result<(), String>`
 
 **What it does:** starts capturing the screen and transmitting it as a video
 track in the active call. Delegates to `VoiceController::start_screen_share`,
 which opens the capture source, spawns the H.264 encode loop at the given `fps`
 (downscaled to fit `max_width`/`max_height`), and offers the video stream key to
-peers. Errors if not in a call.
-**Side effects:** spawns capture + encode tasks; mutates `VoiceController` state;
-causes peers to receive `voice://peer-video-frame` events (now tagged with the
-sharer's `pubkey`).
+peers. As of Phase D it also best-effort captures game/system audio from
+`audio_device_id` and transmits it as a separate `ScreenAudio` track (own key,
+own loop); if audio capture fails the share continues video-only. Errors if not
+in a call.
+**Parameters:** `audio_device_id` — `Option<String>`; the `id` of an output
+device from `list_audio_output_devices`, or `null`/omitted for the system
+default render device.
+**Side effects:** spawns capture + encode tasks (and, when audio capture
+succeeds, a WASAPI-loopback capture thread + screen-audio send loop); mutates
+`VoiceController` state; causes peers to receive `voice://peer-video-frame`
+events (tagged with the sharer's `pubkey`) and, with screen audio, an extra
+mixed-in `ScreenAudio` stream.
 **Connects to:** `VoiceController::start_screen_share`.
-**invoke name:** `"voice_start_screen_share"` → `voiceStartScreenShare()`
-(args `{ fps, maxWidth, maxHeight }`; Tauri maps snake_case Rust params to
-camelCase JS keys).
+**invoke name:** `"voice_start_screen_share"` →
+`voiceStartScreenShare(fps, maxWidth, maxHeight, audioDeviceId)` (args
+`{ fps, maxWidth, maxHeight, audioDeviceId }`; Tauri maps snake_case Rust params
+to camelCase JS keys).
 
 ---
 
@@ -942,6 +951,22 @@ and disables the video track so peers tear down their video tiles.
 track-disabled signal.
 **Connects to:** `VoiceController::stop_screen_share`.
 **invoke name:** `"voice_stop_screen_share"` → `voiceStopScreenShare()`.
+
+---
+
+### `list_audio_output_devices() -> Result<Vec<OutputDevice>, String>`
+
+**What it does:** enumerates the system output (render) devices available for
+screen/game-audio loopback capture, for the output-device picker in the voice
+control bar. Delegates to `screen_audio::list_output_devices` (WASAPI
+`DeviceEnumerator` on Windows; a single mock entry off Windows). Takes no args.
+**Returns:** a list of `{ id, name, is_default }` (`OutputDevice`); `id` is the
+opaque device id passed back as `audio_device_id` to `voice_start_screen_share`.
+On error — a `String` (COM/enumeration failure).
+**Side effects:** none (read-only device enumeration).
+**Connects to:** `screen_audio::list_output_devices`; the returned `id` feeds
+`voice_start_screen_share`'s `audio_device_id`.
+**invoke name:** `"list_audio_output_devices"` → `listAudioOutputDevices()`.
 
 ---
 
