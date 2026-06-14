@@ -43,6 +43,7 @@ openh264 = "0.9.3"
 # Windows Graphics Capture — screen/window/fullscreen capture. Windows-only;
 # on other hosts the mock display backend is used and this isn't compiled.
 windows-capture = "2.0.0"
+wasapi = "0.23.0"
 
 [dev-dependencies]
 tempfile = "3"

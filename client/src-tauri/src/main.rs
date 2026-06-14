@@ -19,6 +19,9 @@ mod tls;
 mod translation;
 mod tray;
 mod profile_sync;
+mod screen_audio;
+#[cfg(windows)]
+mod screen_audio_wasapi;
 mod screenshare;
 mod video_encoder;
 mod voice;
