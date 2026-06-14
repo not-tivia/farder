@@ -309,16 +309,37 @@ gets a keyframe without restarting the share.
 ### Keyframe-on-join + late-joiner re-offer (`on_peer_stream_joined`)
 
 When a new peer joins the call (`on_peer_stream_joined`) and we are currently
-sharing, the controller:
+sharing, the controller (after releasing the `inner` lock, in this order):
 
 - sets the share's `force_keyframe` flag so the encoder emits a fresh IDR the new
-  viewer can start decoding from immediately, and
+  viewer can start decoding from immediately,
 - re-offers the video key via `offer_video_key` — the new member is now in
   `get_media_state`, so the re-offer wraps the existing `video_key` for the
-  enlarged member set (the offer runs after the `inner` lock is released).
+  enlarged member set, and
+- re-calls `enable_track(TrackKind::Video)` so the server re-broadcasts
+  `TrackEnabled(Video)` to **all** members including the new joiner.
 
-Without this, a peer joining mid-share would never receive the video key and
-would wait indefinitely for a keyframe.
+The re-enable is what actually wires up the late joiner's *receive route*: a
+viewer's video recv task + dispatcher route is created only by
+`on_peer_video_track_enabled`, which fires only on a `TrackEnabled(Video)` event,
+and the server does **not** replay an existing session's active tracks to a new
+joiner. The key offer is sent first on the ordered connection, so by the time the
+re-broadcast `TrackEnabled` reaches the joiner its video key is already stored and
+the route comes up; existing viewers get a duplicate `TrackEnabled` that is a
+no-op (their `video_peers` route already exists — the handler early-returns).
+
+Without all three, a peer joining mid-share would either never receive the video
+key, never get a decodable keyframe, or (without the re-enable) hold the key but
+have no recv route and see nothing.
+
+> **Known limitation (not C2-specific):** this late-joiner wiring exists for
+> *video* but the equivalent does not exist for *audio* — audio offers its key and
+> enables its track only once, at the joiner's own join, and the existing-member
+> side never re-offers/re-enables when a later peer arrives. A client that joins
+> after others are already speaking relies on those members toggling to be heard.
+> Closing that for audio (ideally a server-side replay of each existing session's
+> `active_tracks` as `TrackEnabled` targeted at the joiner on `JoinStream`) is
+> out of scope for C2 and tracked separately.
 
 ### Frontend viewer — `PeerVideoTiles.tsx`
 
