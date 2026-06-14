@@ -45,6 +45,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let want_rate: usize = 48_000;
     let want_channels: usize = 2;
 
+    use std::io::Write;
     for i in 0..n {
         let device = match collection.get_device_at_index(i) {
             Ok(d) => d,
@@ -57,16 +58,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let is_default = device.get_id().ok().as_deref() == default_id.as_deref();
         let tag = if is_default { " (DEFAULT)" } else { "" };
 
+        // Print BEFORE capturing so progress is visible and a wedged device is
+        // obvious (it'll be the last name printed).
+        print!("[{i}]{tag} {name} ... ");
+        let _ = std::io::stdout().flush();
+
         match capture_peak(&device, want_rate, want_channels) {
             Ok((frames, peak, native)) => {
-                let verdict = if peak > 0.0001 { "  <== AUDIO IS HERE" } else { "  (silent)" };
-                println!("[{i}]{tag} {name}");
-                println!("     native {native} | captured {frames} frames | peak {peak:.5}{verdict}");
+                let verdict = if peak > 0.0001 { "<== AUDIO IS HERE" } else { "(silent)" };
+                println!("native {native} | {frames} frames | peak {peak:.5}  {verdict}");
             }
-            Err(e) => {
-                println!("[{i}]{tag} {name}");
-                println!("     (could not capture: {e})");
-            }
+            Err(e) => println!("(could not capture: {e})"),
         }
     }
 
@@ -85,6 +87,7 @@ fn capture_peak(
     want_channels: usize,
 ) -> Result<(u64, f32, String), Box<dyn std::error::Error>> {
     use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
     use wasapi::*;
 
     let mut audio_client = device.get_iaudioclient()?;
@@ -108,9 +111,12 @@ fn capture_peak(
     let mut bytes: VecDeque<u8> = VecDeque::new();
     let mut frames: u64 = 0;
     let mut peak: f32 = 0.0;
-    let target: u64 = (want_rate as u64) * 3 / 2; // ~1.5s
 
-    while frames < target {
+    // HARD wall-clock cap: ~1.2s per device no matter what. Some phantom/idle
+    // endpoints fire buffer-ready events but never deliver samples — capping on
+    // real time (not on a frame target) guarantees we always move on.
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < deadline {
         capture_client.read_from_device_to_deque(&mut bytes)?;
         let mut chunk = [0u8; 4];
         let mut samples = 0usize;
@@ -125,9 +131,8 @@ fn capture_peak(
             samples += 1;
         }
         frames += (samples as u64) / (want_channels as u64);
-        if h_event.wait_for_event(10_000_000).is_err() {
-            break; // ~1s with no buffer -> move on
-        }
+        // Short wait (~100ms) so we poll and re-check the deadline promptly.
+        let _ = h_event.wait_for_event(1_000_000);
     }
     audio_client.stop_stream()?;
     Ok((frames, peak, native))
