@@ -175,6 +175,7 @@ fn main() {
             commands::voice_get_state,
             commands::voice_toggle_transmit,
             commands::voice_set_peer_volume,
+            commands::voice_set_screen_audio_gain,
             commands::get_voice_mode,
             commands::set_voice_mode,
             commands::get_ptt_key,

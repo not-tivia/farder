@@ -503,6 +503,10 @@ export async function voiceSetPeerVolume(pubkeyHex: string, volume: number): Pro
   return invoke<void>("voice_set_peer_volume", { pubkeyHex, volume });
 }
 
+export async function voiceSetScreenAudioGain(pubkeyHex: string, gain: number): Promise<void> {
+  return invoke<void>("voice_set_screen_audio_gain", { pubkeyHex, gain });
+}
+
 export async function getVoiceMode(): Promise<string> {
   return invoke<string>("get_voice_mode");
 }

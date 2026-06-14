@@ -923,6 +923,23 @@ impl VoiceController {
         Ok(())
     }
 
+    /// Set a peer's GAME-AUDIO (ScreenAudio) volume, independent of their voice.
+    pub async fn set_screen_audio_gain(&self, pubkey_hex: String, gain: f32) -> Result<(), String> {
+        let clamped = gain.clamp(0.0, 2.0);
+        let inner = self.inner.lock().await;
+        if let Some(call) = inner.active.as_ref() {
+            let rings = call.screen_audio_rings.lock().expect("screen_audio_rings poisoned");
+            for (sid, (_, g)) in rings.iter() {
+                if let Some(pk) = call.peer_pubkeys.get(sid) {
+                    if pk.to_string() == pubkey_hex {
+                        g.store(clamped.to_bits(), Ordering::Release);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── Inbound media-event handlers (Task 11 wires server events to these) ──
 
     /// Server told us a peer offered us a wrapped stream key. Unwrap it with
@@ -2570,6 +2587,104 @@ mod controller_tests {
             "pubkey must match the peer's key on disable; payload={:?}",
             disable_event.1
         );
+
+        ctrl.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_screen_audio_gain_updates_ring_gain_and_clamps() {
+        // Seed a ScreenAudio peer the same way peer_stream_left_tears_down_screen_audio_ring
+        // does: offer a ScreenAudio key via on_stream_key_offer, then enable via
+        // on_peer_track_enabled(ScreenAudio).
+        let (ctrl, fake, _emitter) = setup_joined_call().await;
+        let sid: SessionId = [11u8; 16];
+        // pk is used for on_peer_track_enabled but peer_pubkeys is keyed by the
+        // sender_pubkey passed to on_stream_key_offer (peer_kp.public_key()).
+        let pk = PublicKey::from_bytes([7u8; 32]);
+
+        let peer_kp = Keypair::generate();
+        let our_kp = fake.my_keypair();
+        let key = farder_crypto::media::derive_stream_key();
+        let wrapped = farder_crypto::media::wrap_stream_key_for_peer(
+            &key,
+            peer_kp.signing_key_bytes(),
+            our_kp.public_key().as_bytes(),
+        )
+        .unwrap();
+        // on_stream_key_offer inserts peer_pubkeys[sid] = peer_kp.public_key()
+        ctrl.on_stream_key_offer(sid, TrackKind::ScreenAudio, peer_kp.public_key(), wrapped)
+            .await;
+        ctrl.on_peer_track_enabled(sid, pk.clone(), TrackKind::ScreenAudio)
+            .await;
+
+        // The ring must be seeded at gain=1.0 (default unity).
+        {
+            let inner = ctrl.inner.lock().await;
+            let call = inner.active.as_ref().expect("still in call");
+            let rings = call.screen_audio_rings.lock().expect("screen_audio_rings poisoned");
+            let (_, gain) = rings.get(&sid).expect("screen_audio ring present");
+            assert_eq!(
+                f32::from_bits(gain.load(Ordering::Acquire)),
+                1.0,
+                "default gain must be 1.0"
+            );
+        }
+
+        // set_screen_audio_gain matches by peer_pubkeys, which holds peer_kp.public_key()
+        let pubkey_hex = peer_kp.public_key().to_string();
+
+        // Normal set to 0.5.
+        ctrl.set_screen_audio_gain(pubkey_hex.clone(), 0.5)
+            .await
+            .unwrap();
+        {
+            let inner = ctrl.inner.lock().await;
+            let call = inner.active.as_ref().expect("still in call");
+            let rings = call.screen_audio_rings.lock().expect("screen_audio_rings poisoned");
+            let (_, gain) = rings.get(&sid).expect("screen_audio ring present");
+            assert_eq!(
+                f32::from_bits(gain.load(Ordering::Acquire)),
+                0.5,
+                "gain must be 0.5 after set"
+            );
+        }
+
+        // Over-range clamps to 2.0.
+        ctrl.set_screen_audio_gain(pubkey_hex.clone(), 3.0)
+            .await
+            .unwrap();
+        {
+            let inner = ctrl.inner.lock().await;
+            let call = inner.active.as_ref().expect("still in call");
+            let rings = call.screen_audio_rings.lock().expect("screen_audio_rings poisoned");
+            let (_, gain) = rings.get(&sid).expect("screen_audio ring present");
+            assert_eq!(
+                f32::from_bits(gain.load(Ordering::Acquire)),
+                2.0,
+                "gain must clamp to 2.0 for input 3.0"
+            );
+        }
+
+        // Negative clamps to 0.0.
+        ctrl.set_screen_audio_gain(pubkey_hex.clone(), -1.0)
+            .await
+            .unwrap();
+        {
+            let inner = ctrl.inner.lock().await;
+            let call = inner.active.as_ref().expect("still in call");
+            let rings = call.screen_audio_rings.lock().expect("screen_audio_rings poisoned");
+            let (_, gain) = rings.get(&sid).expect("screen_audio ring present");
+            assert_eq!(
+                f32::from_bits(gain.load(Ordering::Acquire)),
+                0.0,
+                "gain must clamp to 0.0 for negative input"
+            );
+        }
+
+        // Unknown pubkey is a no-op (must not error).
+        ctrl.set_screen_audio_gain("vk_unknown".to_string(), 1.0)
+            .await
+            .unwrap();
 
         ctrl.leave().await.unwrap();
     }

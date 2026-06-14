@@ -2983,6 +2983,15 @@ pub async fn voice_set_peer_volume(
 }
 
 #[tauri::command]
+pub async fn voice_set_screen_audio_gain(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+    pubkey_hex: String,
+    gain: f32,
+) -> Result<(), String> {
+    voice.set_screen_audio_gain(pubkey_hex, gain).await
+}
+
+#[tauri::command]
 pub async fn voice_leave(
     voice: State<'_, Arc<crate::voice::VoiceController>>,
 ) -> Result<(), String> {
