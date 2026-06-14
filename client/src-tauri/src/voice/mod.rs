@@ -1143,6 +1143,15 @@ impl VoiceController {
             if let Err(e) = offer_video_key(&server, channel_id, &video_key).await {
                 eprintln!("[voice] re-offer of video key on peer join failed: {e}");
             }
+            // Re-enable the Video track so the server re-broadcasts TrackEnabled
+            // to the new joiner (the server doesn't replay existing tracks on
+            // join). The key offer above is sent first on this ordered stream, so
+            // the joiner's on_peer_video_track_enabled finds it and spins up the
+            // recv route. Existing viewers get a duplicate TrackEnabled, which is
+            // a no-op (their video_peers route already exists).
+            if let Err(e) = server.enable_track(TrackKind::Video).await {
+                eprintln!("[voice] re-enable Video on peer join failed: {e}");
+            }
         }
     }
 
@@ -1931,6 +1940,23 @@ mod controller_tests {
             2,
             "joining mid-share must re-offer the Video key; offered={:?}",
             server.offered_kinds.lock().unwrap()
+        );
+
+        // (a') The Video track must also be re-enabled so the server
+        // re-broadcasts TrackEnabled(Video) to the new joiner (who then builds
+        // its recv route). One enable from start_screen_share + one from the
+        // join re-enable == 2.
+        assert_eq!(
+            server
+                .enabled_kinds
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|k| **k == TrackKind::Video)
+                .count(),
+            2,
+            "joining mid-share must re-enable the Video track; enabled={:?}",
+            server.enabled_kinds.lock().unwrap()
         );
 
         // The seed map still got the new peer's mute/deafen (unchanged behavior).
