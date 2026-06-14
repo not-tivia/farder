@@ -2992,8 +2992,9 @@ pub async fn voice_start_screen_share(
     fps: u32,
     max_width: u32,
     max_height: u32,
+    audio_device_id: Option<String>,
 ) -> Result<(), String> {
-    voice.start_screen_share(fps, max_width, max_height).await
+    voice.start_screen_share(fps, max_width, max_height, audio_device_id).await
 }
 
 #[tauri::command]

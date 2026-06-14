@@ -506,6 +506,13 @@ struct VideoShareState {
     video_key: [u8; 32],
     #[allow(dead_code)]
     thread: std::thread::JoinHandle<()>,
+    /// Screen-audio stream key (for late-joiner re-offer). None if capture failed.
+    screen_audio_key: Option<[u8; 32]>,
+    /// Stop flag for the screen-audio send loop.
+    screen_audio_stop: Arc<AtomicBool>,
+    /// Running WASAPI loopback capture (dropping/stopping it ends the capture thread).
+    #[allow(dead_code)]
+    screen_audio_capture: Option<Box<dyn crate::screen_audio::ScreenAudioCapture>>,
 }
 
 /// Map a u64 channel_id (server-side identifier) into the controller's
@@ -1242,7 +1249,7 @@ impl VoiceController {
                     // across the offer_video_key await).
                     if let Some(s) = call.video_share.as_ref() {
                         s.force_keyframe.store(true, Ordering::Relaxed);
-                        Some((call.server.clone(), call.channel_id, s.video_key))
+                        Some((call.server.clone(), call.channel_id, s.video_key, s.screen_audio_key))
                     } else {
                         None
                     }
@@ -1250,8 +1257,8 @@ impl VoiceController {
                 None => None,
             }
         };
-        if let Some((server, channel_id, video_key)) = reoffer {
-            if let Err(e) = offer_video_key(&server, channel_id, &video_key).await {
+        if let Some((server, channel_id, video_key, screen_audio_key)) = reoffer {
+            if let Err(e) = offer_track_key(&server, channel_id, TrackKind::Video, &video_key).await {
                 eprintln!("[voice] re-offer of video key on peer join failed: {e}");
             }
             // Re-enable the Video track so the server re-broadcasts TrackEnabled
@@ -1262,6 +1269,16 @@ impl VoiceController {
             // a no-op (their video_peers route already exists).
             if let Err(e) = server.enable_track(TrackKind::Video).await {
                 eprintln!("[voice] re-enable Video on peer join failed: {e}");
+            }
+            // If we're ALSO sharing screen/game audio, re-offer its key + re-enable
+            // the ScreenAudio track so the late joiner can decrypt + receive it too.
+            if let Some(sa_key) = screen_audio_key {
+                if let Err(e) = offer_track_key(&server, channel_id, TrackKind::ScreenAudio, &sa_key).await {
+                    eprintln!("[voice] re-offer screen-audio key on join failed: {e}");
+                }
+                if let Err(e) = server.enable_track(TrackKind::ScreenAudio).await {
+                    eprintln!("[voice] re-enable ScreenAudio on join failed: {e}");
+                }
             }
         }
     }
@@ -1335,7 +1352,7 @@ impl VoiceController {
     /// Start sharing our screen into the active call: derive a video key, offer
     /// it to current members, enable the Video track, and drive the Phase B
     /// capture->encode loop into the C1 VideoSender over this call's connection.
-    pub async fn start_screen_share(&self, fps: u32, max_width: u32, max_height: u32) -> Result<(), String> {
+    pub async fn start_screen_share(&self, fps: u32, max_width: u32, max_height: u32, audio_device_id: Option<String>) -> Result<(), String> {
         // Fail-fast: validate the encoder can init (it's built inside the thread).
         drop(crate::video_encoder::H264Encoder::new()?);
 
@@ -1355,7 +1372,7 @@ impl VoiceController {
 
         // Derive + offer the video key to current members.
         let video_key = farder_crypto::media::derive_stream_key();
-        offer_video_key(&server, channel_id, &video_key).await?;
+        offer_track_key(&server, channel_id, TrackKind::Video, &video_key).await?;
 
         // Start capture.
         let backend = crate::display::make_display_backend();
@@ -1390,13 +1407,55 @@ impl VoiceController {
             return Err(e);
         }
 
+        // Best-effort screen/game audio: capture the selected output device and
+        // spin up the ScreenAudio send loop under its OWN stream key. If capture
+        // fails to start, log and share VIDEO ONLY (don't abort the whole share).
+        let screen_audio_stop = Arc::new(AtomicBool::new(false));
+        let mut screen_audio_key: Option<[u8; 32]> = None;
+        let mut screen_audio_capture: Option<Box<dyn crate::screen_audio::ScreenAudioCapture>> = None;
+        match crate::screen_audio::start_capture(audio_device_id) {
+            Ok((cap, pcm_rx)) => {
+                let sa_key = farder_crypto::media::derive_stream_key();
+                if let Err(e) = offer_track_key(&server, channel_id, TrackKind::ScreenAudio, &sa_key).await {
+                    eprintln!("[voice] offer screen-audio key failed: {e}");
+                }
+                let sa_stop_t = screen_audio_stop.clone();
+                let server_sa = server.clone();
+                std::thread::spawn(move || {
+                    crate::voice::send_screen_audio::run(
+                        crate::voice::send_screen_audio::ScreenAudioSendConfig {
+                            pcm_rx,
+                            session_id: my_session_id,
+                            stream_key: sa_key,
+                            speaker_pk: my_pk_bytes,
+                            datagram_sink: Box::new(move |b| { let _ = server_sa.send_datagram(b); }),
+                        },
+                        sa_stop_t,
+                    );
+                });
+                screen_audio_key = Some(sa_key);
+                screen_audio_capture = Some(cap);
+                let _ = server.enable_track(TrackKind::ScreenAudio).await;
+            }
+            Err(e) => eprintln!("[voice] screen-audio capture failed to start (sharing video only): {e}"),
+        }
+
         // Record share state. Decide the outcome while borrowing `inner`; only
         // hand the just-built share to the call when we're actually storing it.
         // Held in an Option so the borrow checker tracks the move via `.take()`
         // (unconditional from its view): on a bail path the Option still owns the
         // share so we can tear it down after releasing the lock (we can't drop the
         // lock while `call` borrows it). `bail` carries the error for that path.
-        let mut share = Some(VideoShareState { stop, force_keyframe, backend, video_key, thread });
+        let mut share = Some(VideoShareState {
+            stop,
+            force_keyframe,
+            backend,
+            video_key,
+            thread,
+            screen_audio_key,
+            screen_audio_stop,
+            screen_audio_capture,
+        });
         // On a bail path we carry both the error message AND whether to disable
         // the Video track during teardown. The track toggle is a single
         // per-connection on/off (not refcounted), so we must only disable it when
@@ -1425,14 +1484,23 @@ impl VoiceController {
         };
         if let Some((msg, disable_track)) = bail {
             // `share` was not stored on a bail path, so the Option still owns it.
+            // Note whether screen audio was enabled before the share is consumed,
+            // so we mirror the Video track disable for ScreenAudio below.
+            let had_screen_audio = share.as_ref().map(|s| s.screen_audio_key.is_some()).unwrap_or(false);
             if let Some(s) = share.take() {
+                // shutdown_video_share also stops the screen-audio send loop +
+                // loopback capture thread (best-effort).
                 shutdown_video_share(s);
             }
             // We enabled the Video track above; best-effort disable it only when
             // nobody else owns it (call ended), so we don't leave it enabled with
-            // no share behind it — but never clobber a race winner's track.
+            // no share behind it — but never clobber a race winner's track. Mirror
+            // the same logic for the ScreenAudio track when it was enabled.
             if disable_track {
                 let _ = server.disable_track(TrackKind::Video).await;
+                if had_screen_audio {
+                    let _ = server.disable_track(TrackKind::ScreenAudio).await;
+                }
             }
             return Err(msg.into());
         }
@@ -1449,9 +1517,16 @@ impl VoiceController {
             }
         };
         if let Some(s) = share {
+            // Remember whether this share also carried screen audio before the
+            // share is consumed, so we only disable the ScreenAudio track when it
+            // was actually enabled (capture may have failed at start).
+            let had_screen_audio = s.screen_audio_key.is_some();
             shutdown_video_share(s);
             if let Some(server) = server {
                 let _ = server.disable_track(TrackKind::Video).await;
+                if had_screen_audio {
+                    let _ = server.disable_track(TrackKind::ScreenAudio).await;
+                }
             }
         }
         Ok(())
@@ -1467,10 +1542,17 @@ impl VoiceController {
 fn shutdown_video_share(s: VideoShareState) {
     s.stop.store(true, Ordering::Relaxed);
     let _ = s.backend.stop_capture();
+    // Best-effort screen-audio teardown: stop the send loop + the loopback
+    // capture thread. No-ops when screen audio never started (capture None).
+    s.screen_audio_stop.store(true, Ordering::Relaxed);
+    if let Some(cap) = s.screen_audio_capture.as_ref() {
+        cap.stop();
+    }
 }
 
-/// Wrap `video_key` for every current channel member (except self) and offer it.
-async fn offer_video_key(server: &Arc<dyn ServerSession>, channel_id: u64, video_key: &[u8; 32]) -> Result<(), String> {
+/// Wrap `key` for every current channel member (except self) and offer it for
+/// the given `kind` track.
+async fn offer_track_key(server: &Arc<dyn ServerSession>, channel_id: u64, kind: TrackKind, key: &[u8; 32]) -> Result<(), String> {
     let participants = server.get_media_state(channel_id).await?;
     let keypair = server.my_keypair();
     let my_sk = *keypair.signing_key_bytes();
@@ -1479,17 +1561,17 @@ async fn offer_video_key(server: &Arc<dyn ServerSession>, channel_id: u64, video
         .iter()
         .filter(|m| m.public_key.as_bytes() != &my_pk)
         .filter_map(|m| {
-            match farder_crypto::media::wrap_stream_key_for_peer(video_key, &my_sk, m.public_key.as_bytes()) {
+            match farder_crypto::media::wrap_stream_key_for_peer(key, &my_sk, m.public_key.as_bytes()) {
                 Ok(w) => Some((m.public_key.clone(), w)),
                 Err(e) => {
-                    eprintln!("[voice] failed to wrap video key for a peer: {e}");
+                    eprintln!("[voice] failed to wrap key for a peer: {e}");
                     None
                 }
             }
         })
         .collect();
     if !wrapped.is_empty() {
-        server.offer_stream_key(TrackKind::Video, wrapped).await?;
+        server.offer_stream_key(kind, wrapped).await?;
     }
     Ok(())
 }
@@ -2019,7 +2101,7 @@ mod controller_tests {
         };
         let server = FakeServerSession::new_with_members(vec![peer]);
         ctrl.join(7, server.clone()).await.unwrap();
-        ctrl.start_screen_share(15, 320, 240).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
 
         // Exactly one Video offer so far (from start_screen_share).
         assert_eq!(
@@ -2273,7 +2355,7 @@ mod controller_tests {
         let server = FakeServerSession::new_with_members(vec![peer]);
         ctrl.join(7, server.clone()).await.unwrap();
 
-        ctrl.start_screen_share(15, 320, 240).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
 
         assert!(
             server.offered_kinds.lock().unwrap().contains(&TrackKind::Video),
@@ -2288,7 +2370,7 @@ mod controller_tests {
 
         // Starting again while sharing must be rejected.
         assert!(
-            ctrl.start_screen_share(15, 320, 240).await.is_err(),
+            ctrl.start_screen_share(15, 320, 240, None).await.is_err(),
             "second start_screen_share must error while already sharing"
         );
 
@@ -2296,6 +2378,48 @@ mod controller_tests {
         assert!(
             server.disabled_kinds.lock().unwrap().contains(&TrackKind::Video),
             "stop_screen_share must disable the Video track; disabled={:?}",
+            server.disabled_kinds.lock().unwrap()
+        );
+
+        ctrl.leave().await.unwrap();
+    }
+
+    // Task 5: the SAME share must also start screen/game audio under its OWN
+    // stream key. With FARDER_DISPLAY_BACKEND=mock (headless display) and the
+    // non-Windows mock screen-audio capture, start_screen_share must offer a
+    // ScreenAudio stream key + enable the ScreenAudio track, and stop_screen_share
+    // must disable it. Mirrors the Video share test exactly, asserting ScreenAudio.
+    #[tokio::test]
+    async fn start_then_stop_screen_share_offers_enables_and_disables_screen_audio() {
+        std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
+        let (ctrl, _emitter) = make_controller();
+
+        // One remote member in the channel so the screen-audio key gets wrapped+offered.
+        let peer = VoiceMember {
+            public_key: Keypair::generate().public_key(),
+            display_name: "peer".into(),
+            joined_at: 0,
+        };
+        let server = FakeServerSession::new_with_members(vec![peer]);
+        ctrl.join(7, server.clone()).await.unwrap();
+
+        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
+
+        assert!(
+            server.offered_kinds.lock().unwrap().contains(&TrackKind::ScreenAudio),
+            "start_screen_share must offer a ScreenAudio stream key; offered={:?}",
+            server.offered_kinds.lock().unwrap()
+        );
+        assert!(
+            server.enabled_kinds.lock().unwrap().contains(&TrackKind::ScreenAudio),
+            "start_screen_share must enable the ScreenAudio track; enabled={:?}",
+            server.enabled_kinds.lock().unwrap()
+        );
+
+        ctrl.stop_screen_share().await.unwrap();
+        assert!(
+            server.disabled_kinds.lock().unwrap().contains(&TrackKind::ScreenAudio),
+            "stop_screen_share must disable the ScreenAudio track; disabled={:?}",
             server.disabled_kinds.lock().unwrap()
         );
 
@@ -2322,7 +2446,7 @@ mod controller_tests {
         };
         let server = FakeServerSession::new_with_members(vec![peer]);
         ctrl.join(7, server.clone()).await.unwrap();
-        ctrl.start_screen_share(15, 320, 240).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None).await.unwrap();
 
         // Leave WITHOUT first calling stop_screen_share: leave() must shut down
         // the active share itself.
@@ -2336,14 +2460,14 @@ mod controller_tests {
         // Rejoin and start again: must succeed (no stale "already sharing"
         // VideoShareState carried over from the previous call).
         ctrl.join(7, server.clone()).await.unwrap();
-        ctrl.start_screen_share(15, 320, 240)
+        ctrl.start_screen_share(15, 320, 240, None)
             .await
             .expect("fresh start after leave must succeed; stale share would block it");
 
         // And starting a SECOND time in this fresh call is still correctly
         // rejected (proving the new share installed cleanly, not the old one).
         assert!(
-            ctrl.start_screen_share(15, 320, 240).await.is_err(),
+            ctrl.start_screen_share(15, 320, 240, None).await.is_err(),
             "second start in the fresh call must still error while sharing"
         );
 
