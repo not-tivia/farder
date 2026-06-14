@@ -84,10 +84,22 @@ export default function VoiceControlBar({ voice, channelName, selfInitial, onDis
             <option key={d.id} value={d.id}>{d.name}{d.is_default ? " (default)" : ""}</option>
           ))}
         </select>
+        <select
+          className="vcb-video-source"
+          title="Screen to share (monitor)"
+          value={voice.sourceId ?? ""}
+          onChange={(e) => voice.setSourceId(e.target.value)}
+          disabled={voice.isSharing}
+        >
+          {voice.displaySources.map((s) => (
+            <option key={s.id} value={s.id}>{s.label}</option>
+          ))}
+        </select>
         <button
           className={`vcb-btn${voice.isSharing ? " active" : ""}`}
-          title={voice.isSharing ? "Stop sharing your screen" : "Share your screen"}
+          title={voice.someoneElseSharing && !voice.isSharing ? "Someone else is already sharing" : voice.isSharing ? "Stop sharing your screen" : "Share your screen"}
           aria-pressed={voice.isSharing}
+          disabled={voice.someoneElseSharing && !voice.isSharing}
           onClick={() => { void (voice.isSharing ? voice.stopShare() : voice.startShare()); }}
         ><span>&#x1F5A5;</span></button>
         <button className="vcb-btn leave" title="Disconnect" onClick={() => (onDisconnect ? onDisconnect() : voice.leave())}><span>&#x2716;</span></button>

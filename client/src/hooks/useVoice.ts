@@ -31,6 +31,10 @@ export interface UseVoice {
   audioDevices: api.AudioOutputDevice[];
   audioDeviceId: string | null;
   setAudioDeviceId: (id: string | null) => void;
+  displaySources: api.DisplaySource[];
+  sourceId: string | null;
+  setSourceId: (id: string | null) => void;
+  someoneElseSharing: boolean;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -67,6 +71,14 @@ export function useVoice(): UseVoice {
       setAudioDevices(d);
       const def = d.find((x) => x.is_default);
       setAudioDeviceId((cur) => cur ?? def?.id ?? d[0]?.id ?? null);
+    }).catch(() => {});
+  }, []);
+  const [displaySources, setDisplaySources] = useState<api.DisplaySource[]>([]);
+  const [sourceId, setSourceId] = useState<string | null>(null);
+  useEffect(() => {
+    api.listDisplaySources().then((s) => {
+      setDisplaySources(s);
+      setSourceId((cur) => cur ?? s[0]?.id ?? null);
     }).catch(() => {});
   }, []);
 
@@ -113,9 +125,9 @@ export function useVoice(): UseVoice {
     // No catch: a start failure leaves isSharing=false (correct); the rejection
     // surfaces as an unhandledrejection, consistent with toggleTransmit. Phase E
     // adds user-facing error feedback.
-    await api.voiceStartScreenShare(30, 1280, 720, null, audioDeviceId);
+    await api.voiceStartScreenShare(30, 1280, 720, sourceId, audioDeviceId);
     setIsSharing(true);
-  }, [audioDeviceId]);
+  }, [sourceId, audioDeviceId]);
   const stopShare = useCallback(async () => {
     try { await api.voiceStopScreenShare(); } catch {}
     setIsSharing(false);
@@ -129,6 +141,9 @@ export function useVoice(): UseVoice {
     await api.voiceToggleTransmit();
     // State refreshes via the existing voice://state-changed listener.
   }, []);
+
+  // Task 5 wires this from the sharingPeers set; default false until then.
+  const someoneElseSharing = false;
 
   // Per-peer playback volume (gain), keyed by pubkey string (the same
   // publicKeyToString / PublicKey::to_string() form the backend keys by).
@@ -145,5 +160,5 @@ export function useVoice(): UseVoice {
     await api.voiceSetPeerVolume(pubkey, clamped);
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing };
 }
