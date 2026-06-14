@@ -55,12 +55,15 @@ impl GraphicsCaptureApiHandler for FrameHandler {
         }
         let width = frame.width();
         let height = frame.height();
-        // CONFIRM the exact buffer accessor against windows-capture 2.0.0 docs:
-        // we need PACKED RGBA (stride == width*4). The nopadding accessor gives
-        // that; if only a padded buffer is available, copy row-by-row dropping
-        // the pad. `as_raw_nopadding_buffer()` is the expected name.
-        let mut buffer = frame.buffer()?;
-        let raw: &[u8] = buffer.as_raw_nopadding_buffer()?;
+        // We need PACKED RGBA (stride == width*4). windows-capture 2.0.0's
+        // `as_nopadding_buffer(&mut Vec<u8>) -> &[u8]` gives exactly that: it
+        // returns the frame's internal slice when already unpadded, otherwise
+        // de-pads row-by-row into the scratch Vec we pass. Either way `raw` is
+        // packed RGBA. (NOTE: a fresh scratch per frame; reuse via a field on
+        // self is a possible later optimization.)
+        let buffer = frame.buffer()?;
+        let mut nopad: Vec<u8> = Vec::new();
+        let raw: &[u8] = buffer.as_nopadding_buffer(&mut nopad);
         let packed_len = (width * height * 4) as usize;
         if raw.len() < packed_len {
             return Ok(()); // short buffer — skip this frame defensively
@@ -103,7 +106,7 @@ impl GraphicsCaptureApiHandler for FrameHandler {
 //     is the concrete type; check windows-capture 2.0.0 for exact generics.
 //   - FrameHandler::start_free_threaded(settings) -> Result<CaptureControl<...>, Error>
 //   - CaptureControl::stop() -> Result<(), Error>  (stops session + joins thread)
-//   - frame.buffer() / buffer.as_raw_nopadding_buffer() accessor names
+//   - frame.buffer() / buffer.as_nopadding_buffer(&mut Vec<u8>) accessor names
 //   - Monitor::enumerate(), Monitor::from_index(usize) (1-based, see below)
 //   - Monitor::name(), Monitor::width(), Monitor::height()
 pub struct WgcDisplayBackend {
