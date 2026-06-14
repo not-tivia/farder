@@ -36,7 +36,9 @@ export interface UseVoice {
   setSourceId: (id: string | null) => void;
   someoneElseSharing: boolean;
   sharingPeers: Set<string>;
+  watching: Set<string>;
   toggleWatch: (pubkey: string) => void;
+  setGameAudioVolume: (pubkey: string, gain: number) => void;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -67,6 +69,7 @@ export function useVoice(): UseVoice {
   // Phase E adds a backend-stop event to reconcile this.
   const [isSharing, setIsSharing] = useState(false);
   const [sharingPeers, setSharingPeers] = useState<Set<string>>(new Set());
+  const [watching, setWatching] = useState<Set<string>>(new Set());
   const [audioDevices, setAudioDevices] = useState<api.AudioOutputDevice[]>([]);
   const [audioDeviceId, setAudioDeviceId] = useState<string | null>(null);
   useEffect(() => {
@@ -98,6 +101,7 @@ export function useVoice(): UseVoice {
       setConnectionQuality(null);
       setIsSharing(false);
       setSharingPeers(new Set());
+      setWatching(new Set());
     }
   }, []);
 
@@ -127,6 +131,15 @@ export function useVoice(): UseVoice {
         if (e.payload.sharing) next.add(e.payload.pubkey); else next.delete(e.payload.pubkey);
         return next;
       });
+      // A stopped share should also close any open viewer for that peer.
+      if (!e.payload.sharing) {
+        setWatching((prev) => {
+          if (!prev.has(e.payload.pubkey)) return prev;
+          const next = new Set(prev);
+          next.delete(e.payload.pubkey);
+          return next;
+        });
+      }
     }).then(safePush);
 
     return () => { cleanupRan = true; unlisten.forEach((u) => u()); };
@@ -157,8 +170,15 @@ export function useVoice(): UseVoice {
   // peer-video-sharing for the local client), so size > 0 means someone else is sharing.
   const someoneElseSharing = sharingPeers.size > 0;
 
-  const toggleWatch = useCallback((_pubkey: string) => {
-    // No-op placeholder — Task 6 replaces this with the real watch toggle.
+  const toggleWatch = useCallback((pubkey: string) => {
+    setWatching((prev) => {
+      const next = new Set(prev);
+      if (next.has(pubkey)) next.delete(pubkey); else next.add(pubkey);
+      return next;
+    });
+  }, []);
+  const setGameAudioVolume = useCallback((pubkey: string, gain: number) => {
+    void api.voiceSetScreenAudioGain(pubkey, gain);
   }, []);
 
   // Per-peer playback volume (gain), keyed by pubkey string (the same
@@ -176,5 +196,5 @@ export function useVoice(): UseVoice {
     await api.voiceSetPeerVolume(pubkey, clamped);
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing, sharingPeers, toggleWatch };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing, sharingPeers, watching, toggleWatch, setGameAudioVolume };
 }

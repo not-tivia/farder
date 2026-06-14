@@ -2744,6 +2744,12 @@ body {
 .peer-video-tile { display: flex; flex-direction: column; gap: 4px; }
 .peer-video-canvas { max-width: 100%; max-height: 360px; background: #000; border: 1px solid var(--xp-border); }
 .peer-video-label { font-size: 12px; color: var(--xp-text-muted); }
+.peer-video-controls { display: flex; align-items: center; gap: 6px; padding: 4px 2px; }
+.peer-video-close, .peer-video-enlarge { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 4px; font-size: 12px; line-height: 1; cursor: pointer; background: var(--xp-panel-bg); color: var(--xp-text-normal); border: 1px solid var(--xp-border); border-radius: 3px; }
+.peer-video-close:hover, .peer-video-enlarge:hover { border-color: var(--xp-blue); }
+.peer-video-volume { flex: 1; min-width: 60px; accent-color: var(--xp-blue); cursor: pointer; }
+.peer-video-tile--large { width: 100%; }
+.peer-video-tile--large .peer-video-canvas { max-height: 70vh; }
 
 /* Phase E Task 5: LIVE badge on sharing participants */
 .voice-live-badge {

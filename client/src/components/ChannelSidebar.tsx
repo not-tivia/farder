@@ -532,7 +532,7 @@ export default function ChannelSidebar() {
             </>
           )}
         </div>
-        {activeServer?.currentVoiceChannelId != null && <PeerVideoTiles />}
+        {activeServer?.currentVoiceChannelId != null && <PeerVideoTiles watching={voice.watching} onClose={voice.toggleWatch} onSetGain={voice.setGameAudioVolume} />}
         {activeServer?.currentVoiceChannelId != null && (
           <VoiceControlBar
             voice={voice}

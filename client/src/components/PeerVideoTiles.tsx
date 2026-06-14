@@ -46,18 +46,33 @@ class PeerDecoder {
   close() { if (this.decoder.state !== "closed") this.decoder.close(); }
 }
 
-export default function PeerVideoTiles() {
+interface PeerVideoTilesProps {
+  watching: Set<string>;
+  onClose: (pubkey: string) => void;
+  onSetGain: (pubkey: string, gain: number) => void;
+}
+
+export default function PeerVideoTiles({ watching, onClose, onSetGain }: PeerVideoTilesProps) {
   // session -> { pubkey }
   const [sessions, setSessions] = useState<Record<string, { pubkey: string }>>({});
+  const [large, setLarge] = useState<Set<string>>(new Set());
   const canvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
   const decoders = useRef<Record<string, PeerDecoder>>({});
   const lastSeen = useRef<Record<string, number>>({});
+  // The frame listener's closure captures `watching` at mount; read the latest
+  // set via a ref so the watch gate reflects toggles made after mount.
+  const watchingRef = useRef(watching);
+  useEffect(() => { watchingRef.current = watching; }, [watching]);
 
   useEffect(() => {
     const unlisten = listen<FramePayload>("voice://peer-video-frame", (e) => {
       const p = e.payload;
       lastSeen.current[p.session] = Date.now();
+      // Always track the session (so a tile can appear the instant the user
+      // opts in), but only DECODE frames for peers being watched — unwatched
+      // streams never touch a VideoDecoder, saving CPU.
       setSessions((prev) => prev[p.session] ? prev : { ...prev, [p.session]: { pubkey: p.pubkey } });
+      if (!watchingRef.current.has(p.pubkey)) return;
       const dec = decoders.current[p.session];
       if (dec) {
         dec.decode(p);
@@ -75,6 +90,18 @@ export default function PeerVideoTiles() {
     });
     return () => { unlisten.then((u) => u()); };
   }, []);
+
+  // When a session's pubkey leaves the watch set, close + drop its decoder so
+  // it stops decoding immediately (the tile is also filtered out of the render).
+  useEffect(() => {
+    for (const s of Object.keys(decoders.current)) {
+      const pubkey = sessions[s]?.pubkey;
+      if (!pubkey || !watching.has(pubkey)) {
+        decoders.current[s]?.close();
+        delete decoders.current[s];
+      }
+    }
+  }, [watching, sessions]);
 
   // Reap sessions idle > 3s. Decoders are created synchronously in the canvas
   // ref callback (and re-created on demand in the frame listener), not here.
@@ -108,12 +135,13 @@ export default function PeerVideoTiles() {
     };
   }, []);
 
-  const entries = Object.entries(sessions);
+  // Only render tiles for sessions the user opted into watching.
+  const entries = Object.entries(sessions).filter(([, info]) => watching.has(info.pubkey));
   if (entries.length === 0) return null;
   return (
     <div className="peer-video-tiles">
       {entries.map(([session, info]) => (
-        <div key={session} className="peer-video-tile">
+        <div key={session} className={`peer-video-tile${large.has(session) ? " peer-video-tile--large" : ""}`}>
           <canvas
             ref={(el) => {
               canvasRefs.current[session] = el;
@@ -129,6 +157,16 @@ export default function PeerVideoTiles() {
             className="peer-video-canvas"
           />
           <div className="peer-video-label">{info.pubkey.slice(0, 8)}&hellip; is sharing</div>
+          <div className="peer-video-controls">
+            <button className="peer-video-close" title="Stop watching" onClick={() => onClose(info.pubkey)}>&#x2715;</button>
+            <input
+              type="range" min={0} max={2} step={0.05} defaultValue={1}
+              className="peer-video-volume"
+              title="Game audio volume"
+              onChange={(e) => onSetGain(info.pubkey, Number(e.target.value))}
+            />
+            <button className="peer-video-enlarge" title="Enlarge" onClick={() => setLarge((prev) => { const n = new Set(prev); if (n.has(session)) n.delete(session); else n.add(session); return n; })}>&#x26F6;</button>
+          </div>
         </div>
       ))}
     </div>
