@@ -18,6 +18,7 @@
   --xp-font-size:      14px;
   --xp-font-size-small: 12px;
   --xp-text-normal:    #DBDEE1;
+  --xp-live:           #ED4245;
 }
 
 * {
@@ -2725,3 +2726,20 @@ body {
 .peer-video-tile { display: flex; flex-direction: column; gap: 4px; }
 .peer-video-canvas { max-width: 100%; max-height: 360px; background: #000; border: 1px solid var(--xp-border); }
 .peer-video-label { font-size: 12px; color: var(--xp-text-muted); }
+
+/* Phase E Task 5: LIVE badge on sharing participants */
+.voice-live-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: bold;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: none;
+  background: var(--xp-live);
+  color: #ffffff;
+  cursor: pointer;
+  line-height: 1.4;
+  margin-left: 3px;
+  vertical-align: middle;
+}
+.voice-live-badge:hover { opacity: 0.85; }

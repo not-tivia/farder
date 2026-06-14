@@ -35,6 +35,8 @@ export interface UseVoice {
   sourceId: string | null;
   setSourceId: (id: string | null) => void;
   someoneElseSharing: boolean;
+  sharingPeers: Set<string>;
+  toggleWatch: (pubkey: string) => void;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -64,6 +66,7 @@ export function useVoice(): UseVoice {
   // emitted, so isSharing stays true until the user stops manually or leaves.
   // Phase E adds a backend-stop event to reconcile this.
   const [isSharing, setIsSharing] = useState(false);
+  const [sharingPeers, setSharingPeers] = useState<Set<string>>(new Set());
   const [audioDevices, setAudioDevices] = useState<api.AudioOutputDevice[]>([]);
   const [audioDeviceId, setAudioDeviceId] = useState<string | null>(null);
   useEffect(() => {
@@ -94,6 +97,7 @@ export function useVoice(): UseVoice {
       setTransmitting(false);
       setConnectionQuality(null);
       setIsSharing(false);
+      setSharingPeers(new Set());
     }
   }, []);
 
@@ -117,6 +121,13 @@ export function useVoice(): UseVoice {
     }).then(safePush);
     listen<api.ConnectionQualityPayload>("voice://connection-quality", (e) =>
       setConnectionQuality({ rttMs: e.payload.rtt_ms, lossPct: e.payload.loss_pct })).then(safePush);
+    listen<{ pubkey: string; sharing: boolean }>("voice://peer-video-sharing", (e) => {
+      setSharingPeers((prev) => {
+        const next = new Set(prev);
+        if (e.payload.sharing) next.add(e.payload.pubkey); else next.delete(e.payload.pubkey);
+        return next;
+      });
+    }).then(safePush);
 
     return () => { cleanupRan = true; unlisten.forEach((u) => u()); };
   }, [applyState]);
@@ -142,8 +153,13 @@ export function useVoice(): UseVoice {
     // State refreshes via the existing voice://state-changed listener.
   }, []);
 
-  // Task 5 wires this from the sharingPeers set; default false until then.
-  const someoneElseSharing = false;
+  // sharingPeers only ever contains OTHER peers (backend never emits
+  // peer-video-sharing for the local client), so size > 0 means someone else is sharing.
+  const someoneElseSharing = sharingPeers.size > 0;
+
+  const toggleWatch = useCallback((_pubkey: string) => {
+    // No-op placeholder — Task 6 replaces this with the real watch toggle.
+  }, []);
 
   // Per-peer playback volume (gain), keyed by pubkey string (the same
   // publicKeyToString / PublicKey::to_string() form the backend keys by).
@@ -160,5 +176,5 @@ export function useVoice(): UseVoice {
     await api.voiceSetPeerVolume(pubkey, clamped);
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing, sharingPeers, toggleWatch };
 }

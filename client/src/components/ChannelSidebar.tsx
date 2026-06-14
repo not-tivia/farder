@@ -433,6 +433,13 @@ export default function ChannelSidebar() {
                     : live?.muted
                     ? <span className="voice-participant-status" title="Muted">&#x1F507;</span>
                     : null}
+                  {voice.sharingPeers.has(p.publicKey) ? (
+                    <button
+                      className="voice-live-badge"
+                      title="Watch screen share"
+                      onClick={() => voice.toggleWatch(p.publicKey)}
+                    >LIVE</button>
+                  ) : null}
                 </div>
               );
             })}
