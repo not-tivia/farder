@@ -33,8 +33,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::VecDeque;
     use wasapi::*;
 
-    // COM init (multithreaded apartment).
-    initialize_mta()?;
+    // COM init (multithreaded apartment). initialize_mta() returns an HRESULT;
+    // .ok() turns it into a Result we can propagate.
+    initialize_mta().ok()?;
 
     // The loopback trick: take the default RENDER device, but initialise its
     // audio client in CAPTURE direction → WASAPI hands us what is being played.
