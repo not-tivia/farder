@@ -299,6 +299,8 @@ pub struct PipelineParams {
     pub stream_key: [u8; 32],
     pub speaker_pk: [u8; 32],
     pub peer_rings: crate::voice::mixer::PeerRings,
+    /// Screen/game audio rings, mixed alongside `peer_rings` with independent gain.
+    pub screen_audio_rings: crate::voice::mixer::PeerRings,
     pub muted: Arc<std::sync::atomic::AtomicBool>,
     pub gate: crate::voice::gate::GateMode,
     pub speak_threshold: Arc<std::sync::atomic::AtomicU32>,
@@ -365,9 +367,11 @@ impl VoicePipelineFactory for AudioPipelineFactory {
         // Mixer.
         let mixer_aec = aec_ref.clone();
         let mixer_rings = params.peer_rings.clone();
+        let mixer_screen_rings = params.screen_audio_rings.clone();
         tokio::task::spawn_blocking(move || {
             crate::voice::mixer::run(crate::voice::mixer::MixerTaskConfig {
                 peer_rings: mixer_rings,
+                screen_audio_rings: mixer_screen_rings,
                 playback_tx,
                 aec_ref: mixer_aec,
             });
@@ -438,6 +442,10 @@ struct ActiveCall {
     server: Arc<dyn ServerSession>,
     pipeline: Option<Box<dyn VoicePipelineHandle>>,
     peer_rings: crate::voice::mixer::PeerRings,
+    /// Per-(peer-session) screen/game audio rings, each with its OWN gain
+    /// (independent of that peer's voice gain). Summed by the mixer alongside
+    /// `peer_rings`.
+    screen_audio_rings: crate::voice::mixer::PeerRings,
     peers: HashMap<SessionId, PeerEntry>,
     /// Per-(peer-session, track) stream keys delivered via StreamKeyOffer events.
     /// A peer's session has independent audio + video keys.
@@ -446,6 +454,8 @@ struct ActiveCall {
     peer_pubkeys: HashMap<SessionId, PublicKey>,
     /// Per-session video recv tasks (independent of the audio `peers` map).
     video_peers: HashMap<SessionId, VideoPeerEntry>,
+    /// Per-session screen-audio recv tasks (independent of the `peers` map).
+    screen_audio_peers: HashMap<SessionId, ScreenAudioPeerEntry>,
     /// session_id → (muted, deafened) learned from StreamJoined / StreamStateChanged.
     /// Seeds VoicePeer when the matching TrackEnabled registers the peer.
     peer_status: HashMap<SessionId, (bool, bool)>,
@@ -474,6 +484,13 @@ struct PeerEntry {
 
 struct VideoPeerEntry {
     recv_handle: JoinHandle<()>,
+    #[allow(dead_code)]
+    datagram_tx: mpsc::UnboundedSender<Bytes>,
+}
+
+struct ScreenAudioPeerEntry {
+    recv_handle: JoinHandle<()>,
+    /// Held so the dispatcher's route stays valid for this peer.
     #[allow(dead_code)]
     datagram_tx: mpsc::UnboundedSender<Bytes>,
 }
@@ -624,6 +641,7 @@ impl VoiceController {
 
         // 3. Spawn audio pipeline (mixer + send + I/O).
         let peer_rings: crate::voice::mixer::PeerRings = Default::default();
+        let screen_audio_rings: crate::voice::mixer::PeerRings = Default::default();
         let muted_flag = self.inner.lock().await.muted.clone();
         let transmit_flag = self.inner.lock().await.transmit.clone();
         let (speak_tx, mut speak_rx) = tokio::sync::watch::channel(false);
@@ -634,6 +652,7 @@ impl VoiceController {
             stream_key,
             speaker_pk: my_pk_bytes,
             peer_rings: peer_rings.clone(),
+            screen_audio_rings: screen_audio_rings.clone(),
             muted: muted_flag,
             gate: gate_for_mode(config.mode, transmit_flag),
             speak_threshold: self.speak_threshold.clone(),
@@ -703,10 +722,12 @@ impl VoiceController {
                 server,
                 pipeline: Some(pipeline),
                 peer_rings,
+                screen_audio_rings,
                 peers: HashMap::new(),
                 peer_keys: HashMap::new(),
                 peer_pubkeys: HashMap::new(),
                 video_peers: HashMap::new(),
+                screen_audio_peers: HashMap::new(),
                 peer_status: HashMap::new(),
                 peer_volumes: config.peer_volumes.clone(),
                 gate_is_ptt: matches!(config.mode, VoiceMode::PushToTalk),
@@ -769,7 +790,18 @@ impl VoiceController {
                     d.unregister(&sid, TrackKind::Video).await;
                 });
             }
+            for (sid, entry) in call.screen_audio_peers.drain() {
+                entry.recv_handle.abort();
+                let d = dispatcher.clone();
+                tokio::spawn(async move {
+                    d.unregister(&sid, TrackKind::ScreenAudio).await;
+                });
+            }
             call.peer_rings.lock().expect("peer_rings poisoned").clear();
+            call.screen_audio_rings
+                .lock()
+                .expect("screen_audio_rings poisoned")
+                .clear();
         }
 
         // Phase 3: re-lock to commit the cleared state, then emit.
@@ -927,6 +959,7 @@ impl VoiceController {
         match kind {
             TrackKind::Audio => self.on_peer_audio_track_enabled(session_id, peer_pubkey).await,
             TrackKind::Video => self.on_peer_video_track_enabled(session_id, peer_pubkey).await,
+            TrackKind::ScreenAudio => self.on_peer_screen_audio_track_enabled(session_id, peer_pubkey).await,
         }
     }
 
@@ -1056,6 +1089,59 @@ impl VoiceController {
         call.video_peers.insert(session_id, VideoPeerEntry { recv_handle, datagram_tx: tx });
     }
 
+    /// Spawn a screen/game-audio RecvTask for the peer, register an independent
+    /// ring + gain (NOT tied to that peer's voice gain) with the mixer, and
+    /// register a dispatcher route so inbound ScreenAudio datagrams reach this
+    /// task. Mirrors `on_peer_audio_track_enabled` minus the VoicePeer /
+    /// peer_status / peer_volumes / UI-state plumbing.
+    async fn on_peer_screen_audio_track_enabled(&self, session_id: SessionId, _peer_pubkey: PublicKey) {
+        let mut inner = self.inner.lock().await;
+        let deafened_flag = inner.deafened.clone();
+        let call = match inner.active.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if call.screen_audio_peers.contains_key(&session_id) {
+            return; // already running
+        }
+        let stream_key = match call.peer_keys.get(&(session_id, TrackKind::ScreenAudio)) {
+            Some(k) => *k,
+            None => {
+                eprintln!("[voice] TrackEnabled(ScreenAudio) for session with no key; missing StreamKeyOffer(ScreenAudio)?");
+                return;
+            }
+        };
+        let ring = Arc::new(PeerPcmRing::new(10));
+        // Fresh, independent gain (default unity). The screen-audio volume
+        // slider (Phase E) will drive this ring's gain, separate from voice.
+        let gain = Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits()));
+        call.screen_audio_rings
+            .lock()
+            .expect("screen_audio_rings poisoned")
+            .insert(session_id, (ring.clone(), gain));
+
+        let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
+        let dispatcher = call.server.dispatcher();
+        let tx_for_register = tx.clone();
+        tokio::spawn(async move {
+            dispatcher.register(session_id, TrackKind::ScreenAudio, tx_for_register).await;
+        });
+
+        let recv_handle = tokio::spawn(async move {
+            crate::voice::recv::run(crate::voice::recv::RecvTaskConfig {
+                session_id,
+                stream_key,
+                deafened: deafened_flag,
+                datagram_rx: rx,
+                pcm_ring: ring,
+            })
+            .await;
+        });
+
+        call.screen_audio_peers
+            .insert(session_id, ScreenAudioPeerEntry { recv_handle, datagram_tx: tx });
+    }
+
     /// Peer disabled a track. For Video: tears down the video recv task +
     /// dispatcher route. For Audio: tears down their recv task + dispatcher
     /// route + drops their ring, then re-emits the full state snapshot.
@@ -1068,6 +1154,23 @@ impl VoiceController {
                     let dispatcher = call.server.dispatcher();
                     tokio::spawn(async move {
                         dispatcher.unregister(&session_id, TrackKind::Video).await;
+                    });
+                }
+            }
+            return;
+        }
+        if matches!(kind, TrackKind::ScreenAudio) {
+            let mut inner = self.inner.lock().await;
+            if let Some(call) = inner.active.as_mut() {
+                if let Some(entry) = call.screen_audio_peers.remove(&session_id) {
+                    entry.recv_handle.abort();
+                    call.screen_audio_rings
+                        .lock()
+                        .expect("screen_audio_rings poisoned")
+                        .remove(&session_id);
+                    let dispatcher = call.server.dispatcher();
+                    tokio::spawn(async move {
+                        dispatcher.unregister(&session_id, TrackKind::ScreenAudio).await;
                     });
                 }
             }

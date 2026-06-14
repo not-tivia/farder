@@ -24,6 +24,10 @@ pub type PeerRings = Arc<Mutex<HashMap<SessionId, (Arc<PeerPcmRing>, Arc<AtomicU
 
 pub struct MixerTaskConfig {
     pub peer_rings: PeerRings,
+    /// Screen/game audio rings, summed into the same output frame as the voice
+    /// rings but each carrying its OWN gain (independent of that peer's voice
+    /// gain). Same type + per-frame treatment as `peer_rings`.
+    pub screen_audio_rings: PeerRings,
     pub playback_tx: mpsc::SyncSender<PcmChunk>,
     /// Most-recent mixed PCM, fed back to SendTask's APM as AEC render reference.
     pub aec_ref: Arc<Mutex<Vec<f32>>>,
@@ -32,7 +36,7 @@ pub struct MixerTaskConfig {
 /// Run the mixer. Returns when the playback SyncSender is disconnected.
 pub fn run(cfg: MixerTaskConfig) {
     loop {
-        let mixed = mix_one_frame(&cfg.peer_rings);
+        let mixed = mix_one_frame(&cfg.peer_rings, &cfg.screen_audio_rings);
         {
             let mut guard = cfg.aec_ref.lock().expect("aec_ref poisoned");
             *guard = mixed.clone();
@@ -44,9 +48,24 @@ pub fn run(cfg: MixerTaskConfig) {
     }
 }
 
-fn mix_one_frame(peer_rings: &PeerRings) -> Vec<f32> {
-    let rings = peer_rings.lock().expect("peer_rings poisoned");
+fn mix_one_frame(peer_rings: &PeerRings, screen_audio_rings: &PeerRings) -> Vec<f32> {
     let mut acc = vec![0.0f32; OPUS_FRAME_SAMPLES_MONO];
+    // Voice rings (unchanged behavior) then screen-audio rings, summed into the
+    // SAME accumulator before the single soft-clip. Each ring applies its own
+    // gain, so screen audio is independent of any peer's voice gain.
+    sum_rings_into(peer_rings, &mut acc);
+    sum_rings_into(screen_audio_rings, &mut acc);
+    for s in acc.iter_mut() {
+        *s = soft_clip(*s);
+    }
+    acc
+}
+
+/// Pop one frame from each ring in `rings`, apply its per-ring gain, and add
+/// into `acc`. Shared by the voice and screen-audio ring maps so both sum
+/// identically.
+fn sum_rings_into(rings: &PeerRings, acc: &mut [f32]) {
+    let rings = rings.lock().expect("peer_rings poisoned");
     for (ring, gain_bits) in rings.values() {
         let gain = f32::from_bits(gain_bits.load(Ordering::Acquire));
         let frame = ring.pop_frame();
@@ -56,10 +75,6 @@ fn mix_one_frame(peer_rings: &PeerRings) -> Vec<f32> {
             }
         }
     }
-    for s in acc.iter_mut() {
-        *s = soft_clip(*s);
-    }
-    acc
 }
 
 fn soft_clip(x: f32) -> f32 {
@@ -94,6 +109,7 @@ mod tests {
         let (capture_tx, capture_rx) = mpsc::sync_channel::<PcmChunk>(n + 4);
         let cfg_with_capture = MixerTaskConfig {
             peer_rings: cfg.peer_rings,
+            screen_audio_rings: cfg.screen_audio_rings,
             playback_tx: capture_tx,
             aec_ref: cfg.aec_ref,
         };
@@ -117,6 +133,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<PcmChunk>(4);
         let cfg = MixerTaskConfig {
             peer_rings,
+            screen_audio_rings: Default::default(),
             playback_tx: tx,
             aec_ref: Arc::new(Mutex::new(vec![])),
         };
@@ -136,6 +153,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<PcmChunk>(4);
         let cfg = MixerTaskConfig {
             peer_rings,
+            screen_audio_rings: Default::default(),
             playback_tx: tx,
             aec_ref: Arc::new(Mutex::new(vec![])),
         };
@@ -154,6 +172,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<PcmChunk>(4);
         let cfg = MixerTaskConfig {
             peer_rings,
+            screen_audio_rings: Default::default(),
             playback_tx: tx,
             aec_ref: Arc::new(Mutex::new(vec![])),
         };
@@ -173,7 +192,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert([1u8; 16], (make_ring_with_sine(440.0, 5), gain_bits(0.0)));
-        let mixed = mix_one_frame(&peer_rings);
+        let mixed = mix_one_frame(&peer_rings, &Default::default());
         assert!(mixed.iter().all(|&s| s == 0.0), "gain 0.0 must silence the peer");
     }
 
@@ -191,11 +210,47 @@ mod tests {
             .lock()
             .unwrap()
             .insert([1u8; 16], (make_ring_with_sine(440.0, 5), gain_bits(2.0)));
-        let a = mix_one_frame(&unity);
-        let b = mix_one_frame(&doubled);
+        let a = mix_one_frame(&unity, &Default::default());
+        let b = mix_one_frame(&doubled, &Default::default());
         // For at least one clearly non-zero sample, doubled magnitude > unity.
         let idx = a.iter().position(|&s| s.abs() > 0.05).expect("some signal");
         assert!(b[idx].abs() > a[idx].abs(), "gain 2.0 must increase amplitude");
+    }
+
+    #[test]
+    fn screen_audio_ring_mixes_independently_of_voice_ring() {
+        // One voice ring at gain 1.0 carrying all-0.1, and one screen-audio
+        // ring at gain 0.5 carrying all-0.2. Both sum into one output frame
+        // before the single soft-clip, each applying its OWN gain — proving
+        // the screen-audio gain is independent of the voice gain.
+        let peer_rings: PeerRings = Default::default();
+        let voice_ring = Arc::new(PeerPcmRing::new(4));
+        voice_ring.push_frame(&vec![0.1f32; OPUS_FRAME_SAMPLES_MONO]);
+        peer_rings
+            .lock()
+            .unwrap()
+            .insert([1u8; 16], (voice_ring, gain_bits(1.0)));
+
+        let screen_audio_rings: PeerRings = Default::default();
+        let screen_ring = Arc::new(PeerPcmRing::new(4));
+        screen_ring.push_frame(&vec![0.2f32; OPUS_FRAME_SAMPLES_MONO]);
+        screen_audio_rings
+            .lock()
+            .unwrap()
+            .insert([2u8; 16], (screen_ring, gain_bits(0.5)));
+
+        let mixed = mix_one_frame(&peer_rings, &screen_audio_rings);
+
+        // Per sample: sum = 1.0*0.1 + 0.5*0.2 = 0.2, output = softclip(0.2).
+        let sum = 1.0f32 * 0.1 + 0.5 * 0.2;
+        let expected = sum / (1.0 + sum.abs());
+        assert_eq!(mixed.len(), OPUS_FRAME_SAMPLES_MONO);
+        for &s in &mixed {
+            assert!(
+                (s - expected).abs() < 1e-6,
+                "screen audio must sum independently; got {s}, expected {expected}"
+            );
+        }
     }
 
     #[test]
