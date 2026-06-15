@@ -2125,10 +2125,12 @@ body {
 .vcb-btn.active { background: rgba(230,57,70,0.16); color: var(--xp-bow-red, #E63946); border-color: var(--xp-bow-red, #E63946); }
 .vcb-btn.leave { flex: 0 0 40px; background: rgba(230,57,70,0.12); color: var(--xp-bow-red, #E63946); border-color: var(--xp-bow-red, #E63946); }
 .vcb-e2e { display: flex; align-items: center; gap: 5px; color: var(--xp-text-secondary, #C76A8C); font-size: 10px; margin-top: 8px; }
-.vcb-audio-source, .vcb-video-source {
-  max-width: 160px;
-  font-size: 12px;
-  padding: 2px 4px;
+.vcb-share-setup { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.vcb-source-row { display: flex; align-items: center; gap: 6px; }
+.vcb-source-icon { font-size: 13px; opacity: 0.75; flex-shrink: 0; }
+.vcb-source-select {
+  flex: 1; min-width: 0; box-sizing: border-box;
+  font-size: 12px; padding: 2px 4px;
   background: var(--xp-panel-bg);
   color: var(--xp-text-normal);
   border: 1px solid var(--xp-border);

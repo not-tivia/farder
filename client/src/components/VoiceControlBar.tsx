@@ -60,6 +60,34 @@ export default function VoiceControlBar({ voice, channelName, selfInitial, onDis
           {voice.transmitting ? "Transmitting" : `Tap ${pttKey} to talk`}
         </button>
       )}
+      {!voice.isSharing && (
+        <div className="vcb-share-setup">
+          <label className="vcb-source-row" title="Screen to share (monitor)">
+            <span className="vcb-source-icon">&#x1F5A5;</span>
+            <select
+              className="vcb-source-select"
+              value={voice.sourceId ?? ""}
+              onChange={(e) => voice.setSourceId(e.target.value)}
+            >
+              {voice.displaySources.map((s) => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="vcb-source-row" title="Game audio: which output device to capture">
+            <span className="vcb-source-icon">&#x1F50A;</span>
+            <select
+              className="vcb-source-select"
+              value={voice.audioDeviceId ?? ""}
+              onChange={(e) => voice.setAudioDeviceId(e.target.value)}
+            >
+              {voice.audioDevices.map((d) => (
+                <option key={d.id} value={d.id}>{d.name}{d.is_default ? " (default)" : ""}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
       <div className="vcb-buttons">
         <button
           className={`vcb-btn${voice.muted ? " active" : ""}`}
@@ -73,28 +101,6 @@ export default function VoiceControlBar({ voice, channelName, selfInitial, onDis
           aria-pressed={voice.deafened}
           onClick={() => voice.setDeafen(!voice.deafened)}
         ><span>&#x1F3A7;</span></button>
-        <select
-          className="vcb-audio-source"
-          title="Game-audio source (which output device to capture)"
-          value={voice.audioDeviceId ?? ""}
-          onChange={(e) => voice.setAudioDeviceId(e.target.value)}
-          disabled={voice.isSharing}
-        >
-          {voice.audioDevices.map((d) => (
-            <option key={d.id} value={d.id}>{d.name}{d.is_default ? " (default)" : ""}</option>
-          ))}
-        </select>
-        <select
-          className="vcb-video-source"
-          title="Screen to share (monitor)"
-          value={voice.sourceId ?? ""}
-          onChange={(e) => voice.setSourceId(e.target.value)}
-          disabled={voice.isSharing}
-        >
-          {voice.displaySources.map((s) => (
-            <option key={s.id} value={s.id}>{s.label}</option>
-          ))}
-        </select>
         <button
           className={`vcb-btn${voice.isSharing ? " active" : ""}`}
           title={voice.someoneElseSharing && !voice.isSharing ? "Someone else is already sharing" : voice.isSharing ? "Stop sharing your screen" : "Share your screen"}
