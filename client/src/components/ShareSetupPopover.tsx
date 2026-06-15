@@ -8,7 +8,8 @@ export default function ShareSetupPopover({ voice, onClose }: { voice: UseVoice;
   const windows = voice.displaySources.filter((s) => s.kind === "Window");
 
   return (
-    <div className="share-popover" role="dialog" aria-label="Start sharing">
+    <div className="share-modal-backdrop" onClick={onClose}>
+    <div className="share-popover" role="dialog" aria-label="Start sharing" onClick={(e) => e.stopPropagation()}>
       <div className="share-popover-head">
         <span>Start sharing</span>
         <button className="share-popover-refresh" title="Refresh sources" onClick={() => void voice.refreshDisplaySources()}>&#x21BB;</button>
@@ -36,6 +37,7 @@ export default function ShareSetupPopover({ voice, onClose }: { voice: UseVoice;
         <button className="share-popover-cancel" onClick={onClose}>Cancel</button>
         <button className="share-popover-go" disabled={!voice.sourceId} onClick={() => { void voice.startShare(); onClose(); }}>Go Live</button>
       </div>
+    </div>
     </div>
   );
 }
