@@ -2769,3 +2769,30 @@ body {
   vertical-align: middle;
 }
 .voice-live-badge:hover { opacity: 0.85; }
+.share-popover {
+  position: absolute; bottom: 100%; left: 0; right: 0; margin-bottom: 6px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--xp-panel-bg); border: 1px solid var(--xp-border);
+  border-radius: 6px; padding: 8px; z-index: 50;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+}
+.share-popover-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--xp-text-secondary); }
+.share-popover-refresh { background: none; border: none; color: var(--xp-text-secondary); cursor: pointer; font-size: 14px; }
+.share-popover-sources { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow-y: auto; }
+.share-popover-group { font-size: 10px; text-transform: uppercase; color: var(--xp-text-muted); margin-top: 4px; }
+.share-popover-item {
+  text-align: left; background: none; border: 1px solid transparent; border-radius: 4px;
+  color: var(--xp-text-secondary); padding: 4px 6px; font-size: 12px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.share-popover-item:hover { background: var(--xp-hover-bg, rgba(127,127,127,0.12)); }
+.share-popover-item.selected { border-color: var(--xp-blue); }
+.share-popover-empty { font-size: 12px; color: var(--xp-text-muted); padding: 6px; }
+.share-popover-audio { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--xp-text-secondary); }
+.share-popover-audio select { flex: 1; min-width: 0; font-size: 12px; padding: 2px 4px; background: var(--xp-panel-bg); color: var(--xp-text-secondary); border: 1px solid var(--xp-border); border-radius: 3px; }
+.share-popover-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.share-popover-cancel { background: none; border: 1px solid var(--xp-border); border-radius: 4px; color: var(--xp-text-secondary); padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.share-popover-go { background: var(--xp-blue); border: none; border-radius: 4px; color: #fff; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.share-popover-go:disabled { opacity: 0.5; cursor: not-allowed; }
+.vcb-live { display: inline-flex; align-items: center; gap: 5px; }
+.vcb-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--xp-live); display: inline-block; }

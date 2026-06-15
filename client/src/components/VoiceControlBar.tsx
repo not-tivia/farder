@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { UseVoice } from "../hooks/useVoice";
+import ShareSetupPopover from "./ShareSetupPopover";
 import { getVoiceMode, getPttKey } from "../lib/tauri-bridge";
 import { classifyQuality } from "../lib/connectionQuality";
 
@@ -14,6 +15,7 @@ interface Props {
 export default function VoiceControlBar({ voice, channelName, selfInitial, onDisconnect }: Props) {
   const [micMode, setMicMode] = useState<string>("OpenMic");
   const [pttKey, setPttKey] = useState<string>("Backquote");
+  const [sharePopover, setSharePopover] = useState(false);
 
   useEffect(() => {
     void getVoiceMode().then(setMicMode).catch(() => {});
@@ -60,34 +62,6 @@ export default function VoiceControlBar({ voice, channelName, selfInitial, onDis
           {voice.transmitting ? "Transmitting" : `Tap ${pttKey} to talk`}
         </button>
       )}
-      {!voice.isSharing && (
-        <div className="vcb-share-setup">
-          <label className="vcb-source-row" title="Screen to share (monitor)">
-            <span className="vcb-source-icon">&#x1F5A5;</span>
-            <select
-              className="vcb-source-select"
-              value={voice.sourceId ?? ""}
-              onChange={(e) => voice.setSourceId(e.target.value)}
-            >
-              {voice.displaySources.map((s) => (
-                <option key={s.id} value={s.id}>{s.label}</option>
-              ))}
-            </select>
-          </label>
-          <label className="vcb-source-row" title="Game audio: which output device to capture">
-            <span className="vcb-source-icon">&#x1F50A;</span>
-            <select
-              className="vcb-source-select"
-              value={voice.audioDeviceId ?? ""}
-              onChange={(e) => voice.setAudioDeviceId(e.target.value)}
-            >
-              {voice.audioDevices.map((d) => (
-                <option key={d.id} value={d.id}>{d.name}{d.is_default ? " (default)" : ""}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
       <div className="vcb-buttons">
         <button
           className={`vcb-btn${voice.muted ? " active" : ""}`}
@@ -101,16 +75,24 @@ export default function VoiceControlBar({ voice, channelName, selfInitial, onDis
           aria-pressed={voice.deafened}
           onClick={() => voice.setDeafen(!voice.deafened)}
         ><span>&#x1F3A7;</span></button>
-        <button
-          className={`vcb-btn${voice.isSharing ? " active" : ""}`}
-          title={voice.someoneElseSharing && !voice.isSharing ? "Someone else is already sharing" : voice.isSharing ? "Stop sharing your screen" : "Share your screen"}
-          aria-pressed={voice.isSharing}
-          disabled={voice.someoneElseSharing && !voice.isSharing}
-          onClick={() => { void (voice.isSharing ? voice.stopShare() : voice.startShare()); }}
-        ><span>&#x1F5A5;</span></button>
+        {voice.isSharing ? (
+          <button className="vcb-btn active vcb-live" title="Stop sharing your screen" onClick={() => { void voice.stopShare(); }}>
+            <span className="vcb-live-dot" /> LIVE
+          </button>
+        ) : (
+          <button
+            className="vcb-btn"
+            title={voice.someoneElseSharing ? "Someone else is already sharing" : "Share your screen"}
+            disabled={voice.someoneElseSharing}
+            onClick={() => setSharePopover((v) => !v)}
+          ><span>&#x1F5A5;</span></button>
+        )}
         <button className="vcb-btn leave" title="Disconnect" onClick={() => (onDisconnect ? onDisconnect() : voice.leave())}><span>&#x2716;</span></button>
       </div>
       <div className="vcb-e2e"><span>&#x1F512;</span> End-to-end encrypted</div>
+      {sharePopover && !voice.isSharing && (
+        <ShareSetupPopover voice={voice} onClose={() => setSharePopover(false)} />
+      )}
     </div>
   );
 }

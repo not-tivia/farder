@@ -39,6 +39,7 @@ export interface UseVoice {
   watching: Set<string>;
   toggleWatch: (pubkey: string) => void;
   setGameAudioVolume: (pubkey: string, gain: number) => void;
+  refreshDisplaySources: () => Promise<void>;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -145,6 +146,14 @@ export function useVoice(): UseVoice {
     return () => { cleanupRan = true; unlisten.forEach((u) => u()); };
   }, [applyState]);
 
+  const refreshDisplaySources = useCallback(async () => {
+    try {
+      const s = await api.listDisplaySources();
+      setDisplaySources(s);
+      setSourceId((cur) => (cur && s.some((x) => x.id === cur)) ? cur : (s[0]?.id ?? null));
+    } catch { /* ignore */ }
+  }, []);
+
   const startShare = useCallback(async () => {
     // No catch: a start failure leaves isSharing=false (correct); the rejection
     // surfaces as an unhandledrejection, consistent with toggleTransmit. Phase E
@@ -196,5 +205,5 @@ export function useVoice(): UseVoice {
     await api.voiceSetPeerVolume(pubkey, clamped);
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing, sharingPeers, watching, toggleWatch, setGameAudioVolume };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing, sharingPeers, watching, toggleWatch, setGameAudioVolume, refreshDisplaySources };
 }
