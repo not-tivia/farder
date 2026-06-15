@@ -116,6 +116,11 @@ across all five phases (A-E): a user picks a monitor (`list_display_sources`) an
 device, shares into a voice channel, and peers see a LIVE badge and click to watch with an
 independent per-peer game-audio volume (`voice_set_screen_audio_gain`) — all E2EE.
 
+**Screensharing (UX pass):** sources now include single **windows** (`window:` ids) as well as
+whole screens; the sharer gets a **self-preview** of their own stream (`voice://self-video-frame`);
+and the viewer moved from cramped sidebar tiles to a **main-area `ScreenShareStage`** with a
+sidebar **Join** flow (single-watch), replacing the retired `PeerVideoTiles`.
+
 ## Relay as fetch proxy (invite previews)
 
 The relay doubles as a **privacy fetch proxy** for invite previews (and,

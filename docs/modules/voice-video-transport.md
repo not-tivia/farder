@@ -7,7 +7,9 @@
 > `client/src-tauri/src/screen_audio.rs` (Phase D capture seam + mock),
 > `client/src-tauri/src/screen_audio_wasapi.rs` (Phase D, `cfg(windows)` WASAPI loopback),
 > `client/src-tauri/src/screenshare.rs` (`run_encode_loop`),
-> `client/src/components/PeerVideoTiles.tsx` (viewer),
+> `client/src-tauri/src/display_wgc.rs` (`enumerate_sources` / `start_capture` — monitor + window),
+> `client/src/components/ScreenShareStage.tsx` (main-area viewer + self-preview),
+> `client/src/components/ShareSetupPopover.tsx` (source picker + Go Live),
 > `crates/farder-crypto/src/media.rs` (`seal_video_frame_to_wire` / `open_video_wire_frame`)
 > **Layer:** Voice engine
 > **Last reviewed:** 2026-06-14
@@ -346,6 +348,12 @@ have no recv route and see nothing.
 
 ### Frontend viewer — `PeerVideoTiles.tsx`
 
+> **Superseded:** `PeerVideoTiles.tsx` was **retired/deleted** in the Screenshare UX
+> pass (see that section above). Its viewer behavior — lazy per-session decoder,
+> key-gating, error self-heal, idle reap — moved into the main-area
+> `ScreenShareStage`, now gated on a single `watching` peer. The description below
+> documents the C2-era component for history.
+
 `client/src/components/PeerVideoTiles.tsx`, mounted in `ChannelSidebar` above the
 voice control bar, renders one tile per sharing peer. It listens for
 `voice://peer-video-frame` (documented above, carries `session`, `pubkey`,
@@ -525,6 +533,65 @@ independent game-audio volume — all E2EE.
 
 ---
 
+## Screenshare UX (window capture + self-preview + main-area stage)
+
+A UX pass on top of Phase E. No new transport: it adds **single-window capture**
+sources, a **self-preview** of your own share, and reworks the viewer from the cramped
+sidebar tiles into a single main-area stage with a Join flow. All E2EE plumbing is
+unchanged.
+
+### Window capture (`window:` source ids)
+
+`enumerate_sources()` in `display_wgc.rs` now lists open windows alongside monitors.
+After the monitors (`screen:{i}`), it calls `Window::enumerate()` and appends each as a
+`DisplaySource { kind: DisplaySourceKind::Window, id: "window:{i}", label, width, height }`,
+**skipping windows with an empty title or smaller than 100px** in either dimension (junk /
+invisible tool windows). `Window` satisfies the same capture-item trait as `Monitor`, so
+`start_capture` simply branches on the id prefix: `monitor:` / `screen:` resolves a
+`Monitor`, `window:{i}` resolves `Window::enumerate()[i]`. This supersedes the Phase E
+note that "single-window capture is deferred" — sources are now a mix of
+`kind: "Screen"` (whole monitors) and `kind: "Window"` (single windows).
+
+### Self-preview — `voice://self-video-frame`
+
+The encode loop in `start_screen_share` (`run_encode_loop`'s sink in `voice/mod.rs`) emits
+each encoded frame **locally** as `voice://self-video-frame` *in addition to* sealing and
+sending it to peers — so the sharer renders exactly what is being transmitted from a single
+capture (no second capture, no decode of your own outbound stream).
+
+| Field | Type | Description |
+|---|---|---|
+| `data` | `string` | Base64-encoded H.264 Annex-B frame (same bytes handed to `VideoSender::send`) |
+| `key` | `boolean` | `true` for an IDR/keyframe; `false` for delta frames |
+| `seq` | `number` | The frame's capture `timestamp_ms` (the `EncodedFrame.timestamp_ms`), used only for ordering/labeling — **not** the AEAD inner-header `seq` of the peer path |
+
+It carries no `session`/`pubkey` (it is the local client's own frame). Consumed by
+`ScreenShareStage` to render the sharer's self-preview. See `tauri-bridge.md`.
+
+### The UX — Share popover, self LIVE, main-area stage, Join
+
+- **Share popover (`ShareSetupPopover.tsx`)** replaces the inline voice-bar dropdowns: a
+  grouped **Screens / Windows** source list (from `displaySources`, grouped by `kind`), a
+  game-audio device picker, and a **Go Live** button. Refreshes its list via
+  `useVoice().refreshDisplaySources` when opened.
+- **Self LIVE indicator + Stop** in the voice bar while you are sharing (a 🔴 **LIVE**
+  marker), driven by `isSharing`.
+- **Main-area `ScreenShareStage`** (mounted in `ChatPanel`, not the sidebar) shows the one
+  active stream: your **self-preview** (`voice://self-video-frame`) when you are sharing,
+  otherwise the joined peer's stream (`voice://peer-video-frame`, gated on `watching`). It
+  has a per-peer game-audio slider and a ✕ to stop watching.
+- **JOIN / WATCHING button + self LIVE badge** in the sidebar participant list: a peer who
+  is sharing (in `sharingPeers`) gets a JOIN button (toggles to WATCHING); the local client
+  shows a LIVE badge while `isSharing`. `toggleWatch` is **single-watch** — joining one peer
+  clears any other (one stream on the stage at a time).
+- The cramped sidebar **`PeerVideoTiles` component is retired/deleted**; the viewer (lazy
+  per-session WebCodecs `VideoDecoder`, key-gating, error self-heal, idle reap) moved into
+  `ScreenShareStage`. `useVoice()` is now owned by **AppShell** (one instance, threaded to
+  `ChannelSidebar` + `ChatPanel`) so the sidebar Join button and the main-area stage share
+  one source of truth.
+
+---
+
 ## State it owns
 
 | Field | Type | What it tracks, when it's mutated |
@@ -541,8 +608,9 @@ independent game-audio volume — all E2EE.
 
 | Event name | Payload shape | When | Who listens |
 |---|---|---|---|
-| `"voice://peer-video-frame"` | `{ session: string, pubkey: string, data: string, key: boolean, seq: number }` | Per decrypted, reassembled video frame | Phase C2 frontend per-peer video tile (WebCodecs decoder) |
+| `"voice://peer-video-frame"` | `{ session: string, pubkey: string, data: string, key: boolean, seq: number }` | Per decrypted, reassembled video frame | `ScreenShareStage` viewer (WebCodecs decoder, gated on `watching`) |
 | `"voice://peer-video-sharing"` | `{ pubkey: string, sharing: boolean }` | On a peer's Video track enable/disable | Phase E `useVoice` → `sharingPeers` → LIVE badge |
+| `"voice://self-video-frame"` | `{ data: string, key: boolean, seq: number }` | Per locally-encoded frame while you are sharing | `ScreenShareStage` self-preview (the sharer's own stream) |
 
 ## Events / requests consumed
 

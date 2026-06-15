@@ -82,7 +82,8 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 | Event name | Emitted by | Payload | Consumer |
 |---|---|---|---|
 | `"screenshare:frame"` | `start_screenshare_preview` encode thread (`screenshare.rs`) | `{ data: string, key: boolean, ts: number }` | `ScreensharePreview.tsx` → WebCodecs `VideoDecoder` → `<canvas>` |
-| `"voice://peer-video-frame"` | Video recv task inside `on_peer_video_track_enabled` (`voice/mod.rs`) | `{ session: string, pubkey: string, data: string, key: boolean, seq: number }` | Phase C2 per-peer video tile → WebCodecs `VideoDecoder` |
+| `"voice://peer-video-frame"` | Video recv task inside `on_peer_video_track_enabled` (`voice/mod.rs`) | `{ session: string, pubkey: string, data: string, key: boolean, seq: number }` | `ScreenShareStage` viewer → WebCodecs `VideoDecoder` (gated on `watching`) |
+| `"voice://self-video-frame"` | `start_screen_share` encode loop / `run_encode_loop` sink (`voice/mod.rs`) | `{ data: string, key: boolean, seq: number }` | `ScreenShareStage` self-preview (the sharer's own stream) |
 | `"voice://peer-video-sharing"` | `on_peer_track_enabled` / `on_peer_track_disabled` (Video) (`voice/mod.rs`) | `{ pubkey: string, sharing: boolean }` | Phase E `useVoice` → `sharingPeers` set → LIVE badge in `ChannelSidebar` |
 
 **`screenshare:frame` payload fields:**
@@ -98,6 +99,13 @@ and consumed by frontend components rather than `useServerEvents.ts`.
 - `seq` — Frame sequence number from the inner AEAD header (u64). Monotonically increasing per sender. Can be used to detect gaps and request a keyframe (Phase C2).
 
 This event is emitted per decrypted video frame by the controller's video recv task (one task per peer, spawned by `on_peer_video_track_enabled`). It is NOT emitted by the server bridge — the frame is decrypted on the receiver, then forwarded to the webview. See `docs/modules/voice-video-transport.md` for the full transport reference.
+
+**`voice://self-video-frame` payload fields:**
+- `data` — Base64-encoded H.264 Annex-B frame — the **same** encoded bytes handed to `VideoSender::send` for the peer path (single capture, not a second one).
+- `key` — `true` if this is an IDR/keyframe; gate delta frames until the first keyframe (same key-first invariant as the peer path).
+- `seq` — the frame's capture `timestamp_ms` (used for ordering/labeling only, not the peer path's AEAD inner-header `seq`).
+
+Emitted **locally** by the `start_screen_share` encode loop (`run_encode_loop`'s sink in `voice/mod.rs`) for every encoded frame while you are sharing, *in addition to* sealing+sending it to peers. It carries no `session`/`pubkey` (it is the local client's own frame). Consumed by `ScreenShareStage` so the sharer sees exactly what is being transmitted. See `docs/modules/voice-video-transport.md`.
 
 **`voice://peer-video-sharing` payload fields (Phase E):**
 - `pubkey` — Sharing peer's public key (`vk_` + 64 lowercase hex chars).

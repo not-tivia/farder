@@ -209,7 +209,9 @@ Cross-reference: every event in this table must have a corresponding emit arm in
 
 ## `useVoice` — audio call hook
 
-`useVoice()` is the single hook the UI uses for everything voice-call related. It owns its own local `useState` variables; it does NOT read from `ServerContext`. On mount it hydrates from `api.voiceGetState()` and subscribes to five `voice://*` Tauri events. On unmount it unlistens all of them.
+`useVoice()` is the single hook the UI uses for everything voice-call related. It owns its own local `useState` variables; it does NOT read from `ServerContext`. On mount it hydrates from `api.voiceGetState()` and subscribes to its `voice://*` Tauri events. On unmount it unlistens all of them.
+
+**Ownership: one instance, in `AppShell`.** `useVoice()` is now called **once** in `AppShell` and the returned object is threaded down as a prop to both `ChannelSidebar` (sidebar JOIN button + self LIVE badge) and `ChatPanel` (the main-area `ScreenShareStage`). Because the hook holds local state (`isSharing`, `watching`, `displaySources`, …), calling it in two places would create two independent, divergent copies — the sidebar Join button and the main-area stage must share a single source of truth, so there is exactly one instance.
 
 ### Returned interface
 
@@ -232,17 +234,20 @@ Cross-reference: every event in this table must have a corresponding emit arm in
 | `isSharing` | `boolean` | Whether the local user is currently screen-sharing. Local `useState` only — there is no `voice://` event for share state, so it is set/cleared by `startShare`/`stopShare` and stays `true` until the user stops manually or leaves |
 | `startShare()` | `() => Promise<void>` | Starts a local screen share via `api.voiceStartScreenShare(30, 1280, 720, sourceId, audioDeviceId)`, then sets `isSharing` |
 | `stopShare()` | `() => Promise<void>` | Stops the local share via `api.voiceStopScreenShare()` (errors swallowed) and clears `isSharing` |
-| `displaySources` | `api.DisplaySource[]` | Available capture displays (Phase E), hydrated from `api.listDisplaySources()`; backs the video-source `<select>` in the voice control bar |
-| `sourceId` / `setSourceId(id)` | `string \| null` / `(string \| null) => void` | Selected display id passed to `startShare`; defaults to the first source. `null` = capture the first source |
-| `sharingPeers` | `Set<string>` | Pubkeys of peers currently sharing video (Phase E), driven by the `voice://peer-video-sharing` event; backs the LIVE badge. Never contains the local client |
+| `displaySources` | `api.DisplaySource[]` | Available capture sources, hydrated from `api.listDisplaySources()`; now a mix of `kind: "Screen"` (monitors) and `kind: "Window"` (single windows). Backs the grouped Screens/Windows list in `ShareSetupPopover` |
+| `sourceId` / `setSourceId(id)` | `string \| null` / `(string \| null) => void` | Selected source id passed to `startShare` (`screen:{i}` or `window:{i}`); defaults to the first source. `null` = capture the first source |
+| `refreshDisplaySources()` | `() => Promise<void>` | Re-fetches `api.listDisplaySources()` into `displaySources` and keeps `sourceId` valid (resets to the first source if the current selection vanished). Called by `ShareSetupPopover` when it opens so the source list is fresh |
+| `sharingPeers` | `Set<string>` | Pubkeys of peers currently sharing video (Phase E), driven by the `voice://peer-video-sharing` event; backs the LIVE badge + JOIN button. Never contains the local client |
 | `someoneElseSharing` | `boolean` | `sharingPeers.size > 0` — true when another peer is sharing; used to disable the local Share button (one sharer per channel) |
-| `watching` / `toggleWatch(pubkey)` | `Set<string>` / `(string) => void` | Click-to-watch gating set (Phase E); `PeerVideoTiles` only renders/decodes a peer's video while that peer's pubkey is in `watching`. `toggleWatch` adds/removes it |
-| `setGameAudioVolume(pubkey, gain)` | `(string, number) => void` | Sets the per-peer game/screen-audio volume via `api.voiceSetScreenAudioGain` (Phase E); backs the per-tile game-audio slider. Ephemeral (not persisted) |
+| `watching` / `toggleWatch(pubkey)` | `Set<string>` / `(string) => void` | **Single-watch** gating set: at most one peer at a time. `toggleWatch(pubkey)` watches that peer (clearing any other) or, if already watching them, stops. `ScreenShareStage` renders/decodes the watched peer's video. Backs the sidebar JOIN/WATCHING button |
+| `setGameAudioVolume(pubkey, gain)` | `(string, number) => void` | Sets the per-peer game/screen-audio volume via `api.voiceSetScreenAudioGain` (Phase E); backs the stage's game-audio slider. Ephemeral (not persisted) |
 
-(The viewer side — decoding peers' shared video into per-peer WebCodecs tiles —
-lives in `client/src/components/PeerVideoTiles.tsx`, which listens for the
-`voice://peer-video-frame` event directly rather than going through `useVoice`.
-See `docs/modules/voice-video-transport.md` for the share lifecycle + viewer.)
+(The viewer side — decoding the watched peer's shared video (and the sharer's own
+self-preview) — lives in the main-area `client/src/components/ScreenShareStage.tsx`,
+which listens for the `voice://peer-video-frame` and `voice://self-video-frame`
+events directly rather than through `useVoice`. The old sidebar
+`PeerVideoTiles.tsx` was retired. See `docs/modules/voice-video-transport.md` for
+the share lifecycle + viewer.)
 
 ### `voice://*` events consumed
 
@@ -253,6 +258,8 @@ See `docs/modules/voice-video-transport.md` for the share lifecycle + viewer.)
 | `voice://peer-speaking` | `api.VoicePeerSpeakingPayload` | Patches `speaking` on the matching peer in `peers` by `pubkey`; no-op if the peer isn't in the list yet (next `state-changed` will fill it) |
 | `voice://connection-quality` | `api.ConnectionQualityPayload` | Sets `connectionQuality` |
 | `voice://peer-video-sharing` | `{ pubkey: string, sharing: boolean }` | Adds/removes the peer's pubkey in `sharingPeers` (Phase E); drives the LIVE badge and `someoneElseSharing` |
+
+(The `voice://peer-video-frame` and `voice://self-video-frame` frame events are consumed by `ScreenShareStage` directly, not by `useVoice` — see the viewer note above.)
 
 These events are emitted by the `VoiceController` in `client/src-tauri/src/voice/mod.rs`, not by `bridge.rs`. They are a separate event namespace from `server:*`.
 
