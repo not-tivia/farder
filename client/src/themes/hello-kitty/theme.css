@@ -2096,6 +2096,7 @@ body {
 
 /* ── In-call control bar (style C) ── */
 .voice-control-bar {
+  position: relative; /* anchor for the absolutely-positioned share popover */
   background: var(--xp-sidebar, #FFE4ED);
   border-top: 1px solid var(--xp-border, #FFB3CC);
   padding: 9px 11px;
