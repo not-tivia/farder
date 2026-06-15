@@ -12,9 +12,8 @@ import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
 import SettingsModal from "./settings/SettingsModal";
 import VoiceControlBar from "./VoiceControlBar";
-import PeerVideoTiles from "./PeerVideoTiles";
 import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
-import { useVoice } from "../hooks/useVoice";
+import type { UseVoice } from "../hooks/useVoice";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
   const serverId = useActiveServerId();
@@ -113,7 +112,7 @@ function CategoryEditForm({ category, onClose, serverId }: { category: CategoryI
   );
 }
 
-export default function ChannelSidebar() {
+export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
@@ -123,8 +122,6 @@ export default function ChannelSidebar() {
   const [voiceMenu, setVoiceMenu] = useState<{ x: number; y: number; pubkeyHex: string; displayName: string } | null>(null);
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
-
-  const voice = useVoice();
 
   // Self display-name initial, for the voice control bar avatar.
   const [selfName, setSelfName] = useState<string>("");
@@ -433,12 +430,14 @@ export default function ChannelSidebar() {
                     : live?.muted
                     ? <span className="voice-participant-status" title="Muted">&#x1F507;</span>
                     : null}
-                  {voice.sharingPeers.has(p.publicKey) ? (
+                  {isSelf && voice.isSharing ? (
+                    <span className="voice-live-badge" title="You're sharing">LIVE</span>
+                  ) : (!isSelf && voice.sharingPeers.has(p.publicKey)) ? (
                     <button
-                      className="voice-live-badge"
-                      title="Watch screen share"
+                      className={`voice-join-badge${voice.watching.has(p.publicKey) ? " watching" : ""}`}
+                      title={voice.watching.has(p.publicKey) ? "Stop watching" : "Join screen share"}
                       onClick={() => voice.toggleWatch(p.publicKey)}
-                    >LIVE</button>
+                    >{voice.watching.has(p.publicKey) ? "WATCHING" : "JOIN"}</button>
                   ) : null}
                 </div>
               );
@@ -532,7 +531,6 @@ export default function ChannelSidebar() {
             </>
           )}
         </div>
-        {activeServer?.currentVoiceChannelId != null && <PeerVideoTiles watching={voice.watching} onClose={voice.toggleWatch} onSetGain={voice.setGameAudioVolume} />}
         {activeServer?.currentVoiceChannelId != null && (
           <VoiceControlBar
             voice={voice}

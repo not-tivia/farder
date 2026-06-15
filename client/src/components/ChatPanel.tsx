@@ -7,9 +7,11 @@ import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
 import MessageInput from "./MessageInput";
 import ThreadPanel from "./ThreadPanel";
+import ScreenShareStage from "./ScreenShareStage";
 import { openMessageSearch } from "./AppShell";
+import type { UseVoice } from "../hooks/useVoice";
 
-export default function ChatPanel() {
+export default function ChatPanel({ voice }: { voice: UseVoice }) {
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
@@ -147,6 +149,7 @@ export default function ChatPanel() {
           🔍
         </button>
       </div>
+        <ScreenShareStage voice={voice} />
       <div className="message-list" onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
         {channelMessages.map((msg, i) => {

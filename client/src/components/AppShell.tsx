@@ -8,6 +8,7 @@ import DmPanel from "./DmPanel";
 import ServerStrip from "./ServerStrip";
 import KickedBannedDialog from "./KickedBannedDialog";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
+import { useVoice } from "../hooks/useVoice";
 import * as api from "../lib/tauri-bridge";
 
 let openSearchRef: (() => void) | null = null;
@@ -22,6 +23,12 @@ export default function AppShell() {
   const { state, dispatch } = useApp();
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
+
+  // Single voice instance for the whole shell, threaded to the components that
+  // need it. Sharing one instance keeps `watching`/`isSharing` consistent
+  // between the sidebar's Join button and the main-area screen-share stage, and
+  // avoids duplicate voice event listeners (which would double-decode video).
+  const voice = useVoice();
 
   const [searchOpen, setSearchOpen] = useState(false);
   // Counter that increments every time something tries to open the overlay.
@@ -118,8 +125,8 @@ export default function AppShell() {
       <TitleBar />
       <div className="main-layout" style={{ position: "relative" }}>
         <ServerStrip />
-        <ChannelSidebar />
-        <ChatPanel />
+        <ChannelSidebar voice={voice} />
+        <ChatPanel voice={voice} />
         <MemberSidebar />
         <DmPanel />
         {activeServer?.connectionLost && (
