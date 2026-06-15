@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { UseVoice } from "../hooks/useVoice";
 
+interface StageFrame { pubkey?: string; data: string; key: boolean; seq?: number; }
+
 const H264_CODEC = "avc1.42E01E";
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64); const out = new Uint8Array(bin.length);
@@ -15,7 +17,7 @@ function b64ToBytes(b64: string): Uint8Array {
 function useStreamPlayer(
   canvasRef: React.RefObject<HTMLCanvasElement>,
   eventName: string,
-  match: (p: any) => boolean,
+  match: (p: StageFrame) => boolean,
   active: boolean,
 ) {
   useEffect(() => {
@@ -35,7 +37,7 @@ function useStreamPlayer(
       });
       decoder.configure({ codec: H264_CODEC, optimizeForLatency: true });
     };
-    const un = listen<any>(eventName, (e) => {
+    const un = listen<StageFrame>(eventName, (e) => {
       const p = e.payload;
       if (!match(p)) return;
       ensure();

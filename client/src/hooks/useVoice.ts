@@ -180,11 +180,7 @@ export function useVoice(): UseVoice {
   const someoneElseSharing = sharingPeers.size > 0;
 
   const toggleWatch = useCallback((pubkey: string) => {
-    setWatching((prev) => {
-      const next = new Set(prev);
-      if (next.has(pubkey)) next.delete(pubkey); else next.add(pubkey);
-      return next;
-    });
+    setWatching((prev) => (prev.has(pubkey) ? new Set() : new Set([pubkey])));
   }, []);
   const setGameAudioVolume = useCallback((pubkey: string, gain: number) => {
     void api.voiceSetScreenAudioGain(pubkey, gain);
