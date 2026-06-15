@@ -1430,6 +1430,7 @@ impl VoiceController {
         let stop_t = stop.clone();
         let force_t = force_keyframe.clone();
         let server_t = server.clone();
+        let emitter_t = self.emitter.clone();
         let thread = std::thread::spawn(move || {
             let encoder = match crate::video_encoder::H264Encoder::new() {
                 Ok(e) => e,
@@ -1437,6 +1438,14 @@ impl VoiceController {
             };
             let mut sender = crate::voice::send_video::VideoSender::new(video_key, my_session_id, my_pk_bytes);
             crate::screenshare::run_encode_loop(rx, encoder, stop_t, force_t, move |enc| {
+                // Self-preview: emit the same encoded frame locally so the sharer's
+                // stage shows exactly what's being sent (no second capture).
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&enc.data);
+                emitter_t.emit(
+                    "voice://self-video-frame",
+                    serde_json::json!({ "data": b64, "key": enc.is_keyframe, "seq": enc.timestamp_ms }),
+                );
                 sender.send(&enc, |b| { let _ = server_t.send_datagram(b); });
             });
         });
@@ -2425,6 +2434,48 @@ mod controller_tests {
         );
 
         ctrl.leave().await.unwrap();
+    }
+
+    // Self-preview: while sharing, each encoded frame must also be emitted
+    // locally as voice://self-video-frame so the sharer's stage can render
+    // exactly what's being sent (no second capture). Uses the mock display
+    // backend (headless) + bundled openh264 software encoder, then polls the
+    // recording emitter for the self-frame event the encode loop produces.
+    #[tokio::test]
+    async fn sharing_emits_self_video_frames() {
+        std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
+        let (ctrl, emitter) = make_controller();
+
+        let peer = VoiceMember {
+            public_key: Keypair::generate().public_key(),
+            display_name: "peer".into(),
+            joined_at: 0,
+        };
+        let server = FakeServerSession::new_with_members(vec![peer]);
+        ctrl.join(7, server.clone()).await.unwrap();
+        ctrl.start_screen_share(15, 320, 240, None, None).await.unwrap();
+
+        // Poll up to ~1.6s for the mock capture + encode to produce a frame.
+        let mut saw = false;
+        for _ in 0..8 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if emitter
+                .events()
+                .iter()
+                .any(|(n, _)| n == "voice://self-video-frame")
+            {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            saw,
+            "sharing must emit voice://self-video-frame for the self-preview"
+        );
+
+        ctrl.stop_screen_share().await.unwrap();
+        ctrl.leave().await.unwrap();
+        std::env::remove_var("FARDER_DISPLAY_BACKEND");
     }
 
     // Task 5: the SAME share must also start screen/game audio under its OWN

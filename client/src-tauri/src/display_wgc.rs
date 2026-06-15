@@ -13,6 +13,7 @@ use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandle
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
+use windows_capture::window::Window;
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
@@ -156,6 +157,28 @@ impl DisplayBackend for WgcDisplayBackend {
                 height,
             });
         }
+        // Windows (single-window capture). Skip empty-title + tiny/tray windows
+        // (the probe showed explorer.exe "" and 160x28 entries — junk).
+        if let Ok(windows) = Window::enumerate() {
+            for (i, w) in windows.into_iter().enumerate() {
+                let title = match w.title() {
+                    Ok(t) if !t.trim().is_empty() => t,
+                    _ => continue,
+                };
+                let width = w.width().unwrap_or(0).max(0) as u32;
+                let height = w.height().unwrap_or(0).max(0) as u32;
+                if width < 100 || height < 100 {
+                    continue; // tray/hidden window, not shareable
+                }
+                out.push(DisplaySource {
+                    id: format!("window:{}", i),
+                    kind: DisplaySourceKind::Window,
+                    label: format!("\u{1FA9F} {}", title), // window icon prefix
+                    width,
+                    height,
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -174,32 +197,10 @@ impl DisplayBackend for WgcDisplayBackend {
             return Err("capture already active".into());
         }
 
-        let idx: u32 = source_id
-            .strip_prefix("monitor:")
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| format!("bad source_id: {source_id}"))?;
-        // Guard: valid 1-based monitor indices start at 1.
-        // OWNER-CONFIRM: Monitor::from_index is 1-based in windows-capture 2.0.0.
-        if idx == 0 {
-            return Err("monitor index must be >= 1".into());
-        }
-        let monitor = Monitor::from_index(idx as usize).map_err(|e| format!("monitor {idx}: {e}"))?;
-
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::sync_channel::<VideoFrame>(4); // 4 frames of slack
         let now = Instant::now();
         let flags = CaptureFlags { sink: tx, stop: stop.clone(), started: now };
-
-        let settings = Settings::new(
-            monitor,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::Default,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Rgba8,
-            flags,
-        );
 
         // start_free_threaded spawns the WGC capture thread and returns a
         // CaptureControl handle immediately. This lets stop_capture call
@@ -208,9 +209,34 @@ impl DisplayBackend for WgcDisplayBackend {
         // seen → join blocks forever). See DESIGN NOTE on the struct.
         //
         // OWNER-CONFIRM: FrameHandler::start_free_threaded exists in
-        // windows-capture 2.0.0 and has this signature.
-        let control = FrameHandler::start_free_threaded(settings)
-            .map_err(|e| format!("start capture: {e:?}"))?;
+        // windows-capture 2.0.0 and has this signature. Monitor::from_index is
+        // 1-based; Window satisfies the same capture-item trait as Monitor.
+        let control = if let Some(idx) = source_id.strip_prefix("monitor:") {
+            let idx: u32 = idx.parse().map_err(|_| format!("bad source_id: {source_id}"))?;
+            if idx == 0 { return Err("monitor index must be >= 1".into()); }
+            let monitor = Monitor::from_index(idx as usize).map_err(|e| format!("monitor {idx}: {e}"))?;
+            let settings = Settings::new(
+                monitor,
+                CursorCaptureSettings::Default, DrawBorderSettings::Default,
+                SecondaryWindowSettings::Default, MinimumUpdateIntervalSettings::Default,
+                DirtyRegionSettings::Default, ColorFormat::Rgba8, flags,
+            );
+            FrameHandler::start_free_threaded(settings).map_err(|e| format!("start capture: {e:?}"))?
+        } else if let Some(idx) = source_id.strip_prefix("window:") {
+            let idx: usize = idx.parse().map_err(|_| format!("bad source_id: {source_id}"))?;
+            let window = Window::enumerate().map_err(|e| format!("enumerate windows: {e}"))?
+                .into_iter().nth(idx)
+                .ok_or_else(|| "that window is no longer available \u{2014} refresh".to_string())?;
+            let settings = Settings::new(
+                window,
+                CursorCaptureSettings::Default, DrawBorderSettings::Default,
+                SecondaryWindowSettings::Default, MinimumUpdateIntervalSettings::Default,
+                DirtyRegionSettings::Default, ColorFormat::Rgba8, flags,
+            );
+            FrameHandler::start_free_threaded(settings).map_err(|e| format!("start capture: {e:?}"))?
+        } else {
+            return Err(format!("bad source_id: {source_id}"));
+        };
 
         *control_slot = Some(control);
         *self.stop.lock().map_err(|e| e.to_string())? = Some(stop);
