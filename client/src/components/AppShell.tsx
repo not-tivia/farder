@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import TitleBar from "./TitleBar";
 import ChannelSidebar from "./ChannelSidebar";
 import ChatPanel from "./ChatPanel";
+import ScreenShareStage from "./ScreenShareStage";
 import { MessageSearchOverlay } from "./MessageSearchOverlay";
 import MemberSidebar from "./MemberSidebar";
 import DmPanel from "./DmPanel";
@@ -126,8 +127,9 @@ export default function AppShell() {
       <div className="main-layout" style={{ position: "relative" }}>
         <ServerStrip />
         <ChannelSidebar voice={voice} />
-        <ChatPanel voice={voice} />
+        <ChatPanel />
         <MemberSidebar />
+        <ScreenShareStage voice={voice} />
         <DmPanel />
         {activeServer?.connectionLost && (
           <div className="reconnect-overlay">

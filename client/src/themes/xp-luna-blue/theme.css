@@ -2770,7 +2770,7 @@ body {
   vertical-align: middle;
 }
 .voice-live-badge:hover { opacity: 0.85; }
-.screen-stage { display: flex; flex-direction: column; margin: 8px; border: 1px solid var(--xp-border); border-radius: 6px; overflow: hidden; background: var(--xp-panel-bg); }
+.screen-stage { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 200; width: 680px; max-width: 74vw; display: flex; flex-direction: column; border: 1px solid var(--xp-border); border-radius: 8px; overflow: hidden; background: var(--xp-panel-bg); box-shadow: 0 14px 44px rgba(0,0,0,0.55); }
 .screen-stage-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; color: var(--xp-text-secondary); }
 .screen-stage-title { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .screen-stage-vol { width: 120px; accent-color: var(--xp-blue); }
