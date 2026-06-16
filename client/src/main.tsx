@@ -1,10 +1,18 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import ScreenSharePopout from "./components/ScreenSharePopout";
 import { getActiveTheme } from "./lib/tauri-bridge";
 import { bookMigrateLegacyFavorites } from "./lib/book/client";
 
 async function bootstrap() {
+  // Detached screen-share preview window: render JUST the popout view (no
+  // servers/voice/full app) so it only decodes the app-wide frame events.
+  if (new URLSearchParams(window.location.search).get("popout") === "screenshare") {
+    document.documentElement.style.background = "#000";
+    ReactDOM.createRoot(document.getElementById("root")!).render(<ScreenSharePopout />);
+    return;
+  }
   // Inject the active theme's CSS before React mounts so there's no
   // flash of default styling. If the IPC fails (shouldn't happen in
   // production), we still render — an unstyled app is better than a

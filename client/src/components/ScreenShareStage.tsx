@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UseVoice } from "../hooks/useVoice";
 
 interface StageFrame { pubkey?: string; data: string; key: boolean; seq?: number; }
@@ -59,6 +60,7 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
   const [minimized, setMinimized] = useState(false);
+  const [poppedOut, setPoppedOut] = useState(false);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
 
   // One sharer per channel: show your self-preview when sharing, else the peer you joined.
@@ -67,13 +69,45 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
   const showPeer = !showSelf && watchedPubkey != null;
   const visible = showSelf || showPeer;
 
-  // Decode only while visible AND not minimized (minimize hides + pauses decode;
-  // it does NOT stop the share — the encoder keeps running independently).
-  useStreamPlayer(canvasRef, "voice://self-video-frame", () => true, showSelf && !minimized);
-  useStreamPlayer(canvasRef, "voice://peer-video-frame", (p) => p.pubkey === watchedPubkey, showPeer && !minimized);
+  // Decode in-app only while visible, not minimized, and not popped out
+  // (when popped out, the detached window decodes instead). Minimize/pop-out
+  // never stop the share — the encoder keeps running independently.
+  useStreamPlayer(canvasRef, "voice://self-video-frame", () => true, showSelf && !minimized && !poppedOut);
+  useStreamPlayer(canvasRef, "voice://peer-video-frame", (p) => p.pubkey === watchedPubkey, showPeer && !minimized && !poppedOut);
 
-  // Reset the minimized state when the stream goes away entirely.
+  // Reset transient panel state when the stream goes away entirely.
   useEffect(() => { if (!visible) setMinimized(false); }, [visible]);
+
+  // The detached popout window tells us when it closes → restore the in-app panel.
+  useEffect(() => {
+    const un = listen("voice://popout-closed", () => setPoppedOut(false));
+    return () => { un.then((u) => u()); };
+  }, []);
+
+  // Open the detached always-on-top preview window (one at a time).
+  const openPopout = async () => {
+    try {
+      const existing = await WebviewWindow.getByLabel("screenshare-popout");
+      if (existing) { await existing.setFocus(); setPoppedOut(true); return; }
+      const w = new WebviewWindow("screenshare-popout", {
+        url: "index.html?popout=screenshare",
+        title: "Farder — Screen share",
+        width: 640, height: 400, minWidth: 320, minHeight: 200,
+        decorations: false, alwaysOnTop: true, resizable: true,
+      });
+      w.once("tauri://created", () => setPoppedOut(true));
+      w.once("tauri://error", (e) => { console.error("[popout] create failed:", e); });
+    } catch (e) {
+      console.error("[popout] open failed:", e);
+    }
+  };
+  const closePopout = async () => {
+    try { const w = await WebviewWindow.getByLabel("screenshare-popout"); if (w) await w.close(); } catch { /* ignore */ }
+    setPoppedOut(false);
+  };
+
+  // Close the popout if the stream ends while it's open.
+  useEffect(() => { if (!visible && poppedOut) void closePopout(); }, [visible, poppedOut]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!visible) return null;
 
@@ -102,6 +136,17 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
     : undefined;
   const title = showSelf ? "You're sharing" : `${watchedPubkey?.slice(0, 8)}… is sharing`;
 
+  // While popped out, the in-app panel collapses to a small restore pill.
+  if (poppedOut) {
+    return (
+      <div className="screen-stage-mini" style={posStyle} onMouseDown={startDrag}>
+        <span className="screen-stage-mini-dot" />
+        <span className="screen-stage-mini-label">Popped out</span>
+        <button className="screen-stage-min" title="Bring preview back into the app" onClick={() => void closePopout()}>&#x21F2;</button>
+      </div>
+    );
+  }
+
   if (minimized) {
     return (
       <div className="screen-stage-mini" style={posStyle} onMouseDown={startDrag}>
@@ -123,6 +168,7 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
             onChange={(e) => voice.setGameAudioVolume(watchedPubkey, Number(e.target.value))}
           />
         )}
+        <button className="screen-stage-min" title="Pop out into a floating window" onClick={() => void openPopout()}>&#x29C9;</button>
         <button className="screen-stage-min" title="Hide preview (keep sharing)" onClick={() => setMinimized(true)}>&#x2013;</button>
         <button
           className="screen-stage-close"
