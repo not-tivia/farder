@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { UseVoice } from "../hooks/useVoice";
 
@@ -56,19 +56,66 @@ function useStreamPlayer(
 
 export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
+  const [minimized, setMinimized] = useState(false);
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+
   // One sharer per channel: show your self-preview when sharing, else the peer you joined.
   const watchedPubkey = [...voice.watching][0] ?? null;
   const showSelf = voice.isSharing;
   const showPeer = !showSelf && watchedPubkey != null;
+  const visible = showSelf || showPeer;
 
-  useStreamPlayer(canvasRef, "voice://self-video-frame", () => true, showSelf);
-  useStreamPlayer(canvasRef, "voice://peer-video-frame", (p) => p.pubkey === watchedPubkey, showPeer);
+  // Decode only while visible AND not minimized (minimize hides + pauses decode;
+  // it does NOT stop the share — the encoder keeps running independently).
+  useStreamPlayer(canvasRef, "voice://self-video-frame", () => true, showSelf && !minimized);
+  useStreamPlayer(canvasRef, "voice://peer-video-frame", (p) => p.pubkey === watchedPubkey, showPeer && !minimized);
 
-  if (!showSelf && !showPeer) return null;
+  // Reset the minimized state when the stream goes away entirely.
+  useEffect(() => { if (!visible) setMinimized(false); }, [visible]);
+
+  if (!visible) return null;
+
+  // Drag by the header (but not when grabbing a button/slider).
+  const startDrag = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button, input")) return;
+    const el = (panelRef.current ?? (e.currentTarget as HTMLElement)).closest(".screen-stage, .screen-stage-mini") as HTMLElement | null;
+    const rect = (el ?? (e.currentTarget as HTMLElement)).getBoundingClientRect();
+    dragRef.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      setPos({ x: ev.clientX - dragRef.current.dx, y: ev.clientY - dragRef.current.dy });
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  // When dragged, pin to explicit coords (overriding the CSS centering).
+  const posStyle: React.CSSProperties | undefined = pos
+    ? { left: pos.x, top: pos.y, right: "auto", transform: "none" }
+    : undefined;
+  const title = showSelf ? "You're sharing" : `${watchedPubkey?.slice(0, 8)}… is sharing`;
+
+  if (minimized) {
+    return (
+      <div className="screen-stage-mini" style={posStyle} onMouseDown={startDrag}>
+        <span className="screen-stage-mini-dot" />
+        <span className="screen-stage-mini-label">{showSelf ? "Sharing" : "Watching"}</span>
+        <button className="screen-stage-min" title="Show preview" onClick={() => setMinimized(false)}>&#x25A2;</button>
+      </div>
+    );
+  }
+
   return (
-    <div className="screen-stage">
-      <div className="screen-stage-head">
-        <span className="screen-stage-title">{showSelf ? "You're sharing" : `${watchedPubkey?.slice(0, 8)}… is sharing`}</span>
+    <div className="screen-stage" ref={panelRef} style={posStyle}>
+      <div className="screen-stage-head" onMouseDown={startDrag}>
+        <span className="screen-stage-title">{title}</span>
         {showPeer && watchedPubkey && (
           <input
             className="screen-stage-vol" type="range" min={0} max={2} step={0.05} defaultValue={1}
@@ -76,6 +123,7 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
             onChange={(e) => voice.setGameAudioVolume(watchedPubkey, Number(e.target.value))}
           />
         )}
+        <button className="screen-stage-min" title="Hide preview (keep sharing)" onClick={() => setMinimized(true)}>&#x2013;</button>
         <button
           className="screen-stage-close"
           title={showSelf ? "Stop sharing" : "Stop watching"}

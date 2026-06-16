@@ -2761,11 +2761,15 @@ body {
 }
 .voice-live-badge:hover { opacity: 0.85; }
 .screen-stage { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 200; width: 680px; max-width: 74vw; display: flex; flex-direction: column; border: 1px solid var(--xp-border); border-radius: 8px; overflow: hidden; background: var(--xp-panel-bg); box-shadow: 0 14px 44px rgba(0,0,0,0.55); }
-.screen-stage-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; color: var(--xp-text-normal); }
+.screen-stage-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; color: var(--xp-text-normal); cursor: move; user-select: none; }
 .screen-stage-title { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .screen-stage-vol { width: 120px; accent-color: var(--xp-blue); }
 .screen-stage-close { background: none; border: none; color: var(--xp-text-normal); cursor: pointer; font-size: 14px; }
+.screen-stage-min { background: none; border: none; color: var(--xp-text-normal); cursor: pointer; font-size: 15px; line-height: 1; }
 .screen-stage-canvas { width: 100%; max-height: 60vh; background: #000; object-fit: contain; display: block; }
+.screen-stage-mini { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 20px; background: var(--xp-panel-bg); border: 1px solid var(--xp-border); color: var(--xp-text-normal); font-size: 12px; cursor: move; user-select: none; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
+.screen-stage-mini-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--xp-bow-red); }
+.screen-stage-mini-label { font-weight: 600; }
 .voice-join-badge { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 8px; border: none; cursor: pointer; background: var(--xp-blue); color: #fff; margin-left: auto; }
 .voice-join-badge.watching { background: var(--xp-bow-red); }
 .share-modal-backdrop {
