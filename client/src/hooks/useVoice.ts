@@ -40,6 +40,10 @@ export interface UseVoice {
   toggleWatch: (pubkey: string) => void;
   setGameAudioVolume: (pubkey: string, gain: number) => void;
   refreshDisplaySources: () => Promise<void>;
+  shareFps: number;
+  setShareFps: (fps: number) => void;
+  shareResId: "720" | "1080" | "source";
+  setShareResId: (id: "720" | "1080" | "source") => void;
 }
 
 function normalize(state: api.VoiceState): { inCall: boolean; peers: VoiceUiPeer[] } {
@@ -154,13 +158,17 @@ export function useVoice(): UseVoice {
     } catch { /* ignore */ }
   }, []);
 
+  // User-selectable quality (the share popover sets these). Resolution maps to a
+  // max width/height the backend downscales to; "source" = no downscale.
+  const [shareFps, setShareFps] = useState(30);
+  const [shareResId, setShareResId] = useState<"720" | "1080" | "source">("720");
   const startShare = useCallback(async () => {
     // No catch: a start failure leaves isSharing=false (correct); the rejection
-    // surfaces as an unhandledrejection, consistent with toggleTransmit. Phase E
-    // adds user-facing error feedback.
-    await api.voiceStartScreenShare(30, 1280, 720, sourceId, audioDeviceId);
+    // surfaces as an unhandledrejection, consistent with toggleTransmit.
+    const [mw, mh] = shareResId === "1080" ? [1920, 1080] : shareResId === "source" ? [7680, 4320] : [1280, 720];
+    await api.voiceStartScreenShare(shareFps, mw, mh, sourceId, audioDeviceId);
     setIsSharing(true);
-  }, [sourceId, audioDeviceId]);
+  }, [shareFps, shareResId, sourceId, audioDeviceId]);
   const stopShare = useCallback(async () => {
     try { await api.voiceStopScreenShare(); } catch {}
     setIsSharing(false);
@@ -201,5 +209,5 @@ export function useVoice(): UseVoice {
     await api.voiceSetPeerVolume(pubkey, clamped);
   }, []);
 
-  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing, sharingPeers, watching, toggleWatch, setGameAudioVolume, refreshDisplaySources };
+  return { inCall, muted, deafened, transmitting, localSpeaking, peers, join, leave, setMute, setDeafen, toggleTransmit, connectionQuality, peerVolume, setPeerVolume, isSharing, startShare, stopShare, audioDevices, audioDeviceId, setAudioDeviceId, displaySources, sourceId, setSourceId, someoneElseSharing, sharingPeers, watching, toggleWatch, setGameAudioVolume, refreshDisplaySources, shareFps, setShareFps, shareResId, setShareResId };
 }

@@ -23,13 +23,16 @@ pub struct H264Encoder {
 }
 
 impl H264Encoder {
-    pub fn new() -> Result<Self, String> {
-        // 3 Mbps, 30 fps, keyframe every ~60 frames (~2 s). These are starting
-        // values; Phase C/quality tuning revisits them (and NVENC in phase 2).
+    /// Build an encoder for the given frame rate + bitrate. Keyframe every ~2 s
+    /// (2×fps frames). `fps`/`bitrate_bps` are chosen by the user-facing quality
+    /// settings (NVENC hardware encode is the phase-2 upgrade for high fps/res).
+    pub fn new(fps: u32, bitrate_bps: u32) -> Result<Self, String> {
+        let fps = fps.clamp(1, 240);
         let config = EncoderConfig::new()
-            .bitrate(BitRate::from_bps(3_000_000))
-            .max_frame_rate(FrameRate::from_hz(30.0))
-            .intra_frame_period(IntraFramePeriod::from_num_frames(60));
+            .bitrate(BitRate::from_bps(bitrate_bps.max(100_000)))
+            .max_frame_rate(FrameRate::from_hz(fps as f32))
+            // ~2 seconds between keyframes at the chosen rate.
+            .intra_frame_period(IntraFramePeriod::from_num_frames(fps.saturating_mul(2).max(2)));
         let enc = Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| format!("openh264 encoder init: {e}"))?;
         Ok(Self { enc })
@@ -89,7 +92,7 @@ mod tests {
 
     #[test]
     fn first_forced_frame_is_keyframe_and_nonempty() {
-        let mut enc = H264Encoder::new().unwrap();
+        let mut enc = H264Encoder::new(30, 3_000_000).unwrap();
         enc.force_keyframe();
         let out = enc.encode(&gradient_frame(320, 240, 0)).unwrap();
         assert!(out.is_keyframe, "first forced frame must be a keyframe");
@@ -100,7 +103,7 @@ mod tests {
 
     #[test]
     fn rejects_unpacked_frame() {
-        let mut enc = H264Encoder::new().unwrap();
+        let mut enc = H264Encoder::new(30, 3_000_000).unwrap();
         let mut f = gradient_frame(16, 16, 0);
         f.stride = 999; // not width*4
         assert!(enc.encode(&f).is_err());
@@ -113,7 +116,7 @@ mod tests {
         use openh264::formats::YUVSource;
         use openh264::nal_units;
 
-        let mut enc = H264Encoder::new().unwrap();
+        let mut enc = H264Encoder::new(30, 3_000_000).unwrap();
         let mut dec = Decoder::new().unwrap();
         enc.force_keyframe();
 

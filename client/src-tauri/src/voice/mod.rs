@@ -1392,7 +1392,7 @@ impl VoiceController {
     /// capture->encode loop into the C1 VideoSender over this call's connection.
     pub async fn start_screen_share(&self, fps: u32, max_width: u32, max_height: u32, source_id: Option<String>, audio_device_id: Option<String>) -> Result<(), String> {
         // Fail-fast: validate the encoder can init (it's built inside the thread).
-        drop(crate::video_encoder::H264Encoder::new()?);
+        drop(crate::video_encoder::H264Encoder::new(30, 3_000_000)?);
 
         let (server, my_session_id, channel_id, my_pk_bytes, already) = {
             let inner = self.inner.lock().await;
@@ -1431,13 +1431,16 @@ impl VoiceController {
         let force_t = force_keyframe.clone();
         let server_t = server.clone();
         let emitter_t = self.emitter.clone();
+        // Bitrate ~ pixels × fps (≈0.1 bit/px/frame), clamped to a sane range.
+        let video_bitrate = ((max_width as u64 * max_height as u64 * fps as u64 / 10)
+            .clamp(1_000_000, 16_000_000)) as u32;
         let thread = std::thread::spawn(move || {
-            let encoder = match crate::video_encoder::H264Encoder::new() {
+            let encoder = match crate::video_encoder::H264Encoder::new(fps, video_bitrate) {
                 Ok(e) => e,
                 Err(e) => { eprintln!("[voice] video encoder init failed: {e}"); return; }
             };
             let mut sender = crate::voice::send_video::VideoSender::new(video_key, my_session_id, my_pk_bytes);
-            crate::screenshare::run_encode_loop(rx, encoder, stop_t, force_t, move |enc| {
+            crate::screenshare::run_encode_loop(rx, encoder, stop_t, force_t, fps, max_width, max_height, move |enc| {
                 // Self-preview: emit the same encoded frame locally so the sharer's
                 // stage shows exactly what's being sent (no second capture).
                 use base64::Engine;

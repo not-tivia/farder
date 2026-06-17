@@ -33,6 +33,24 @@ export default function ShareSetupPopover({ voice, onClose }: { voice: UseVoice;
           ))}
         </select>
       </label>
+      <div className="share-popover-quality">
+        <label>
+          <span>Quality</span>
+          <select value={voice.shareResId} onChange={(e) => voice.setShareResId(e.target.value as "720" | "1080" | "source")}>
+            <option value="720">720p</option>
+            <option value="1080">1080p</option>
+            <option value="source">Source (no downscale)</option>
+          </select>
+        </label>
+        <label>
+          <span>FPS</span>
+          <select value={voice.shareFps} onChange={(e) => voice.setShareFps(Number(e.target.value))}>
+            <option value={30}>30</option>
+            <option value={60}>60</option>
+            <option value={120}>120</option>
+          </select>
+        </label>
+      </div>
       <div className="share-popover-actions">
         <button className="share-popover-cancel" onClick={onClose}>Cancel</button>
         <button className="share-popover-go" disabled={!voice.sourceId} onClick={() => { void voice.startShare(); onClose(); }}>Go Live</button>
