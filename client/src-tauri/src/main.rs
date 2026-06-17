@@ -168,6 +168,7 @@ fn main() {
             commands::voice_leave,
             commands::voice_start_screen_share,
             commands::voice_stop_screen_share,
+            commands::voice_request_keyframe,
             commands::list_display_sources,
             commands::list_audio_output_devices,
             commands::voice_set_mute,

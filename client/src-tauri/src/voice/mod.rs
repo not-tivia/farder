@@ -1583,6 +1583,18 @@ impl VoiceController {
         }
         Ok(())
     }
+
+    /// Force the next encoded video frame to be a keyframe (IDR). Used when a
+    /// viewer attaches mid-stream (e.g. the pop-out preview window opens) so it
+    /// can start decoding immediately instead of waiting for the periodic one.
+    pub async fn request_keyframe(&self) {
+        let inner = self.inner.lock().await;
+        if let Some(call) = inner.active.as_ref() {
+            if let Some(s) = call.video_share.as_ref() {
+                s.force_keyframe.store(true, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Tear down a screen share: stop the capture+encode thread by setting `stop`

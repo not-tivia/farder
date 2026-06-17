@@ -478,6 +478,10 @@ export async function voiceStopScreenShare(): Promise<void> {
   return invoke<void>("voice_stop_screen_share");
 }
 
+export async function voiceRequestKeyframe(): Promise<void> {
+  return invoke<void>("voice_request_keyframe");
+}
+
 export async function voiceSetMute(muted: boolean): Promise<void> {
   return invoke("voice_set_mute", { muted });
 }

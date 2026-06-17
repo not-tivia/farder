@@ -3023,6 +3023,14 @@ pub async fn voice_stop_screen_share(
 }
 
 #[tauri::command]
+pub async fn voice_request_keyframe(
+    voice: State<'_, Arc<crate::voice::VoiceController>>,
+) -> Result<(), String> {
+    voice.request_keyframe().await;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn voice_set_mute(
     voice: State<'_, Arc<crate::voice::VoiceController>>,
     muted: bool,

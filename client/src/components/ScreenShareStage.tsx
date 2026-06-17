@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { voiceRequestKeyframe } from "../lib/tauri-bridge";
 import type { UseVoice } from "../hooks/useVoice";
 
 interface StageFrame { pubkey?: string; data: string; key: boolean; seq?: number; }
@@ -84,6 +85,13 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
     return () => { un.then((u) => u()); };
   }, []);
 
+  // When the popout (or a re-shown in-app panel) signals it's listening, force a
+  // keyframe so it paints immediately instead of waiting for the periodic one.
+  useEffect(() => {
+    const un = listen("voice://popout-ready", () => { void voiceRequestKeyframe(); });
+    return () => { un.then((u) => u()); };
+  }, []);
+
   // Open the detached always-on-top preview window (one at a time).
   const openPopout = async () => {
     try {
@@ -93,7 +101,7 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
         url: "index.html?popout=screenshare",
         title: "Farder — Screen share",
         width: 640, height: 400, minWidth: 320, minHeight: 200,
-        decorations: false, alwaysOnTop: true, resizable: true,
+        decorations: true, alwaysOnTop: true, resizable: true,
       });
       w.once("tauri://created", () => setPoppedOut(true));
       w.once("tauri://error", (e) => { console.error("[popout] create failed:", e); });
@@ -152,7 +160,7 @@ export default function ScreenShareStage({ voice }: { voice: UseVoice }) {
       <div className="screen-stage-mini" style={posStyle} onMouseDown={startDrag}>
         <span className="screen-stage-mini-dot" />
         <span className="screen-stage-mini-label">{showSelf ? "Sharing" : "Watching"}</span>
-        <button className="screen-stage-min" title="Show preview" onClick={() => setMinimized(false)}>&#x25A2;</button>
+        <button className="screen-stage-min" title="Show preview" onClick={() => { setMinimized(false); void voiceRequestKeyframe(); }}>&#x25A2;</button>
       </div>
     );
   }
