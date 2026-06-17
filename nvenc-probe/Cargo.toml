@@ -1,0 +1,20 @@
+# THROWAWAY probe — validate NVENC (NVIDIA hardware H.264 encode) on the owner's
+# Windows box BEFORE wiring it into the screenshare encoder. Confirms: the
+# nvidia-video-codec-sdk crate + cudarc BUILD on this MSVC toolchain + driver,
+# CUDA initialises, and an NVENC H.264 encode session comes up on the GPU.
+# Needs only the installed NVIDIA driver (cudarc dynamic-loading — no CUDA
+# toolkit / Video Codec SDK install). Detached from the parent workspace.
+# DELETE once NVENC ships.
+[package]
+name = "nvenc-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+nvidia-video-codec-sdk = "0.4"
+# Match the features the crate's own CI uses: a CUDA 12.x API + runtime loading
+# (so no CUDA toolkit install is required — the NVIDIA driver provides the libs).
+cudarc = { version = "0.16", default-features = false, features = ["cuda-12020", "dynamic-loading"] }
