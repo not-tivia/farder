@@ -2727,6 +2727,36 @@ body {
   border-color: var(--xp-blue);
 }
 
+/* Link embeds (Twitter, YouTube, Reddit, Spotify, image) */
+.link-embeds { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.link-embed {
+  border: 1px solid var(--xp-border);
+  border-left: 3px solid var(--xp-blue);
+  background: var(--xp-panel-bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-width: 460px;
+}
+.link-embed-author { font-weight: 600; color: var(--xp-text-normal); font-size: 0.85em; }
+.link-embed-title { font-weight: 600; color: var(--xp-text-normal); margin: 2px 0; }
+.link-embed-desc { color: var(--xp-text-secondary); font-size: 0.9em; white-space: pre-wrap; }
+.link-embed-video, .link-embed-image, .link-embed-thumb {
+  max-width: 100%; border-radius: 4px; margin-top: 6px; display: block;
+}
+.link-embed-thumb-wrap { position: relative; display: inline-block; }
+.link-embed-play {
+  position: absolute; inset: 0; margin: auto; width: fit-content; height: fit-content;
+  padding: 6px 12px; background: var(--xp-blue); color: var(--xp-white); border: none;
+  border-radius: 4px; cursor: pointer;
+}
+.link-embed-duration { color: var(--xp-text-secondary); font-size: 0.8em; margin-top: 4px; }
+.link-embed-chip {
+  background: var(--xp-panel-bg); border: 1px solid var(--xp-border);
+  color: var(--xp-text-normal); border-radius: 4px; padding: 4px 10px;
+  cursor: pointer; margin-top: 6px;
+}
+.link-embed-state { color: var(--xp-text-secondary); font-size: 0.9em; }
+
 /* ── Screenshare preview (Phase B loopback viewer) ──────────────────────── */
 .screenshare-preview-controls { margin: 6px 0; }
 .screenshare-preview-canvas {
