@@ -19,6 +19,8 @@ import { translateMessage, subscribe as subscribeTranslation, dismiss as dismiss
 import { getTranslationSettings } from "../lib/translation/api";
 import InviteEmbed from "./InviteEmbed";
 import { parseInviteLink } from "../lib/invite";
+import LinkEmbed from "./LinkEmbed";
+import { detectEmbedUrls } from "../lib/linkEmbed";
 import MemberAvatar from "./MemberAvatar";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
@@ -284,6 +286,9 @@ export default function Message({ message, memberNames, grouped = false, serverI
       ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
       : message.content;
 
+  // Data-saver setting for link embeds (Task 20 will replace with real setting)
+  const dataSaver = false;
+
   async function handleReactionClick(emoji: string, alreadyMe: boolean, fileId?: number) {
     if (reacting) return;
     setReacting(true);
@@ -474,6 +479,15 @@ export default function Message({ message, memberNames, grouped = false, serverI
         return embeds.length > 0 ? (
           <div className="invite-embeds">
             {embeds.map((m, i) => <InviteEmbed key={i} link={m} />)}
+          </div>
+        ) : null;
+      })()}
+
+      {!deleted && (() => {
+        const urls = detectEmbedUrls(message.content);
+        return urls.length > 0 ? (
+          <div className="link-embeds">
+            {urls.map((u, i) => <LinkEmbed key={i} url={u} dataSaver={dataSaver} />)}
           </div>
         ) : null;
       })()}
