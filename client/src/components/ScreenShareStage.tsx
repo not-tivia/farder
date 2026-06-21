@@ -6,7 +6,10 @@ import type { UseVoice } from "../hooks/useVoice";
 
 interface StageFrame { pubkey?: string; data: string; key: boolean; seq?: number; }
 
-const H264_CODEC = "avc1.42E01E";
+// Constrained Baseline Level 5.1 — accepts 720p/1080p/1440p/4K30 streams.
+// (The old "avc1.42E01E" was Level 3.0, which rejects anything above ~720p and
+// silently blanked the canvas at higher share resolutions.)
+const H264_CODEC = "avc1.42E033";
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64); const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -35,7 +38,7 @@ function useStreamPlayer(
           canvas.width = frame.displayWidth; canvas.height = frame.displayHeight;
           ctx.drawImage(frame, 0, 0, canvas.width, canvas.height); frame.close();
         },
-        error: () => { try { decoder?.close(); } catch { /* ignore */ } decoder = null; gotKey = false; },
+        error: (err) => { console.warn("[screenshare] decoder error, resetting:", err); try { decoder?.close(); } catch { /* ignore */ } decoder = null; gotKey = false; },
       });
       decoder.configure({ codec: H264_CODEC, optimizeForLatency: true });
     };
