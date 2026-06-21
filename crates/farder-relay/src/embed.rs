@@ -92,6 +92,68 @@ pub fn fxtwitter_api_url(raw: &str) -> Option<String> {
     }
 }
 
+use farder_protocol::messages::EmbedOutcome;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const EMBED_CACHE_TTL: Duration = Duration::from_secs(3600);
+const EMBED_CACHE_MAX: usize = 2048;
+
+pub struct EmbedCache {
+    entries: Mutex<HashMap<String, (Instant, EmbedOutcome)>>,
+}
+
+impl EmbedCache {
+    pub fn new() -> Self {
+        Self { entries: Mutex::new(HashMap::new()) }
+    }
+
+    pub fn get(&self, key: &str, now: Instant) -> Option<EmbedOutcome> {
+        let map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(key).and_then(|(at, v)| (now.duration_since(*at) < EMBED_CACHE_TTL).then(|| v.clone()))
+    }
+
+    pub fn put(&self, key: String, value: EmbedOutcome, now: Instant) {
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= EMBED_CACHE_MAX {
+            map.retain(|_, (at, _)| now.duration_since(*at) < EMBED_CACHE_TTL);
+            if map.len() >= EMBED_CACHE_MAX {
+                map.clear();
+            }
+        }
+        map.insert(key, (now, value));
+    }
+}
+
+pub fn embed_cache_key(url: &str) -> String {
+    url.to_string()
+}
+
+/// Route an allowlisted URL to its adapter. Non-allowlisted → Unavailable;
+/// allowlisted but unparseable shape → Unsupported.
+pub async fn resolve_embed<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> EmbedOutcome {
+    let Some(provider) = classify_url(url) else {
+        return EmbedOutcome::Unavailable;
+    };
+    let adapted = match provider {
+        Provider::Twitter => adapt_twitter(url, f).await,
+        Provider::YouTube => adapt_youtube(url, f).await,
+        Provider::Reddit => adapt_reddit(url, f).await,
+        Provider::Spotify => adapt_spotify(url, f).await,
+        Provider::Image => adapt_image(url).await,
+    };
+    match adapted {
+        Some(e) => EmbedOutcome::Embed(e),
+        None => EmbedOutcome::Unsupported,
+    }
+}
+
+pub async fn adapt_youtube<F: LinkFetcher + ?Sized>(_u: &str, _f: &F) -> Option<LinkEmbed> { None }
+pub async fn adapt_reddit<F: LinkFetcher + ?Sized>(_u: &str, _f: &F) -> Option<LinkEmbed> { None }
+pub async fn adapt_spotify<F: LinkFetcher + ?Sized>(_u: &str, _f: &F) -> Option<LinkEmbed> { None }
+pub async fn adapt_image(_u: &str) -> Option<LinkEmbed> { None }
+
 pub async fn adapt_twitter<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<LinkEmbed> {
     let api = fxtwitter_api_url(url)?;
     let fetched = f.fetch_text(&api).await.ok()?;
@@ -236,5 +298,36 @@ mod tests {
         assert!(media.playable_inline);
         assert_eq!(e.duration_secs, Some(12));
         assert_eq!(e.thumbnail.as_deref(), Some("https://pbs.twimg.com/thumb.jpg"));
+    }
+
+    #[tokio::test]
+    async fn resolve_embed_routes_twitter() {
+        let mut m = MockFetcher::new();
+        m.insert("https://api.fxtwitter.com/jack/status/20", &fixture("fxtwitter_video.json"));
+        match resolve_embed("https://x.com/jack/status/20", &m).await {
+            farder_protocol::messages::EmbedOutcome::Embed(e) => assert_eq!(e.provider, "twitter"),
+            other => panic!("expected Embed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_embed_non_allowlisted_is_unavailable() {
+        let m = MockFetcher::new();
+        assert_eq!(
+            resolve_embed("https://evil.com/x", &m).await,
+            farder_protocol::messages::EmbedOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn embed_cache_ttl() {
+        use std::time::{Duration, Instant};
+        let c = EmbedCache::new();
+        let t0 = Instant::now();
+        let out = farder_protocol::messages::EmbedOutcome::Unsupported;
+        assert!(c.get("k", t0).is_none());
+        c.put("k".into(), out.clone(), t0);
+        assert_eq!(c.get("k", t0 + Duration::from_secs(3599)), Some(out));
+        assert!(c.get("k", t0 + Duration::from_secs(3601)).is_none());
     }
 }
