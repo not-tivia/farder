@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { useLinkEmbed } from "../hooks/useLinkEmbed";
 import { useProxiedMedia } from "../hooks/useProxiedMedia";
 
@@ -61,7 +62,7 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
           {(e.kind === "Video" || e.kind === "Audio") && (
             <button
               className="link-embed-play"
-              onClick={() => window.open(e.url, "_blank")}
+              onClick={() => { void openExternal(e.url); }}
             >
               &#9654; {e.kind === "Video" ? "Play" : "Open"}
             </button>
