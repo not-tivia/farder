@@ -690,6 +690,26 @@ pub(crate) fn read_peer_volumes() -> std::collections::HashMap<String, f32> {
         .unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// Data-saver embed setting
+// ---------------------------------------------------------------------------
+
+pub(crate) fn read_data_saver_embeds() -> bool {
+    settings_get("data_saver_embeds")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn get_data_saver_embeds() -> bool {
+    read_data_saver_embeds()
+}
+
+#[tauri::command]
+pub fn set_data_saver_embeds(enabled: bool) -> Result<(), String> {
+    settings_set("data_saver_embeds", serde_json::json!(enabled))
+}
+
 #[tauri::command]
 pub fn get_voice_mode() -> String {
     read_voice_mode()
@@ -3650,6 +3670,21 @@ mod voice_settings_tests {
             assert_eq!(read_peer_volumes().get("deadbeef"), Some(&2.0));
             persist_peer_volume("deadbeef", -3.0).unwrap();
             assert_eq!(read_peer_volumes().get("deadbeef"), Some(&0.0));
+        });
+    }
+
+    #[test]
+    fn data_saver_embeds_defaults_to_false_and_round_trips() {
+        with_temp_config(|| {
+            // Default must be false (auto-show embeds).
+            assert!(!read_data_saver_embeds());
+
+            // Round-trip: enable, verify, disable, verify.
+            set_data_saver_embeds(true).unwrap();
+            assert!(read_data_saver_embeds());
+
+            set_data_saver_embeds(false).unwrap();
+            assert!(!read_data_saver_embeds());
         });
     }
 }

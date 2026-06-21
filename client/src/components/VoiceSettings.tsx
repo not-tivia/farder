@@ -16,6 +16,8 @@ import {
   setInputDevice,
   getOutputDevice,
   setOutputDevice,
+  getDataSaverEmbeds,
+  setDataSaverEmbeds,
   type AudioDeviceInfo,
   type VoiceInputLevelPayload,
 } from "../lib/tauri-bridge";
@@ -51,6 +53,7 @@ export default function VoiceSettings() {
   // Empty string = system default.
   const [selectedInput, setSelectedInput] = useState<string>(SYSTEM_DEFAULT);
   const [selectedOutput, setSelectedOutput] = useState<string>(SYSTEM_DEFAULT);
+  const [dataSaverEmbeds, setDataSaverEmbedsState] = useState<boolean>(false);
 
   useEffect(() => {
     void getVoiceMode().then(setMode).catch(() => {});
@@ -60,6 +63,7 @@ export default function VoiceSettings() {
     void listOutputDevices().then(setOutputDevices).catch(() => {});
     void getInputDevice().then((n) => setSelectedInput(n ?? SYSTEM_DEFAULT)).catch(() => {});
     void getOutputDevice().then((n) => setSelectedOutput(n ?? SYSTEM_DEFAULT)).catch(() => {});
+    void getDataSaverEmbeds().then(setDataSaverEmbedsState).catch(() => {});
     // Live mic level (only flows while a voice call is active).
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -92,6 +96,11 @@ export default function VoiceSettings() {
   const chooseSensitivity = (v: number) => {
     setSensitivity(v);
     void setVoiceSensitivity(v).catch((e) => console.error("[voice-settings] failed to save sensitivity:", e));
+  };
+
+  const chooseDataSaverEmbeds = (enabled: boolean) => {
+    setDataSaverEmbedsState(enabled);
+    void setDataSaverEmbeds(enabled).catch((e) => console.error("[voice-settings] failed to save data-saver setting:", e));
   };
 
   useEffect(() => {
@@ -243,6 +252,23 @@ export default function VoiceSettings() {
       <div className="settings-divider" />
       <SettingsSection label="Screen Share (preview &mdash; Phase B)">
         <ScreensharePreview />
+      </SettingsSection>
+
+      <div className="settings-divider" />
+      <SettingsSection label="Privacy &amp; Data">
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={dataSaverEmbeds}
+            onChange={(e) => chooseDataSaverEmbeds(e.target.checked)}
+          />
+          Data saver: load link previews only when clicked
+        </label>
+        <p className="settings-help">
+          When enabled, link preview cards show a "Load preview" button instead of
+          loading automatically. Reduces network requests and hides your IP from
+          preview sources until you choose to load them.
+        </p>
       </SettingsSection>
 
       {mode === "PushToTalk" && (

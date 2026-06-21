@@ -17,6 +17,7 @@ import { TranslatedRow } from "./TranslatedRow";
 import { TranslationDownloadDialog } from "./TranslationDownloadDialog";
 import { translateMessage, subscribe as subscribeTranslation, dismiss as dismissTranslation } from "../lib/translation/store";
 import { getTranslationSettings } from "../lib/translation/api";
+import { getDataSaverEmbeds } from "../lib/tauri-bridge";
 import InviteEmbed from "./InviteEmbed";
 import { parseInviteLink } from "../lib/invite";
 import LinkEmbed from "./LinkEmbed";
@@ -179,6 +180,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
     user_language_overrides: Record<string, string>;
   } | null>(null);
 
+  const [dataSaver, setDataSaver] = useState(false);
+
+  useEffect(() => {
+    getDataSaverEmbeds().then(setDataSaver).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!cachedOwnPk) {
       api.getPublicKey().then((pk) => { cachedOwnPk = pk; setOwnPk(pk); });
@@ -285,9 +292,6 @@ export default function Message({ message, memberNames, grouped = false, serverI
     : message.attachments.length > 0
       ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
       : message.content;
-
-  // Data-saver setting for link embeds (Task 20 will replace with real setting)
-  const dataSaver = false;
 
   async function handleReactionClick(emoji: string, alreadyMe: boolean, fileId?: number) {
     if (reacting) return;

@@ -784,3 +784,13 @@ export function getLinkEmbed(url: string): Promise<EmbedOutcome> {
 export function getProxiedMedia(url: string): Promise<{ content_type: string; data_base64: string }> {
   return invoke<{ content_type: string; data_base64: string }>("get_proxied_media", { url });
 }
+
+// ── Data-saver embed toggle ───────────────────────────────────────────────────
+
+export function getDataSaverEmbeds(): Promise<boolean> {
+  return invoke<boolean>("get_data_saver_embeds");
+}
+
+export function setDataSaverEmbeds(enabled: boolean): Promise<void> {
+  return invoke<void>("set_data_saver_embeds", { enabled });
+}

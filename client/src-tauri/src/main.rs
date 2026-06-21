@@ -179,6 +179,8 @@ fn main() {
             commands::voice_toggle_transmit,
             commands::voice_set_peer_volume,
             commands::voice_set_screen_audio_gain,
+            commands::get_data_saver_embeds,
+            commands::set_data_saver_embeds,
             commands::get_voice_mode,
             commands::set_voice_mode,
             commands::get_ptt_key,
