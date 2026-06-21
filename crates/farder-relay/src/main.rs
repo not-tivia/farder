@@ -30,6 +30,7 @@ async fn main() -> Result<()> {
     ));
     let connections = router::new_state();
     let preview = router::new_preview_context()?;
-    router::serve(endpoint, connections, limiter, preview).await?;
+    let embed = router::new_embed_context()?;
+    router::serve(endpoint, connections, limiter, preview, embed).await?;
     Ok(())
 }

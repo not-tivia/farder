@@ -39,6 +39,25 @@ pub fn new_preview_context() -> Result<Arc<PreviewContext>> {
     }))
 }
 
+/// Everything the embed proxy needs at dispatch time.
+pub struct EmbedContext {
+    pub cache: crate::embed::EmbedCache,
+    pub limiter: crate::limits::ConnectionLimiter,
+    pub media_limiter: crate::limits::ConnectionLimiter,
+    pub fetcher: std::sync::Arc<crate::embed::SafeFetcher>,
+}
+
+pub fn new_embed_context() -> Result<Arc<EmbedContext>> {
+    Ok(Arc::new(EmbedContext {
+        cache: crate::embed::EmbedCache::new(),
+        // 30 metadata previews/min/IP (same posture as invite previews).
+        limiter: crate::limits::ConnectionLimiter::new(usize::MAX, 30, std::time::Duration::from_secs(60)),
+        // Separate, tighter bucket for bandwidth-heavy media fetches.
+        media_limiter: crate::limits::ConnectionLimiter::new(usize::MAX, 60, std::time::Duration::from_secs(60)),
+        fetcher: std::sync::Arc::new(crate::embed::SafeFetcher::new()?),
+    }))
+}
+
 pub fn new_state() -> SharedState {
     Arc::new(RelayState {
         servers: RwLock::new(HashMap::new()),
@@ -56,6 +75,7 @@ pub async fn serve(
     state: SharedState,
     limiter: std::sync::Arc<crate::limits::ConnectionLimiter>,
     preview: Arc<PreviewContext>,
+    embed: Arc<EmbedContext>,
 ) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let ip = incoming.remote_address().ip();
@@ -69,11 +89,12 @@ pub async fn serve(
         };
         let state = state.clone();
         let preview = preview.clone();
+        let embed = embed.clone();
         tokio::spawn(async move {
             let _guard = guard; // held for the connection's lifetime
             match incoming.await {
                 Ok(conn) => {
-                    if let Err(e) = handle_connection(conn, state, preview).await {
+                    if let Err(e) = handle_connection(conn, state, preview, embed).await {
                         warn!("connection error: {}", e);
                     }
                 }
@@ -84,7 +105,7 @@ pub async fn serve(
     Ok(())
 }
 
-pub async fn handle_connection(conn: Connection, state: SharedState, preview: Arc<PreviewContext>) -> Result<()> {
+pub async fn handle_connection(conn: Connection, state: SharedState, preview: Arc<PreviewContext>, embed: Arc<EmbedContext>) -> Result<()> {
     let remote = conn.remote_address();
     info!("new connection from {}", remote);
     // The first bi-stream carries the role-establishing message.
@@ -100,6 +121,12 @@ pub async fn handle_connection(conn: Connection, state: SharedState, preview: Ar
         }
         Message::ProxyInvitePreview { target, code } => {
             handle_preview(target, code, conn, send, state, preview).await
+        }
+        Message::ProxyLinkEmbed { url } => {
+            handle_link_embed(url, conn, send, embed).await
+        }
+        Message::ProxyMedia { url } => {
+            handle_media(url, conn, send, embed).await
         }
         _ => {
             warn!("unexpected first message from {}", remote);
@@ -257,6 +284,84 @@ async fn handle_preview(
     Ok(())
 }
 
+/// Answer a ProxyLinkEmbed: rate-limit → cache → resolve (8s budget) → reply.
+async fn handle_link_embed(
+    url: String,
+    client_conn: Connection,
+    mut send: SendStream,
+    embed: Arc<EmbedContext>,
+) -> Result<()> {
+    use farder_protocol::messages::EmbedOutcome;
+    let ip = client_conn.remote_address().ip();
+    let now = std::time::Instant::now();
+
+    let outcome = if url.len() > 2048 {
+        EmbedOutcome::Unavailable
+    } else if embed.limiter.try_admit(ip, now).is_none() {
+        EmbedOutcome::Unavailable
+    } else {
+        let key = crate::embed::embed_cache_key(&url);
+        match embed.cache.get(&key, now) {
+            Some(hit) => hit,
+            None => {
+                let fresh = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    crate::embed::resolve_embed(&url, embed.fetcher.as_ref()),
+                ).await.unwrap_or(EmbedOutcome::Unavailable);
+                embed.cache.put(key, fresh.clone(), std::time::Instant::now());
+                fresh
+            }
+        }
+    };
+
+    let reply = codec::encode(&Message::ProxyLinkEmbedResult { outcome })?;
+    write_message(&mut send, &reply).await?;
+    let _ = send.finish();
+    client_conn.closed().await;
+    Ok(())
+}
+
+/// Answer a ProxyMedia: rate-limit → fetch (validated, capped) → reply a
+/// ProxyMediaHeader then the raw bytes length-framed, or ProxyMediaUnavailable.
+async fn handle_media(
+    url: String,
+    client_conn: Connection,
+    mut send: SendStream,
+    embed: Arc<EmbedContext>,
+) -> Result<()> {
+    let ip = client_conn.remote_address().ip();
+    let now = std::time::Instant::now();
+
+    let result = if url.len() > 2048 || embed.media_limiter.try_admit(ip, now).is_none() {
+        None
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            crate::embed::fetch_media(embed.fetcher.client(), &url),
+        ).await.ok().and_then(|r| r.ok())
+    };
+
+    match result {
+        Some((content_type, bytes)) => {
+            let hdr = codec::encode(&Message::ProxyMediaHeader {
+                content_type,
+                total_len: bytes.len() as u64,
+            })?;
+            write_message(&mut send, &hdr).await?;
+            // Raw bytes follow, length-framed (4-byte BE len + bytes).
+            send.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
+            send.write_all(&bytes).await?;
+        }
+        None => {
+            let msg = codec::encode(&Message::ProxyMediaUnavailable)?;
+            write_message(&mut send, &msg).await?;
+        }
+    }
+    let _ = send.finish();
+    client_conn.closed().await;
+    Ok(())
+}
+
 /// Bridge every bi-stream the client opens to a fresh bi-stream on the server's
 /// control connection, copying bytes both ways. Each server-bound stream is
 /// prefixed with the client's 4-byte big-endian routing handle (Phase 5b), so
@@ -406,7 +511,8 @@ mod tests {
             10_000, 10_000, std::time::Duration::from_secs(60),
         ));
         let preview = new_preview_context().unwrap();
-        tokio::spawn(serve(ep, state.clone(), limiter, preview));
+        let embed = new_embed_context().unwrap();
+        tokio::spawn(serve(ep, state.clone(), limiter, preview, embed));
         std::mem::forget(dir);
         (addr, state)
     }
@@ -567,7 +673,8 @@ mod tests {
             1, 10_000, std::time::Duration::from_secs(60),
         ));
         let preview = new_preview_context().unwrap();
-        tokio::spawn(serve(ep, state, limiter, preview));
+        let embed = new_embed_context().unwrap();
+        tokio::spawn(serve(ep, state, limiter, preview, embed));
         std::mem::forget(dir);
 
         // First connection: open it and keep it alive so it holds the only slot.
