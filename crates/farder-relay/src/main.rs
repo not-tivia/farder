@@ -1,5 +1,6 @@
 mod config;
 mod datagram;
+mod embed;
 mod limits;
 mod listener;
 mod proxy;
