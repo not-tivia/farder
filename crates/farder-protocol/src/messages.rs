@@ -25,6 +25,55 @@ pub enum PreviewOutcome {
     Unavailable,
 }
 
+/// Coarse class of an external embed, used by the client to pick a card layout.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum EmbedKind {
+    Tweet,
+    Video,
+    Image,
+    Audio,
+    Article,
+}
+
+/// A directly-fetchable media asset (image or direct video file) the client
+/// renders inline by pulling its bytes via `ProxyMedia`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EmbedMedia {
+    pub url: String,
+    pub mime: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// true for direct-file media playable in a `<video>`/`<img>`; false for
+    /// sources (YouTube, Spotify) that must open in an external browser.
+    pub playable_inline: bool,
+}
+
+/// Normalized metadata for one external link, produced by a relay-side adapter.
+/// The client never sees raw HTML; only this struct.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LinkEmbed {
+    pub provider: String,
+    pub kind: EmbedKind,
+    pub url: String,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    /// URL of a thumbnail/preview image, fetched via `ProxyMedia`.
+    pub thumbnail: Option<String>,
+    pub media: Option<EmbedMedia>,
+    pub duration_secs: Option<u32>,
+}
+
+/// Result of a `ProxyLinkEmbed` lookup. Uniform failure leaks nothing.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum EmbedOutcome {
+    Embed(LinkEmbed),
+    /// URL host is allowlisted but the specific URL shape isn't handled.
+    Unsupported,
+    /// Timeout, SSRF refusal, non-allowlisted host, rate-limit, parse failure.
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
     RelayConnect { destination_id: Vec<u8> },
@@ -49,6 +98,20 @@ pub enum Message {
     /// The relay's answer to a `ProxyInvitePreview` request. Sent by the relay
     /// after resolving the invite code against the target server.
     ProxyInvitePreviewResult { outcome: PreviewOutcome },
+    /// Ask the relay to resolve a rich embed for an external URL (relay fetch
+    /// proxy, phase two). First message on a fresh connection.
+    ProxyLinkEmbed { url: String },
+    /// The relay's normalized answer to `ProxyLinkEmbed`.
+    ProxyLinkEmbedResult { outcome: EmbedOutcome },
+    /// Ask the relay to stream a media/thumbnail asset (image or direct video)
+    /// on the requester's behalf. First message on a fresh connection.
+    ProxyMedia { url: String },
+    /// Sent by the relay before the raw media bytes: the validated content type
+    /// and total length. Followed by length-framed raw chunks on the stream.
+    ProxyMediaHeader { content_type: String, total_len: u64 },
+    /// Sent by the relay instead of a header when the media can't be served
+    /// (non-allowlisted, SSRF refusal, over cap, bad content-type, timeout).
+    ProxyMediaUnavailable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -194,5 +257,56 @@ mod tests {
             }
             _ => panic!("wrong variant after decode"),
         }
+    }
+
+    #[test]
+    fn test_roundtrip_link_embed() {
+        let embed = LinkEmbed {
+            provider: "twitter".into(),
+            kind: EmbedKind::Tweet,
+            url: "https://x.com/a/status/1".into(),
+            title: Some("hi".into()),
+            author: Some("@a".into()),
+            description: Some("body".into()),
+            thumbnail: Some("https://pbs.example/t.jpg".into()),
+            media: Some(EmbedMedia {
+                url: "https://video.example/v.mp4".into(),
+                mime: "video/mp4".into(),
+                width: Some(640),
+                height: Some(360),
+                playable_inline: true,
+            }),
+            duration_secs: Some(12),
+        };
+        for outcome in [
+            EmbedOutcome::Embed(embed.clone()),
+            EmbedOutcome::Unsupported,
+            EmbedOutcome::Unavailable,
+        ] {
+            let msg = Message::ProxyLinkEmbedResult { outcome: outcome.clone() };
+            let bytes = codec::encode(&msg).unwrap();
+            match codec::decode::<Message>(&bytes).unwrap() {
+                Message::ProxyLinkEmbedResult { outcome: o } => assert_eq!(o, outcome),
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
+
+        let req = Message::ProxyLinkEmbed { url: "https://x.com/a/status/1".into() };
+        assert!(matches!(
+            codec::decode::<Message>(&codec::encode(&req).unwrap()).unwrap(),
+            Message::ProxyLinkEmbed { .. }
+        ));
+
+        let media = Message::ProxyMedia { url: "https://video.example/v.mp4".into() };
+        assert!(matches!(
+            codec::decode::<Message>(&codec::encode(&media).unwrap()).unwrap(),
+            Message::ProxyMedia { .. }
+        ));
+
+        let hdr = Message::ProxyMediaHeader { content_type: "image/jpeg".into(), total_len: 1024 };
+        assert!(matches!(
+            codec::decode::<Message>(&codec::encode(&hdr).unwrap()).unwrap(),
+            Message::ProxyMediaHeader { .. }
+        ));
     }
 }
