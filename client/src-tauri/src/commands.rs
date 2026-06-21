@@ -512,6 +512,74 @@ pub async fn get_invite_preview(link: String) -> Result<InvitePreviewResult, Str
 }
 
 // ---------------------------------------------------------------------------
+// Link embed command
+// ---------------------------------------------------------------------------
+
+/// Session-scoped embed cache: url → (when, result). 5-minute TTL; relay
+/// caches embeds for 1h so a client cache of 5m is conservative and correct.
+static LINK_EMBED_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, (std::time::Instant, farder_protocol::messages::EmbedOutcome)>,
+    >,
+> = std::sync::OnceLock::new();
+
+fn link_embed_cache(
+) -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, (std::time::Instant, farder_protocol::messages::EmbedOutcome)>,
+> {
+    LINK_EMBED_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Resolve a rich embed for an external URL through the default relay. Throwaway
+/// connection; never touches session connections. LAZY ONLY (PIN-lock rule):
+/// needs no identity — embeds are anonymous.
+#[tauri::command]
+pub async fn get_link_embed(url: String) -> Result<farder_protocol::messages::EmbedOutcome, String> {
+    use farder_protocol::messages::Message;
+
+    // 5-minute client cache (embeds are stable; relay caches 1h).
+    {
+        let cache = link_embed_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, hit)) = cache.get(&url) {
+            if at.elapsed() < std::time::Duration::from_secs(300) {
+                return Ok(hit.clone());
+            }
+        }
+    }
+
+    let Some((relay_addr, relay_fp)) = crate::default_relay::default_relay() else {
+        return Ok(farder_protocol::messages::EmbedOutcome::Unavailable);
+    };
+    let endpoint = crate::tls::make_pinned_relay_endpoint(relay_fp).map_err(|e| e.to_string())?;
+    let conn = endpoint
+        .connect(relay_addr, "farder-relay")
+        .map_err(|e| e.to_string())?
+        .await
+        .map_err(|e| e.to_string())?;
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    let msg = farder_protocol::codec::encode(&Message::ProxyLinkEmbed { url: url.clone() })
+        .map_err(|e| e.to_string())?;
+    crate::connection::write_frame(&mut send, &msg)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply_bytes = crate::connection::read_frame(&mut recv)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reply: Message = farder_protocol::codec::decode(&reply_bytes).map_err(|e| e.to_string())?;
+    conn.close(0u32.into(), b"embed done");
+
+    let outcome = match reply {
+        Message::ProxyLinkEmbedResult { outcome } => outcome,
+        other => return Err(format!("unexpected relay reply: {:?}", other)),
+    };
+    {
+        let mut cache = link_embed_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(url, (std::time::Instant::now(), outcome.clone()));
+    }
+    Ok(outcome)
+}
+
+// ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------
 
@@ -3557,5 +3625,25 @@ mod relay_choice_tests {
         assert!(resolve_relay_choice("selfhost", Some("nope"), Some(&"ab".repeat(32))).is_err());
         assert!(resolve_relay_choice("selfhost", Some("1.2.3.4:4433"), Some("zz")).is_err());
         assert!(resolve_relay_choice("selfhost", Some("1.2.3.4:4433"), Some("abcd")).is_err()); // not 32 bytes
+    }
+}
+
+#[cfg(test)]
+mod link_embed_tests {
+    use super::*;
+
+    #[test]
+    fn link_embed_cache_roundtrip() {
+        use farder_protocol::messages::EmbedOutcome;
+        let c = link_embed_cache();
+        {
+            let mut m = c.lock().unwrap();
+            m.insert("u".into(), (std::time::Instant::now(), EmbedOutcome::Unsupported));
+        }
+        let hit = {
+            let m = c.lock().unwrap();
+            m.get("u").map(|(_, v)| v.clone())
+        };
+        assert_eq!(hit, Some(EmbedOutcome::Unsupported));
     }
 }

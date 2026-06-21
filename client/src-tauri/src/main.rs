@@ -143,6 +143,7 @@ fn main() {
             commands::get_server_avatar_override,
             commands::get_member_profile,
             commands::get_invite_preview,
+            commands::get_link_embed,
             commands::save_temp_audio,
             commands::start_recording,
             commands::stop_recording,
