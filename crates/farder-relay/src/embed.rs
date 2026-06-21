@@ -94,9 +94,44 @@ pub fn fxtwitter_api_url(raw: &str) -> Option<String> {
 }
 
 use crate::proxy::is_global_ip;
+use futures_util::StreamExt;
 
 pub const META_CAP: usize = 16 * 1024;
+pub const MEDIA_CAP: u64 = 25 * 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Returns true if the content-type is an allowed media type (image/* or video/mp4).
+/// Strips parameters (e.g. "; charset=binary"), trims whitespace, lowercases.
+pub fn content_type_allowed(ct: &str) -> bool {
+    let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    base.starts_with("image/") || base == "video/mp4"
+}
+
+/// Fetch a media asset with full guards: allowlist + SSRF re-validation,
+/// content-type allowlist, and a byte-counted cap enforced DURING streaming
+/// (Content-Length is not trusted). Returns (content_type, bytes).
+pub async fn fetch_media(client: &reqwest::Client, url: &str) -> Result<(String, Vec<u8>)> {
+    if !validate_fetchable(url).await {
+        anyhow::bail!("media refused (allowlist/ssrf): {url}");
+    }
+    let resp = client.get(url).send().await?;
+    anyhow::ensure!(resp.status().is_success(), "media status {}", resp.status());
+    let ct = resp.headers().get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    anyhow::ensure!(content_type_allowed(&ct), "media content-type rejected: {ct}");
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        anyhow::ensure!(
+            out.len() as u64 + chunk.len() as u64 <= MEDIA_CAP,
+            "media exceeds cap"
+        );
+        out.extend_from_slice(&chunk);
+    }
+    Ok((ct, out))
+}
 
 /// Allowlist + SSRF gate: the host must be allowlisted AND every IP it resolves
 /// to must be globally routable. Used before BOTH page fetches and media fetches
@@ -572,6 +607,17 @@ mod tests {
         let media = e.media.unwrap();
         assert_eq!(media.url, "https://i.redd.it/pic.jpg");
         assert!(media.playable_inline);
+    }
+
+    #[test]
+    fn content_type_gate() {
+        assert!(content_type_allowed("image/jpeg"));
+        assert!(content_type_allowed("image/png; charset=binary"));
+        assert!(content_type_allowed("video/mp4"));
+        assert!(content_type_allowed("image/gif"));
+        assert!(!content_type_allowed("text/html"));
+        assert!(!content_type_allowed("application/octet-stream"));
+        assert!(!content_type_allowed(""));
     }
 
     #[tokio::test]
