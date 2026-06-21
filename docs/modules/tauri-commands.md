@@ -974,6 +974,21 @@ track-disabled signal.
 
 ---
 
+### `voice_request_keyframe(voice) -> Result<(), String>`
+
+**What it does:** forces the LOCAL screen-share encoder to emit a fresh IDR
+keyframe on its next frame (sets the share's `force_keyframe` flag). Used so a
+just-opened pop-out / un-minimized self-preview paints immediately instead of
+waiting for the periodic keyframe. No-op if not currently sharing.
+**Side effects:** sets `VideoShareState.force_keyframe` for the local share only.
+NOTE: this affects only the local encoder, so it does NOT speed up a viewer
+popping out a REMOTE peer's stream (there is no peer-keyframe-request datagram
+yet).
+**Connects to:** `VoiceController::request_keyframe`.
+**invoke name:** `"voice_request_keyframe"` → `voiceRequestKeyframe()`.
+
+---
+
 ### `list_audio_output_devices() -> Result<Vec<OutputDevice>, String>`
 
 **What it does:** enumerates the system output (render) devices available for

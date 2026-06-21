@@ -576,10 +576,20 @@ It carries no `session`/`pubkey` (it is the local client's own frame). Consumed 
   `useVoice().refreshDisplaySources` when opened.
 - **Self LIVE indicator + Stop** in the voice bar while you are sharing (a 🔴 **LIVE**
   marker), driven by `isSharing`.
-- **Main-area `ScreenShareStage`** (mounted in `ChatPanel`, not the sidebar) shows the one
-  active stream: your **self-preview** (`voice://self-video-frame`) when you are sharing,
-  otherwise the joined peer's stream (`voice://peer-video-frame`, gated on `watching`). It
-  has a per-peer game-audio slider and a ✕ to stop watching.
+- **Main-area `ScreenShareStage`** (mounted in `AppShell` as a floating panel, not the
+  sidebar) shows the one active stream: your **self-preview** (`voice://self-video-frame`)
+  when you are sharing, otherwise the joined peer's stream (`voice://peer-video-frame`,
+  gated on `watching`). It has a per-peer game-audio slider and a ✕ to stop watching, plus
+  drag-to-move and a minimize toggle (hides the preview without stopping the share).
+- **Detached pop-out (`ScreenSharePopout`)** opens the preview in a second, resizable,
+  always-on-top Tauri window (label `screenshare-popout`). On `voice://popout-ready` the
+  stage calls `voiceRequestKeyframe()` so a fresh IDR paints the popout immediately. NOTE:
+  `request_keyframe` forces only the **local** encoder, so the instant-paint applies to the
+  **self-preview**; popping out while watching a **remote peer** still waits up to one
+  keyframe interval (~2s) for the sharer's periodic IDR — there is no on-demand
+  peer-keyframe request datagram yet (tracked as a backlog item alongside
+  on-demand-keyframe-on-watch). Closing the popout, stopping the share, or leaving the
+  channel tears the second window down.
 - **JOIN / WATCHING button + self LIVE badge** in the sidebar participant list: a peer who
   is sharing (in `sharingPeers`) gets a JOIN button (toggles to WATCHING); the local client
   shows a LIVE badge while `isSharing`. `toggleWatch` is **single-watch** — joining one peer
@@ -587,8 +597,8 @@ It carries no `session`/`pubkey` (it is the local client's own frame). Consumed 
 - The cramped sidebar **`PeerVideoTiles` component is retired/deleted**; the viewer (lazy
   per-session WebCodecs `VideoDecoder`, key-gating, error self-heal, idle reap) moved into
   `ScreenShareStage`. `useVoice()` is now owned by **AppShell** (one instance, threaded to
-  `ChannelSidebar` + `ChatPanel`) so the sidebar Join button and the main-area stage share
-  one source of truth.
+  `ChannelSidebar` and `ScreenShareStage`) so the sidebar Join button and the main-area
+  stage share one source of truth.
 
 ---
 
