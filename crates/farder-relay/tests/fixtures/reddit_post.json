@@ -1,0 +1,10 @@
+[
+  { "data": { "children": [
+    { "data": {
+      "title": "A cool post",
+      "subreddit_name_prefixed": "r/aww",
+      "thumbnail": "https://b.thumbs.redditmedia.com/x.jpg",
+      "url": "https://i.redd.it/pic.jpg"
+    } }
+  ] } }
+]

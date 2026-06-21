@@ -206,8 +206,59 @@ pub async fn adapt_spotify<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<
     })
 }
 
-pub async fn adapt_reddit<F: LinkFetcher + ?Sized>(_u: &str, _f: &F) -> Option<LinkEmbed> { None }
-pub async fn adapt_image(_u: &str) -> Option<LinkEmbed> { None }
+pub fn reddit_json_url(raw: &str) -> Option<String> {
+    if classify_url(raw) != Some(Provider::Reddit) { return None; }
+    let trimmed = raw.split(['?', '#']).next().unwrap_or(raw);
+    let base = trimmed.trim_end_matches('/');
+    Some(format!("{base}/.json"))
+}
+
+pub async fn adapt_reddit<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<LinkEmbed> {
+    let api = reddit_json_url(url)?;
+    let fetched = f.fetch_text(&api).await.ok()?;
+    let j: serde_json::Value = serde_json::from_str(&fetched.body).ok()?;
+    let post = j.get(0)?.get("data")?.get("children")?.get(0)?.get("data")?;
+    let title = post.get("title").and_then(|v| v.as_str()).map(String::from);
+    let subreddit = post.get("subreddit_name_prefixed").and_then(|v| v.as_str()).map(String::from);
+    // Use the thumbnail only if it's an http(s) URL (reddit uses sentinels like
+    // "self"/"default"/"nsfw" otherwise).
+    let thumb = post.get("thumbnail").and_then(|v| v.as_str())
+        .filter(|t| t.starts_with("http"))
+        .map(String::from);
+    Some(LinkEmbed {
+        provider: "reddit".into(),
+        kind: EmbedKind::Article,
+        url: url.to_string(),
+        title,
+        author: subreddit,
+        description: None,
+        thumbnail: thumb,
+        media: None, // v1: card only (no v.redd.it inline video)
+        duration_secs: None,
+    })
+}
+
+/// Direct image: no fetch needed to build the embed; the bytes come later via
+/// ProxyMedia (which validates content-type). The host is already allowlisted.
+pub async fn adapt_image(url: &str) -> Option<LinkEmbed> {
+    Some(LinkEmbed {
+        provider: "image".into(),
+        kind: EmbedKind::Image,
+        url: url.to_string(),
+        title: None,
+        author: None,
+        description: None,
+        thumbnail: Some(url.to_string()),
+        media: Some(EmbedMedia {
+            url: url.to_string(),
+            mime: "image/*".into(),
+            width: None,
+            height: None,
+            playable_inline: true,
+        }),
+        duration_secs: None,
+    })
+}
 
 pub async fn adapt_twitter<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<LinkEmbed> {
     let api = fxtwitter_api_url(url)?;
@@ -419,5 +470,34 @@ mod tests {
         assert_eq!(e.kind, farder_protocol::messages::EmbedKind::Audio);
         assert!(e.title.as_deref().unwrap().contains("Never Gonna"));
         assert!(e.media.is_none());
+    }
+
+    #[test]
+    fn reddit_json_url_appends_dot_json() {
+        assert_eq!(
+            reddit_json_url("https://www.reddit.com/r/aww/comments/1/title/"),
+            Some("https://www.reddit.com/r/aww/comments/1/title/.json".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn reddit_adapter_parses_listing() {
+        let mut m = MockFetcher::new();
+        let api = reddit_json_url("https://www.reddit.com/r/aww/comments/1/title/").unwrap();
+        m.insert(&api, &fixture("reddit_post.json"));
+        let e = adapt_reddit("https://www.reddit.com/r/aww/comments/1/title/", &m).await.unwrap();
+        assert_eq!(e.provider, "reddit");
+        assert_eq!(e.author.as_deref(), Some("r/aww"));
+        assert!(e.title.as_deref().unwrap().contains("cool post"));
+    }
+
+    #[tokio::test]
+    async fn image_adapter_builds_image_embed() {
+        let e = adapt_image("https://i.redd.it/pic.jpg").await.unwrap();
+        assert_eq!(e.provider, "image");
+        assert_eq!(e.kind, farder_protocol::messages::EmbedKind::Image);
+        let media = e.media.unwrap();
+        assert_eq!(media.url, "https://i.redd.it/pic.jpg");
+        assert!(media.playable_inline);
     }
 }
