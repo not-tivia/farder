@@ -630,4 +630,59 @@ mod tests {
         // but classification must pass — assert the allowlist gate specifically).
         assert!(host_is_allowlisted("https://api.fxtwitter.com/x")); // see note
     }
+
+    // --- Integration test: real HTTP round-trip via localhost fixture server ---
+    //
+    // The production SafeFetcher refuses loopback via the SSRF gate; this test
+    // uses a LocalFetcher (bare reqwest, no allowlist/SSRF) to exercise the
+    // adapter→HTTP→parse path end-to-end.  The SSRF guard itself is covered above.
+
+    struct LocalFetcher {
+        client: reqwest::Client,
+        base: String,
+    }
+
+    impl LinkFetcher for LocalFetcher {
+        async fn fetch_text(&self, url: &str) -> super::Result<FetchedText> {
+            // Rewrite the adapter's API host onto our localhost fixture server,
+            // preserving path and query so the adapter's URL shape is exercised.
+            let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!(e))?;
+            let path = parsed.path();
+            let query = parsed.query().unwrap_or("");
+            let local = if query.is_empty() {
+                format!("{}{}", self.base, path)
+            } else {
+                format!("{}{}?{}", self.base, path, query)
+            };
+            let body = self.client.get(&local).send().await?.text().await?;
+            Ok(FetchedText { body, final_url: url.to_string() })
+        }
+    }
+
+    #[tokio::test]
+    async fn youtube_resolves_over_http() {
+        // Spawn a tiny_http server on a random port; it replies with canned oEmbed JSON.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr();
+        let base = format!("http://{addr}");
+
+        std::thread::spawn(move || {
+            let body = r#"{"title":"T","author_name":"A","thumbnail_url":"http://x/y.jpg"}"#;
+            // Serve one request then exit; the test only needs a single fetch.
+            if let Some(req) = server.incoming_requests().next() {
+                let header = "Content-Type: application/json"
+                    .parse::<tiny_http::Header>()
+                    .unwrap();
+                let _ = req.respond(
+                    tiny_http::Response::from_string(body).with_header(header),
+                );
+            }
+        });
+
+        let f = LocalFetcher { client: reqwest::Client::new(), base };
+        let e = adapt_youtube("https://youtu.be/abc", &f).await
+            .expect("adapt_youtube failed over localhost");
+        assert_eq!(e.title.as_deref(), Some("T"), "title mismatch");
+        assert_eq!(e.author.as_deref(), Some("A"), "author mismatch");
+    }
 }
