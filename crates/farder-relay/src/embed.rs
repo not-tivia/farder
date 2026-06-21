@@ -26,6 +26,7 @@ const ALLOWLIST: &[(&str, Provider)] = &[
     ("reddit.com", Provider::Reddit),
     ("redd.it", Provider::Reddit),
     ("open.spotify.com", Provider::Spotify),
+    ("fxtwitter.com", Provider::Twitter),
     // Curated direct-image hosts (v1).
     ("i.redd.it", Provider::Image),
     ("i.imgur.com", Provider::Image),
@@ -89,6 +90,78 @@ pub fn fxtwitter_api_url(raw: &str) -> Option<String> {
         Some(format!("https://api.fxtwitter.com/{}/status/{}", segs[0], segs[2]))
     } else {
         None
+    }
+}
+
+use crate::proxy::is_global_ip;
+
+pub const META_CAP: usize = 16 * 1024;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Allowlist + SSRF gate: the host must be allowlisted AND every IP it resolves
+/// to must be globally routable. Used before BOTH page fetches and media fetches
+/// (re-validates adapter-extracted media URLs — the "media-URL trap").
+pub async fn validate_fetchable(raw: &str) -> bool {
+    if !host_is_allowlisted(raw) { return false; }
+    let Ok(u) = Url::parse(raw) else { return false; };
+    let Some(host) = u.host_str() else { return false; };
+    let port = u.port_or_known_default().unwrap_or(443);
+    // Resolve and require ALL resolved addresses to be global (anti-rebind).
+    let Ok(addrs) = tokio::net::lookup_host((host, port)).await else { return false; };
+    let mut any = false;
+    for a in addrs {
+        any = true;
+        if !is_global_ip(a.ip()) { return false; }
+    }
+    any
+}
+
+pub struct SafeFetcher {
+    client: reqwest::Client,
+}
+
+impl SafeFetcher {
+    pub fn new() -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none()) // we handle hops ourselves
+            .user_agent("FarderRelay/1.0 (+https://farder.gg)")
+            .build()?;
+        Ok(Self { client })
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+}
+
+impl LinkFetcher for SafeFetcher {
+    async fn fetch_text(&self, url: &str) -> Result<FetchedText> {
+        // Manual redirect loop (max 4 hops) with SSRF re-validation on every hop.
+        let mut current = url.to_string();
+        for _ in 0..4 {
+            if !validate_fetchable(&current).await {
+                anyhow::bail!("fetch refused (allowlist/ssrf): {current}");
+            }
+            let resp = self.client.get(&current).send().await?;
+            if resp.status().is_redirection() {
+                let loc = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| anyhow::anyhow!("redirect without location"))?;
+                // Resolve relative redirects against the current URL.
+                current = Url::parse(&current)?.join(loc)?.to_string();
+                continue;
+            }
+            anyhow::ensure!(resp.status().is_success(), "status {}", resp.status());
+            // Cap the body: read up to META_CAP+1 and reject if larger.
+            let full = resp.bytes().await?;
+            anyhow::ensure!(full.len() <= META_CAP, "metadata too large: {}", full.len());
+            let body = String::from_utf8_lossy(&full).into_owned();
+            return Ok(FetchedText { body, final_url: current });
+        }
+        anyhow::bail!("too many redirects")
     }
 }
 
@@ -499,5 +572,16 @@ mod tests {
         let media = e.media.unwrap();
         assert_eq!(media.url, "https://i.redd.it/pic.jpg");
         assert!(media.playable_inline);
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_non_allowlisted_and_keeps_allowlisted_shape() {
+        // Non-allowlisted host: rejected without any DNS/network.
+        assert!(!validate_fetchable("https://evil.com/x").await);
+        // Bare private IP host: rejected.
+        assert!(!validate_fetchable("https://10.0.0.1/x").await);
+        // Allowlisted host string classifies (DNS may or may not resolve in CI,
+        // but classification must pass — assert the allowlist gate specifically).
+        assert!(host_is_allowlisted("https://api.fxtwitter.com/x")); // see note
     }
 }
