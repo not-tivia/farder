@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember } from "./types";
+import type { EmbedOutcome } from "./linkEmbed";
 
 // ── Server management (no serverId needed) ───────────────────────────────────
 
@@ -772,4 +773,14 @@ export interface AudioOutputDevice { id: string; name: string; is_default: boole
 
 export async function listAudioOutputDevices(): Promise<AudioOutputDevice[]> {
   return invoke<AudioOutputDevice[]>("list_audio_output_devices");
+}
+
+// ── Rich link embeds (Phase 6) ────────────────────────────────────────────────
+
+export function getLinkEmbed(url: string): Promise<EmbedOutcome> {
+  return invoke<EmbedOutcome>("get_link_embed", { url });
+}
+
+export function getProxiedMedia(url: string): Promise<{ content_type: string; data_base64: string }> {
+  return invoke<{ content_type: string; data_base64: string }>("get_proxied_media", { url });
 }
