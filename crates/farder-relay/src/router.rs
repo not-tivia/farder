@@ -284,7 +284,7 @@ async fn handle_preview(
     Ok(())
 }
 
-/// Answer a ProxyLinkEmbed: rate-limit → cache → resolve (8s budget) → reply.
+/// Answer a ProxyLinkEmbed: rate-limit → cache → resolve (10s budget) → reply.
 async fn handle_link_embed(
     url: String,
     client_conn: Connection,

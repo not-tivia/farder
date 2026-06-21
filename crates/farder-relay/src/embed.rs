@@ -67,10 +67,9 @@ pub fn host_is_allowlisted(raw: &str) -> bool {
     classify_url(raw).is_some()
 }
 
-/// A successfully fetched text document and the final URL after any redirects.
+/// A successfully fetched text document.
 pub struct FetchedText {
     pub body: String,
-    pub final_url: String,
 }
 
 /// Seam over outbound HTTP so adapters are unit-testable without a network.
@@ -194,7 +193,7 @@ impl LinkFetcher for SafeFetcher {
             let full = resp.bytes().await?;
             anyhow::ensure!(full.len() <= META_CAP, "metadata too large: {}", full.len());
             let body = String::from_utf8_lossy(&full).into_owned();
-            return Ok(FetchedText { body, final_url: current });
+            return Ok(FetchedText { body });
         }
         anyhow::bail!("too many redirects")
     }
@@ -443,7 +442,7 @@ mod tests {
     impl LinkFetcher for MockFetcher {
         async fn fetch_text(&self, url: &str) -> super::Result<super::FetchedText> {
             match self.map.get(url) {
-                Some(b) => Ok(super::FetchedText { body: b.clone(), final_url: url.to_string() }),
+                Some(b) => Ok(super::FetchedText { body: b.clone() }),
                 None => anyhow::bail!("mock: no entry for {url}"),
             }
         }
@@ -655,7 +654,7 @@ mod tests {
                 format!("{}{}?{}", self.base, path, query)
             };
             let body = self.client.get(&local).send().await?.text().await?;
-            Ok(FetchedText { body, final_url: url.to_string() })
+            Ok(FetchedText { body })
         }
     }
 
