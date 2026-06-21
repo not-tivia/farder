@@ -583,6 +583,8 @@ pub async fn get_link_embed(url: String) -> Result<farder_protocol::messages::Em
 // Media proxy command
 // ---------------------------------------------------------------------------
 
+const MAX_PROXIED_MEDIA: usize = 25 * 1024 * 1024;
+
 #[derive(serde::Serialize)]
 pub struct ProxiedMedia {
     pub content_type: String,
@@ -619,6 +621,10 @@ pub async fn get_proxied_media(url: String) -> Result<ProxiedMedia, String> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await.map_err(|e| e.to_string())?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_PROXIED_MEDIA {
+        conn.close(0u32.into(), b"media too large");
+        return Err("media too large".into());
+    }
     if len as u64 != total_len { conn.close(0u32.into(), b"done"); return Err("length mismatch".into()); }
     let mut data = vec![0u8; len];
     recv.read_exact(&mut data).await.map_err(|e| e.to_string())?;
