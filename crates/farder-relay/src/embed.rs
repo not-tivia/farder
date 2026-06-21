@@ -149,9 +149,64 @@ pub async fn resolve_embed<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> EmbedOu
     }
 }
 
-pub async fn adapt_youtube<F: LinkFetcher + ?Sized>(_u: &str, _f: &F) -> Option<LinkEmbed> { None }
+fn percent_encode_url(u: &str) -> String {
+    // Minimal RFC3986 query-component encoding for a full URL value.
+    let mut out = String::with_capacity(u.len() * 3);
+    for b in u.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+pub fn youtube_oembed_url(raw: &str) -> Option<String> {
+    // Accept any allowlisted youtube URL; oEmbed takes the original URL.
+    if classify_url(raw) != Some(Provider::YouTube) { return None; }
+    Some(format!("https://www.youtube.com/oembed?format=json&url={}", percent_encode_url(raw)))
+}
+
+pub async fn adapt_youtube<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<LinkEmbed> {
+    let api = youtube_oembed_url(url)?;
+    let fetched = f.fetch_text(&api).await.ok()?;
+    let j: serde_json::Value = serde_json::from_str(&fetched.body).ok()?;
+    Some(LinkEmbed {
+        provider: "youtube".into(),
+        kind: EmbedKind::Video,
+        url: url.to_string(),
+        title: j.get("title").and_then(|v| v.as_str()).map(String::from),
+        author: j.get("author_name").and_then(|v| v.as_str()).map(String::from),
+        description: None,
+        thumbnail: j.get("thumbnail_url").and_then(|v| v.as_str()).map(String::from),
+        media: None, // YouTube: card + open externally (not inline-playable)
+        duration_secs: None,
+    })
+}
+
+pub fn spotify_oembed_url(raw: &str) -> Option<String> {
+    if classify_url(raw) != Some(Provider::Spotify) { return None; }
+    Some(format!("https://open.spotify.com/oembed?url={}", percent_encode_url(raw)))
+}
+
+pub async fn adapt_spotify<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<LinkEmbed> {
+    let api = spotify_oembed_url(url)?;
+    let fetched = f.fetch_text(&api).await.ok()?;
+    let j: serde_json::Value = serde_json::from_str(&fetched.body).ok()?;
+    Some(LinkEmbed {
+        provider: "spotify".into(),
+        kind: EmbedKind::Audio,
+        url: url.to_string(),
+        title: j.get("title").and_then(|v| v.as_str()).map(String::from),
+        author: j.get("author_name").and_then(|v| v.as_str()).map(String::from),
+        description: None,
+        thumbnail: j.get("thumbnail_url").and_then(|v| v.as_str()).map(String::from),
+        media: None,
+        duration_secs: None,
+    })
+}
+
 pub async fn adapt_reddit<F: LinkFetcher + ?Sized>(_u: &str, _f: &F) -> Option<LinkEmbed> { None }
-pub async fn adapt_spotify<F: LinkFetcher + ?Sized>(_u: &str, _f: &F) -> Option<LinkEmbed> { None }
 pub async fn adapt_image(_u: &str) -> Option<LinkEmbed> { None }
 
 pub async fn adapt_twitter<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<LinkEmbed> {
@@ -329,5 +384,40 @@ mod tests {
         c.put("k".into(), out.clone(), t0);
         assert_eq!(c.get("k", t0 + Duration::from_secs(3599)), Some(out));
         assert!(c.get("k", t0 + Duration::from_secs(3601)).is_none());
+    }
+
+    #[test]
+    fn youtube_oembed_url_forms() {
+        assert_eq!(
+            youtube_oembed_url("https://youtu.be/dQw4w9WgXcQ"),
+            Some("https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fyoutu.be%2FdQw4w9WgXcQ".to_string())
+        );
+        assert!(youtube_oembed_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ").is_some());
+    }
+
+    #[tokio::test]
+    async fn youtube_adapter_parses_oembed() {
+        let mut m = MockFetcher::new();
+        let api = youtube_oembed_url("https://youtu.be/dQw4w9WgXcQ").unwrap();
+        m.insert(&api, &fixture("youtube_oembed.json"));
+        let e = adapt_youtube("https://youtu.be/dQw4w9WgXcQ", &m).await.unwrap();
+        assert_eq!(e.provider, "youtube");
+        assert_eq!(e.kind, farder_protocol::messages::EmbedKind::Video);
+        assert_eq!(e.author.as_deref(), Some("Rick Astley"));
+        assert!(e.title.as_deref().unwrap().contains("Never Gonna"));
+        assert_eq!(e.thumbnail.as_deref(), Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"));
+        assert!(e.media.is_none()); // not inline-playable
+    }
+
+    #[tokio::test]
+    async fn spotify_adapter_parses_oembed() {
+        let mut m = MockFetcher::new();
+        let api = spotify_oembed_url("https://open.spotify.com/track/1").unwrap();
+        m.insert(&api, &fixture("spotify_oembed.json"));
+        let e = adapt_spotify("https://open.spotify.com/track/1", &m).await.unwrap();
+        assert_eq!(e.provider, "spotify");
+        assert_eq!(e.kind, farder_protocol::messages::EmbedKind::Audio);
+        assert!(e.title.as_deref().unwrap().contains("Never Gonna"));
+        assert!(e.media.is_none());
     }
 }
