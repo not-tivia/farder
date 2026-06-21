@@ -580,6 +580,57 @@ pub async fn get_link_embed(url: String) -> Result<farder_protocol::messages::Em
 }
 
 // ---------------------------------------------------------------------------
+// Media proxy command
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct ProxiedMedia {
+    pub content_type: String,
+    pub data_base64: String,
+}
+
+/// Pull a media asset (thumbnail or direct video) through the default relay and
+/// return it base64-encoded for the webview to wrap in a Blob URL. The webview
+/// never fetches the CDN directly (IP-leak protection).
+#[tauri::command]
+pub async fn get_proxied_media(url: String) -> Result<ProxiedMedia, String> {
+    use farder_protocol::messages::Message;
+    use base64::Engine;
+
+    let Some((relay_addr, relay_fp)) = crate::default_relay::default_relay() else {
+        return Err("no default relay".into());
+    };
+    let endpoint = crate::tls::make_pinned_relay_endpoint(relay_fp).map_err(|e| e.to_string())?;
+    let conn = endpoint.connect(relay_addr, "farder-relay")
+        .map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())?;
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+    let msg = farder_protocol::codec::encode(&Message::ProxyMedia { url }).map_err(|e| e.to_string())?;
+    crate::connection::write_frame(&mut send, &msg).await.map_err(|e| e.to_string())?;
+
+    // First frame: header or unavailable.
+    let hdr_bytes = crate::connection::read_frame(&mut recv).await.map_err(|e| e.to_string())?;
+    let hdr: Message = farder_protocol::codec::decode(&hdr_bytes).map_err(|e| e.to_string())?;
+    let (content_type, total_len) = match hdr {
+        Message::ProxyMediaHeader { content_type, total_len } => (content_type, total_len),
+        Message::ProxyMediaUnavailable => { conn.close(0u32.into(), b"done"); return Err("media unavailable".into()); }
+        other => { conn.close(0u32.into(), b"done"); return Err(format!("unexpected: {:?}", other)); }
+    };
+    // Then the raw length-framed bytes (4-byte BE length + raw bytes).
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await.map_err(|e| e.to_string())?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len as u64 != total_len { conn.close(0u32.into(), b"done"); return Err("length mismatch".into()); }
+    let mut data = vec![0u8; len];
+    recv.read_exact(&mut data).await.map_err(|e| e.to_string())?;
+    conn.close(0u32.into(), b"media done");
+
+    Ok(ProxiedMedia {
+        content_type,
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------
 

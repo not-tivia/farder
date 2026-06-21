@@ -144,6 +144,7 @@ fn main() {
             commands::get_member_profile,
             commands::get_invite_preview,
             commands::get_link_embed,
+            commands::get_proxied_media,
             commands::save_temp_audio,
             commands::start_recording,
             commands::stop_recording,
