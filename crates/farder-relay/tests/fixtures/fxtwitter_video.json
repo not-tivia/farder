@@ -1,0 +1,15 @@
+{
+  "code": 200,
+  "tweet": {
+    "url": "https://x.com/jack/status/20",
+    "text": "just setting up my twttr",
+    "author": { "name": "jack", "screen_name": "jack" },
+    "media": {
+      "videos": [
+        { "url": "https://video.twimg.com/v.mp4", "type": "video",
+          "width": 640, "height": 360, "duration": 12.5,
+          "thumbnail_url": "https://pbs.twimg.com/thumb.jpg" }
+      ]
+    }
+  }
+}

@@ -3,6 +3,7 @@
 //! so a requester's IP never touches the third-party site.
 
 use anyhow::Result;
+use farder_protocol::messages::{EmbedKind, EmbedMedia, LinkEmbed};
 use url::Url;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +79,77 @@ pub trait LinkFetcher: Send + Sync {
     async fn fetch_text(&self, url: &str) -> Result<FetchedText>;
 }
 
+/// Rewrite a twitter.com/x.com status URL to the fxtwitter JSON API URL.
+/// Returns None if the path isn't a `/<user>/status/<id>` shape.
+pub fn fxtwitter_api_url(raw: &str) -> Option<String> {
+    let u = Url::parse(raw).ok()?;
+    let segs: Vec<&str> = u.path_segments()?.filter(|s| !s.is_empty()).collect();
+    // [user, "status", id]
+    if segs.len() >= 3 && segs[1] == "status" {
+        Some(format!("https://api.fxtwitter.com/{}/status/{}", segs[0], segs[2]))
+    } else {
+        None
+    }
+}
+
+pub async fn adapt_twitter<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<LinkEmbed> {
+    let api = fxtwitter_api_url(url)?;
+    let fetched = f.fetch_text(&api).await.ok()?;
+    let json: serde_json::Value = serde_json::from_str(&fetched.body).ok()?;
+    let tweet = json.get("tweet")?;
+    let author = tweet.get("author").and_then(|a| a.get("screen_name")).and_then(|v| v.as_str());
+    let text = tweet.get("text").and_then(|v| v.as_str());
+    let canonical = tweet.get("url").and_then(|v| v.as_str()).unwrap_or(url).to_string();
+
+    // Prefer a video; fall back to the first photo.
+    let media = tweet.get("media");
+    let video = media
+        .and_then(|m| m.get("videos"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first());
+    let photo = media
+        .and_then(|m| m.get("photos"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first());
+
+    let (embed_media, thumbnail, duration) = if let Some(v) = video {
+        let m = EmbedMedia {
+            url: v.get("url").and_then(|x| x.as_str())?.to_string(),
+            mime: "video/mp4".into(),
+            width: v.get("width").and_then(|x| x.as_u64()).map(|n| n as u32),
+            height: v.get("height").and_then(|x| x.as_u64()).map(|n| n as u32),
+            playable_inline: true,
+        };
+        let thumb = v.get("thumbnail_url").and_then(|x| x.as_str()).map(String::from);
+        let dur = v.get("duration").and_then(|x| x.as_f64()).map(|d| d as u32);
+        (Some(m), thumb, dur)
+    } else if let Some(p) = photo {
+        let purl = p.get("url").and_then(|x| x.as_str())?.to_string();
+        let m = EmbedMedia {
+            url: purl.clone(),
+            mime: "image/jpeg".into(),
+            width: p.get("width").and_then(|x| x.as_u64()).map(|n| n as u32),
+            height: p.get("height").and_then(|x| x.as_u64()).map(|n| n as u32),
+            playable_inline: true,
+        };
+        (Some(m), Some(purl), None)
+    } else {
+        (None, None, None)
+    };
+
+    Some(LinkEmbed {
+        provider: "twitter".into(),
+        kind: EmbedKind::Tweet,
+        url: canonical,
+        title: None,
+        author: author.map(|a| format!("@{a}")),
+        description: text.map(String::from),
+        thumbnail,
+        media: embed_media,
+        duration_secs: duration,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +171,12 @@ mod tests {
                 None => anyhow::bail!("mock: no entry for {url}"),
             }
         }
+    }
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name),
+        ).unwrap()
     }
 
     #[tokio::test]
@@ -129,5 +207,34 @@ mod tests {
         assert_eq!(classify_url("http://127.0.0.1/x"), None);
         assert_eq!(classify_url("https://192.168.1.1/x"), None);
         assert_eq!(classify_url("not a url"), None);
+    }
+
+    #[test]
+    fn twitter_api_url_rewrite() {
+        assert_eq!(
+            fxtwitter_api_url("https://x.com/jack/status/20"),
+            Some("https://api.fxtwitter.com/jack/status/20".to_string())
+        );
+        assert_eq!(
+            fxtwitter_api_url("https://twitter.com/jack/status/20?s=21"),
+            Some("https://api.fxtwitter.com/jack/status/20".to_string())
+        );
+        assert_eq!(fxtwitter_api_url("https://x.com/jack"), None); // not a status
+    }
+
+    #[tokio::test]
+    async fn twitter_adapter_parses_video_tweet() {
+        let mut m = MockFetcher::new();
+        m.insert("https://api.fxtwitter.com/jack/status/20", &fixture("fxtwitter_video.json"));
+        let e = adapt_twitter("https://x.com/jack/status/20", &m).await.unwrap();
+        assert_eq!(e.provider, "twitter");
+        assert_eq!(e.kind, farder_protocol::messages::EmbedKind::Tweet);
+        assert_eq!(e.author.as_deref(), Some("@jack"));
+        assert_eq!(e.description.as_deref(), Some("just setting up my twttr"));
+        let media = e.media.unwrap();
+        assert_eq!(media.url, "https://video.twimg.com/v.mp4");
+        assert!(media.playable_inline);
+        assert_eq!(e.duration_secs, Some(12));
+        assert_eq!(e.thumbnail.as_deref(), Some("https://pbs.twimg.com/thumb.jpg"));
     }
 }
