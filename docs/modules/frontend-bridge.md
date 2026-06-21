@@ -94,6 +94,19 @@ Theme catalog entry vs the currently-applied theme. `source: "builtin" | "user"`
 
 Metadata for a locally-hosted server (port, data dir, template, privacy mode) and for a server template available at creation time.
 
+### `EmbedKind` / `EmbedMedia` / `LinkEmbed` / `EmbedOutcome` (`lib/linkEmbed.ts`)
+
+Mirror types for `farder_protocol::messages` embed types. `EmbedKind` is a string
+union: `"Tweet" | "Video" | "Image" | "Audio" | "Article"`. `EmbedMedia` carries
+`url`, `mime`, `width`/`height` (nullable), and `playable_inline: boolean`.
+`LinkEmbed` carries `provider`, `kind`, `url`, and nullable `title`, `author`,
+`description`, `thumbnail`, `media` (an `EmbedMedia`), and `duration_secs`.
+
+`EmbedOutcome` mirrors serde's external tagging:
+- `{ Embed: LinkEmbed }` — a successful embed.
+- `"Unsupported"` — allowlisted host, but the URL shape isn't handled by an adapter.
+- `"Unavailable"` — non-allowlisted, rate-limited, timed out, or no relay configured.
+
 ---
 
 ## Helper functions (types.ts)
@@ -329,6 +342,22 @@ These commands drive the `VoiceController` (the local Opus/QUIC audio subsystem)
 | Function | Rust command | What it does |
 |---|---|---|
 | `createInvite(serverId, maxUses?)` | `create_invite` | Creates an invite link. `maxUses` null = unlimited. Returns `InviteResult` with the code and share-ready URLs. |
+
+---
+
+### Rich link embeds (Phase 6)
+
+These four functions speak to the relay's embed fetch proxy (phase two). No
+server session or identity is required — each opens a throwaway QUIC connection
+to the default relay. See `docs/modules/relay-embed.md` for the relay-side
+protocol reference.
+
+| Function | Rust command | What it does |
+|---|---|---|
+| `getLinkEmbed(url)` | `get_link_embed` | Asks the relay to resolve an external URL and return `EmbedOutcome`. Hits a 5-minute client-side cache before opening a connection. Returns `{ Embed: LinkEmbed }`, `"Unsupported"`, or `"Unavailable"`. |
+| `getProxiedMedia(url)` | `get_proxied_media` | Streams a media asset (image or direct video) through the relay, returning `{ content_type, data_base64 }`. The caller wraps `data_base64` in a `Blob` URL for rendering; no CDN is ever contacted from the client. |
+| `getDataSaverEmbeds()` | `get_data_saver_embeds` | Returns `true` if data-saver mode is enabled (embeds do not auto-load). |
+| `setDataSaverEmbeds(enabled)` | `set_data_saver_embeds` | Persists the data-saver embed setting to `settings.json`. |
 
 ---
 

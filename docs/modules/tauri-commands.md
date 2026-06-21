@@ -1270,6 +1270,103 @@ handles relay links.
 
 ---
 
+## Group 17c — Rich link embeds
+
+These commands implement the relay-side embed fetch proxy (phase two). They open
+throwaway QUIC connections to the default relay — no server session or identity
+is needed. All four live in `client/src-tauri/src/commands.rs`.
+
+---
+
+### `get_link_embed(url) -> Result<EmbedOutcome, String>`
+
+**What it does:** sends `Message::ProxyLinkEmbed { url }` to the default relay on
+a throwaway QUIC connection and returns the relay's `ProxyLinkEmbedResult` as an
+`EmbedOutcome`. The viewer's IP never touches the third-party URL's host.
+
+**Parameters:** `url` — the external URL string to resolve (must be allowlisted by
+the relay; any non-allowlisted URL returns `EmbedOutcome::Unavailable`).
+
+**Returns:** `EmbedOutcome`:
+- `{ Embed: LinkEmbed }` — successfully resolved metadata.
+- `"Unsupported"` — the host is allowlisted but the specific URL shape isn't handled by any adapter.
+- `"Unavailable"` — non-allowlisted host, timeout, SSRF refusal, rate-limit, parse failure,
+  or no default relay configured in this build.
+
+**Cache:** results are cached for 5 minutes in `LINK_EMBED_CACHE` (session-scoped
+static, keyed by URL). The relay caches for 1 h; the client's 5-minute cache means
+the relay is hit at most once per 5 minutes per URL per client session.
+
+**Side effects:** throwaway QUIC connection to the default relay; writes to
+`LINK_EMBED_CACHE`.
+
+**No identity required:** the connection is anonymous (no keypair, no
+`AppState::servers` lookup).
+
+**invoke name:** `"get_link_embed"` → `getLinkEmbed(url)`.
+
+---
+
+### `get_proxied_media(url) -> Result<ProxiedMedia, String>`
+
+**What it does:** sends `Message::ProxyMedia { url }` to the default relay, reads
+a `ProxyMediaHeader` frame to learn the content type and total byte count, then
+reads the raw length-framed bytes (4-byte BE u32 + raw bytes), and returns the
+media base64-encoded. The webview caller wraps the result in a `Blob` URL so no
+CDN is ever contacted from the user's machine.
+
+**Parameters:** `url` — the media URL to proxy; must be allowlisted by the relay
+(same allowlist as `get_link_embed`).
+
+**Returns:** `{ content_type: String, data_base64: String }` — the validated
+content type (e.g. `"image/jpeg"`, `"video/mp4"`) and the raw bytes base64-encoded.
+Errors with `"media unavailable"` if the relay sends `ProxyMediaUnavailable`, or a
+descriptive string on connection or framing failure.
+
+**Wire details:** after the framed `ProxyMediaHeader`, the bytes arrive as a bare
+4-byte-BE-length + raw bytes (NOT a protocol-framed `Message`). The command reads
+them with `recv.read_exact` and verifies the u32 matches `total_len`.
+
+**Side effects:** throwaway QUIC connection to the default relay. No client-side
+cache (media bytes are large; the caller decides whether to cache the Blob URL).
+
+**No identity required.**
+
+**invoke name:** `"get_proxied_media"` → `getProxiedMedia(url)`.
+
+---
+
+### `get_data_saver_embeds() -> bool`
+
+**What it does:** reads the `"data_saver_embeds"` key from `~/.farder/settings.json`
+and returns it as a boolean. Default: `false` (embeds load automatically). When
+`true`, the `LinkEmbed` component suppresses auto-loading and instead shows a
+"Load preview" chip the user must click.
+
+**Returns:** `true` if data-saver mode is enabled; `false` otherwise (including if
+the key is absent).
+
+**Side effects:** none (read-only disk access).
+
+**invoke name:** `"get_data_saver_embeds"` → `getDataSaverEmbeds()`.
+
+---
+
+### `set_data_saver_embeds(enabled) -> Result<(), String>`
+
+**What it does:** writes `enabled` to the `"data_saver_embeds"` key in
+`~/.farder/settings.json`.
+
+**Parameters:** `enabled` — boolean.
+
+**Returns:** `Ok(())` on success; errors on file I/O failure.
+
+**Side effects:** disk write to `~/.farder/settings.json`.
+
+**invoke name:** `"set_data_saver_embeds"` → `setDataSaverEmbeds(enabled)`.
+
+---
+
 ## Group 18 — Invites and account deletion
 
 ---
@@ -1724,6 +1821,7 @@ will exit and no further `screenshare:frame` events will be emitted.
 | `~/.farder/profile_overrides/<safe_server_id>.img` | disk | Per-server avatar override (raw image bytes); written by `set_server_avatar_override`, cleared by `clear_server_avatar_override` |
 | `~/.farder/profile_cache/<hash>` | disk | Verified signed-profile blobs keyed by SHA-256 hash; written by `get_member_profile` on a network fetch; corrupt entries auto-deleted |
 | `~/.farder/pushed_profiles.json` | disk | Map of `server_id → last successfully pushed profile hash`; owned by `profile_sync.rs` |
+| `LINK_EMBED_CACHE` | `OnceLock<Mutex<HashMap<String, (Instant, EmbedOutcome)>>>` (static) | Per-session embed cache, 5-minute TTL; written by `get_link_embed` |
 | `ACTIVE` (screenshare) | `OnceLock<Mutex<Option<ActivePreview>>>` (static in `screenshare.rs`) | The single active preview (stop flag + backend); set by `start_screenshare_preview`, cleared by `stop_screenshare_preview` |
 
 ## Integration map

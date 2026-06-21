@@ -481,7 +481,9 @@ The client sends an `UploadRequest` to declare the file, then streams the bytes.
 
 `Message` is a separate enum used between two clients via the relay node —
 distinct from the client-to-server protocol above. It handles key exchange and
-asynchronous DM delivery.
+asynchronous DM delivery, invite previews, and rich external-link embeds.
+
+### Core relay routing and DM signaling
 
 | Variant | Fields | Purpose |
 |---|---|---|
@@ -502,6 +504,74 @@ asynchronous DM delivery.
 
 `QueuedMessage` carries `sender: PublicKey`, `payload: Vec<u8>`, and
 `timestamp: u64`, and is used only inside `NotifyMessages`.
+
+### Relay fetch proxy — invite previews
+
+| Variant | Fields | Purpose |
+|---|---|---|
+| `ProxyInvitePreview` | `target: PreviewTarget`, `code: String` | First message on a fresh throwaway connection; asks the relay to fetch an invite preview on the requester's behalf. |
+| `ProxyInvitePreviewResult` | `outcome: PreviewOutcome` | Relay's answer to `ProxyInvitePreview`. |
+
+`PreviewTarget` variants: `Registered { server_id: Vec<u8> }` (a server registered with this relay) or `Direct { addr: String }` (relay dials an arbitrary address, subject to SSRF guard).
+
+`PreviewOutcome` variants: `Preview { server_name: String, member_count: u32, online_count: u32 }`, `Invalid`, `Unavailable`.
+
+### Relay fetch proxy — rich external embeds (Phase 6)
+
+New message variants for the relay's embed proxy. Each is exchanged on its own
+fresh throwaway QUIC connection (never on a session connection).
+
+| Variant | Fields | Purpose |
+|---|---|---|
+| `ProxyLinkEmbed` | `url: String` | Client → relay: first message on a throwaway connection; asks the relay to resolve rich embed metadata for `url`. `url` must be host-allowlisted by the relay (see `docs/modules/relay-embed.md`). |
+| `ProxyLinkEmbedResult` | `outcome: EmbedOutcome` | Relay → client: relay's normalized answer. |
+| `ProxyMedia` | `url: String` | Client → relay: first message on a separate throwaway connection; asks the relay to stream a media asset (image or direct video). |
+| `ProxyMediaHeader` | `content_type: String`, `total_len: u64` | Relay → client: sent before the raw bytes, confirms the validated content type and total byte count. |
+| `ProxyMediaUnavailable` | — | Relay → client: sent instead of `ProxyMediaHeader` when the media cannot be served (non-allowlisted, SSRF refusal, over 25 MB cap, bad content-type, timeout, rate-limit). |
+
+**Wire format for `ProxyMedia` exchange:** after `ProxyMediaHeader` the relay
+writes raw bytes as a 4-byte-BE `u32` length-prefix + raw bytes directly on the
+stream (NOT framed as a `Message`). The client reads this with `recv.read_exact`
+for 4 + `total_len` bytes and verifies the u32 matches `total_len`.
+
+### New embed types
+
+These types are defined in `messages.rs` and carried by the embed proxy messages.
+They mirror the TypeScript types in `client/src/lib/linkEmbed.ts`.
+
+**`EmbedKind`** (enum): `Tweet | Video | Image | Audio | Article`. Coarse
+classification used by the client to pick a card layout.
+
+**`EmbedMedia`** (struct): a directly-fetchable media asset.
+
+| Field | Type | Notes |
+|---|---|---|
+| `url` | `String` | The media URL; fetched via `ProxyMedia`. |
+| `mime` | `String` | MIME type (e.g. `"video/mp4"`, `"image/jpeg"`). |
+| `width` | `Option<u32>` | Pixel width, if known. |
+| `height` | `Option<u32>` | Pixel height, if known. |
+| `playable_inline` | `bool` | `true` for direct files playable in `<video>`/`<img>`; `false` for embeddable sources (YouTube, Spotify) that must open externally. |
+
+**`LinkEmbed`** (struct): normalized metadata for one external link, produced by
+an adapter in `embed.rs`. The client never sees raw HTML; only this struct.
+
+| Field | Type | Notes |
+|---|---|---|
+| `provider` | `String` | Short provider name: `"twitter"`, `"youtube"`, `"spotify"`, `"reddit"`, `"image"`. |
+| `kind` | `EmbedKind` | Card layout hint. |
+| `url` | `String` | Canonical URL (may differ from the input, e.g. after Twitter adapter canonicalization). |
+| `title` | `Option<String>` | Page or post title. |
+| `author` | `Option<String>` | Creator name (e.g. `"@jack"` for Twitter, `"r/aww"` for Reddit). |
+| `description` | `Option<String>` | Post body or article excerpt. |
+| `thumbnail` | `Option<String>` | Thumbnail image URL, fetched via `ProxyMedia`. |
+| `media` | `Option<EmbedMedia>` | Inline-playable media, if available. `None` for YouTube/Spotify (external only). |
+| `duration_secs` | `Option<u32>` | Media duration in seconds. |
+
+**`EmbedOutcome`** (enum): `Embed(LinkEmbed) | Unsupported | Unavailable`.
+Uniform failure variants — `Unsupported` means the host is allowlisted but the
+URL shape isn't handled by any adapter; `Unavailable` means everything else
+(non-allowlisted, rate-limit, SSRF, timeout, parse failure). Uniform failure
+leaks no information about why the relay refused.
 
 ---
 

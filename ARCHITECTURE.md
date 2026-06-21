@@ -121,24 +121,34 @@ whole screens; the sharer gets a **self-preview** of their own stream (`voice://
 and the viewer moved from cramped sidebar tiles to a **main-area `ScreenShareStage`** with a
 sidebar **Join** flow (single-watch), replacing the retired `PeerVideoTiles`.
 
-## Relay as fetch proxy (invite previews)
+## Relay as fetch proxy (invite previews + rich embeds)
 
-The relay doubles as a **privacy fetch proxy** for invite previews (and,
-planned, external embeds). When a client hovers over an invite link before
-joining, it sends `ProxyInvitePreview` to the link's relay (or the default
-relay for direct links) instead of contacting the target server directly. The
-relay fetches the preview on the client's behalf, so the client's IP never
-reaches the server host.
+The relay doubles as a **privacy fetch proxy**. All outbound HTTP(S) traffic
+originates from the relay — the viewer's IP is never exposed to any third-party
+host. There are two proxy modes:
 
-The relay opens a handle-0-stamped `RelayStreamRole::Primary` stream on the
-already-open server control connection, speaks the Challenge /
-GetInvitePreview / InvitePreview exchange (one round trip), and returns
-`ProxyInvitePreviewResult` to the client. Guardrails: 30/min/IP rate bucket,
-5 s fetch timeout, 16 KB answer cap, 256-char code cap, SSRF guard (including
-v4-mapped-IPv6), 60 s TTL cache.
+**Phase 1 — Invite previews:** when a client hovers over an invite link before
+joining, it sends `ProxyInvitePreview` to the link's relay (or the default relay
+for direct links) instead of contacting the target server directly. The relay opens
+a handle-0-stamped `RelayStreamRole::Primary` stream on the server control
+connection, speaks the Challenge / GetInvitePreview / InvitePreview exchange, and
+returns `ProxyInvitePreviewResult`. Guardrails: 30/min/IP rate bucket, 5 s fetch
+timeout, 16 KB answer cap, 256-char code cap, SSRF guard, 60 s TTL cache.
 
-The client-side Tauri command is `get_invite_preview`. See
-`docs/modules/relay-proxy.md` and `docs/modules/tauri-commands.md` for full
+**Phase 2 — Rich external embeds:** when the client encounters an allowlisted URL
+in a message, it sends `ProxyLinkEmbed` on a fresh throwaway connection. The relay
+resolves the URL through a provider adapter (Twitter/X via fxtwitter, YouTube and
+Spotify via oEmbed, Reddit via `.json` API, direct images inline), enforces a
+strict egress allowlist + SSRF guard on all resolved IPs + redirect re-validation,
+and returns `ProxyLinkEmbedResult { outcome: EmbedOutcome }`. Media bytes are
+fetched on a separate `ProxyMedia` throwaway connection; the relay validates the
+content-type (images and `video/mp4` only) and caps bytes at 25 MB. Rate limits:
+30 metadata / 60 media requests per minute per IP. 1 h relay-side TTL cache (2048
+entries). Egress guardrails in `crates/farder-relay/src/embed.rs::SafeFetcher`.
+
+The client-side commands are `get_invite_preview`, `get_link_embed`, and
+`get_proxied_media`. See `docs/modules/relay-proxy.md`,
+`docs/modules/relay-embed.md`, and `docs/modules/tauri-commands.md` for the full
 reference.
 
 ## Profile sync
