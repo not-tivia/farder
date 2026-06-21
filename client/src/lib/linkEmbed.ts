@@ -28,9 +28,12 @@ export type EmbedOutcome = { Embed: LinkEmbed } | "Unsupported" | "Unavailable";
 // Allowlist host detection — MUST match the relay's ALLOWLIST (embed.rs).
 // User-facing hosts only: fxtwitter.com/api.fxtwitter.com are internal API
 // hosts used by the relay, never posted by users, so they are excluded.
+// Direct-image hosts (i.imgur.com, etc.) are intentionally NOT here: Farder
+// already inlines posted image URLs via the auto-attach path (MessageInput ->
+// fetch_url), so an image embed would render the picture twice.
 const ALLOWLIST_HOSTS = [
   "twitter.com", "x.com", "youtube.com", "youtu.be",
-  "reddit.com", "redd.it", "open.spotify.com", "i.redd.it", "i.imgur.com",
+  "reddit.com", "redd.it", "open.spotify.com",
 ];
 
 function hostAllowed(host: string): boolean {
@@ -51,8 +54,7 @@ const URL_RE = /https?:\/\/[^\s<>"']+/g;
  *     (www.youtube.com ends with ".youtube.com")
  *   - "https://open.spotify.com/track/1"    → ["https://open.spotify.com/track/1"]
  *     (open.spotify.com ends with ".spotify.com"? No — exact match on "open.spotify.com")
- *   - "https://i.redd.it/pic.jpg"           → ["https://i.redd.it/pic.jpg"]
- *     (i.redd.it ends with ".redd.it")
+ *   - "https://i.imgur.com/pic.jpg"         → []  (image hosts excluded; auto-attach handles images)
  *   - same URL twice                        → deduplicated to 1 entry
  *   - 4 distinct URLs                       → first 3 only (cap enforced)
  *   - not-a-url embedded text               → skipped (new URL() throws, caught)

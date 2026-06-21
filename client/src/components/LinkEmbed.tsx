@@ -53,9 +53,11 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
       {inlineMedia && !isVideo && mediaBlob && (
         <img className="link-embed-image" src={mediaBlob} alt={e.title ?? ""} />
       )}
-      {!inlineMedia && thumbBlob && (
+      {!inlineMedia && (thumbBlob || e.kind === "Video" || e.kind === "Audio") && (
         <div className="link-embed-thumb-wrap">
-          <img className="link-embed-thumb" src={thumbBlob} alt={e.title ?? ""} />
+          {/* Thumbnail when it resolved; the Play/Open button renders regardless
+              so a failed/absent thumbnail never hides the action (RC#2). */}
+          {thumbBlob && <img className="link-embed-thumb" src={thumbBlob} alt={e.title ?? ""} />}
           {(e.kind === "Video" || e.kind === "Audio") && (
             <button
               className="link-embed-play"

@@ -12,12 +12,14 @@ pub enum Provider {
     YouTube,
     Reddit,
     Spotify,
-    Image,
 }
 
-/// Allowlist entries: (registrable-or-exact host suffix, provider). A URL host
+/// Page-host allowlist: (registrable-or-exact host suffix, provider). A URL host
 /// matches an entry if it equals the suffix OR ends with "." + suffix (so
 /// subdomains match, but `youtube.com.evil.com` does NOT match `youtube.com`).
+/// NOTE: direct-image hosts (i.redd.it/i.imgur.com) are intentionally NOT here —
+/// Farder already inlines posted image URLs via the auto-attach path
+/// (`MessageInput` -> `fetch_url`), so an image embed would render twice.
 const ALLOWLIST: &[(&str, Provider)] = &[
     ("twitter.com", Provider::Twitter),
     ("x.com", Provider::Twitter),
@@ -27,9 +29,18 @@ const ALLOWLIST: &[(&str, Provider)] = &[
     ("redd.it", Provider::Reddit),
     ("open.spotify.com", Provider::Spotify),
     ("fxtwitter.com", Provider::Twitter),
-    // Curated direct-image hosts (v1).
-    ("i.redd.it", Provider::Image),
-    ("i.imgur.com", Provider::Image),
+];
+
+/// Media/thumbnail CDN hosts. Adapters extract media URLs that live on CDNs
+/// distinct from the page host (e.g. a tweet's video is on `video.twimg.com`,
+/// not `x.com`). `fetch_media` accepts these IN ADDITION to page hosts so
+/// thumbnails and inline video resolve, while the SSRF guard still applies.
+const MEDIA_ALLOWLIST: &[&str] = &[
+    "twimg.com",       // twitter media + thumbnails (video.twimg.com, pbs.twimg.com)
+    "ytimg.com",       // youtube thumbnails (i.ytimg.com)
+    "scdn.co",         // spotify cover art (i.scdn.co, mosaic.scdn.co)
+    "redd.it",         // reddit images (i.redd.it, preview.redd.it, external-preview.redd.it)
+    "redditmedia.com", // reddit thumbnails (b.thumbs.redditmedia.com)
 ];
 
 /// True if a host matches an allowlist suffix safely (exact or dotted-subdomain).
@@ -38,7 +49,7 @@ fn host_matches(host: &str, suffix: &str) -> bool {
 }
 
 /// Classify a URL to a provider, or None if its host is not allowlisted.
-/// `i.redd.it` (Image) is checked before `redd.it` (Reddit) via longest-match.
+/// Longest matching suffix wins (defensive; entries are currently unambiguous).
 pub fn classify_url(raw: &str) -> Option<Provider> {
     let parsed = Url::parse(raw).ok()?;
     if parsed.scheme() != "https" && parsed.scheme() != "http" {
@@ -49,7 +60,6 @@ pub fn classify_url(raw: &str) -> Option<Provider> {
     if host.parse::<std::net::IpAddr>().is_ok() {
         return None;
     }
-    // Longest suffix first so i.redd.it (Image) wins over redd.it (Reddit).
     let mut best: Option<(usize, Provider)> = None;
     for (suffix, provider) in ALLOWLIST {
         if host_matches(&host, suffix) {
@@ -62,9 +72,28 @@ pub fn classify_url(raw: &str) -> Option<Provider> {
     best.map(|(_, p)| p)
 }
 
-/// True if the URL's host is allowlisted at all (used to re-validate media URLs).
+/// True if the URL's host is an allowlisted PAGE host (used for metadata fetches).
 pub fn host_is_allowlisted(raw: &str) -> bool {
     classify_url(raw).is_some()
+}
+
+/// True if the URL's host is allowlisted for MEDIA fetches — a page host OR a
+/// known media CDN host (`fetch_media` only). SSRF resolution still applies on
+/// top of this.
+pub fn host_is_media_allowlisted(raw: &str) -> bool {
+    if host_is_allowlisted(raw) {
+        return true;
+    }
+    let Ok(parsed) = Url::parse(raw) else { return false; };
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else { return false; };
+    let host = host.to_ascii_lowercase();
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    MEDIA_ALLOWLIST.iter().any(|s| host_matches(&host, s))
 }
 
 /// A successfully fetched text document.
@@ -110,14 +139,27 @@ pub fn content_type_allowed(ct: &str) -> bool {
 /// content-type allowlist, and a byte-counted cap enforced DURING streaming
 /// (Content-Length is not trusted). Returns (content_type, bytes).
 pub async fn fetch_media(client: &reqwest::Client, url: &str) -> Result<(String, Vec<u8>)> {
-    if !validate_fetchable(url).await {
+    if !validate_media_fetchable(url).await {
+        tracing::warn!("embed media refused (allowlist/ssrf): {url}");
         anyhow::bail!("media refused (allowlist/ssrf): {url}");
     }
-    let resp = client.get(url).send().await?;
-    anyhow::ensure!(resp.status().is_success(), "media status {}", resp.status());
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("embed media transport error for {url}: {e}");
+            return Err(e.into());
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!("embed media status {} for {url}", resp.status());
+        anyhow::bail!("media status {}", resp.status());
+    }
     let ct = resp.headers().get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    anyhow::ensure!(content_type_allowed(&ct), "media content-type rejected: {ct}");
+    if !content_type_allowed(&ct) {
+        tracing::warn!("embed media content-type rejected '{ct}' for {url}");
+        anyhow::bail!("media content-type rejected: {ct}");
+    }
 
     let mut out: Vec<u8> = Vec::new();
     let mut stream = resp.bytes_stream();
@@ -132,15 +174,12 @@ pub async fn fetch_media(client: &reqwest::Client, url: &str) -> Result<(String,
     Ok((ct, out))
 }
 
-/// Allowlist + SSRF gate: the host must be allowlisted AND every IP it resolves
-/// to must be globally routable. Used before BOTH page fetches and media fetches
-/// (re-validates adapter-extracted media URLs — the "media-URL trap").
-pub async fn validate_fetchable(raw: &str) -> bool {
-    if !host_is_allowlisted(raw) { return false; }
+/// SSRF resolution gate: every IP the URL's host resolves to must be globally
+/// routable (anti-rebind). Shared by the page and media validators.
+async fn resolves_to_global(raw: &str) -> bool {
     let Ok(u) = Url::parse(raw) else { return false; };
     let Some(host) = u.host_str() else { return false; };
     let port = u.port_or_known_default().unwrap_or(443);
-    // Resolve and require ALL resolved addresses to be global (anti-rebind).
     let Ok(addrs) = tokio::net::lookup_host((host, port)).await else { return false; };
     let mut any = false;
     for a in addrs {
@@ -150,16 +189,34 @@ pub async fn validate_fetchable(raw: &str) -> bool {
     any
 }
 
+/// Page-fetch gate: allowlisted PAGE host AND all resolved IPs global.
+pub async fn validate_fetchable(raw: &str) -> bool {
+    host_is_allowlisted(raw) && resolves_to_global(raw).await
+}
+
+/// Media-fetch gate: page OR media-CDN host AND all resolved IPs global.
+/// This is the re-validation of adapter-extracted media URLs (the "media-URL
+/// trap" defense), widened to the media CDNs the adapters legitimately use.
+pub async fn validate_media_fetchable(raw: &str) -> bool {
+    host_is_media_allowlisted(raw) && resolves_to_global(raw).await
+}
+
 pub struct SafeFetcher {
     client: reqwest::Client,
 }
 
 impl SafeFetcher {
     pub fn new() -> Result<Self> {
+        // Browser-like UA: several providers (Reddit, some oEmbed endpoints)
+        // reject or rate-limit non-browser User-Agents. Note this does NOT defeat
+        // datacenter-IP blocking some sites apply to the relay's host.
         let client = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none()) // we handle hops ourselves
-            .user_agent("FarderRelay/1.0 (+https://farder.gg)")
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
             .build()?;
         Ok(Self { client })
     }
@@ -175,9 +232,16 @@ impl LinkFetcher for SafeFetcher {
         let mut current = url.to_string();
         for _ in 0..4 {
             if !validate_fetchable(&current).await {
+                tracing::warn!("embed fetch refused (allowlist/ssrf): {current}");
                 anyhow::bail!("fetch refused (allowlist/ssrf): {current}");
             }
-            let resp = self.client.get(&current).send().await?;
+            let resp = match self.client.get(&current).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("embed fetch transport error for {current}: {e}");
+                    return Err(e.into());
+                }
+            };
             if resp.status().is_redirection() {
                 let loc = resp
                     .headers()
@@ -188,7 +252,10 @@ impl LinkFetcher for SafeFetcher {
                 current = Url::parse(&current)?.join(loc)?.to_string();
                 continue;
             }
-            anyhow::ensure!(resp.status().is_success(), "status {}", resp.status());
+            if !resp.status().is_success() {
+                tracing::warn!("embed fetch status {} for {current}", resp.status());
+                anyhow::bail!("status {}", resp.status());
+            }
             // Cap the body: read up to META_CAP+1 and reject if larger.
             let full = resp.bytes().await?;
             anyhow::ensure!(full.len() <= META_CAP, "metadata too large: {}", full.len());
@@ -248,7 +315,6 @@ pub async fn resolve_embed<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> EmbedOu
         Provider::YouTube => adapt_youtube(url, f).await,
         Provider::Reddit => adapt_reddit(url, f).await,
         Provider::Spotify => adapt_spotify(url, f).await,
-        Provider::Image => adapt_image(url).await,
     };
     match adapted {
         Some(e) => EmbedOutcome::Embed(e),
@@ -341,28 +407,6 @@ pub async fn adapt_reddit<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> Option<L
         description: None,
         thumbnail: thumb,
         media: None, // v1: card only (no v.redd.it inline video)
-        duration_secs: None,
-    })
-}
-
-/// Direct image: no fetch needed to build the embed; the bytes come later via
-/// ProxyMedia (which validates content-type). The host is already allowlisted.
-pub async fn adapt_image(url: &str) -> Option<LinkEmbed> {
-    Some(LinkEmbed {
-        provider: "image".into(),
-        kind: EmbedKind::Image,
-        url: url.to_string(),
-        title: None,
-        author: None,
-        description: None,
-        thumbnail: Some(url.to_string()),
-        media: Some(EmbedMedia {
-            url: url.to_string(),
-            mime: "image/*".into(),
-            width: None,
-            height: None,
-            playable_inline: true,
-        }),
         duration_secs: None,
     })
 }
@@ -470,8 +514,25 @@ mod tests {
         assert_eq!(classify_url("https://youtu.be/abc"), Some(Provider::YouTube));
         assert_eq!(classify_url("https://www.reddit.com/r/x/comments/1/t/"), Some(Provider::Reddit));
         assert_eq!(classify_url("https://open.spotify.com/track/1"), Some(Provider::Spotify));
-        assert_eq!(classify_url("https://i.redd.it/abc.jpg"), Some(Provider::Image));
-        assert_eq!(classify_url("https://i.imgur.com/abc.png"), Some(Provider::Image));
+    }
+
+    #[test]
+    fn media_allowlist_accepts_cdn_hosts_and_rejects_others() {
+        // CDN media hosts the adapters extract are fetchable as media...
+        assert!(host_is_media_allowlisted("https://video.twimg.com/v.mp4"));
+        assert!(host_is_media_allowlisted("https://pbs.twimg.com/thumb.jpg"));
+        assert!(host_is_media_allowlisted("https://i.ytimg.com/vi/abc/hq.jpg"));
+        assert!(host_is_media_allowlisted("https://i.scdn.co/image/abc"));
+        assert!(host_is_media_allowlisted("https://i.redd.it/pic.jpg"));
+        assert!(host_is_media_allowlisted("https://b.thumbs.redditmedia.com/x.jpg"));
+        // ...page hosts are also media-allowlisted (superset)...
+        assert!(host_is_media_allowlisted("https://x.com/u/status/1"));
+        // ...but arbitrary hosts, lookalikes, and bare IPs are not.
+        assert!(!host_is_media_allowlisted("https://evil.com/x.jpg"));
+        assert!(!host_is_media_allowlisted("https://twimg.com.evil.com/x.jpg"));
+        assert!(!host_is_media_allowlisted("https://10.0.0.1/x.jpg"));
+        // The page allowlist itself must NOT accept media CDN hosts.
+        assert!(!host_is_allowlisted("https://video.twimg.com/v.mp4"));
     }
 
     #[test]
@@ -596,16 +657,6 @@ mod tests {
         assert_eq!(e.provider, "reddit");
         assert_eq!(e.author.as_deref(), Some("r/aww"));
         assert!(e.title.as_deref().unwrap().contains("cool post"));
-    }
-
-    #[tokio::test]
-    async fn image_adapter_builds_image_embed() {
-        let e = adapt_image("https://i.redd.it/pic.jpg").await.unwrap();
-        assert_eq!(e.provider, "image");
-        assert_eq!(e.kind, farder_protocol::messages::EmbedKind::Image);
-        let media = e.media.unwrap();
-        assert_eq!(media.url, "https://i.redd.it/pic.jpg");
-        assert!(media.playable_inline);
     }
 
     #[test]
