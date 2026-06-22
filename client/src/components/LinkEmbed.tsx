@@ -2,27 +2,33 @@ import { useState } from "react";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { useLinkEmbed } from "../hooks/useLinkEmbed";
 import { useProxiedMedia } from "../hooks/useProxiedMedia";
+import { usePip } from "../context/PipContext";
 
 export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: boolean }) {
   // Data-saver: don't auto-load; show a chip that loads on click.
   const [loaded, setLoaded] = useState(!dataSaver);
   const state = useLinkEmbed(url, loaded);
+  const { openPip } = usePip();
 
   // Derive embed properties safely (embed may be null until state is "ok").
   const e = state.status === "ok" ? state.embed : null;
   const inlineMedia = e?.media?.playable_inline ? e.media : null;
-  const isVideo = inlineMedia?.mime.startsWith("video/");
+  const isVideo = !!inlineMedia?.mime.startsWith("video/");
 
   // IMPORTANT: both useProxiedMedia calls are hoisted here, before any early
   // return, so hook call order is stable across all render paths (rules of hooks).
   // The `enabled` flag gates the actual fetch — no work is done when not needed.
+  //
+  // Playable VIDEO no longer fetches its bytes on the card (it streams when the
+  // PiP opens); only inline IMAGES fetch their media here.
   const mediaBlob = useProxiedMedia(
     inlineMedia?.url ?? null,
-    loaded && state.status === "ok" && !!inlineMedia,
+    loaded && state.status === "ok" && !!inlineMedia && !isVideo,
   );
+  // Thumbnail: for non-inline providers (YouTube/Spotify) AND for the video poster.
   const thumbBlob = useProxiedMedia(
     e?.thumbnail ?? null,
-    loaded && state.status === "ok" && !inlineMedia && !!e?.thumbnail,
+    loaded && state.status === "ok" && !!e?.thumbnail && (!inlineMedia || isVideo),
   );
 
   // --- early returns (all hooks already called above) ---
@@ -42,14 +48,29 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
     return null;
   }
 
+  const openVideoPip = () => {
+    if (!inlineMedia) return;
+    openPip({ mediaUrl: inlineMedia.url, title: e.author ?? e.title ?? "Video", mime: inlineMedia.mime });
+  };
+
   return (
     <div className={`link-embed link-embed--${e.provider}`}>
       {e.author && <div className="link-embed-author">{e.author}</div>}
       {e.title && <div className="link-embed-title">{e.title}</div>}
       {e.description && <div className="link-embed-desc">{e.description}</div>}
 
-      {inlineMedia && isVideo && mediaBlob && (
-        <video className="link-embed-video" src={mediaBlob} controls preload="metadata" />
+      {inlineMedia && isVideo && (
+        <div className="link-embed-poster" onClick={openVideoPip}>
+          {thumbBlob
+            ? <img className="link-embed-thumb" src={thumbBlob} alt={e.title ?? ""} />
+            : <div className="link-embed-poster-blank" />}
+          <button
+            className="link-embed-poster-play"
+            onClick={(ev) => { ev.stopPropagation(); openVideoPip(); }}
+          >
+            &#9654; Play
+          </button>
+        </div>
       )}
       {inlineMedia && !isVideo && mediaBlob && (
         <img className="link-embed-image" src={mediaBlob} alt={e.title ?? ""} />
