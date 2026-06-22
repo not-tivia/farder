@@ -301,9 +301,17 @@ of Hooks.
 Data-saver behaviour: if `dataSaver` is `true`, the component renders a "Load
 preview" `<button>` chip and does not call any relay commands until clicked.
 
-Inline-playable media (`EmbedMedia.playable_inline === true`) renders as a
-`<video>` (for `video/*` MIME) or `<img>`. Non-inline media (YouTube, Spotify)
-renders a thumbnail with an external-open button.
+Inline-playable media (`EmbedMedia.playable_inline === true`) renders as an
+`<img>` (for `image/*` MIME) or, for `video/*`, as a compact poster (thumbnail
++ ▶ Play button). Non-inline media (YouTube, Spotify) renders a thumbnail with
+an external-open button.
+
+**Update (2026-06-21):** Playable *video* embeds no longer auto-play inline.
+`LinkEmbed` now renders a compact poster (thumbnail + ▶ Play); clicking Play
+opens the video in a floating in-app picture-in-picture pane (see
+`docs/modules/frontend-pip.md`). The video bytes are fetched only when the PiP
+opens (not on card display). Inline images and YouTube/Spotify external-open
+buttons are unchanged.
 
 Returns `null` for `Unsupported` and `Unavailable` outcomes (renders nothing).
 
