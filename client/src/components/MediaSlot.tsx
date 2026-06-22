@@ -2,8 +2,8 @@ import { useEffect, useRef } from "react";
 import { useMediaPlayers, type PlayerKind } from "../context/MediaPlayersContext";
 
 export default function MediaSlot({
-  hostId, kind, src, title, thumbUrl, aspect = 0.5625,
-}: { hostId: string; kind: PlayerKind; src: string; title: string; thumbUrl?: string | null; aspect?: number }) {
+  hostId, kind, src, title, thumbUrl, aspect = 0.5625, manualTrigger = false,
+}: { hostId: string; kind: PlayerKind; src: string; title: string; thumbUrl?: string | null; aspect?: number; manualTrigger?: boolean }) {
   const { players, registerHost, unregisterHost, setHostVisible, openPlayer, setPlayerState } = useMediaPlayers();
   const ref = useRef<HTMLDivElement>(null);
 
@@ -28,7 +28,7 @@ export default function MediaSlot({
   return (
     <div ref={ref} className="media-slot" style={{ position: "relative", width: "100%", maxWidth: 480, marginTop: 6 }}>
       <div style={{ paddingTop: `${aspect * 100}%` }} />
-      {!player && (
+      {!player && !manualTrigger && (
         <button className="media-slot-poster" onClick={() => openPlayer({ kind, src, hostId, title })}>
           {thumbUrl && <img className="media-slot-thumb" src={thumbUrl} alt={title} />}
           <span className="media-slot-play">&#9654; Play</span>
