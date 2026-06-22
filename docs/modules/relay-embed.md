@@ -318,13 +318,10 @@ Settings → Privacy & Data. URL→embed-src parsing and the consent store live 
 `client/src/lib/embedPlayer.ts`. The relay-proxied (Invidious-style) path that
 would hide the viewer's IP from the provider is explicitly deferred (possible v2).
 
-**Update (2026-06-21):** Playable *video* embeds no longer auto-play inline.
-`LinkEmbed` now renders a compact poster (thumbnail + ▶ Play); clicking Play
-opens the video in a floating in-app picture-in-picture pane (see
-`docs/modules/frontend-pip.md`). The video bytes are fetched only when the PiP
-opens (not on card display). Inline images are unchanged. (YouTube/Spotify cards
-later gained an opt-in "Watch here" in-app player — see the 2026-06-21 opt-in
-in-app player note above.)
+**Update (2026-06-21):** Playable *video* embeds and the YouTube/Spotify "Watch
+here" in-app player both render via `MediaSlot` + the root `MediaPlayersLayer`
+(inline-first float/dock — see `docs/modules/frontend-media-players.md`). The
+old PiP poster→pane flow is gone. Inline images are unchanged.
 
 Returns `null` for `Unsupported` and `Unavailable` outcomes (renders nothing).
 
