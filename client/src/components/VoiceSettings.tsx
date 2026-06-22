@@ -21,6 +21,7 @@ import {
   type AudioDeviceInfo,
   type VoiceInputLevelPayload,
 } from "../lib/tauri-bridge";
+import { getEmbedConsent, setEmbedConsent } from "../lib/embedPlayer";
 import SettingsSection from "./settings/SettingsSection";
 import RadioOption from "./settings/RadioOption";
 import KeybindRow from "./settings/KeybindRow";
@@ -54,6 +55,8 @@ export default function VoiceSettings() {
   const [selectedInput, setSelectedInput] = useState<string>(SYSTEM_DEFAULT);
   const [selectedOutput, setSelectedOutput] = useState<string>(SYSTEM_DEFAULT);
   const [dataSaverEmbeds, setDataSaverEmbedsState] = useState<boolean>(false);
+  const [ytEmbeds, setYtEmbeds] = useState<boolean>(false);
+  const [spotifyEmbeds, setSpotifyEmbeds] = useState<boolean>(false);
 
   useEffect(() => {
     void getVoiceMode().then(setMode).catch(() => {});
@@ -70,6 +73,11 @@ export default function VoiceSettings() {
     void listen<VoiceInputLevelPayload>("voice://input-level", (e) => setInputLevel(e.payload.level))
       .then((u) => { if (cancelled) u(); else unlisten = u; });
     return () => { cancelled = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    setYtEmbeds(getEmbedConsent("youtube"));
+    setSpotifyEmbeds(getEmbedConsent("spotify"));
   }, []);
 
   const chooseInputDevice = (name: string) => {
@@ -101,6 +109,14 @@ export default function VoiceSettings() {
   const chooseDataSaverEmbeds = (enabled: boolean) => {
     setDataSaverEmbedsState(enabled);
     void setDataSaverEmbeds(enabled).catch((e) => console.error("[voice-settings] failed to save data-saver setting:", e));
+  };
+  const chooseYtEmbeds = (enabled: boolean) => {
+    setYtEmbeds(enabled);
+    setEmbedConsent("youtube", enabled);
+  };
+  const chooseSpotifyEmbeds = (enabled: boolean) => {
+    setSpotifyEmbeds(enabled);
+    setEmbedConsent("spotify", enabled);
   };
 
   useEffect(() => {
@@ -268,6 +284,27 @@ export default function VoiceSettings() {
           When enabled, link preview cards show a "Load preview" button instead of
           loading automatically. Reduces network requests and hides your IP from
           preview sources until you choose to load them.
+        </p>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={ytEmbeds}
+            onChange={(e) => chooseYtEmbeds(e.target.checked)}
+          />
+          Allow YouTube embeds (sends your IP to YouTube when you watch)
+        </label>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={spotifyEmbeds}
+            onChange={(e) => chooseSpotifyEmbeds(e.target.checked)}
+          />
+          Allow Spotify embeds (sends your IP to Spotify when you watch)
+        </label>
+        <p className="settings-help">
+          When off, the first time you click &ldquo;Watch here&rdquo; on a YouTube or
+          Spotify card Farder asks before connecting. Turn on to skip that prompt for
+          that provider. You can turn it back off here at any time.
         </p>
       </SettingsSection>
 
