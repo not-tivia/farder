@@ -306,15 +306,15 @@ export default function VoiceSettings() {
           />
           Allow Spotify embeds (sends your IP to Spotify when you watch)
         </label>
-        <label className="settings-row">
-          <input type="checkbox" checked={alwaysFloat} onChange={(e) => chooseAlwaysFloat(e.target.checked)} />
-          Always play videos in a floating player (instead of inline)
-        </label>
         <p className="settings-help">
           When off, the first time you click &ldquo;Watch here&rdquo; on a YouTube or
           Spotify card Farder asks before connecting. Turn on to skip that prompt for
           that provider. You can turn it back off here at any time.
         </p>
+        <label className="settings-row">
+          <input type="checkbox" checked={alwaysFloat} onChange={(e) => chooseAlwaysFloat(e.target.checked)} />
+          Always play videos in a floating player (instead of inline)
+        </label>
       </SettingsSection>
 
       {mode === "PushToTalk" && (
