@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useMediaPlayers, type PlayerKind } from "../context/MediaPlayersContext";
+import { getAlwaysFloat } from "../lib/floatAnchor";
 
 export default function MediaSlot({
   hostId, kind, src, title, thumbUrl, aspect = 0.5625, manualTrigger = false,
@@ -29,7 +30,7 @@ export default function MediaSlot({
     <div ref={ref} className="media-slot" style={{ position: "relative", width: "100%", maxWidth: 480, marginTop: 6 }}>
       <div style={{ paddingTop: `${aspect * 100}%` }} />
       {!player && !manualTrigger && (
-        <button className="media-slot-poster" onClick={() => openPlayer({ kind, src, hostId, title })}>
+        <button className="media-slot-poster" onClick={() => openPlayer({ kind, src, hostId, title, float: getAlwaysFloat() })}>
           {thumbUrl && <img className="media-slot-thumb" src={thumbUrl} alt={title} />}
           <span className="media-slot-play">&#9654; Play</span>
         </button>

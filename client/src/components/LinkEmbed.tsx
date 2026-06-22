@@ -6,6 +6,7 @@ import { useMediaPlayers } from "../context/MediaPlayersContext";
 import MediaSlot from "./MediaSlot";
 import EmbedConsentModal from "./EmbedConsentModal";
 import { buildEmbedPlayerSrc, getEmbedConsent, setEmbedConsent } from "../lib/embedPlayer";
+import { getAlwaysFloat } from "../lib/floatAnchor";
 
 export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: boolean }) {
   const [loaded, setLoaded] = useState(!dataSaver);
@@ -43,7 +44,7 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
 
   const watchHere = () => {
     if (!player) return;
-    if (getEmbedConsent(player.provider)) openPlayer({ kind: "iframe", src: player.src, hostId, title: e.author ?? e.title ?? "Video" });
+    if (getEmbedConsent(player.provider)) openPlayer({ kind: "iframe", src: player.src, hostId, title: e.author ?? e.title ?? "Video", float: getAlwaysFloat() });
     else setShowConsent(true);
   };
 
@@ -97,7 +98,7 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
           onConfirm={(always) => {
             if (always) setEmbedConsent(player.provider, true);
             setShowConsent(false);
-            openPlayer({ kind: "iframe", src: player.src, hostId, title: e.author ?? e.title ?? "Video" });
+            openPlayer({ kind: "iframe", src: player.src, hostId, title: e.author ?? e.title ?? "Video", float: getAlwaysFloat() });
           }}
           onCancel={() => setShowConsent(false)}
         />

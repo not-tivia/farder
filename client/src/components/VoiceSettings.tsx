@@ -22,6 +22,7 @@ import {
   type VoiceInputLevelPayload,
 } from "../lib/tauri-bridge";
 import { getEmbedConsent, setEmbedConsent } from "../lib/embedPlayer";
+import { getAlwaysFloat, setAlwaysFloat } from "../lib/floatAnchor";
 import SettingsSection from "./settings/SettingsSection";
 import RadioOption from "./settings/RadioOption";
 import KeybindRow from "./settings/KeybindRow";
@@ -57,6 +58,7 @@ export default function VoiceSettings() {
   const [dataSaverEmbeds, setDataSaverEmbedsState] = useState<boolean>(false);
   const [ytEmbeds, setYtEmbeds] = useState<boolean>(false);
   const [spotifyEmbeds, setSpotifyEmbeds] = useState<boolean>(false);
+  const [alwaysFloat, setAlwaysFloatState] = useState<boolean>(false);
 
   useEffect(() => {
     void getVoiceMode().then(setMode).catch(() => {});
@@ -79,6 +81,8 @@ export default function VoiceSettings() {
     setYtEmbeds(getEmbedConsent("youtube"));
     setSpotifyEmbeds(getEmbedConsent("spotify"));
   }, []);
+
+  useEffect(() => { setAlwaysFloatState(getAlwaysFloat()); }, []);
 
   const chooseInputDevice = (name: string) => {
     setSelectedInput(name);
@@ -118,6 +122,7 @@ export default function VoiceSettings() {
     setSpotifyEmbeds(enabled);
     setEmbedConsent("spotify", enabled);
   };
+  const chooseAlwaysFloat = (v: boolean) => { setAlwaysFloatState(v); setAlwaysFloat(v); };
 
   useEffect(() => {
     if (!capturing) return;
@@ -300,6 +305,10 @@ export default function VoiceSettings() {
             onChange={(e) => chooseSpotifyEmbeds(e.target.checked)}
           />
           Allow Spotify embeds (sends your IP to Spotify when you watch)
+        </label>
+        <label className="settings-row">
+          <input type="checkbox" checked={alwaysFloat} onChange={(e) => chooseAlwaysFloat(e.target.checked)} />
+          Always play videos in a floating player (instead of inline)
         </label>
         <p className="settings-help">
           When off, the first time you click &ldquo;Watch here&rdquo; on a YouTube or

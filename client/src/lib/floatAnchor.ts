@@ -39,3 +39,12 @@ export function getFloatAnchor(): FloatAnchor {
 export function setFloatAnchor(a: FloatAnchor): void {
   try { localStorage.setItem(KEY, JSON.stringify(a)); } catch { /* ignore */ }
 }
+
+const ALWAYS_KEY = "farder.alwaysFloat";
+/** Whether ▶ should open players directly floating. Default false; fail-safe false. */
+export function getAlwaysFloat(): boolean {
+  try { return localStorage.getItem(ALWAYS_KEY) === "1"; } catch { return false; }
+}
+export function setAlwaysFloat(v: boolean): void {
+  try { if (v) localStorage.setItem(ALWAYS_KEY, "1"); else localStorage.removeItem(ALWAYS_KEY); } catch { /* ignore */ }
+}
