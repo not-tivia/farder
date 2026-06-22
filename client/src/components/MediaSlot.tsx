@@ -1,31 +1,38 @@
 import { useEffect, useRef } from "react";
 import { useMediaPlayers, type PlayerKind } from "../context/MediaPlayersContext";
 import { getAlwaysFloat } from "../lib/floatAnchor";
+import MediaPlayer from "./MediaPlayer";
 
 export default function MediaSlot({
   hostId, kind, src, title, thumbUrl, aspect = 0.5625, manualTrigger = false,
 }: { hostId: string; kind: PlayerKind; src: string; title: string; thumbUrl?: string | null; aspect?: number; manualTrigger?: boolean }) {
-  const { players, registerHost, unregisterHost, setHostVisible, openPlayer, setPlayerState } = useMediaPlayers();
+  const { players, setHostVisible, openPlayer, setPlayerState, closePlayer } = useMediaPlayers();
   const ref = useRef<HTMLDivElement>(null);
-
   const player = players.find((p) => p.hostId === hostId);
-  const docked = player?.state === "docked";
 
-  // Register this slot's element + observe visibility for docked<->floating.
+  // Keep the current player id in a ref so the unmount cleanup can close it.
+  const playerIdRef = useRef<string | null>(null);
+  playerIdRef.current = player?.id ?? null;
+
+  // VIDEO auto-floats when its card scrolls out of view (and docks back). IFRAME
+  // does not auto-float (manual pop-out only), so only observe for video.
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    registerHost(hostId, el);
+    if (kind !== "video") return;
+    const el = ref.current; if (!el) return;
     const io = new IntersectionObserver(
       (entries) => { for (const e of entries) setHostVisible(hostId, e.isIntersecting); },
       { threshold: 0.5 },
     );
     io.observe(el);
-    return () => { io.disconnect(); unregisterHost(hostId); };
-  }, [hostId]); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => io.disconnect();
+  }, [hostId, kind]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The slot reserves the media's space (so the docked player overlays it and the
-  // layout doesn't jump when it floats). Use a padding-top aspect box.
+  // On unmount (e.g. switching server/channel) close this slot's player — floating
+  // players live with their message and do not persist across navigation.
+  useEffect(() => {
+    return () => { if (playerIdRef.current) closePlayer(playerIdRef.current); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div ref={ref} className="media-slot" style={{ position: "relative", width: "100%", maxWidth: 480, marginTop: 6 }}>
       <div style={{ paddingTop: `${aspect * 100}%` }} />
@@ -35,12 +42,12 @@ export default function MediaSlot({
           <span className="media-slot-play">&#9654; Play</span>
         </button>
       )}
-      {player && !docked && (
+      {player && <MediaPlayer player={player} />}
+      {player && player.state !== "docked" && (
         <button className="media-slot-chip" onClick={() => setPlayerState(player.id, "docked")}>
           &#9654; Playing in a floating player &mdash; dock it back
         </button>
       )}
-      {/* When docked, the root-level MediaPlayer overlays this slot; nothing rendered here. */}
     </div>
   );
 }

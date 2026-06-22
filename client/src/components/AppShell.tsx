@@ -3,7 +3,6 @@ import TitleBar from "./TitleBar";
 import ChannelSidebar from "./ChannelSidebar";
 import ChatPanel from "./ChatPanel";
 import ScreenShareStage from "./ScreenShareStage";
-import MediaPlayersLayer from "./MediaPlayersLayer";
 import { MessageSearchOverlay } from "./MessageSearchOverlay";
 import MemberSidebar from "./MemberSidebar";
 import DmPanel from "./DmPanel";
@@ -131,7 +130,6 @@ export default function AppShell() {
         <ChatPanel />
         <MemberSidebar />
         <ScreenShareStage voice={voice} />
-        <MediaPlayersLayer />
         <DmPanel />
         {activeServer?.connectionLost && (
           <div className="reconnect-overlay">
