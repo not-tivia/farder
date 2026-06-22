@@ -97,9 +97,9 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
                 style={{ height: player.provider === "spotify" ? 152 : 270 }}
                 src={player.src}
                 title={e.title ?? providerLabel(player.provider)}
-                sandbox="allow-scripts allow-same-origin allow-presentation"
-                referrerPolicy="no-referrer"
-                allow="encrypted-media; fullscreen; picture-in-picture"
+                sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+                referrerPolicy="origin"
+                allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
                 loading="lazy"
                 allowFullScreen
               />
