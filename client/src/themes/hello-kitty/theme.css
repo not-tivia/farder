@@ -2748,6 +2748,22 @@ body {
 }
 .link-embed-state { color: var(--xp-text-secondary); font-size: 0.9em; }
 
+/* --- Opt-in in-app external embed player (YouTube/Spotify iframe) --- */
+.link-embed-player-wrap { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; align-items: flex-start; }
+.embed-player { position: relative; width: 100%; max-width: 480px; }
+.embed-player-frame { width: 100%; border: 0; display: block; border-radius: 4px; background: #000; }
+.embed-player-close {
+  position: absolute; top: 4px; right: 4px; z-index: 1;
+  padding: 2px 6px; font-size: 12px; line-height: 1; cursor: pointer;
+  border: 1px solid var(--xp-border); border-radius: 4px;
+  background: var(--xp-panel-bg); color: var(--xp-text-normal, var(--xp-text-secondary));
+}
+.embed-player-note { color: var(--xp-text-secondary); font-size: 0.8em; margin-top: 2px; }
+.embed-open-external {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--xp-blue); font-size: 0.85em;
+}
+
 /* ── Screenshare preview (Phase B loopback viewer) ──────────────────────── */
 .screenshare-preview-controls { margin: 6px 0; }
 .screenshare-preview-canvas {
