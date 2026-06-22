@@ -3,12 +3,16 @@ import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { useLinkEmbed } from "../hooks/useLinkEmbed";
 import { useProxiedMedia } from "../hooks/useProxiedMedia";
 import { usePip } from "../context/PipContext";
+import EmbedConsentModal from "./EmbedConsentModal";
+import { buildEmbedPlayerSrc, getEmbedConsent, setEmbedConsent, providerLabel } from "../lib/embedPlayer";
 
 export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: boolean }) {
   // Data-saver: don't auto-load; show a chip that loads on click.
   const [loaded, setLoaded] = useState(!dataSaver);
   const state = useLinkEmbed(url, loaded);
   const { openPip } = usePip();
+  const [watching, setWatching] = useState(false);
+  const [showConsent, setShowConsent] = useState(false);
 
   // Derive embed properties safely (embed may be null until state is "ok").
   const e = state.status === "ok" ? state.embed : null;
@@ -53,6 +57,14 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
     openPip({ mediaUrl: inlineMedia.url, title: e.author ?? e.title ?? "Video", mime: inlineMedia.mime });
   };
 
+  // YouTube/Spotify get an opt-in in-app iframe player; null for any other URL.
+  const player = buildEmbedPlayerSrc(e.url);
+  const watchHere = () => {
+    if (!player) return;
+    if (getEmbedConsent(player.provider)) setWatching(true);
+    else setShowConsent(true);
+  };
+
   return (
     <div className={`link-embed link-embed--${e.provider}`}>
       {e.author && <div className="link-embed-author">{e.author}</div>}
@@ -75,7 +87,36 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
       {inlineMedia && !isVideo && mediaBlob && (
         <img className="link-embed-image" src={mediaBlob} alt={e.title ?? ""} />
       )}
-      {!inlineMedia && (thumbBlob || e.kind === "Video" || e.kind === "Audio") && (
+      {!inlineMedia && player && (
+        <div className="link-embed-player-wrap">
+          {watching ? (
+            <div className="embed-player">
+              <button className="embed-player-close" title="Stop watching" onClick={() => setWatching(false)}>&#x2715;</button>
+              <iframe
+                className="embed-player-frame"
+                style={{ height: player.provider === "spotify" ? 152 : 270 }}
+                src={player.src}
+                title={e.title ?? providerLabel(player.provider)}
+                sandbox="allow-scripts allow-same-origin allow-presentation"
+                referrerPolicy="no-referrer"
+                allow="encrypted-media; fullscreen; picture-in-picture"
+                loading="lazy"
+                allowFullScreen
+              />
+              {player.provider === "spotify" && (
+                <div className="embed-player-note">30-second preview in Farder &mdash; open externally for the full track.</div>
+              )}
+            </div>
+          ) : (
+            <div className="link-embed-thumb-wrap">
+              {thumbBlob && <img className="link-embed-thumb" src={thumbBlob} alt={e.title ?? ""} />}
+              <button className="link-embed-play" onClick={watchHere}>&#9654; Watch here</button>
+            </div>
+          )}
+          <button className="embed-open-external" onClick={() => { void openExternal(e.url); }}>Open externally &#8599;</button>
+        </div>
+      )}
+      {!inlineMedia && !player && (thumbBlob || e.kind === "Video" || e.kind === "Audio") && (
         <div className="link-embed-thumb-wrap">
           {/* Thumbnail when it resolved; the Play/Open button renders regardless
               so a failed/absent thumbnail never hides the action (RC#2). */}
@@ -92,6 +133,17 @@ export default function LinkEmbed({ url, dataSaver }: { url: string; dataSaver: 
       )}
       {e.duration_secs != null && (
         <div className="link-embed-duration">{formatDuration(e.duration_secs)}</div>
+      )}
+      {showConsent && player && (
+        <EmbedConsentModal
+          provider={player.provider}
+          onConfirm={(always) => {
+            if (always) setEmbedConsent(player.provider, true);
+            setShowConsent(false);
+            setWatching(true);
+          }}
+          onCancel={() => setShowConsent(false)}
+        />
       )}
     </div>
   );
