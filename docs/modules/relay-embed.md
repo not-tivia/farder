@@ -322,8 +322,9 @@ would hide the viewer's IP from the provider is explicitly deferred (possible v2
 `LinkEmbed` now renders a compact poster (thumbnail + ▶ Play); clicking Play
 opens the video in a floating in-app picture-in-picture pane (see
 `docs/modules/frontend-pip.md`). The video bytes are fetched only when the PiP
-opens (not on card display). Inline images and YouTube/Spotify external-open
-buttons are unchanged.
+opens (not on card display). Inline images are unchanged. (YouTube/Spotify cards
+later gained an opt-in "Watch here" in-app player — see the 2026-06-21 opt-in
+in-app player note above.)
 
 Returns `null` for `Unsupported` and `Unavailable` outcomes (renders nothing).
 
