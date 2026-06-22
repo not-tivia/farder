@@ -2831,3 +2831,43 @@ body {
 .share-popover-go:disabled { opacity: 0.5; cursor: not-allowed; }
 .vcb-live { display: inline-flex; align-items: center; gap: 5px; }
 .vcb-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--xp-live); display: inline-block; }
+/* --- Picture-in-picture floating video panes --- */
+.pip-pane {
+  position: fixed; z-index: 300; display: flex; flex-direction: column;
+  min-width: 220px; min-height: 140px; resize: both; overflow: hidden;
+  border: 1px solid var(--xp-border); border-radius: 8px;
+  background: var(--xp-panel-bg); box-shadow: 0 14px 44px rgba(0,0,0,0.55);
+}
+.pip-pane-head {
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 12px;
+  color: var(--xp-text-normal, var(--xp-text-secondary)); cursor: move; user-select: none;
+}
+.pip-pane-title { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pip-pane-opacity { width: 80px; accent-color: var(--xp-blue); }
+.pip-pane-min, .pip-pane-close {
+  background: none; border: none; color: var(--xp-text-normal, var(--xp-text-secondary));
+  cursor: pointer; font-size: 14px; line-height: 1;
+}
+.pip-pane-video { flex: 1; min-height: 0; width: 100%; background: #000; object-fit: contain; display: block; }
+.pip-pane-state {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  background: #000; color: var(--xp-text-secondary); font-size: 0.9em;
+}
+.pip-pane-mini {
+  position: fixed; z-index: 300; display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; max-width: 220px; border-radius: 20px;
+  background: var(--xp-panel-bg); border: 1px solid var(--xp-border);
+  color: var(--xp-text-normal, var(--xp-text-secondary)); font-size: 12px;
+  cursor: move; user-select: none; box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+}
+/* Compact poster shown in chat instead of an inline video player */
+.link-embed-poster { position: relative; display: inline-block; cursor: pointer; margin-top: 6px; }
+.link-embed-poster-blank {
+  width: 320px; max-width: 100%; height: 180px; border-radius: 4px;
+  background: var(--xp-sidebar, #000);
+}
+.link-embed-poster-play {
+  position: absolute; inset: 0; margin: auto; width: fit-content; height: fit-content;
+  padding: 6px 12px; background: var(--xp-blue); color: #fff; border: none;
+  border-radius: 4px; cursor: pointer;
+}
