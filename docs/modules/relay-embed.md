@@ -306,6 +306,18 @@ Inline-playable media (`EmbedMedia.playable_inline === true`) renders as an
 + ▶ Play button). Non-inline media (YouTube, Spotify) renders a thumbnail with
 an external-open button.
 
+**Update (2026-06-21) — opt-in in-app player:** YouTube and Spotify cards now
+offer a **"Watch here"** button alongside "Open externally". Clicking it loads a
+**sandboxed iframe** inline (YouTube via `youtube-nocookie.com`; Spotify via
+`open.spotify.com/embed`, which is a 30s preview in-app). Privacy-by-default:
+nothing external loads until the click, and the FIRST click per provider shows a
+warning (`EmbedConsentModal`) with an "always allow" checkbox. Consent is stored
+client-side in `localStorage` keys `farder.embedConsent.youtube` /
+`farder.embedConsent.spotify` (no Tauri/relay involvement) and is revocable in
+Settings → Privacy & Data. URL→embed-src parsing and the consent store live in
+`client/src/lib/embedPlayer.ts`. The relay-proxied (Invidious-style) path that
+would hide the viewer's IP from the provider is explicitly deferred (possible v2).
+
 **Update (2026-06-21):** Playable *video* embeds no longer auto-play inline.
 `LinkEmbed` now renders a compact poster (thumbnail + ▶ Play); clicking Play
 opens the video in a floating in-app picture-in-picture pane (see
