@@ -36,6 +36,7 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
       window.removeEventListener("scroll", schedule, true);
       window.removeEventListener("resize", schedule);
       if (raf) cancelAnimationFrame(raf);
+      if (rootRef.current) rootRef.current.style.transform = "";
     };
   }, [player.state, player.hostId, hosts]);
 

@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, useRef, useEffect, useCallback, ReactNode } from "react";
+import { createContext, useContext, useReducer, useRef, useEffect, useCallback, ReactNode, MutableRefObject } from "react";
 import { toast } from "../lib/toast";
 import { getFloatAnchor } from "../lib/floatAnchor";
 
@@ -114,7 +114,7 @@ export function mediaPlayersReducer(state: State, action: Action): State {
 
 interface CtxValue {
   players: MediaPlayerInfo[];
-  hosts: React.MutableRefObject<Map<string, HTMLElement>>;
+  hosts: MutableRefObject<Map<string, HTMLElement>>;
   openPlayer: (input: OpenPlayerInput) => void;
   closePlayer: (id: string) => void;
   focusPlayer: (id: string) => void;
