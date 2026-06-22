@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, useRef, useEffect, useCallback, ReactNode, MutableRefObject } from "react";
+import { createContext, useContext, useReducer, useRef, useEffect, useCallback, ReactNode } from "react";
 import { toast } from "../lib/toast";
 import { getFloatAnchor } from "../lib/floatAnchor";
 
@@ -33,8 +33,7 @@ type Action =
   | { type: "focus"; id: string }
   | { type: "update"; id: string; patch: PlayerPatch }
   | { type: "setState"; id: string; state: PlayerVisualState; autoFloated?: boolean }
-  | { type: "hostVisible"; hostId: string; visible: boolean }
-  | { type: "orphan"; hostId: string };
+  | { type: "hostVisible"; hostId: string; visible: boolean };
 
 export const initialState: State = { players: [], nextZ: BASE_Z, nextId: 1 };
 
@@ -54,7 +53,6 @@ export const initialState: State = { players: [], nextZ: BASE_Z, nextId: 1 };
  *   - hostVisible(host,false) when docked → that player floating + autoFloated=true
  *   - hostVisible(host,true) when floating&autoFloated → docked + autoFloated=false
  *   - hostVisible(host,true) when floating&!autoFloated (popped out) → unchanged
- *   - orphan(host) → that player's hostId=null, state floating (if was docked), autoFloated=false
  */
 export function mediaPlayersReducer(state: State, action: Action): State {
   switch (action.type) {
@@ -100,13 +98,6 @@ export function mediaPlayersReducer(state: State, action: Action): State {
           return p;
         }),
       };
-    case "orphan":
-      return {
-        ...state,
-        players: state.players.map((p) => p.hostId === action.hostId
-          ? { ...p, hostId: null, autoFloated: false, state: p.state === "docked" ? "floating" : p.state }
-          : p),
-      };
     default:
       return state;
   }
@@ -114,14 +105,11 @@ export function mediaPlayersReducer(state: State, action: Action): State {
 
 interface CtxValue {
   players: MediaPlayerInfo[];
-  hosts: MutableRefObject<Map<string, HTMLElement>>;
   openPlayer: (input: OpenPlayerInput) => void;
   closePlayer: (id: string) => void;
   focusPlayer: (id: string) => void;
   updatePlayer: (id: string, patch: PlayerPatch) => void;
   setPlayerState: (id: string, state: PlayerVisualState) => void;
-  registerHost: (hostId: string, el: HTMLElement) => void;
-  unregisterHost: (hostId: string) => void;
   setHostVisible: (hostId: string, visible: boolean) => void;
 }
 
@@ -131,7 +119,6 @@ export function MediaPlayersProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(mediaPlayersReducer, initialState);
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
-  const hosts = useRef<Map<string, HTMLElement>>(new Map());
 
   const openPlayer = useCallback((input: OpenPlayerInput) => {
     const s = stateRef.current;
@@ -143,12 +130,10 @@ export function MediaPlayersProvider({ children }: { children: ReactNode }) {
   const focusPlayer = useCallback((id: string) => dispatch({ type: "focus", id }), []);
   const updatePlayer = useCallback((id: string, patch: PlayerPatch) => dispatch({ type: "update", id, patch }), []);
   const setPlayerState = useCallback((id: string, st: PlayerVisualState) => dispatch({ type: "setState", id, state: st }), []);
-  const registerHost = useCallback((hostId: string, el: HTMLElement) => { hosts.current.set(hostId, el); }, []);
-  const unregisterHost = useCallback((hostId: string) => { hosts.current.delete(hostId); dispatch({ type: "orphan", hostId }); }, []);
   const setHostVisible = useCallback((hostId: string, visible: boolean) => dispatch({ type: "hostVisible", hostId, visible }), []);
 
   return (
-    <Ctx.Provider value={{ players: state.players, hosts, openPlayer, closePlayer, focusPlayer, updatePlayer, setPlayerState, registerHost, unregisterHost, setHostVisible }}>
+    <Ctx.Provider value={{ players: state.players, openPlayer, closePlayer, focusPlayer, updatePlayer, setPlayerState, setHostVisible }}>
       {children}
     </Ctx.Provider>
   );
