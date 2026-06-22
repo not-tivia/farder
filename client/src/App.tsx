@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AppProvider, useApp } from "./context/ServerContext";
-import { PipProvider } from "./context/PipContext";
+import { MediaPlayersProvider } from "./context/MediaPlayersContext";
 import { useServerEvents } from "./hooks/useServerEvents";
 import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
@@ -169,9 +169,9 @@ function AppInner() {
 export default function App() {
   return (
     <AppProvider>
-      <PipProvider>
+      <MediaPlayersProvider>
         <AppInner />
-      </PipProvider>
+      </MediaPlayersProvider>
       <ToastContainer />
     </AppProvider>
   );
