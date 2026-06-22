@@ -1,4 +1,4 @@
-# Floating Picture-in-Picture Video (`PipManager` / `PipPane` / `PipLayer`)
+# Floating Picture-in-Picture Video (`PipContext` / `PipPane` / `PipLayer`)
 
 In-app, draggable, opacity-adjustable floating video players. A playable video
 embed in chat renders a compact poster (▶ Play); clicking it opens a floating
