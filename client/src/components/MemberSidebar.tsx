@@ -72,7 +72,9 @@ export default function MemberSidebar() {
     if (d.raf) cancelAnimationFrame(d.raf);
     resizeRef.current = null;
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
-    setMemberSidebarWidth(clampMemberWidth(d.base + (d.startX - e.clientX)));
+    const final = clampMemberWidth(d.base + (d.startX - e.clientX));
+    setWidth(final);            // keep state in sync with the persisted value (no end-of-drag flicker)
+    setMemberSidebarWidth(final);
   };
   const resetWidth = () => { setWidth(MEMBER_SIDEBAR_DEFAULT); setMemberSidebarWidth(MEMBER_SIDEBAR_DEFAULT); };
 
