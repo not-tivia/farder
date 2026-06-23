@@ -1,0 +1,15 @@
+# Throwaway dep-validation probe for Rich Presence (music source).
+# Confirms the Windows Global System Media Transport Controls (GSMTC) API
+# reads now-playing title/artist via the `windows` crate, and locks the crate
+# version + features for the implementation plan. DELETE when presence ships.
+[package]
+name = "presence-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Detached workspace so it doesn't join the main farder workspace.
+[workspace]
+
+[dependencies]
+windows = { version = "0.58", features = ["Media_Control", "Foundation", "Foundation_Collections"] }
