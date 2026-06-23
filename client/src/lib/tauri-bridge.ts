@@ -794,3 +794,10 @@ export function getDataSaverEmbeds(): Promise<boolean> {
 export function setDataSaverEmbeds(enabled: boolean): Promise<void> {
   return invoke<void>("set_data_saver_embeds", { enabled });
 }
+
+// ── Presence settings ─────────────────────────────────────────────────────────
+
+export const getPresenceEnabled = () => invoke<boolean>("get_presence_enabled");
+export const setPresenceEnabled = (enabled: boolean) => invoke<void>("set_presence_enabled", { enabled });
+export const getPresenceMusic = () => invoke<boolean>("get_presence_music");
+export const setPresenceMusic = (enabled: boolean) => invoke<void>("set_presence_music", { enabled });

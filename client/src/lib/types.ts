@@ -25,6 +25,9 @@ export interface RoleInfo {
   position: number;
 }
 
+export type PresenceKind = "Music" | "Game";
+export interface Presence { kind: PresenceKind; details: string; state?: string | null }
+
 export interface MemberInfo {
   public_key: { bytes: number[] };
   display_name: string;
@@ -33,6 +36,7 @@ export interface MemberInfo {
   timeout_until?: number | null;
   timeout_reason?: string | null;
   profile_hash?: string | null;
+  presence?: Presence | null;
 }
 
 export interface AttachmentInfo {

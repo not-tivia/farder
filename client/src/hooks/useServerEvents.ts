@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
-import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo } from "../lib/types";
+import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
@@ -288,6 +288,15 @@ export function useServerEvents(): void {
       api.getMembers(serverId).then(members => {
         dispatch({ type: "SET_MEMBERS", serverId, payload: members });
       }).catch((err) => console.error("[members] refresh on profile update failed:", err));
+    }).then(safePush);
+
+    listen("server:member_presence_updated", (e) => {
+      const data = e.payload as { server_id: string; public_key: string; presence: Presence | null };
+      dispatch({
+        type: "UPDATE_MEMBER_PRESENCE",
+        serverId: data.server_id,
+        payload: { publicKey: data.public_key, presence: data.presence },
+      });
     }).then(safePush);
 
     listen("server:member_left", (e) => {

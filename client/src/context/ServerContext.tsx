@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 
 export interface PerServerState {
@@ -116,6 +116,7 @@ export type AppAction =
   | { type: "JOIN_VOICE_CHANNEL"; serverId: string; payload: number }
   | { type: "LEAVE_VOICE_CHANNEL"; serverId: string }
   | { type: "MEMBER_TIMEOUT_CHANGED"; serverId: string; payload: { publicKey: string; untilMs: number | null; reason: string | null } }
+  | { type: "UPDATE_MEMBER_PRESENCE"; serverId: string; payload: { publicKey: string; presence: Presence | null } }
   | { type: "YOU_WERE_KICKED"; serverId: string }
   | { type: "YOU_WERE_BANNED"; serverId: string; reason: string | null }
   | { type: "CLEAR_KICKED_BANNED" }
@@ -157,6 +158,15 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       );
       return { ...state, members };
     }
+    case "UPDATE_MEMBER_PRESENCE":
+      return {
+        ...state,
+        members: state.members.map((m) =>
+          publicKeyToString(m.public_key) === action.payload.publicKey
+            ? { ...m, presence: action.payload.presence }
+            : m,
+        ),
+      };
     case "SELECT_CHANNEL": {
       const chMsgs = state.messages[action.payload] ?? [];
       const latestId = chMsgs.length > 0 ? Math.max(...chMsgs.map((m) => m.id)) : 0;
