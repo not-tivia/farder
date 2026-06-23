@@ -1367,6 +1367,76 @@ the key is absent).
 
 ---
 
+## Group 17d — Rich presence settings (`commands.rs`)
+
+These four commands read and write the two presence opt-in flags in
+`~/.farder/settings.json`. They are purely local (no network I/O). All four live
+in `client/src-tauri/src/commands.rs` and are registered in `generate_handler!`
+in `main.rs`. See `docs/modules/presence.md` for the full presence architecture.
+
+---
+
+### `get_presence_enabled() -> bool`
+
+**What it does:** reads `"presence_enabled"` from `~/.farder/settings.json` and
+returns it. This is the master "Share my activity" toggle.
+
+**Returns:** `true` if presence sharing is enabled; `false` otherwise (including
+if the key is absent — default is `false`).
+
+**Side effects:** none (read-only).
+
+**invoke name:** `"get_presence_enabled"` → `getPresenceEnabled()`.
+
+---
+
+### `set_presence_enabled(enabled) -> Result<(), String>`
+
+**What it does:** writes `enabled` to `"presence_enabled"` in
+`~/.farder/settings.json`. Toggling this on/off is reflected on the next
+5-second poller tick: `PresenceManager::compute()` checks this flag and returns
+`None` (triggering a clear) when false.
+
+**Parameters:** `enabled` — boolean.
+
+**Returns:** `Ok(())` on success; errors on file I/O failure.
+
+**Side effects:** disk write to `~/.farder/settings.json`.
+
+**invoke name:** `"set_presence_enabled"` → `setPresenceEnabled(enabled)`.
+
+---
+
+### `get_presence_music() -> bool`
+
+**What it does:** reads `"presence_music"` from `~/.farder/settings.json` and
+returns it. This is the per-source "Share music" toggle.
+
+**Returns:** `true` if music presence is enabled; `false` otherwise (default
+is `false`).
+
+**Side effects:** none (read-only).
+
+**invoke name:** `"get_presence_music"` → `getPresenceMusic()`.
+
+---
+
+### `set_presence_music(enabled) -> Result<(), String>`
+
+**What it does:** writes `enabled` to `"presence_music"` in
+`~/.farder/settings.json`. When set to `false`, `PresenceManager::compute()`
+skips the music source on the next tick.
+
+**Parameters:** `enabled` — boolean.
+
+**Returns:** `Ok(())` on success; errors on file I/O failure.
+
+**Side effects:** disk write to `~/.farder/settings.json`.
+
+**invoke name:** `"set_presence_music"` → `setPresenceMusic(enabled)`.
+
+---
+
 ## Group 18 — Invites and account deletion
 
 ---

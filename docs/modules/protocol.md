@@ -161,6 +161,12 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 |---|---|---|
 | `FetchUrl` | `url: String`, `channel_id: u64` | Ask the server to proxy-fetch a URL and store it as a server-side file; returns the `file_id`. |
 
+### Rich presence
+
+| Variant | Fields | What it asks the server to do |
+|---|---|---|
+| `UpdatePresence` | `presence: Option<Presence>` | Set or clear the sender's ephemeral activity presence. `None` clears it. The server stamps the **sender's own authenticated public key** — the client cannot supply a key. Rate-limited to 2 updates/sec per member. Responds with `Ok` or `Error` (validation failure or rate-limit exceeded). See `docs/modules/presence.md`. |
+
 ### Voice / media
 
 | Variant | Fields | What it asks the server to do |
@@ -237,6 +243,7 @@ frontend listener mapping.
 | `YouWereKicked` | — | Sent only to the kicked client; the client should disconnect. |
 | `YouWereBanned` | `reason: Option<String>` | Sent only to the banned client; the client should disconnect. |
 | `AuditEventCreated` | `event: AuditEvent` | A new entry was appended to the audit log; broadcast to members with audit-log permission. |
+| `MemberPresenceUpdated` | `public_key: PublicKey`, `presence: Option<Presence>` | A member's ephemeral presence changed. `None` means cleared (paused, stopped, toggled off, or disconnected). Always keyed to the member's authenticated public key. Maps to `server:member_presence_updated` in `tauri-bridge.md`. |
 
 ### Channel, category, and role lifecycle events
 
@@ -383,6 +390,7 @@ A server member, used in `Members` response and `MemberJoined` event.
 | `role_ids` | `Vec<u64>` | IDs of all roles currently held. |
 | `timeout_until` | `Option<u64>` | Unix-ms timeout expiry, or `None`. Defaults to `None` via `#[serde(default)]`. |
 | `timeout_reason` | `Option<String>` | Human-readable reason for the timeout. Defaults to `None` via `#[serde(default)]`. |
+| `presence` | `Option<Presence>` | The member's current ephemeral activity (music or game), or `None`. Defaults to `None` via `#[serde(default)]` — backward-compatible. Populated from `ServerState.presences` at the time `GetMembers` is handled so late joiners see the full picture. |
 
 ### `BannedMember`
 
@@ -404,6 +412,22 @@ A voice presence entry, used in `MediaStateResp` and the `MediaJoined`/`MediaLef
 | `public_key` | `PublicKey` | Serialized as `{bytes: [u8; 32]}` in MessagePack. |
 | `display_name` | `String` | Member's display name. |
 | `joined_at` | `u64` | Unix-ms timestamp when the member joined the voice channel. |
+
+### `Presence` and `PresenceKind`
+
+The ephemeral activity payload carried by `UpdatePresence`, `MemberPresenceUpdated`, and `MemberInfo.presence`. Defined in `crates/farder-protocol/src/server.rs`.
+
+**`PresenceKind`** (enum): `Music | Game`.
+
+**`Presence`** (struct):
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | `PresenceKind` | `Music` or `Game`. Determines the display format on the client. |
+| `details` | `String` | Primary text: track title (Music) or game name (Game). Max 128 chars. |
+| `state` | `Option<String>` | Secondary text: artist name (Music) or `None` (Game, for now). Max 128 chars. |
+
+Field-length limits (128 chars each) are enforced server-side; the server returns `ServerResponse::Error` on violation. `Presence` derives `PartialEq` and `Clone` (required by the client's per-server dedup logic).
 
 ### `AuditEvent`
 
@@ -594,7 +618,7 @@ leaks no information about why the relay refused.
 ## Known gotchas
 
 - **`PublicKey` wire form vs. display form:** on the wire (MessagePack / JSON) `PublicKey` is `{"bytes": [32 bytes]}`. When crossing the Tauri webview boundary it must be converted to its `Display` string (`"vk_<hex64>"`) via `.to_string()`. Mixing these two forms is a silent bug — the UI's string equality checks will always fail.
-- **`#[serde(default)]` fields:** several optional fields on wire types (`ban_reason`, `timeout_until`, `timeout_reason`, `file_id` on `ReactionGroup`/`ReactionAdded`/`ReactionRemoved`, `target` and `metadata` on `AuditEvent`, `owner_public_key` on `ServerInfo`) use `#[serde(default)]` so they can be omitted from older serialized frames. Adding a new required field without `#[serde(default)]` will break deserialization of any frames produced by an older server.
+- **`#[serde(default)]` fields:** several optional fields on wire types (`ban_reason`, `timeout_until`, `timeout_reason`, `file_id` on `ReactionGroup`/`ReactionAdded`/`ReactionRemoved`, `target` and `metadata` on `AuditEvent`, `owner_public_key` on `ServerInfo`, `presence` on `MemberInfo`) use `#[serde(default)]` so they can be omitted from older serialized frames. Adding a new required field without `#[serde(default)]` will break deserialization of any frames produced by an older server.
 - **Session ID is `[u8; 16]`:** `session_id` in all `Stream*` events is a 16-byte opaque array, not a UUID string. The `VoiceController` keys its peer map on this value; always compare by byte equality, not string form.
 - **`Option<Option<T>>` in `UpdateChannel`:** `retention_secs` and `category_id` use `Option<Option<T>>` — the outer `None` means "do not change this field", the inner `None` means "clear it to null". This is intentional and necessary for partial-update semantics but is easy to conflate.
 - **`PermissionsChanged` carries no payload:** the event only signals that the client's permissions may have changed. The client must issue a fresh `GetServerInfo` to know what changed.

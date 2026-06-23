@@ -70,9 +70,15 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `TypingStarted` | `server:typing` | `channel_id, public_key` | `TYPING_STARTED` (8s expiry) |
 | `DmCreated` | `server:dm_created` | `channel, participant` | DM list |
 | `MemberProfileUpdated` | `server:member_profile_updated` | `public_key, profile_hash` | `useServerEvents` → `getMembers` refresh (roster re-fetch so new `profile_hash` propagates to all member list consumers) |
+| `MemberPresenceUpdated` | `server:member_presence_updated` | `public_key, presence` | `useServerEvents` → `UPDATE_MEMBER_PRESENCE` (updates `member.presence` in `ServerContext`; `null` clears it) |
 | `MediaJoined` | `server:voice_joined` | `channel_id, public_key, display_name` | `VOICE_JOINED` (roster) |
 | `MediaLeft` | `server:voice_left` | `channel_id, public_key` | `VOICE_LEFT` (roster) |
 | `StreamCallIncoming` / `StreamCallEnded` | — (no-op) | — | DM-call signaling; no UI yet |
+
+**`server:member_presence_updated` payload fields:**
+- `server_id` — the server this event came from (added by `dispatch_event`, common to all `server:*` events).
+- `public_key` — `"vk_<hex64>"` string (the member whose presence changed). Always the authenticated sender's key; the server never accepts a client-supplied key.
+- `presence` — a `Presence` JSON object `{ kind: "Music"|"Game", details: string, state: string|null }`, or `null` to clear. `null` is sent on: explicit clear (`UpdatePresence{None}`), member disconnect, or settings toggled off.
 
 ## Local events (not from the server — emitted directly by Tauri commands)
 
