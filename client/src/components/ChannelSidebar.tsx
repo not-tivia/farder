@@ -13,6 +13,7 @@ import NotificationSettings from "./NotificationSettings";
 import SettingsModal from "./settings/SettingsModal";
 import VoiceControlBar from "./VoiceControlBar";
 import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
+import { getLastChannel, setLastChannel } from "../lib/lastChannel";
 import type { UseVoice } from "../hooks/useVoice";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
@@ -191,6 +192,24 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
   const members = activeServer?.members ?? [];
   const roles = activeServer?.roles ?? [];
 
+  // Auto-open a text channel on connect/switch when none is selected: the last
+  // channel you were in for this server (remembered client-side), else the first
+  // text channel. Guarded so it fires at most once per server activation.
+  const autoSelectedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!serverId || channels.length === 0) return;
+    if (currentChannelId != null) { autoSelectedFor.current = serverId; return; }
+    if (autoSelectedFor.current === serverId) return;
+    const textChannels = channels.filter(
+      (c) => c.channel_type === "Text" || c.channel_type === "Announcement",
+    );
+    if (textChannels.length === 0) return;
+    autoSelectedFor.current = serverId;
+    const remembered = getLastChannel(serverId);
+    const target = textChannels.find((c) => c.id === remembered) ?? textChannels[0];
+    void handleSelectChannel(target);
+  }, [serverId, currentChannelId, channels]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Drag state ────────────────────────────────────────────
   const dragRef = useRef<{ type: "channel" | "category"; id: number; startY: number } | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
@@ -325,6 +344,7 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
   async function handleSelectChannel(channel: ChannelInfo) {
     if (!serverId) return;
     dispatch({ type: "SELECT_CHANNEL", serverId, payload: channel.id });
+    setLastChannel(serverId, channel.id);
     try {
       const msgs = await api.fetchHistory(serverId, channel.id);
       const reversed = msgs.reverse();
