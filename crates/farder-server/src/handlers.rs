@@ -994,6 +994,7 @@ pub fn handle_request(
         ServerRequest::GetMembers => {
             let all_members = members::list_members(conn)?;
             let now_ms = current_unix_ms();
+            let presences = state.presences.read().unwrap();
             let mut member_infos: Vec<MemberInfo> = Vec::new();
             for m in all_members {
                 let role_ids = members::get_member_role_ids(conn, &m.public_key)?;
@@ -1002,6 +1003,7 @@ pub fn handle_request(
                     None => (None, None),
                 };
                 let profile_hash = m.profile_hash.clone();
+                let presence = presences.get(m.public_key.as_bytes()).cloned();
                 member_infos.push(MemberInfo {
                     public_key: m.public_key,
                     display_name: m.display_name,
@@ -1010,6 +1012,7 @@ pub fn handle_request(
                     timeout_until,
                     timeout_reason,
                     profile_hash,
+                    presence,
                 });
             }
             ok(ServerResponse::Members {
@@ -1221,6 +1224,7 @@ pub fn handle_request(
                 timeout_until,
                 timeout_reason,
                 profile_hash: target_record.profile_hash.clone(),
+                presence: state.presences.read().unwrap().get(target_key.as_bytes()).cloned(),
             };
 
             let mut events = Vec::new();
@@ -1252,13 +1256,14 @@ pub fn handle_request(
                     None => (None, None),
                 };
                 let participant = MemberInfo {
-                    public_key: other_key,
+                    public_key: other_key.clone(),
                     display_name: other_record.display_name,
                     joined_at: other_record.joined_at,
                     role_ids,
                     timeout_until,
                     timeout_reason,
                     profile_hash: other_record.profile_hash.clone(),
+                    presence: state.presences.read().unwrap().get(other_key.as_bytes()).cloned(),
                 };
                 let ch_id = ch.id;
                 let last_msgs = messages::fetch_history(conn, ch_id, None, 1, member)?;
@@ -1658,6 +1663,43 @@ pub fn handle_request(
         ServerRequest::GetMemberProfile { member_key } => {
             let profile = members::get_member_profile(conn, &member_key)?;
             ok(ServerResponse::MemberProfile { member_key, profile })
+        }
+
+        // ----------------------------------------------------------------
+        // Rich presence
+        // ----------------------------------------------------------------
+        ServerRequest::UpdatePresence { presence } => {
+            let pk_bytes = *member.as_bytes();
+            // Rate-limit: silently return Ok if the user is over the cap.
+            if !state.presence_limiter.allow(&pk_bytes) {
+                return ok(ServerResponse::Ok);
+            }
+            // Validate field lengths.
+            if let Some(p) = &presence {
+                if p.details.chars().count() > 128 {
+                    return err("presence details too long (max 128 characters)");
+                }
+                if p.state.as_ref().map_or(false, |s| s.chars().count() > 128) {
+                    return err("presence state too long (max 128 characters)");
+                }
+            }
+            {
+                let mut map = state.presences.write().unwrap();
+                match &presence {
+                    Some(p) => { map.insert(pk_bytes, p.clone()); }
+                    None => { map.remove(&pk_bytes); }
+                }
+            }
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::MemberPresenceUpdated {
+                        public_key: member.clone(),
+                        presence,
+                    },
+                }],
+            )
         }
     }
 }
@@ -3456,6 +3498,169 @@ mod tests {
         ).unwrap();
         assert!(matches!(result.response, ServerResponse::Ok));
         assert_eq!(members::get_member_profile(&conn, &kp.public_key()).unwrap().as_deref(), Some(&blob[..]));
+    }
+
+    // -----------------------------------------------------------------------
+    // UpdatePresence tests
+    // -----------------------------------------------------------------------
+
+    fn make_presence() -> farder_protocol::server::Presence {
+        farder_protocol::server::Presence {
+            kind: farder_protocol::server::PresenceKind::Music,
+            details: "Song Title".to_string(),
+            state: Some("Artist Name".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_update_presence_some_stores_and_broadcasts() {
+        let (conn, owner_pk) = setup();
+        let state = fake_state();
+        let presence = make_presence();
+
+        let result = handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::UpdatePresence { presence: Some(presence.clone()) },
+            "", &state,
+        ).unwrap();
+
+        assert!(matches!(result.response, ServerResponse::Ok), "expected Ok");
+        assert_eq!(result.events.len(), 1, "should have one broadcast event");
+
+        match &result.events[0] {
+            BroadcastEvent { target: EventTarget::All, event: ServerEvent::MemberPresenceUpdated { public_key, presence: p } } => {
+                assert_eq!(public_key, &owner_pk, "broadcast pk should be authenticated sender");
+                assert_eq!(p.as_ref(), Some(&presence));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        // Confirm presence is stored in the map under the sender's key.
+        let stored = state.presences.read().unwrap().get(owner_pk.as_bytes()).cloned();
+        assert_eq!(stored, Some(presence));
+    }
+
+    #[test]
+    fn test_update_presence_none_removes_and_broadcasts() {
+        let (conn, owner_pk) = setup();
+        let state = fake_state();
+        let presence = make_presence();
+
+        // First set a presence.
+        handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::UpdatePresence { presence: Some(presence) },
+            "", &state,
+        ).unwrap();
+        assert!(state.presences.read().unwrap().contains_key(owner_pk.as_bytes()));
+
+        // Now clear it.
+        let result = handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::UpdatePresence { presence: None },
+            "", &state,
+        ).unwrap();
+
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            BroadcastEvent { target: EventTarget::All, event: ServerEvent::MemberPresenceUpdated { public_key, presence: p } } => {
+                assert_eq!(public_key, &owner_pk);
+                assert!(p.is_none(), "broadcast presence should be None");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        // Confirm removed from map.
+        assert!(state.presences.read().unwrap().get(owner_pk.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn test_update_presence_details_too_long_returns_error() {
+        let (conn, owner_pk) = setup();
+        let state = fake_state();
+        let presence = farder_protocol::server::Presence {
+            kind: farder_protocol::server::PresenceKind::Game,
+            details: "x".repeat(129),
+            state: None,
+        };
+
+        let result = handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::UpdatePresence { presence: Some(presence) },
+            "", &state,
+        ).unwrap();
+
+        assert!(matches!(result.response, ServerResponse::Error { .. }), "expected Error for overlong details");
+        // Nothing should be stored.
+        assert!(state.presences.read().unwrap().get(owner_pk.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn test_update_presence_state_too_long_returns_error() {
+        let (conn, owner_pk) = setup();
+        let state = fake_state();
+        let presence = farder_protocol::server::Presence {
+            kind: farder_protocol::server::PresenceKind::Music,
+            details: "Track".to_string(),
+            state: Some("a".repeat(129)),
+        };
+
+        let result = handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::UpdatePresence { presence: Some(presence) },
+            "", &state,
+        ).unwrap();
+
+        assert!(matches!(result.response, ServerResponse::Error { .. }), "expected Error for overlong state");
+        assert!(state.presences.read().unwrap().get(owner_pk.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn test_get_members_includes_stored_presence() {
+        let (conn, owner_pk) = setup();
+        let state = fake_state();
+        let presence = make_presence();
+
+        // Store presence for owner.
+        handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::UpdatePresence { presence: Some(presence.clone()) },
+            "", &state,
+        ).unwrap();
+
+        let result = handle_request(
+            &conn, &owner_pk, true,
+            ServerRequest::GetMembers,
+            "", &state,
+        ).unwrap();
+
+        match result.response {
+            ServerResponse::Members { members: infos } => {
+                let me = infos.iter().find(|m| m.public_key == owner_pk).unwrap();
+                assert_eq!(me.presence.as_ref(), Some(&presence), "GetMembers should include stored presence");
+            }
+            other => panic!("expected Members, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update_presence_keyed_to_authenticated_sender() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+        let alice_state = fake_state();
+        let presence = make_presence();
+
+        // Alice sets her presence; it should be stored under Alice's key, NOT Bob's.
+        handle_request(
+            &conn, &alice, false,
+            ServerRequest::UpdatePresence { presence: Some(presence.clone()) },
+            "", &alice_state,
+        ).unwrap();
+
+        assert_eq!(alice_state.presences.read().unwrap().get(alice.as_bytes()).cloned(), Some(presence.clone()));
+        assert!(alice_state.presences.read().unwrap().get(bob.as_bytes()).is_none(), "Bob should have no presence");
+        assert!(alice_state.presences.read().unwrap().get(owner_pk.as_bytes()).is_none(), "owner should have no presence");
     }
 
 }

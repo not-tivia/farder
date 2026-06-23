@@ -638,6 +638,16 @@ pub(crate) async fn cleanup_session(
             subscribers.remove(&pk_bytes);
         }
     }
+    { state.presences.write().unwrap().remove(&pk_bytes); }
+    broadcast_event(
+        state,
+        EventTarget::All,
+        ServerEvent::MemberPresenceUpdated {
+            public_key: public_key.clone(),
+            presence: None,
+        },
+    )
+    .await;
     broadcast_event(
         state,
         EventTarget::All,

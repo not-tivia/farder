@@ -2,10 +2,10 @@ use crate::db;
 use crate::media_stream;
 use anyhow::Result;
 use farder_crypto::identity::PublicKey;
-use farder_protocol::server::ServerEvent;
+use farder_protocol::server::{Presence, ServerEvent};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock as StdRwLock};
 use tokio::sync::{mpsc, RwLock};
 
 /// Where a member's voice datagrams are sent. Direct clients have their own
@@ -87,6 +87,8 @@ pub struct ServerState {
     pub max_file_size: u64,
     pub upload_limiter: RateLimiter,    // 10/min per user
     pub reaction_limiter: RateLimiter,  // 60/min per user
+    pub presences: StdRwLock<HashMap<[u8; 32], Presence>>,
+    pub presence_limiter: RateLimiter,  // 2/sec per user
     pub media: media_stream::MediaStateMap,
 }
 
@@ -106,6 +108,8 @@ impl ServerState {
             max_file_size,
             upload_limiter: RateLimiter::new(10, 60),
             reaction_limiter: RateLimiter::new(60, 60),
+            presences: StdRwLock::new(HashMap::new()),
+            presence_limiter: RateLimiter::new(2, 1),
             media: media_stream::MediaStateMap::new(),
         }
     }
