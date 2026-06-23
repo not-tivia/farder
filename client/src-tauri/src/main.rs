@@ -18,6 +18,7 @@ mod themes;
 mod tls;
 mod translation;
 mod tray;
+mod presence;
 mod profile_sync;
 mod screen_audio;
 #[cfg(windows)]

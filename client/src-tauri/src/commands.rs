@@ -716,6 +716,38 @@ pub fn set_data_saver_embeds(enabled: bool) -> Result<(), String> {
     settings_set("data_saver_embeds", serde_json::json!(enabled))
 }
 
+// ---------------------------------------------------------------------------
+// Presence settings
+// ---------------------------------------------------------------------------
+
+pub(crate) fn read_presence_enabled() -> bool {
+    settings_get("presence_enabled").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+pub(crate) fn read_presence_music() -> bool {
+    settings_get("presence_music").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn get_presence_enabled() -> bool {
+    read_presence_enabled()
+}
+
+#[tauri::command]
+pub fn set_presence_enabled(enabled: bool) -> Result<(), String> {
+    settings_set("presence_enabled", serde_json::json!(enabled))
+}
+
+#[tauri::command]
+pub fn get_presence_music() -> bool {
+    read_presence_music()
+}
+
+#[tauri::command]
+pub fn set_presence_music(enabled: bool) -> Result<(), String> {
+    settings_set("presence_music", serde_json::json!(enabled))
+}
+
 #[tauri::command]
 pub fn get_voice_mode() -> String {
     read_voice_mode()
