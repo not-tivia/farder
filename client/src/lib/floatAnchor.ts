@@ -1,22 +1,32 @@
 // Remembered floating-player placement, persisted client-side. Default anchors
-// to the right of the chat column so a floating player doesn't cover messages.
-// Fails safe (returns the default) on any storage error.
+// just under the chat's search (magnifying-glass) button — the top-far-right
+// corner — so floating players stack downward there without covering messages.
+// Fails safe (returns a viewport default) on any storage error.
 
 export interface FloatAnchor { x: number; y: number; w: number; h: number }
 
 const KEY = "farder.floatAnchor";
 const SIZE = { w: 360, h: 240 };
 
-/** Default = upper-right area of the viewport (right of the chat column). */
+/**
+ * Default = directly under the chat search (🔍) button, right-aligned to it
+ * (top-far-right corner). Falls back to the upper-right of the viewport if the
+ * search button isn't in the DOM (e.g. no channel open).
+ */
 function defaultAnchor(): FloatAnchor {
-  const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
-  return { x: Math.max(16, vw - SIZE.w - 32), y: 88, w: SIZE.w, h: SIZE.h };
+  if (typeof window === "undefined") return { x: 16, y: 88, w: SIZE.w, h: SIZE.h };
+  const el = document.querySelector(".search-toggle");
+  if (el) {
+    const r = el.getBoundingClientRect();
+    return { x: Math.max(16, r.right - SIZE.w), y: r.bottom + 8, w: SIZE.w, h: SIZE.h };
+  }
+  return { x: Math.max(16, window.innerWidth - SIZE.w - 32), y: 88, w: SIZE.w, h: SIZE.h };
 }
 
 /**
  * Read the saved anchor, or the right-of-chat default.
  * Test-notes (verified by inspection):
- *   - nothing saved            → defaultAnchor() (x near right edge, y 88)
+ *   - nothing saved            → defaultAnchor() (under the .search-toggle button, or viewport upper-right fallback)
  *   - saved {x,y,w,h} valid    → that object
  *   - saved malformed/partial  → defaultAnchor() (validation rejects it)
  *   - localStorage throws       → defaultAnchor() (caught)
