@@ -8,7 +8,7 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
   const { focusPlayer, updatePlayer, setPlayerState, closePlayer } = useMediaPlayers();
   const rootRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const dragRef = useRef<{ dx: number; dy: number; raf: number } | null>(null);
+  const dragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number; raf: number } | null>(null);
 
   // Video bytes via the relay; kept loaded in ALL states (incl. minimized) so the
   // element never reloads. iframe needs no proxy.
@@ -21,16 +21,18 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
   const onVolume = () => { if (videoRef.current) setMediaVolume(videoRef.current.volume); };
 
   // Drag (floating/minimized) via pointer capture — release outside the window still ends it.
+  // DELTA-based: we add the pointer's MOVEMENT to the player's current position rather
+  // than mixing getBoundingClientRect (viewport coords) with the applied left/top. This is
+  // immune to coordinate-origin mismatches, so the pane never "teleports" on grab.
   const startDrag = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest("button, input")) return;
-    const root = rootRef.current; if (!root) return;
-    const rect = root.getBoundingClientRect();
-    dragRef.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top, raf: 0 };
+    dragRef.current = { startX: e.clientX, startY: e.clientY, baseX: player.pos.x, baseY: player.pos.y, raf: 0 };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
   const onDragMove = (e: React.PointerEvent) => {
     const d = dragRef.current; if (!d) return;
-    const x = e.clientX - d.dx, y = e.clientY - d.dy;
+    const x = d.baseX + (e.clientX - d.startX);
+    const y = d.baseY + (e.clientY - d.startY);
     if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; updatePlayer(player.id, { pos: { x, y } }); });
   };
   const endDrag = (e: React.PointerEvent) => {
