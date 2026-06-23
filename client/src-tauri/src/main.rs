@@ -63,6 +63,22 @@ fn main() {
                     let _ = tauri::Emitter::emit(&app_handle, "deep-link", url);
                 });
             }
+
+            // Presence poller: samples sources every 5 s and pushes any change
+            // to all connected servers.  Sources are platform-gated — on Windows
+            // the GSMTC music source is active; elsewhere the list is empty and
+            // the manager always returns None.
+            {
+                let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mgr = presence::PresenceManager::new(presence::default_sources());
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let current = mgr.compute();
+                        presence::push_presence_everywhere(&state, current).await;
+                    }
+                });
+            }
             if let Err(e) = tray::setup_tray(&app.handle()) {
                 eprintln!("Failed to setup tray: {}", e);
             }
@@ -233,6 +249,10 @@ fn main() {
             translation::get_model_paths,
             screenshare::start_screenshare_preview,
             screenshare::stop_screenshare_preview,
+            commands::get_presence_enabled,
+            commands::set_presence_enabled,
+            commands::get_presence_music,
+            commands::set_presence_music,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

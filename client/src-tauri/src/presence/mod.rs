@@ -2,6 +2,9 @@
 //! and pushes the computed presence to every connected server with per-server
 //! dedup so unchanged values are never re-sent.
 
+#[cfg(windows)]
+pub mod music_windows;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +60,25 @@ impl PresenceManager {
             }
         }
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Platform source factory
+// ---------------------------------------------------------------------------
+
+/// Build the set of presence sources for the current platform.
+///
+/// On Windows the GSMTC music source is included; on other platforms the list
+/// is empty (presence manager always returns `None`).
+pub fn default_sources() -> Vec<Box<dyn PresenceSource>> {
+    #[cfg(windows)]
+    {
+        vec![Box::new(crate::presence::music_windows::MusicSource)]
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
     }
 }
 
