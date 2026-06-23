@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { getMemberSidebarWidth, setMemberSidebarWidth, clampMemberWidth, MEMBER_SIDEBAR_DEFAULT } from "../lib/memberWidth";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { MemberInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
@@ -53,6 +54,28 @@ export default function MemberSidebar() {
   const [contextMenu, setContextMenu] = useState<{ target: MemberInfo; position: { x: number; y: number } } | null>(null);
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
 
+  // Draggable width (handle on the left edge). Persisted + clamped.
+  const [width, setWidth] = useState(getMemberSidebarWidth());
+  const resizeRef = useRef<{ startX: number; base: number; raf: number } | null>(null);
+  const startResize = (e: React.PointerEvent) => {
+    resizeRef.current = { startX: e.clientX, base: width, raf: 0 };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const onResizeMove = (e: React.PointerEvent) => {
+    const d = resizeRef.current; if (!d) return;
+    // Handle is on the LEFT edge; dragging left (smaller clientX) widens the bar.
+    const next = clampMemberWidth(d.base + (d.startX - e.clientX));
+    if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; setWidth(next); });
+  };
+  const endResize = (e: React.PointerEvent) => {
+    const d = resizeRef.current; if (!d) return;
+    if (d.raf) cancelAnimationFrame(d.raf);
+    resizeRef.current = null;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    setMemberSidebarWidth(clampMemberWidth(d.base + (d.startX - e.clientX)));
+  };
+  const resetWidth = () => { setWidth(MEMBER_SIDEBAR_DEFAULT); setMemberSidebarWidth(MEMBER_SIDEBAR_DEFAULT); };
+
   useEffect(() => {
     if (!cachedOwnPk) {
       api.getPublicKey().then(pk => { cachedOwnPk = pk; setOwnPk(pk); });
@@ -84,7 +107,16 @@ export default function MemberSidebar() {
   });
 
   return (
-    <div className="member-sidebar">
+    <div className="member-sidebar" style={{ width, minWidth: width, position: "relative" }}>
+      <div
+        className="member-sidebar-resize"
+        title="Drag to resize · double-click to reset"
+        onPointerDown={startResize}
+        onPointerMove={onResizeMove}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+        onDoubleClick={resetWidth}
+      />
       <div className="member-sidebar-header">
         Members — {members.length}
       </div>
