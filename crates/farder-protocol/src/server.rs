@@ -26,6 +26,20 @@ pub enum TrackKind {
     ScreenAudio,
 }
 
+/// What a member is doing right now (ephemeral activity). Source-agnostic so a
+/// future game source produces the same shape as the music source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PresenceKind { Music, Game }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Presence {
+    pub kind: PresenceKind,
+    /// Primary line: music = track title; game = game name.
+    pub details: String,
+    /// Secondary line: music = artist; game = None (for now).
+    pub state: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct VoiceMember {
     pub public_key: PublicKey,
@@ -150,6 +164,8 @@ pub struct MemberInfo {
     /// Hex-encoded SHA-256 of the member's canonical serialized SignedProfile.
     #[serde(default)]
     pub profile_hash: Option<String>,
+    #[serde(default)]
+    pub presence: Option<Presence>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -248,6 +264,8 @@ pub enum ServerRequest {
     GetMembers,
     /// Store the sender's signed profile (serialized `farder_crypto::profile::SignedProfile`).
     UpdateProfile { profile: Vec<u8> },
+    /// Set or clear the sender's ephemeral presence (None clears it).
+    UpdatePresence { presence: Option<Presence> },
     /// Fetch a member's stored signed profile blob.
     GetMemberProfile { member_key: PublicKey },
     SetChannelOverride { channel_id: u64, role_id: u64, allow: u64, deny: u64 },
@@ -351,6 +369,8 @@ pub enum ServerEvent {
         #[serde(default)]
         profile_hash: Option<String>,
     },
+    /// A member's ephemeral presence changed (None = cleared/offline).
+    MemberPresenceUpdated { public_key: PublicKey, presence: Option<Presence> },
     YouWereKicked,
     YouWereBanned {
         #[serde(default)]
@@ -787,6 +807,18 @@ mod tests {
             }
             _ => panic!("wrong frame variant"),
         }
+    }
+
+    #[test]
+    fn presence_roundtrips() {
+        let p = Presence { kind: PresenceKind::Music, details: "Song".into(), state: Some("Artist".into()) };
+        let bytes = codec::encode(&p).unwrap();
+        let back: Presence = codec::decode(&bytes).unwrap();
+        assert_eq!(p, back);
+        // None clears
+        let req = ServerRequest::UpdatePresence { presence: None };
+        let b = codec::encode(&req).unwrap();
+        let _back: ServerRequest = codec::decode(&b).unwrap();
     }
 
     #[test]
