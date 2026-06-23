@@ -165,7 +165,7 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 
 | Variant | Fields | What it asks the server to do |
 |---|---|---|
-| `UpdatePresence` | `presence: Option<Presence>` | Set or clear the sender's ephemeral activity presence. `None` clears it. The server stamps the **sender's own authenticated public key** — the client cannot supply a key. Rate-limited to 2 updates/sec per member. Responds with `Ok` or `Error` (validation failure or rate-limit exceeded). See `docs/modules/presence.md`. |
+| `UpdatePresence` | `presence: Option<Presence>` | Set or clear the sender's ephemeral activity presence. `None` clears it. The server stamps the **sender's own authenticated public key** — the client cannot supply a key. Rate-limited to 2 updates/sec per member (excess silently returns `Ok`, no broadcast). Responds with `Ok` on success; `Error` only on validation failure (a field over 128 chars). See `docs/modules/presence.md`. |
 
 ### Voice / media
 

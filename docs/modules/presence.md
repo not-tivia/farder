@@ -71,7 +71,7 @@ On `UpdatePresence` from an authenticated session:
 
 1. The server stamps the sender's own authenticated public key (a client cannot forge another member's presence).
 2. Field lengths are validated (max 128 chars each); excess is rejected with `ServerResponse::Error`.
-3. The rate limiter is checked: `presence_limiter` is `RateLimiter::new(2, 1)` — at most **2 updates per second per member**. Excess is dropped (`ServerResponse::Error`).
+3. The rate limiter is checked: `presence_limiter` is `RateLimiter::new(2, 1)` — at most **2 updates per second per member**. Excess is **silently dropped** (returns `ServerResponse::Ok`, no broadcast) so a chatty client never sees errors.
 4. The map entry is set (Some) or removed (None).
 5. `MemberPresenceUpdated` is broadcast to all members.
 
