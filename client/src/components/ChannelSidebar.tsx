@@ -192,19 +192,19 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
   const members = activeServer?.members ?? [];
   const roles = activeServer?.roles ?? [];
 
-  // Auto-open a text channel on connect/switch when none is selected: the last
-  // channel you were in for this server (remembered client-side), else the first
-  // text channel. Guarded so it fires at most once per server activation.
-  const autoSelectedFor = useRef<string | null>(null);
+  // Auto-open a text channel whenever a server has channels but none is selected
+  // (fresh connect, server switch, or after a disconnect cleared the selection):
+  // the last channel you were in for this server (remembered client-side), else
+  // the first text channel. The `currentChannelId != null` guard makes this fire
+  // exactly once per selection — the SELECT_CHANNEL dispatch is synchronous, so
+  // the effect re-runs with a non-null id and early-returns (no loop).
   useEffect(() => {
     if (!serverId || channels.length === 0) return;
-    if (currentChannelId != null) { autoSelectedFor.current = serverId; return; }
-    if (autoSelectedFor.current === serverId) return;
+    if (currentChannelId != null) return;
     const textChannels = channels.filter(
       (c) => c.channel_type === "Text" || c.channel_type === "Announcement",
     );
     if (textChannels.length === 0) return;
-    autoSelectedFor.current = serverId;
     const remembered = getLastChannel(serverId);
     const target = textChannels.find((c) => c.id === remembered) ?? textChannels[0];
     void handleSelectChannel(target);
