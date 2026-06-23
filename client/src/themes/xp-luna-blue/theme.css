@@ -2671,6 +2671,19 @@ body {
   text-overflow: ellipsis;
   color: var(--xp-text-muted);
 }
+.member-presence {
+  display: block;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--xp-text-muted);
+}
+.profile-presence {
+  font-size: 0.85em;
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+  margin: 2px 0;
+}
 .avatar-change-group {
   display: flex;
   gap: 4px;

@@ -5,6 +5,7 @@ import * as api from "../lib/tauri-bridge";
 import { useApp, useActiveServer } from "../context/ServerContext";
 import { useMemberProfile } from "../hooks/useMemberProfile";
 import { toast } from "../lib/toast";
+import { formatPresence } from "../lib/presence";
 
 interface Props {
   member: MemberInfo;
@@ -123,6 +124,8 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
         <div className="profile-card-body">
           <div className="profile-card-name">{member.display_name}</div>
           <div className="profile-card-id">{pkStr.slice(0, 18)}...</div>
+
+          {member.presence && <div className="profile-presence">{formatPresence(member.presence)}</div>}
 
           {(isSelf || remoteStatus) && (
             <div className="profile-card-status">

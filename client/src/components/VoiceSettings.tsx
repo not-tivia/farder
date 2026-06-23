@@ -18,6 +18,10 @@ import {
   setOutputDevice,
   getDataSaverEmbeds,
   setDataSaverEmbeds,
+  getPresenceEnabled,
+  setPresenceEnabled,
+  getPresenceMusic,
+  setPresenceMusic,
   type AudioDeviceInfo,
   type VoiceInputLevelPayload,
 } from "../lib/tauri-bridge";
@@ -59,6 +63,8 @@ export default function VoiceSettings() {
   const [ytEmbeds, setYtEmbeds] = useState<boolean>(false);
   const [spotifyEmbeds, setSpotifyEmbeds] = useState<boolean>(false);
   const [alwaysFloat, setAlwaysFloatState] = useState<boolean>(false);
+  const [presenceEnabled, setPresenceEnabledState] = useState<boolean>(false);
+  const [presenceMusic, setPresenceMusicState] = useState<boolean>(false);
 
   useEffect(() => {
     void getVoiceMode().then(setMode).catch(() => {});
@@ -69,6 +75,8 @@ export default function VoiceSettings() {
     void getInputDevice().then((n) => setSelectedInput(n ?? SYSTEM_DEFAULT)).catch(() => {});
     void getOutputDevice().then((n) => setSelectedOutput(n ?? SYSTEM_DEFAULT)).catch(() => {});
     void getDataSaverEmbeds().then(setDataSaverEmbedsState).catch(() => {});
+    void getPresenceEnabled().then(setPresenceEnabledState).catch(() => {});
+    void getPresenceMusic().then(setPresenceMusicState).catch(() => {});
     // Live mic level (only flows while a voice call is active).
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -123,6 +131,19 @@ export default function VoiceSettings() {
     setEmbedConsent("spotify", enabled);
   };
   const chooseAlwaysFloat = (v: boolean) => { setAlwaysFloatState(v); setAlwaysFloat(v); };
+  const choosePresenceEnabled = (enabled: boolean) => {
+    setPresenceEnabledState(enabled);
+    void setPresenceEnabled(enabled).catch((e) => console.error("[voice-settings] failed to save presence-enabled:", e));
+    // If master is turned off, also clear music
+    if (!enabled) {
+      setPresenceMusicState(false);
+      void setPresenceMusic(false).catch(() => {});
+    }
+  };
+  const choosePresenceMusic = (enabled: boolean) => {
+    setPresenceMusicState(enabled);
+    void setPresenceMusic(enabled).catch((e) => console.error("[voice-settings] failed to save presence-music:", e));
+  };
 
   useEffect(() => {
     if (!capturing) return;
@@ -315,6 +336,18 @@ export default function VoiceSettings() {
           <input type="checkbox" checked={alwaysFloat} onChange={(e) => chooseAlwaysFloat(e.target.checked)} />
           Always play videos in a floating player (instead of inline)
         </label>
+        <label className="settings-row">
+          <input type="checkbox" checked={presenceEnabled} onChange={(e) => choosePresenceEnabled(e.target.checked)} />
+          Share my activity (let others see what you're doing)
+        </label>
+        <label className="settings-row">
+          <input type="checkbox" checked={presenceMusic} disabled={!presenceEnabled} onChange={(e) => choosePresenceMusic(e.target.checked)} />
+          Share music I'm playing
+        </label>
+        <p className="settings-help">
+          Off by default. When on, members on your servers see your current activity
+          (e.g. the song you're playing). Turn off any time.
+        </p>
       </SettingsSection>
 
       {mode === "PushToTalk" && (

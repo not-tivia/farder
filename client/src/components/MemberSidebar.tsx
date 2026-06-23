@@ -9,6 +9,7 @@ import TimedOutBadge from "./TimedOutBadge";
 import { getActorPermissions, isModerator } from "../lib/permissions";
 import MemberAvatar from "./MemberAvatar";
 import { useMemberProfile } from "../hooks/useMemberProfile";
+import { formatPresence } from "../lib/presence";
 
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
@@ -34,7 +35,9 @@ function MemberRow({ member, serverId, showModBadges, onClick, onContextMenu }: 
       <span className="online-dot" />
       <span className="member-text">
         <span className="member-name">{member.display_name}</span>
-        {status && <span className="member-status">{status}</span>}
+        {member.presence
+          ? <span className="member-presence">{formatPresence(member.presence)}</span>
+          : status && <span className="member-status">{status}</span>}
       </span>
       {showModBadges && (
         <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
