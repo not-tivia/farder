@@ -76,7 +76,7 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
       : { zIndex: player.z }; // docked: position/inset come from .mp-docked CSS
 
   return (
-    <div ref={rootRef} className={cls} style={style} onMouseDown={() => focusPlayer(player.id)}>
+    <div ref={rootRef} className={cls} style={style} onMouseDown={(floating || minimized) ? () => focusPlayer(player.id) : undefined}>
       {floating && (
         <div className="mp-head" onPointerDown={startDrag} onPointerMove={onDragMove} onPointerUp={endDrag} onPointerCancel={endDrag}>
           <span className="mp-title">{player.title}</span>
