@@ -36,8 +36,8 @@ function MemberRow({ member, serverId, showModBadges, onClick, onContextMenu }: 
       <span className="member-text">
         <span className="member-name">{member.display_name}</span>
         {member.presence
-          ? <span className="member-presence">{formatPresence(member.presence)}</span>
-          : status && <span className="member-status">{status}</span>}
+          ? <span className="member-presence" title={formatPresence(member.presence)}>{formatPresence(member.presence)}</span>
+          : status && <span className="member-status" title={status}>{status}</span>}
       </span>
       {showModBadges && (
         <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
