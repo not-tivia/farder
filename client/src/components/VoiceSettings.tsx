@@ -16,8 +16,6 @@ import {
   setInputDevice,
   getOutputDevice,
   setOutputDevice,
-  getDataSaverEmbeds,
-  setDataSaverEmbeds,
   getPresenceEnabled,
   setPresenceEnabled,
   getPresenceMusic,
@@ -25,6 +23,7 @@ import {
   type AudioDeviceInfo,
   type VoiceInputLevelPayload,
 } from "../lib/tauri-bridge";
+import { useDataSaver } from "../context/DataSaverContext";
 import { getEmbedConsent, setEmbedConsent } from "../lib/embedPlayer";
 import { getAlwaysFloat, setAlwaysFloat } from "../lib/floatAnchor";
 import SettingsSection from "./settings/SettingsSection";
@@ -59,12 +58,12 @@ export default function VoiceSettings() {
   // Empty string = system default.
   const [selectedInput, setSelectedInput] = useState<string>(SYSTEM_DEFAULT);
   const [selectedOutput, setSelectedOutput] = useState<string>(SYSTEM_DEFAULT);
-  const [dataSaverEmbeds, setDataSaverEmbedsState] = useState<boolean>(false);
   const [ytEmbeds, setYtEmbeds] = useState<boolean>(false);
   const [spotifyEmbeds, setSpotifyEmbeds] = useState<boolean>(false);
   const [alwaysFloat, setAlwaysFloatState] = useState<boolean>(false);
   const [presenceEnabled, setPresenceEnabledState] = useState<boolean>(false);
   const [presenceMusic, setPresenceMusicState] = useState<boolean>(false);
+  const { settings: ds, update: updateDs } = useDataSaver();
 
   useEffect(() => {
     void getVoiceMode().then(setMode).catch(() => {});
@@ -74,7 +73,6 @@ export default function VoiceSettings() {
     void listOutputDevices().then(setOutputDevices).catch(() => {});
     void getInputDevice().then((n) => setSelectedInput(n ?? SYSTEM_DEFAULT)).catch(() => {});
     void getOutputDevice().then((n) => setSelectedOutput(n ?? SYSTEM_DEFAULT)).catch(() => {});
-    void getDataSaverEmbeds().then(setDataSaverEmbedsState).catch(() => {});
     void getPresenceEnabled().then(setPresenceEnabledState).catch(() => {});
     void getPresenceMusic().then(setPresenceMusicState).catch(() => {});
     // Live mic level (only flows while a voice call is active).
@@ -118,10 +116,6 @@ export default function VoiceSettings() {
     void setVoiceSensitivity(v).catch((e) => console.error("[voice-settings] failed to save sensitivity:", e));
   };
 
-  const chooseDataSaverEmbeds = (enabled: boolean) => {
-    setDataSaverEmbedsState(enabled);
-    void setDataSaverEmbeds(enabled).catch((e) => console.error("[voice-settings] failed to save data-saver setting:", e));
-  };
   const chooseYtEmbeds = (enabled: boolean) => {
     setYtEmbeds(enabled);
     setEmbedConsent("youtube", enabled);
@@ -301,15 +295,57 @@ export default function VoiceSettings() {
         <label className="settings-row">
           <input
             type="checkbox"
-            checked={dataSaverEmbeds}
-            onChange={(e) => chooseDataSaverEmbeds(e.target.checked)}
+            checked={ds.enabled}
+            onChange={(e) => updateDs({ enabled: e.target.checked })}
           />
-          Data saver: load link previews only when clicked
+          Data Saver
         </label>
+        <div style={{ marginLeft: 22, opacity: ds.enabled ? 1 : 0.5 }}>
+          <label className="settings-row">
+            <input
+              type="checkbox"
+              checked={ds.gateImages}
+              disabled={!ds.enabled}
+              onChange={(e) => updateDs({ gateImages: e.target.checked })}
+            />
+            Don&rsquo;t auto-load large images
+          </label>
+          <label className="settings-row">
+            <input
+              type="checkbox"
+              checked={ds.clickToLoadEmbeds}
+              disabled={!ds.enabled}
+              onChange={(e) => updateDs({ clickToLoadEmbeds: e.target.checked })}
+            />
+            Click-to-load link previews
+          </label>
+          <label className="settings-row">
+            <input
+              type="checkbox"
+              checked={ds.freezeAvatars}
+              disabled={!ds.enabled}
+              onChange={(e) => updateDs({ freezeAvatars: e.target.checked })}
+            />
+            Freeze animated avatars
+          </label>
+          <label className="settings-row">
+            Auto-load media up to&nbsp;
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={ds.thresholdMB}
+              disabled={!ds.enabled || !ds.gateImages}
+              onChange={(e) => updateDs({ thresholdMB: Math.max(0, parseFloat(e.target.value) || 0) })}
+              style={{ width: 56 }}
+            />
+            &nbsp;MB
+          </label>
+        </div>
         <p className="settings-help">
-          When enabled, link preview cards show a "Load preview" button instead of
-          loading automatically. Reduces network requests and hides your IP from
-          preview sources until you choose to load them.
+          When on, large images show a &ldquo;Load image&rdquo; button instead of
+          downloading automatically, link previews wait for a click, and animated
+          avatars are shown as a still frame. Small files load normally.
         </p>
         <label className="settings-row">
           <input
