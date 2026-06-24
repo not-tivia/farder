@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import type { MemberInfo, RoleInfo } from "../lib/types";
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { useApp, useActiveServer } from "../context/ServerContext";
 import { useMemberProfile } from "../hooks/useMemberProfile";
@@ -28,7 +28,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   const joinDate = new Date(member.joined_at * 1000).toLocaleDateString([], {
     year: "numeric", month: "short", day: "numeric"
   });
-  const initial = (member.display_name || "?").charAt(0).toUpperCase();
+  const initial = memberDisplayName(member.display_name).charAt(0).toUpperCase();
 
   const defaultBannerColor = `hsl(${Math.abs(pkStr.split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % 360}, 50%, 40%)`;
 
@@ -140,7 +140,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
 
         {/* Info */}
         <div className="profile-card-body">
-          <div className="profile-card-name">{member.display_name}</div>
+          <div className="profile-card-name">{memberDisplayName(member.display_name)}</div>
           <div className="profile-card-id">{pkStr.slice(0, 18)}...</div>
 
           {member.presence && <div className="profile-presence">{formatPresence(member.presence)}</div>}

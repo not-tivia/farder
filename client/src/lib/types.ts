@@ -108,6 +108,17 @@ export function publicKeyToString(pk: { bytes: number[] }): string {
   return "vk_" + hex;
 }
 
+/**
+ * Friendly display name for a member. The server auto-assigns "vk_<8 hex>" to
+ * anyone who hasn't set a name; show a human-friendly placeholder for those
+ * (and for empty names) instead of the raw key.
+ */
+export function memberDisplayName(name: string | null | undefined): string {
+  const n = (name ?? "").trim();
+  if (!n || /^vk_[0-9a-f]{8}$/i.test(n)) return "Anonymous";
+  return n;
+}
+
 export function isDeletedUser(pk: { bytes: number[] }): boolean {
   return pk.bytes.every((b) => b === 0);
 }

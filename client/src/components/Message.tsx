@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import type { MessageInfo, AttachmentInfo } from "../lib/types";
-import { publicKeyToString, isDeletedUser } from "../lib/types";
+import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
 import * as bookApi from "../lib/book/client";
@@ -217,7 +217,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const pkStr = publicKeyToString(message.author);
   const displayName = deleted
     ? "Deleted User"
-    : (memberNames[pkStr] ?? pkStr.slice(0, 16) + "…");
+    : (memberNames[pkStr] != null ? memberDisplayName(memberNames[pkStr]) : pkStr.slice(0, 16) + "…");
   const color = deleted ? "#999" : authorColor(pkStr);
   const member = deleted ? null : (activeServer?.members.find((m) => publicKeyToString(m.public_key) === pkStr) ?? null);
   const roles = activeServer?.roles ?? [];

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { getMemberSidebarWidth, setMemberSidebarWidth, clampMemberWidth, MEMBER_SIDEBAR_DEFAULT } from "../lib/memberWidth";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { MemberInfo } from "../lib/types";
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
@@ -31,11 +31,11 @@ function MemberRow({ member, serverId, showModBadges, onClick, onContextMenu }: 
         serverId={serverId}
         publicKey={pkStr}
         profileHash={member.profile_hash}
-        name={member.display_name}
+        name={memberDisplayName(member.display_name)}
       />
       <span className="online-dot" />
       <span className="member-text">
-        <span className="member-name">{member.display_name}</span>
+        <span className="member-name">{memberDisplayName(member.display_name)}</span>
         {member.presence
           ? <span className="member-presence" title={formatPresence(member.presence)}>{formatPresence(member.presence)}</span>
           : status && <span className="member-status" title={status}>{status}</span>}
