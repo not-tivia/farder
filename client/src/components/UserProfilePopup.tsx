@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
+import { createPortal } from "react-dom";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
@@ -72,12 +73,18 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     const el = cardRef.current;
     if (!el) return;
     const M = 8;
+    // Use the layout viewport (excludes any scrollbar and is immune to the
+    // window.innerWidth quirks some webviews report).
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = document.documentElement.clientHeight || window.innerHeight;
     const w = el.offsetWidth;
     const h = el.offsetHeight;
-    let left = position.x;
-    if (left + w + M > window.innerWidth) left = position.x - w; // flip leftward
-    left = Math.max(M, Math.min(left, window.innerWidth - w - M));
-    const top = Math.max(M, Math.min(position.y, window.innerHeight - h - M));
+    // The member list lives at the right edge, so prefer opening the card to the
+    // LEFT of the click. Only open rightward when there isn't room on the left.
+    let left = position.x - w;
+    if (left < M) left = position.x;
+    left = Math.max(M, Math.min(left, vw - w - M));
+    const top = Math.max(M, Math.min(position.y, vh - h - M));
     setPos({ left, top });
   }, [position.x, position.y]);
 
@@ -88,7 +95,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     zIndex: 1000,
   };
 
-  return (
+  return createPortal(
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={onClose} />
       <div ref={cardRef} className="profile-card" style={style}>
@@ -288,6 +295,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
           )}
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
