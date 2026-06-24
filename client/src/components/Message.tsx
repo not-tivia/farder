@@ -17,7 +17,6 @@ import { TranslatedRow } from "./TranslatedRow";
 import { TranslationDownloadDialog } from "./TranslationDownloadDialog";
 import { translateMessage, subscribe as subscribeTranslation, dismiss as dismissTranslation } from "../lib/translation/store";
 import { getTranslationSettings } from "../lib/translation/api";
-import { getDataSaverEmbeds } from "../lib/tauri-bridge";
 import InviteEmbed from "./InviteEmbed";
 import { parseInviteLink } from "../lib/invite";
 import LinkEmbed from "./LinkEmbed";
@@ -179,12 +178,6 @@ export default function Message({ message, memberNames, grouped = false, serverI
     default_target: string;
     user_language_overrides: Record<string, string>;
   } | null>(null);
-
-  const [dataSaver, setDataSaver] = useState(false);
-
-  useEffect(() => {
-    getDataSaverEmbeds().then(setDataSaver).catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (!cachedOwnPk) {
@@ -491,7 +484,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
         const urls = detectEmbedUrls(message.content);
         return urls.length > 0 ? (
           <div className="link-embeds">
-            {urls.map((u, i) => <LinkEmbed key={i} url={u} dataSaver={dataSaver} />)}
+            {urls.map((u, i) => <LinkEmbed key={i} url={u} />)}
           </div>
         ) : null;
       })()}
