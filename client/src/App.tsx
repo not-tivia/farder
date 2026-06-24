@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AppProvider, useApp } from "./context/ServerContext";
 import { MediaPlayersProvider } from "./context/MediaPlayersContext";
+import { DataSaverProvider } from "./context/DataSaverContext";
 import { useServerEvents } from "./hooks/useServerEvents";
 import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
@@ -170,7 +171,9 @@ export default function App() {
   return (
     <AppProvider>
       <MediaPlayersProvider>
-        <AppInner />
+        <DataSaverProvider>
+          <AppInner />
+        </DataSaverProvider>
       </MediaPlayersProvider>
       <ToastContainer />
     </AppProvider>
