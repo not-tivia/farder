@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
@@ -63,17 +63,35 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     setEditingBio(false);
   }
 
+  // Position the card on-screen: open it leftward when the click is near the
+  // right edge (the member list sits at the far right, so opening rightward would
+  // spill off-screen), and clamp to the card's real measured size with a margin.
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number }>({ left: position.x, top: position.y });
+  useLayoutEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const M = 8;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    let left = position.x;
+    if (left + w + M > window.innerWidth) left = position.x - w; // flip leftward
+    left = Math.max(M, Math.min(left, window.innerWidth - w - M));
+    const top = Math.max(M, Math.min(position.y, window.innerHeight - h - M));
+    setPos({ left, top });
+  }, [position.x, position.y]);
+
   const style: React.CSSProperties = {
     position: "fixed",
-    top: Math.min(position.y, window.innerHeight - 380),
-    left: Math.min(position.x, window.innerWidth - 300),
+    top: pos.top,
+    left: pos.left,
     zIndex: 1000,
   };
 
   return (
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={onClose} />
-      <div className="profile-card" style={style}>
+      <div ref={cardRef} className="profile-card" style={style}>
         {/* Banner */}
         <div className="profile-card-banner" style={{ background: bannerColor }} />
 
