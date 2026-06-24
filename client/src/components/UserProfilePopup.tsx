@@ -68,7 +68,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   // right edge (the member list sits at the far right, so opening rightward would
   // spill off-screen), and clamp to the card's real measured size with a margin.
   const cardRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number }>({ left: position.x, top: position.y });
+  const [pos, setPos] = useState<{ right: number; top: number }>({ right: 8, top: position.y });
   useLayoutEffect(() => {
     const el = cardRef.current;
     if (!el) return;
@@ -77,21 +77,22 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     // window.innerWidth quirks some webviews report).
     const vw = document.documentElement.clientWidth || window.innerWidth;
     const vh = document.documentElement.clientHeight || window.innerHeight;
-    const w = el.offsetWidth;
     const h = el.offsetHeight;
-    // The member list lives at the right edge, so prefer opening the card to the
-    // LEFT of the click. Only open rightward when there isn't room on the left.
-    let left = position.x - w;
-    if (left < M) left = position.x;
-    left = Math.max(M, Math.min(left, vw - w - M));
+    // Pin the card's RIGHT edge at the click point and let it grow leftward
+    // (the member list lives at the right edge). Anchoring the right edge —
+    // instead of deriving a left from the measured width — means the card can
+    // never spill off the right edge of the window, no matter how its width
+    // changes after async profile content loads or how big the window is.
+    const right = Math.max(M, vw - position.x);
     const top = Math.max(M, Math.min(position.y, vh - h - M));
-    setPos({ left, top });
+    setPos({ right, top });
   }, [position.x, position.y]);
 
   const style: React.CSSProperties = {
     position: "fixed",
     top: pos.top,
-    left: pos.left,
+    right: pos.right,
+    left: "auto",
     zIndex: 1000,
   };
 
