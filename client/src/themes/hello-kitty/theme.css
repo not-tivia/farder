@@ -1507,6 +1507,7 @@ body {
 /* ── Profile Card (Discord-style mini profile) ──────────── */
 .profile-card {
   width: 300px;
+  max-width: calc(100vw - 16px);
   background: var(--xp-window-bg);
   border: 2px solid var(--xp-blue);
   border-radius: 6px;
