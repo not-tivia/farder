@@ -22,6 +22,8 @@ import { parseInviteLink } from "../lib/invite";
 import LinkEmbed from "./LinkEmbed";
 import { detectEmbedUrls } from "../lib/linkEmbed";
 import MemberAvatar from "./MemberAvatar";
+import { useDataSaver } from "../context/DataSaverContext";
+import { imageIsGated } from "../lib/dataSaver";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
@@ -644,9 +646,17 @@ function AttachmentDisplay({
   const [menu, setMenu] = useState<{ x: number; y: number; isRightClick: boolean } | null>(null);
   const isImage = attachment.mime_type.startsWith("image/");
   const isAudio = attachment.mime_type.startsWith("audio/");
+  const { settings: ds } = useDataSaver();
+  const [userLoaded, setUserLoaded] = useState(false);
+  const gated =
+    isImage &&
+    !userLoaded &&
+    !imageCache.has(attachment.file_id) &&
+    imageIsGated(ds, attachment.size);
 
   useEffect(() => {
     if (!isImage && !isAudio) return;
+    if (gated) return;
     const cached = imageCache.get(attachment.file_id);
     if (cached) {
       setImageUrl(cached);
@@ -659,7 +669,7 @@ function AttachmentDisplay({
         setImageUrl(r.data_url);
       }
     }).catch(() => {}).finally(() => setLoading(false));
-  }, [attachment.file_id, isImage, isAudio, serverId]);
+  }, [attachment.file_id, isImage, isAudio, serverId, gated]);
 
   async function handleSaveToBook() {
     const defaultName = (attachment.name ?? "").replace(/\.[^.]+$/, "");
@@ -690,6 +700,31 @@ function AttachmentDisplay({
     const urlMatch = messageContent.match(/https?:\/\/[^\s]+/);
     if (urlMatch) navigator.clipboard.writeText(urlMatch[0]);
     setMenu(null);
+  }
+
+  if (isImage && gated) {
+    // Reserve the image's real footprint so loading doesn't shift layout,
+    // capped to the same 400x300 max the loaded <img> uses.
+    const maxW = 400, maxH = 300;
+    let w = attachment.width ?? 0;
+    let h = attachment.height ?? 0;
+    if (w > 0 && h > 0) {
+      const scale = Math.min(1, maxW / w, maxH / h);
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+    } else {
+      w = 200; h = 150;
+    }
+    return (
+      <div
+        className="attachment-image"
+        style={{ width: w, height: h, display: "flex", alignItems: "center", justifyContent: "center" }}
+      >
+        <button className="link-embed-chip" onClick={() => setUserLoaded(true)}>
+          &#11015; Load image ({formatSize(attachment.size)})
+        </button>
+      </div>
+    );
   }
 
   if ((isImage || isAudio) && loading) {
