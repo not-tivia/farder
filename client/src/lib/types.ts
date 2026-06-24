@@ -115,7 +115,7 @@ export function publicKeyToString(pk: { bytes: number[] }): string {
  */
 export function memberDisplayName(name: string | null | undefined): string {
   const n = (name ?? "").trim();
-  if (!n || /^vk_[0-9a-f]{8}$/i.test(n)) return "Anonymous";
+  if (!n || /^vk_[0-9a-f]{8}$/.test(n)) return "Anonymous"; // server emits lowercase hex
   return n;
 }
 
