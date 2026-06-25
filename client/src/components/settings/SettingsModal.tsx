@@ -3,18 +3,20 @@ import AppearanceSettings from "../AppearanceSettings";
 import GifSearchSettings from "../GifSearchSettings";
 import { TranslationSettingsTab } from "../TranslationSettingsTab";
 import VoiceSettings from "../VoiceSettings";
+import PrivacyDataSettings from "../PrivacyDataSettings";
 
 interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "gif" | "translation" | "voice";
+type SectionId = "appearance" | "gif" | "translation" | "voice" | "privacy";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "gif", label: "GIF Search" },
   { id: "translation", label: "Translation" },
   { id: "voice", label: "Voice" },
+  { id: "privacy", label: "Privacy & Data" },
 ];
 
 export default function SettingsModal({ onClose }: Props) {
@@ -58,6 +60,7 @@ export default function SettingsModal({ onClose }: Props) {
             {active === "gif" && <GifSearchSettings />}
             {active === "translation" && <TranslationSettingsTab />}
             {active === "voice" && <VoiceSettings />}
+            {active === "privacy" && <PrivacyDataSettings />}
           </section>
         </div>
       </div>
