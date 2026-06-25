@@ -112,6 +112,34 @@ fn record_pushed(server_id: &str, presence: Option<Presence>) {
 }
 
 // ---------------------------------------------------------------------------
+// Give-up guard (mirrors profile_sync.rs)
+// ---------------------------------------------------------------------------
+
+// Servers whose connection DROPPED while we pushed presence. A pre-presence
+// server cannot decode UpdatePresence and closes the WHOLE connection; because
+// the poller re-pushes every 5s while music plays, that would lock the app into
+// a disconnect/reconnect loop (the same class of bug as the profile-sync
+// "disco-ball"). After one transport-level push failure we stop auto-pushing
+// presence to that server for the rest of the session; an app restart, or a
+// server upgrade + restart, clears it.
+static SUPPRESSED: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn suppressed() -> &'static Mutex<std::collections::HashSet<String>> {
+    SUPPRESSED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+fn is_suppressed(server_id: &str) -> bool {
+    suppressed().lock().map(|s| s.contains(server_id)).unwrap_or(false)
+}
+
+fn suppress(server_id: &str) {
+    if let Ok(mut s) = suppressed().lock() {
+        s.insert(server_id.to_string());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Push
 // ---------------------------------------------------------------------------
 
@@ -119,17 +147,27 @@ fn record_pushed(server_id: &str, presence: Option<Presence>) {
 ///
 /// Dedup: if `presence` is identical to the last successfully pushed value for
 /// a given server, the request is skipped. This relies on `Presence: PartialEq`
-/// (derived in farder-protocol Task 1). On transport error the dedup entry is
-/// left unchanged, so the next poll tick retries.
+/// (derived in farder-protocol Task 1).
+///
+/// Failure handling: a transport error (dropped connection) suppresses presence
+/// to that server for the rest of the session (see SUPPRESSED) so an old,
+/// pre-presence server cannot trigger a reconnect storm. A non-Ok response (the
+/// server is alive but rejected the push) is logged but not suppressed, and the
+/// dedup entry is left unset so the next tick retries.
 pub async fn push_presence_everywhere(state: &Arc<AppState>, presence: Option<Presence>) {
     let ids: Vec<String> = state.servers.lock().unwrap().keys().cloned().collect();
     for id in ids {
+        // Skip servers we've given up on this session (see SUPPRESSED).
+        if is_suppressed(&id) {
+            continue;
+        }
         // Dedup: skip if the server already has this presence value.
         // Comparing Option<Presence> via PartialEq handles None == None and
         // Some(a) == Some(b) correctly.
         if last_pushed(&id) == presence {
             continue;
         }
+        eprintln!("[presence] -> {}: {:?}", id, presence);
         match crate::bridge::send_request(state, &id, ServerRequest::UpdatePresence {
             presence: presence.clone(),
         })
@@ -139,9 +177,20 @@ pub async fn push_presence_everywhere(state: &Arc<AppState>, presence: Option<Pr
                 // Record only on confirmed success so a transport failure retries.
                 record_pushed(&id, presence.clone());
             }
-            _ => {
-                // Transport failure or non-Ok response: leave dedup entry unset
-                // so the next tick retries the push.
+            Ok(other) => {
+                // Server is alive but did not return Ok (e.g. a validation
+                // rejection). Don't suppress; surface it so it isn't silent.
+                eprintln!("[presence] push to {} rejected: {:?}", id, other);
+            }
+            Err(e) => {
+                // Transport failure / dropped connection — the reconnect-storm
+                // trigger. Give up on this server for the session.
+                suppress(&id);
+                eprintln!(
+                    "[presence] push to {} dropped the connection ({}); the server may be \
+                     running an older Farder version — presence to it is paused until the app restarts",
+                    id, e
+                );
             }
         }
     }

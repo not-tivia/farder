@@ -292,6 +292,7 @@ export function useServerEvents(): void {
 
     listen("server:member_presence_updated", (e) => {
       const data = e.payload as { server_id: string; public_key: string; presence: Presence | null };
+      console.log("[presence] member_presence_updated", data.public_key, data.presence);
       dispatch({
         type: "UPDATE_MEMBER_PRESENCE",
         serverId: data.server_id,

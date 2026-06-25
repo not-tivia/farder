@@ -18,7 +18,29 @@ pub struct MusicSource;
 
 impl crate::presence::PresenceSource for MusicSource {
     fn current(&self) -> Option<Presence> {
-        read_now_playing().ok().flatten()
+        let p = read_now_playing().ok().flatten();
+        log_change(&p);
+        p
+    }
+}
+
+/// Log GSMTC detection only when it CHANGES (song start/stop/switch), so a
+/// verifier can see what the music source is reading without a line every 5s.
+fn log_change(p: &Option<Presence>) {
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<String>> = Mutex::new(None);
+    let key = p.as_ref().map(|p| match &p.state {
+        Some(a) => format!("{} \u{2014} {}", p.details, a),
+        None => p.details.clone(),
+    });
+    if let Ok(mut last) = LAST.lock() {
+        if *last != key {
+            match &key {
+                Some(k) => eprintln!("[presence] GSMTC detected: {}", k),
+                None => eprintln!("[presence] GSMTC: nothing playing"),
+            }
+            *last = key;
+        }
     }
 }
 

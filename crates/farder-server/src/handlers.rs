@@ -1672,6 +1672,7 @@ pub fn handle_request(
             let pk_bytes = *member.as_bytes();
             // Rate-limit: silently return Ok if the user is over the cap.
             if !state.presence_limiter.allow(&pk_bytes) {
+                tracing::debug!(member = %member, "presence update rate-limited (dropped)");
                 return ok(ServerResponse::Ok);
             }
             // Validate field lengths.
@@ -1690,6 +1691,7 @@ pub fn handle_request(
                     None => { map.remove(&pk_bytes); }
                 }
             }
+            tracing::info!(member = %member, presence = ?presence, "presence updated; broadcasting");
             ok_with(
                 ServerResponse::Ok,
                 vec![BroadcastEvent {
