@@ -11,9 +11,10 @@ import { useDataSaver } from "../context/DataSaverContext";
 
 export default function LinkEmbed({ url }: { url: string }) {
   const { settings } = useDataSaver();
-  // Captured once on mount (matches prior behavior); newly-rendered embeds
-  // pick up a toggled setting, already-mounted ones keep their state.
-  const [loaded, setLoaded] = useState(!settings.clickToLoadEmbeds);
+  // Gate only when the master Data Saver switch is on AND embed-gating is on.
+  // Captured once on mount; newly-rendered embeds pick up a toggled setting,
+  // already-mounted ones keep their state.
+  const [loaded, setLoaded] = useState(!(settings.enabled && settings.clickToLoadEmbeds));
   const state = useLinkEmbed(url, loaded);
   const { openPlayer } = useMediaPlayers();
   const [showConsent, setShowConsent] = useState(false);
