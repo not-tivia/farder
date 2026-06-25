@@ -258,4 +258,15 @@ mod tests {
         record_pushed(sid, None);
         assert_eq!(last_pushed(sid), None);
     }
+
+    #[test]
+    fn suppress_marks_server_for_session() {
+        // The give-up guard: once suppressed, a server stays suppressed (so the
+        // 5s poller stops re-pushing and can't drive a reconnect storm).
+        // (SUPPRESSED is global; use a unique server ID to avoid cross-test bleed.)
+        let sid = "test-suppress-server-1";
+        assert!(!is_suppressed(sid));
+        suppress(sid);
+        assert!(is_suppressed(sid));
+    }
 }
