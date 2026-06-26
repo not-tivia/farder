@@ -1730,11 +1730,17 @@ pub fn handle_request(
                 }
             }
 
-            // 4. Persist the event (source of truth) + derive the message row.
-            crate::event_ingest::store_event(conn, &event)
-                .map_err(|e| anyhow::anyhow!("failed to store event: {}", e))?;
-            let derived_id = crate::event_ingest::derive_message_row(conn, &event)
-                .map_err(|e| anyhow::anyhow!("failed to derive message: {}", e))?;
+            // 4. Persist the event (source of truth) + derive the message row — atomically.
+            let derived_id = {
+                let tx = conn.unchecked_transaction()
+                    .map_err(|e| anyhow::anyhow!("failed to begin tx: {}", e))?;
+                crate::event_ingest::store_event(&tx, &event)
+                    .map_err(|e| anyhow::anyhow!("failed to store event: {}", e))?;
+                let id = crate::event_ingest::derive_message_row(&tx, &event)
+                    .map_err(|e| anyhow::anyhow!("failed to derive message: {}", e))?;
+                tx.commit().map_err(|e| anyhow::anyhow!("failed to commit event: {}", e))?;
+                id
+            };
 
             // 5. Commit the advanced authorization state in memory.
             let timestamp = event.core.timestamp;

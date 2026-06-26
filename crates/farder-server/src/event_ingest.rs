@@ -108,6 +108,34 @@ pub fn derive_message_row(conn: &Connection, event: &Event) -> Result<Option<u64
     Ok(Some(id))
 }
 
+/// Repair drift: derive a `messages` row for any stored `MessagePosted` event
+/// whose `event_hash` has no corresponding `messages` row (e.g. a crash between
+/// store_event and derive_message_row). The event log is the source of truth.
+/// Returns the number of rows repaired.
+pub fn reconcile_messages(conn: &Connection) -> Result<usize> {
+    // Collect message-events that lack a derived row.
+    let missing: Vec<Vec<u8>> = {
+        let mut stmt = conn.prepare(
+            "SELECT e.event_body FROM events e \
+             LEFT JOIN messages m ON m.event_hash = e.event_hash \
+             WHERE e.payload_type = 'MessagePosted' AND m.event_hash IS NULL \
+             ORDER BY e.accept_seq ASC",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut v = Vec::new();
+        for row in rows { v.push(row?); }
+        v
+    };
+    let mut repaired = 0;
+    for body in missing {
+        let event: Event = Event::from_bytes(&body).context("decode event for reconcile")?;
+        if derive_message_row(conn, &event)?.is_some() {
+            repaired += 1;
+        }
+    }
+    Ok(repaired)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +177,30 @@ mod tests {
 
         // Duplicate event hash is rejected (UNIQUE).
         assert!(store_event(&conn, &msg).is_err());
+    }
+
+    #[test]
+    fn reconcile_derives_missing_message_rows() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        save_genesis(&conn, &g).unwrap();
+        let da = Event::next(&dev, owner.public_key(), g.server_id(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &dev.public_key(), 1) });
+        let msg = Event::next(&dev, owner.public_key(), g.server_id(), Some(&da), 1, 2,
+            EP::MessagePosted { channel_id: 1, content: "drifted".into(), reply_to: None, attachments: vec![] });
+        // Store events but DO NOT derive the message row (simulate the crash window).
+        store_event(&conn, &da).unwrap();
+        store_event(&conn, &msg).unwrap();
+        let before: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(before, 0);
+        // Reconcile derives the missing row, and is idempotent (a second run repairs nothing).
+        assert_eq!(reconcile_messages(&conn).unwrap(), 1);
+        assert_eq!(reconcile_messages(&conn).unwrap(), 0);
+        let (content, eh): (String, String) = conn.query_row(
+            "SELECT content, event_hash FROM messages", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(content, "drifted");
+        assert_eq!(eh, msg.hash());
     }
 }

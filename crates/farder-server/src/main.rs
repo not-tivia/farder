@@ -110,9 +110,13 @@ async fn main() -> Result<()> {
         let conn = server_state.db.lock().unwrap();
         if let Some(g) = farder_server::event_ingest::load_genesis(&conn)? {
             let ls = farder_server::event_ingest::build_log_state(&conn)?;
-            drop(conn);
             *server_state.genesis.lock().unwrap() = Some(g);
             *server_state.log_state.lock().unwrap() = ls;
+            let repaired = farder_server::event_ingest::reconcile_messages(&conn).unwrap_or(0);
+            if repaired > 0 {
+                tracing::info!("reconciled {} event-sourced messages missing from the view", repaired);
+            }
+            drop(conn);
         }
     }
 
