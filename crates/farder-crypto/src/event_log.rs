@@ -43,6 +43,52 @@ impl Genesis {
     }
 }
 
+/// A device's id: hex SHA-256 of its public key bytes.
+pub fn device_id(device_pubkey: &PublicKey) -> DeviceId {
+    sha256_hex(device_pubkey.as_bytes())
+}
+
+/// The fields an identity signs to authorize one of its device subkeys.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceCertCore {
+    pub identity: PublicKey,      // the owning identity (an Event's `author`)
+    pub device_pubkey: PublicKey, // the device's signing subkey
+    pub device_id: DeviceId,      // = device_id(device_pubkey)
+    pub created_at: u64,
+}
+
+/// An identity-signed authorization of a device subkey. Events are signed by the
+/// device subkey; this proves the identity stands behind that device.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceCert {
+    pub core: DeviceCertCore,
+    pub signature: Vec<u8>, // the IDENTITY key's sig over canonical(core)
+}
+
+impl DeviceCert {
+    pub fn create(identity: &Keypair, device_pubkey: &PublicKey, created_at: u64) -> Self {
+        let core = DeviceCertCore {
+            identity: identity.public_key(),
+            device_pubkey: device_pubkey.clone(),
+            device_id: device_id(device_pubkey),
+            created_at,
+        };
+        let bytes = rmp_serde::to_vec(&core).expect("devicecert serialization cannot fail");
+        let signature = identity.sign(&bytes);
+        Self { core, signature }
+    }
+
+    /// Valid iff the embedded `device_id` matches `device_pubkey` AND the
+    /// identity key signed the core.
+    pub fn verify(&self) -> Result<()> {
+        if self.core.device_id != device_id(&self.core.device_pubkey) {
+            anyhow::bail!("device_id does not match device_pubkey");
+        }
+        let bytes = rmp_serde::to_vec(&self.core).context("serialize devicecert core")?;
+        self.core.identity.verify(&bytes, &self.signature)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +133,38 @@ mod tests {
     #[test]
     fn genesis_from_bytes_rejects_garbage() {
         assert!(Genesis::from_bytes(&[0xFF, 0x00, 0x12]).is_err());
+    }
+
+    #[test]
+    fn device_id_is_hash_of_pubkey() {
+        let dev = Keypair::generate();
+        assert_eq!(device_id(&dev.public_key()).len(), 64);
+        assert_eq!(device_id(&dev.public_key()), device_id(&dev.public_key()));
+        let other = Keypair::generate();
+        assert_ne!(device_id(&dev.public_key()), device_id(&other.public_key()));
+    }
+
+    #[test]
+    fn devicecert_create_and_verify() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let cert = DeviceCert::create(&identity, &device.public_key(), 1_700_000_000);
+        assert_eq!(cert.core.identity, identity.public_key());
+        assert_eq!(cert.core.device_id, device_id(&device.public_key()));
+        assert!(cert.verify().is_ok());
+    }
+
+    #[test]
+    fn devicecert_tampered_or_wrong_identity_fails() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        // Tampered created_at -> signature no longer matches.
+        let mut cert = DeviceCert::create(&identity, &device.public_key(), 1);
+        cert.core.created_at = 2;
+        assert!(cert.verify().is_err());
+        // device_id that doesn't match the embedded device_pubkey.
+        let mut cert2 = DeviceCert::create(&identity, &device.public_key(), 1);
+        cert2.core.device_id = device_id(&Keypair::generate().public_key());
+        assert!(cert2.verify().is_err());
     }
 }
