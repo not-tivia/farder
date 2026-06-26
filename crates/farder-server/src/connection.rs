@@ -334,6 +334,12 @@ async fn handle_fetch_url(
     let mut current = url.to_string();
     let mut hops = 0;
     let response = loop {
+        // Re-assert http(s)-only on EVERY hop (not just the initial url), so a
+        // redirect can't switch to file://, gopher://, etc. Explicit > implicit
+        // for a security boundary.
+        if !current.starts_with("http://") && !current.starts_with("https://") {
+            return Err("URL refused: only http(s) is allowed".to_string());
+        }
         if !crate::ssrf::resolves_to_global(&current).await {
             return Err("URL refused: resolves to a private or non-routable address".to_string());
         }
