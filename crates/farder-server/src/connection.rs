@@ -566,6 +566,28 @@ pub(crate) async fn authenticate(
     if (setup_token_used || auto_claimed) && auth_result.is_ok() {
         let mut owner = state.owner.write().await;
         *owner = Some(public_key.clone());
+
+        // Mesh Rung 1: a server's genesis fixes its identity + owner. Create it once,
+        // when the owner is first established, then hold the derived LogState in memory.
+        {
+            let mut g_guard = state.genesis.lock().unwrap();
+            if g_guard.is_none() {
+                let genesis = farder_crypto::event_log::Genesis {
+                    version: 1,
+                    name: state.server_name.clone(),
+                    owner: public_key.clone(),
+                    created_at: crate::db::now(),
+                    nonce: rand::random::<[u8; 16]>(),
+                };
+                {
+                    let conn = state.db.lock().unwrap();
+                    crate::event_ingest::save_genesis(&conn, &genesis)?;
+                }
+                *state.log_state.lock().unwrap() =
+                    Some(farder_crypto::event_log_state::LogState::from_genesis(&genesis));
+                *g_guard = Some(genesis);
+            }
+        }
     }
 
     // Step 5: Send Authenticated or AuthError

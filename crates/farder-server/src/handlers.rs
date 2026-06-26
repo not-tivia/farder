@@ -1703,6 +1703,8 @@ pub fn handle_request(
                 }],
             )
         }
+        // TEMPORARY STUB — Task 5 replaces this with the real SubmitEvent handler.
+        ServerRequest::SubmitEvent { .. } => err("submit_event not yet implemented"),
     }
 }
 

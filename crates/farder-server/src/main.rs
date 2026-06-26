@@ -102,6 +102,20 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let (server_state, first_run) = init_server(&args).await?;
+
+    // Mesh Rung 1: if a genesis already exists in the DB, rebuild the in-memory
+    // LogState so the server is ready to validate/append events without waiting
+    // for an owner-establish trigger.
+    {
+        let conn = server_state.db.lock().unwrap();
+        if let Some(g) = farder_server::event_ingest::load_genesis(&conn)? {
+            let ls = farder_server::event_ingest::build_log_state(&conn)?;
+            drop(conn);
+            *server_state.genesis.lock().unwrap() = Some(g);
+            *server_state.log_state.lock().unwrap() = ls;
+        }
+    }
+
     std::fs::create_dir_all(&args.storage_dir)?;
     let state = Arc::new(server_state);
 
