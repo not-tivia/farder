@@ -294,6 +294,9 @@ pub enum ServerRequest {
     JoinChannelMedia { channel_id: u64 },
     LeaveChannelMedia { channel_id: u64 },
     GetMediaState { channel_id: u64 },
+    /// Submit a signed mesh event (Rung 1). The server validates it through the
+    /// authorization log and, for MessagePosted, derives a `messages` row.
+    SubmitEvent { event: farder_crypto::event_log::Event },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -337,6 +340,7 @@ pub enum ServerResponse {
     DmList { dms: Vec<DmEntry> },
     StreamSessionStarted { session_id: [u8; 16] },
     MediaStateResp { participants: Vec<VoiceMember> },
+    EventAccepted { event_hash: String, timestamp: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
