@@ -6,6 +6,7 @@ mod tenor;
 mod bridge;
 mod commands;
 mod connection;
+mod device;
 mod default_relay;
 mod display;
 #[cfg(windows)]
