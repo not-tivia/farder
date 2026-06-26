@@ -326,6 +326,8 @@ pub enum ServerResponse {
         roles: Vec<RoleInfo>,
         #[serde(default)]
         owner_public_key: Option<PublicKey>,
+        #[serde(default)]
+        server_id: Option<String>,
     },
     Members { members: Vec<MemberInfo> },
     MemberProfile { member_key: PublicKey, #[serde(default)] profile: Option<Vec<u8>> },

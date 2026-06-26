@@ -86,6 +86,7 @@ export interface ConnectResult {
   roles: RoleInfo[];
   owner_public_key?: { bytes: number[] } | null;
   relayed?: boolean;
+  server_id?: string | null;
 }
 
 export interface SendMessageResult {

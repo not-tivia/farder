@@ -989,6 +989,7 @@ pub fn handle_request(
                 categories: categories_list,
                 roles: roles_list,
                 owner_public_key: None, // patched by connection handler
+                server_id: state.genesis.lock().unwrap().as_ref().map(|g| g.server_id()),
             })
         }
 
