@@ -74,7 +74,19 @@ impl DeviceState {
             .join("device_state.json")
     }
 
+    /// `server_id` is a hex SHA-256 from the server; reject anything else so a
+    /// malicious server can't smuggle path separators / `..` into the directory
+    /// name (path traversal). Length-bounded too.
+    fn validate_server_id(server_id: &str) -> Result<(), String> {
+        if server_id.len() <= 128 && !server_id.is_empty() && server_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            Ok(())
+        } else {
+            Err("invalid server_id".to_string())
+        }
+    }
+
     pub fn load(server_id: &str) -> Result<Option<Self>, String> {
+        Self::validate_server_id(server_id)?;
         let path = Self::path(server_id);
         match std::fs::read_to_string(&path) {
             Ok(data) => serde_json::from_str(&data).map(Some).map_err(|e| e.to_string()),
@@ -83,6 +95,7 @@ impl DeviceState {
     }
 
     pub fn save(&self, server_id: &str) -> Result<(), String> {
+        Self::validate_server_id(server_id)?;
         let path = Self::path(server_id);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
