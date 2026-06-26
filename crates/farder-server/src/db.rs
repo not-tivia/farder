@@ -88,6 +88,27 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(channel_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id, id);
 
+        CREATE TABLE IF NOT EXISTS events (
+            accept_seq   INTEGER PRIMARY KEY AUTOINCREMENT,  -- server acceptance order (replay order)
+            event_hash   TEXT    UNIQUE NOT NULL,            -- content id (SHA-256 hex of the signed Event)
+            server_id    TEXT    NOT NULL,
+            author       BLOB    NOT NULL,                   -- identity pubkey (32 bytes)
+            device       TEXT    NOT NULL,                   -- device id
+            seq          INTEGER NOT NULL,
+            lamport      INTEGER NOT NULL,
+            payload_type TEXT    NOT NULL,                   -- e.g. 'MessagePosted', 'MemberJoined'
+            channel_id   INTEGER,                            -- denormalized for message lookups (NULL for non-message)
+            event_body   BLOB    NOT NULL,                   -- rmp_serde(Event)
+            created_at   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_author_seq ON events(author, device, seq);
+
+        CREATE TABLE IF NOT EXISTS genesis (
+            singleton    INTEGER PRIMARY KEY CHECK (singleton = 0),  -- exactly one row
+            genesis_body BLOB NOT NULL,                              -- rmp_serde(Genesis)
+            server_id    TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS invites (
             code           TEXT    PRIMARY KEY,
             created_by     BLOB    NOT NULL,
@@ -307,6 +328,19 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // Migration: link event-sourced messages back to their event (NULL for legacy rows).
+    let has_event_hash: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "event_hash")
+    };
+    if !has_event_hash {
+        conn.execute("ALTER TABLE messages ADD COLUMN event_hash TEXT", [])?;
+    }
+
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
     // supported for virtual tables in older SQLite versions).
     let fts_exists: bool = conn.query_row(
@@ -382,5 +416,27 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open_in_memory failed");
         init_schema(&conn).expect("first init_schema call failed");
         init_schema(&conn).expect("second init_schema call failed");
+    }
+
+    #[test]
+    fn events_and_genesis_schema_and_message_event_hash_migration() {
+        let conn = open_in_memory().unwrap();
+        // events table accepts a row.
+        conn.execute(
+            "INSERT INTO events (event_hash, server_id, author, device, seq, lamport, payload_type, channel_id, event_body, created_at) \
+             VALUES ('h0','srv',X'00',  'd', 0, 1, 'MessagePosted', 1, X'01', 100)",
+            [],
+        ).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        // genesis singleton.
+        conn.execute("INSERT INTO genesis (singleton, genesis_body, server_id) VALUES (0, X'02', 'srv')", []).unwrap();
+        assert!(conn.execute("INSERT INTO genesis (singleton, genesis_body, server_id) VALUES (0, X'03', 'srv')", []).is_err(),
+            "genesis must be a singleton");
+        // messages.event_hash column exists and defaults NULL.
+        let has: bool = conn.prepare("PRAGMA table_info(messages)").unwrap()
+            .query_map([], |r| r.get::<_, String>(1)).unwrap()
+            .filter_map(|r| r.ok()).any(|c| c == "event_hash");
+        assert!(has, "messages.event_hash column must exist");
     }
 }
