@@ -171,6 +171,35 @@ impl Event {
     pub fn hash(&self) -> EventHash {
         sha256_hex(&self.to_bytes())
     }
+
+    /// Build + sign the NEXT event in this device's chain. Pure: pass the
+    /// previous event (or None for the first) and the max lamport this device
+    /// has observed; the result is fully determined by the inputs.
+    pub fn next(
+        device: &Keypair,
+        author: PublicKey,
+        server_id: ServerId,
+        prev: Option<&Event>,
+        lamport_observed: u64,
+        timestamp: u64,
+        payload: EventPayload,
+    ) -> Self {
+        let (seq, prev_hash) = match prev {
+            Some(p) => (p.core.seq + 1, Some(p.hash())),
+            None => (0, None),
+        };
+        let core = EventCore {
+            server_id,
+            author,
+            device: device_id(&device.public_key()),
+            seq,
+            prev: prev_hash,
+            lamport: lamport_observed + 1,
+            timestamp,
+            payload,
+        };
+        Event::sign(core, device)
+    }
 }
 
 #[cfg(test)]
@@ -333,5 +362,49 @@ mod tests {
         let decoded = Event::from_bytes(&ev.to_bytes()).unwrap();
         assert_eq!(decoded, ev);
         assert!(decoded.verify(&device.public_key()).is_ok());
+    }
+
+    fn msg_payload(n: u64) -> EventPayload {
+        EventPayload::MessagePosted { channel_id: 1, content: format!("m{n}"), reply_to: None, attachments: vec![] }
+    }
+
+    #[test]
+    fn chain_first_event_then_links() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let id = identity.public_key();
+
+        let e0 = Event::next(&device, id.clone(), "srv".to_string(), None, 0, 100, msg_payload(0));
+        assert_eq!(e0.core.seq, 0);
+        assert_eq!(e0.core.prev, None);
+        assert_eq!(e0.core.lamport, 1); // 0 observed + 1
+        assert_eq!(e0.core.server_id, "srv");
+        assert_eq!(e0.core.author, id);
+        assert_eq!(e0.core.device, device_id(&device.public_key()));
+        assert!(e0.verify(&device.public_key()).is_ok());
+
+        let e1 = Event::next(&device, id.clone(), "srv".to_string(), Some(&e0), 5, 101, msg_payload(1));
+        assert_eq!(e1.core.seq, 1);
+        assert_eq!(e1.core.prev, Some(e0.hash())); // links to e0
+        assert_eq!(e1.core.lamport, 6); // 5 observed + 1
+        assert!(e1.verify(&device.public_key()).is_ok());
+    }
+
+    #[test]
+    fn two_devices_of_one_identity_run_independent_chains() {
+        let identity = Keypair::generate();
+        let dev_a = Keypair::generate();
+        let dev_b = Keypair::generate();
+        let id = identity.public_key();
+
+        // Both devices author seq 0 under the SAME identity — NOT a fork, because
+        // the chain is keyed by (author, device), and the device ids differ.
+        let a0 = Event::next(&dev_a, id.clone(), "srv".to_string(), None, 0, 1, msg_payload(0));
+        let b0 = Event::next(&dev_b, id.clone(), "srv".to_string(), None, 0, 1, msg_payload(0));
+        assert_eq!(a0.core.seq, 0);
+        assert_eq!(b0.core.seq, 0);
+        assert_eq!(a0.core.author, b0.core.author); // same identity
+        assert_ne!(a0.core.device, b0.core.device);  // different devices
+        assert_ne!(a0.hash(), b0.hash());            // distinct events
     }
 }
