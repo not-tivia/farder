@@ -320,15 +320,47 @@ async fn handle_fetch_url(
         return Err("URL too long".to_string());
     }
 
-    // Async HTTP fetch (no DB lock held)
-    let response = reqwest::Client::builder()
+    // SSRF-guarded async HTTP fetch (no DB lock held). Follow redirects
+    // ourselves (cap 4) and re-validate on EVERY hop that the host resolves to a
+    // globally routable IP, so a member cannot make the server probe its own
+    // host or private network (cloud-metadata 169.254.169.254, localhost, LAN)
+    // directly or via a redirect / DNS trick. Mirrors the relay's embed fetcher.
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| format!("http client error: {}", e))?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch failed: {}", e))?;
+        .map_err(|e| format!("http client error: {}", e))?;
+
+    let mut current = url.to_string();
+    let mut hops = 0;
+    let response = loop {
+        if !crate::ssrf::resolves_to_global(&current).await {
+            return Err("URL refused: resolves to a private or non-routable address".to_string());
+        }
+        let resp = client
+            .get(&current)
+            .send()
+            .await
+            .map_err(|e| format!("fetch failed: {}", e))?;
+        if resp.status().is_redirection() {
+            hops += 1;
+            if hops > 4 {
+                return Err("fetch failed: too many redirects".to_string());
+            }
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| "fetch failed: redirect without location".to_string())?;
+            current = reqwest::Url::parse(&current)
+                .map_err(|e| format!("invalid URL: {}", e))?
+                .join(loc)
+                .map_err(|e| format!("invalid redirect target: {}", e))?
+                .to_string();
+            continue;
+        }
+        break resp;
+    };
 
     if !response.status().is_success() {
         return Err(format!("fetch failed: HTTP {}", response.status()));
@@ -343,7 +375,7 @@ async fn handle_fetch_url(
         .trim()
         .to_string();
 
-    let file_name = url.rsplit('/').next()
+    let file_name = current.rsplit('/').next()
         .unwrap_or("download")
         .split('?').next()
         .unwrap_or("download")

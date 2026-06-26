@@ -15,5 +15,6 @@ pub mod permissions;
 pub mod reactions;
 pub mod relay;
 pub mod retention;
+pub mod ssrf;
 pub mod state;
 pub mod templates;
