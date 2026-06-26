@@ -80,7 +80,7 @@ impl LogState {
     }
     /// The owner holds every capability; everyone else holds only what was granted.
     pub fn has_capability(&self, pk: &PublicKey, cap: &str) -> bool {
-        self.is_owner(pk) || self.capabilities.get(pk).map_or(false, |c| c.contains(cap))
+        self.is_owner(pk) || self.capabilities.get(pk).is_some_and(|c| c.contains(cap))
     }
 
     /// Fold a genesis + an ordered slice of events into the resulting state,
@@ -681,7 +681,7 @@ mod tests {
         let replayed = LogState::replay(&g, &log).expect("valid log replays");
         let mut stepwise = LogState::from_genesis(&g);
         for e in &log { stepwise.apply(e).unwrap(); }
-        assert_eq!(replayed.is_member(&alice.public_key()), true);
+        assert!(replayed.is_member(&alice.public_key()));
         assert_eq!(replayed.is_member(&alice.public_key()), stepwise.is_member(&alice.public_key()));
         assert_eq!(replayed.devices.len(), stepwise.devices.len());
 
