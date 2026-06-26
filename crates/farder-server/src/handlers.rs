@@ -5,6 +5,7 @@ use crate::{
     state::ServerState,
 };
 use anyhow::Result;
+use farder_crypto::event_log::EventPayload;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::*;
 use rusqlite::Connection;
@@ -1703,8 +1704,58 @@ pub fn handle_request(
                 }],
             )
         }
-        // TEMPORARY STUB — Task 5 replaces this with the real SubmitEvent handler.
-        ServerRequest::SubmitEvent { .. } => err("submit_event not yet implemented"),
+        ServerRequest::SubmitEvent { event } => {
+            // 1. The server must be in log mode (genesis established).
+            let mut ls_guard = state.log_state.lock().unwrap();
+            let ls = match ls_guard.as_ref() {
+                Some(ls) => ls,
+                None => return err("server is not running the event log (no genesis yet)"),
+            };
+
+            // 2. Validate on a CLONE — apply runs the full envelope + authz; on
+            //    error nothing is mutated and we reject.
+            let mut trial = ls.clone();
+            if let Err(e) = trial.apply(&event) {
+                return err(&format!("event rejected: {}", e));
+            }
+
+            // 3. For a message event, the referenced channel must exist (channels
+            //    are still legacy DB state this slice).
+            if let EventPayload::MessagePosted { channel_id, content, .. } = &event.core.payload {
+                if content.len() > 8000 {
+                    return err("message content too long (max 8000 characters)");
+                }
+                if channels::get_channel(conn, *channel_id)?.is_none() {
+                    return err("channel not found");
+                }
+            }
+
+            // 4. Persist the event (source of truth) + derive the message row.
+            crate::event_ingest::store_event(conn, &event)
+                .map_err(|e| anyhow::anyhow!("failed to store event: {}", e))?;
+            let derived_id = crate::event_ingest::derive_message_row(conn, &event)
+                .map_err(|e| anyhow::anyhow!("failed to derive message: {}", e))?;
+
+            // 5. Commit the advanced authorization state in memory.
+            let timestamp = event.core.timestamp;
+            *ls_guard = Some(trial);
+            drop(ls_guard);
+
+            // 6. Broadcast: for a derived message, send NewMessage so the existing
+            //    client render path works unchanged.
+            let mut events = Vec::new();
+            if let Some(mid) = derived_id {
+                if let EventPayload::MessagePosted { channel_id, .. } = &event.core.payload {
+                    if let Some(msg) = messages::get_message(conn, mid, member)? {
+                        events.push(BroadcastEvent {
+                            target: EventTarget::Subscribers(*channel_id),
+                            event: ServerEvent::NewMessage { message: msg },
+                        });
+                    }
+                }
+            }
+            ok_with(ServerResponse::EventAccepted { event_hash: event.hash(), timestamp }, events)
+        }
     }
 }
 
@@ -3665,6 +3716,355 @@ mod tests {
         assert_eq!(alice_state.presences.read().unwrap().get(alice.as_bytes()).cloned(), Some(presence.clone()));
         assert!(alice_state.presences.read().unwrap().get(bob.as_bytes()).is_none(), "Bob should have no presence");
         assert!(alice_state.presences.read().unwrap().get(owner_pk.as_bytes()).is_none(), "owner should have no presence");
+    }
+
+    // -----------------------------------------------------------------------
+    // SubmitEvent integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_submit_event_accept_and_broadcast() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        // Build the state: open in-memory db with roles + owner member.
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        // Set up @everyone role so members can be created.
+        let everyone_id = members::create_role(
+            &conn,
+            "@everyone",
+            permissions::DEFAULT_EVERYONE,
+            None,
+            0,
+            true,
+        )
+        .unwrap();
+
+        // Owner keypair and device keypair.
+        let owner_kp = Keypair::generate();
+        let dev_kp = Keypair::generate();
+
+        // Register the owner as a server member so get_message works.
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        // Create genesis and initialize log state.
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        // Create a channel so MessagePosted channel_id validation succeeds.
+        let channel_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+
+        // Build event chain: owner DeviceAuthorized, then MessagePosted.
+        let cert = DeviceCert::create(&owner_kp, &dev_kp.public_key(), 1);
+        let da = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert },
+        );
+        let msg = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            Some(&da),
+            1,
+            2,
+            EP::MessagePosted {
+                channel_id,
+                content: "hello from event log".into(),
+                reply_to: None,
+                attachments: vec![],
+            },
+        );
+
+        // Submit DeviceAuthorized — should be accepted.
+        let da_result = handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: da.clone() },
+            "",
+            &state,
+        )
+        .unwrap();
+        match da_result.response {
+            ServerResponse::EventAccepted { event_hash, .. } => {
+                assert_eq!(event_hash, da.hash(), "DA event_hash should match");
+            }
+            other => panic!("expected EventAccepted for DeviceAuthorized, got {:?}", other),
+        }
+        // DA produces no NewMessage broadcast.
+        assert!(da_result.events.is_empty(), "DeviceAuthorized should not produce broadcast events");
+
+        // Submit MessagePosted — should be accepted with a NewMessage broadcast.
+        let msg_result = handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: msg.clone() },
+            "",
+            &state,
+        )
+        .unwrap();
+        match &msg_result.response {
+            ServerResponse::EventAccepted { event_hash, .. } => {
+                assert_eq!(*event_hash, msg.hash(), "MessagePosted event_hash should match");
+            }
+            other => panic!("expected EventAccepted for MessagePosted, got {:?}", other),
+        }
+        // Should have exactly one NewMessage broadcast.
+        assert_eq!(msg_result.events.len(), 1, "should have one broadcast event for MessagePosted");
+        match &msg_result.events[0].event {
+            ServerEvent::NewMessage { .. } => {}
+            other => panic!("expected NewMessage broadcast, got {:?}", other),
+        }
+
+        // The messages table should have one row with the correct event_hash.
+        let (content, eh): (String, String) = conn
+            .query_row(
+                "SELECT content, event_hash FROM messages WHERE event_hash = ?1",
+                rusqlite::params![msg.hash()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("message row should exist in messages table");
+        assert_eq!(content, "hello from event log");
+        assert_eq!(eh, msg.hash());
+    }
+
+    #[test]
+    fn test_submit_event_no_genesis_returns_error() {
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        // Do NOT initialize log_state — it stays None.
+        let owner_kp = Keypair::generate();
+        let dev_kp = Keypair::generate();
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        let cert = DeviceCert::create(&owner_kp, &dev_kp.public_key(), 1);
+        let da = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert },
+        );
+
+        let result = handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: da },
+            "",
+            &state,
+        )
+        .unwrap();
+        match result.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains("no genesis"), "expected 'no genesis' in error, got: {}", reason);
+            }
+            other => panic!("expected Error response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_submit_event_non_member_rejected() {
+        // Note: DeviceAuthorized for any identity is accepted by the log (it's the
+        // device-bootstrap mechanism; anyone may register their own device). The
+        // membership restriction fires for MessagePosted. This test verifies that a
+        // stranger who registered their device but was never added as a member cannot
+        // post a message.
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        let channel_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+
+        // Stranger registers their device (DeviceAuthorized succeeds — anyone can do
+        // this; it adds the device to the log but does NOT make them a member).
+        let stranger_kp = Keypair::generate();
+        let stranger_dev_kp = Keypair::generate();
+        let stranger_cert = DeviceCert::create(&stranger_kp, &stranger_dev_kp.public_key(), 1);
+        let stranger_da = Event::next(
+            &stranger_dev_kp,
+            stranger_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: stranger_cert },
+        );
+
+        let da_result = handle_request(
+            &conn,
+            &stranger_kp.public_key(),
+            false,
+            ServerRequest::SubmitEvent { event: stranger_da.clone() },
+            "",
+            &state,
+        )
+        .unwrap();
+        // DeviceAuthorized accepted — the stranger's device is registered.
+        match da_result.response {
+            ServerResponse::EventAccepted { .. } => {}
+            other => panic!("expected EventAccepted for stranger's DeviceAuthorized, got {:?}", other),
+        }
+
+        // Now try a MessagePosted from the stranger's device — rejected because
+        // the stranger is not a member (only their device is registered).
+        let stranger_msg = Event::next(
+            &stranger_dev_kp,
+            stranger_kp.public_key(),
+            g.server_id(),
+            Some(&stranger_da),
+            1,
+            2,
+            EP::MessagePosted {
+                channel_id,
+                content: "hacked".into(),
+                reply_to: None,
+                attachments: vec![],
+            },
+        );
+
+        let msg_result = handle_request(
+            &conn,
+            &stranger_kp.public_key(),
+            false,
+            ServerRequest::SubmitEvent { event: stranger_msg },
+            "",
+            &state,
+        )
+        .unwrap();
+        match msg_result.response {
+            ServerResponse::Error { reason } => {
+                assert!(
+                    reason.contains("event rejected"),
+                    "expected 'event rejected' in error, got: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Error for non-member MessagePosted, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_submit_event_bad_channel_rejected() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let dev_kp = Keypair::generate();
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        // Create channel (id will be 1), then we'll post to id=999 which doesn't exist.
+        channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+
+        // Authorize the owner's device first.
+        let cert = DeviceCert::create(&owner_kp, &dev_kp.public_key(), 1);
+        let da = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert },
+        );
+        handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: da.clone() },
+            "",
+            &state,
+        )
+        .unwrap();
+
+        // Now post to a non-existent channel 999.
+        let bad_msg = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            Some(&da),
+            1,
+            2,
+            EP::MessagePosted {
+                channel_id: 999,
+                content: "bad channel".into(),
+                reply_to: None,
+                attachments: vec![],
+            },
+        );
+
+        let result = handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: bad_msg },
+            "",
+            &state,
+        )
+        .unwrap();
+        match result.response {
+            ServerResponse::Error { reason } => {
+                assert_eq!(reason, "channel not found", "expected 'channel not found', got: {}", reason);
+            }
+            other => panic!("expected Error for bad channel, got {:?}", other),
+        }
     }
 
 }
