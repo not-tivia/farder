@@ -3477,7 +3477,7 @@ pub async fn create_local_server(
             categories,
             roles,
             owner_public_key,
-            server_id: _,
+            server_id: log_server_id,
         } => {
             *server_conn.server_name.lock().unwrap() = srv_name.clone();
             // Sync our signed profile to the newly created server in the background.
@@ -3499,6 +3499,7 @@ pub async fn create_local_server(
                 "roles": roles,
                 "owner_public_key": owner_public_key,
                 "relayed": relayed,
+                "server_id": log_server_id,
             }))
         }
         ServerResponse::Error { reason } => Err(reason),
@@ -3651,6 +3652,138 @@ pub fn restart_local_servers(
     restarted
 }
 
+// ---------------------------------------------------------------------------
+// submit_event — build + sign a MessagePosted event and submit it to the server
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct EventAcceptedResult {
+    pub event_hash: String,
+    pub timestamp: u64,
+}
+
+#[tauri::command]
+pub async fn submit_event(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    content: String,
+    reply_to: Option<String>, // event-hash ref; None for top-level
+) -> Result<EventAcceptedResult, String> {
+    use farder_crypto::event_log::EventPayload;
+
+    // Identity (must be unlocked) + device key.
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair()?;
+
+    // Per-(server, device) chain state.
+    let mut ds = crate::device::DeviceState::load(&server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    // 1. First time on this server: authorize the device.
+    if !ds.authorized {
+        let cert = crate::device::device_cert(&identity, &device);
+        let da = event_build_next(
+            &device,
+            &identity,
+            &server_id,
+            ds.last_event_hash.clone(),
+            ds.next_seq,
+            ds.lamport,
+            EventPayload::DeviceAuthorized { cert },
+        );
+        event_send_submit(&state, &server_id, &da).await?;
+        ds.next_seq = da.core.seq + 1;
+        ds.last_event_hash = Some(da.hash());
+        ds.lamport = da.core.lamport;
+        ds.authorized = true;
+        ds.save(&server_id)?;
+    }
+
+    // 2. Build + submit the message event, chaining from the stored head.
+    let msg = event_build_next(
+        &device,
+        &identity,
+        &server_id,
+        ds.last_event_hash.clone(),
+        ds.next_seq,
+        ds.lamport,
+        EventPayload::MessagePosted {
+            channel_id,
+            content,
+            reply_to,
+            attachments: vec![],
+        },
+    );
+    let result = event_send_submit(&state, &server_id, &msg).await?;
+
+    // 3. Advance + persist chain state ONLY on confirmed acceptance.
+    ds.next_seq = msg.core.seq + 1;
+    ds.last_event_hash = Some(msg.hash());
+    ds.lamport = msg.core.lamport;
+    ds.save(&server_id)?;
+    Ok(result)
+}
+
+/// Build the next chained event. We only store the prev hash (not the prev
+/// Event), so we construct EventCore directly and sign it.
+fn event_build_next(
+    device: &Keypair,
+    identity: &Keypair,
+    server_id: &str,
+    prev: Option<String>,
+    seq: u64,
+    lamport_observed: u64,
+    payload: farder_crypto::event_log::EventPayload,
+) -> farder_crypto::event_log::Event {
+    use farder_crypto::event_log::{device_id, Event, EventCore};
+    let core = EventCore {
+        server_id: server_id.to_string(),
+        author: identity.public_key(),
+        device: device_id(&device.public_key()),
+        seq,
+        prev,
+        lamport: lamport_observed + 1,
+        timestamp: event_now_secs(),
+        payload,
+    };
+    Event::sign(core, device)
+}
+
+fn event_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+async fn event_send_submit(
+    state: &AppState,
+    server_id: &str,
+    event: &farder_crypto::event_log::Event,
+) -> Result<EventAcceptedResult, String> {
+    let response = bridge::send_request(
+        state,
+        server_id,
+        ServerRequest::SubmitEvent { event: event.clone() },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::EventAccepted { event_hash, timestamp } => {
+            Ok(EventAcceptedResult { event_hash, timestamp })
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 // Public re-export so other modules can resolve paths under ~/.farder/.
 pub(crate) fn farder_data_dir_pub() -> std::path::PathBuf {
     farder_data_dir()
@@ -3771,5 +3904,61 @@ mod link_embed_tests {
             m.get("u").map(|(_, v)| v.clone())
         };
         assert_eq!(hit, Some(EmbedOutcome::Unsupported));
+    }
+}
+
+#[cfg(test)]
+mod submit_event_tests {
+    use super::*;
+    use farder_crypto::event_log::EventPayload;
+
+    /// Build an event via `event_build_next` and assert it verifies under the
+    /// device key and that the chaining fields are set correctly.
+    #[test]
+    fn build_next_verifies_and_chains() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let server_id = "a".repeat(64); // fake hex server_id (64 hex chars = 32 bytes)
+
+        // seq=0, no prev
+        let ev0 = event_build_next(
+            &device,
+            &identity,
+            &server_id,
+            None,
+            0,
+            0,
+            EventPayload::MessagePosted {
+                channel_id: 1,
+                content: "hello".to_string(),
+                reply_to: None,
+                attachments: vec![],
+            },
+        );
+        assert!(ev0.verify(&device.public_key()).is_ok());
+        assert_eq!(ev0.core.seq, 0);
+        assert!(ev0.core.prev.is_none());
+        assert_eq!(ev0.core.lamport, 1); // lamport_observed(0) + 1
+
+        // seq=1, prev = hash of ev0
+        let hash0 = ev0.hash();
+        let ev1 = event_build_next(
+            &device,
+            &identity,
+            &server_id,
+            Some(hash0.clone()),
+            1,
+            ev0.core.lamport,
+            EventPayload::MessagePosted {
+                channel_id: 1,
+                content: "world".to_string(),
+                reply_to: None,
+                attachments: vec![],
+            },
+        );
+        assert!(ev1.verify(&device.public_key()).is_ok());
+        assert_eq!(ev1.core.seq, 1);
+        assert_eq!(ev1.core.prev.as_deref(), Some(hash0.as_str()));
+        assert_eq!(ev1.core.lamport, 2);
     }
 }

@@ -1945,3 +1945,28 @@ will exit and no further `screenshare:frame` events will be emitted.
   a `"vk_"` prefix if present. Always pass keys in `"vk_<hex>"` format from the
   frontend (matching the form stored in `VoiceState::peers` and `MemberInfo`).
   Passing a raw JSON `{bytes}` object will silently fail the hex decode.
+
+---
+
+### `submit_event(state, server_id, channel_id, content, reply_to) -> Result<EventAcceptedResult, String>`
+
+**What it does:** builds and signs a `MessagePosted` event using the local device
+subkey, then submits it to the server via `ServerRequest::SubmitEvent`. On first
+use for a given `(server_id, device)` pair, automatically submits a
+`DeviceAuthorized` event first (authorizing the device subkey under the identity
+key). Chain state — `next_seq`, `last_event_hash`, `lamport`, `authorized` — is
+persisted in `~/.farder/servers/<server_id>/device_state.json` and is advanced
+ONLY after `EventAccepted` is returned by the server, so a failed submit does not
+desync the chain.
+
+**Params:**
+- `server_id: String` — hex SHA-256 server id (as returned by `GetServerInfo`).
+- `channel_id: u64` — target channel.
+- `content: String` — message text.
+- `reply_to: Option<String>` — event-hash of the event being replied to, or `null`.
+
+**Returns:** `{ event_hash: String, timestamp: u64 }` (`EventAcceptedResult`).
+
+**ServerRequest:** `SubmitEvent { event }` → `ServerResponse::EventAccepted { event_hash, timestamp }`.
+
+**invoke name:** `"submit_event"` (no TS wrapper yet; add one in `tauri-bridge.ts` when wiring the frontend).
