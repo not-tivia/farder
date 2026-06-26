@@ -83,6 +83,17 @@ impl LogState {
         self.is_owner(pk) || self.capabilities.get(pk).map_or(false, |c| c.contains(cap))
     }
 
+    /// Fold a genesis + an ordered slice of events into the resulting state,
+    /// rejecting on the first invalid event. Equivalent to `from_genesis` then
+    /// `apply` in sequence.
+    pub fn replay(genesis: &Genesis, events: &[Event]) -> Result<Self> {
+        let mut state = Self::from_genesis(genesis);
+        for event in events {
+            state.apply(event)?;
+        }
+        Ok(state)
+    }
+
     /// Validate and apply one event. CHECK-THEN-MUTATE: every fallible check runs
     /// before any mutation, so on `Err` the state is unchanged.
     pub fn apply(&mut self, event: &Event) -> Result<()> {
@@ -642,5 +653,58 @@ mod tests {
         let g_bad = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&g_ok),
             g_ok.core.lamport + 1, 91, EP::PermissionGranted { member: carol.public_key(), capability: "ban".into() });
         assert!(st.clone().apply(&g_bad).is_err(), "cannot grant a capability you do not hold");
+    }
+
+    #[test]
+    fn replay_equals_stepwise_and_composes_from_a_checkpoint() {
+        // Build a valid log: owner device, invite, alice device, alice join, alice post.
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let g = genesis(&owner);
+        let sid = g.server_id();
+
+        let da = Ev::next(&owner_dev, owner.public_key(), sid.clone(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &owner_dev.public_key(), 1) });
+        let inv = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&da), 1, 2,
+            EP::InviteCreated { code_hash: "c".into(), max_uses: 5, expires_at: 9999 });
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 3,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&alice, &alice_dev.public_key(), 1) });
+        let join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 1, 4,
+            EP::MemberJoined { member: alice.public_key(), invite: inv.hash() });
+        let post = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&join), 2, 5,
+            EP::MessagePosted { channel_id: 1, content: "hi".into(), reply_to: None, attachments: vec![] });
+        let log = vec![da, inv, a_da, join, post];
+
+        // replay == stepwise apply.
+        let replayed = LogState::replay(&g, &log).expect("valid log replays");
+        let mut stepwise = LogState::from_genesis(&g);
+        for e in &log { stepwise.apply(e).unwrap(); }
+        assert_eq!(replayed.is_member(&alice.public_key()), true);
+        assert_eq!(replayed.is_member(&alice.public_key()), stepwise.is_member(&alice.public_key()));
+        assert_eq!(replayed.devices.len(), stepwise.devices.len());
+
+        // Checkpoint composability: applying the TAIL to a CLONE of a mid-log state
+        // yields the same membership as replaying the whole thing — proving apply
+        // is a pure (state, event) step that composes from any starting state.
+        let mut mid = LogState::from_genesis(&g);
+        for e in &log[..3] { mid.apply(e).unwrap(); }   // up to alice's DeviceAuthorized
+        let mut resumed = mid.clone();
+        for e in &log[3..] { resumed.apply(e).unwrap(); } // join + post
+        assert_eq!(resumed.is_member(&alice.public_key()), replayed.is_member(&alice.public_key()));
+
+        // A log with an invalid event (post before join) is rejected by replay.
+        let owner2 = Keypair::generate();
+        let od2 = Keypair::generate();
+        let g2 = genesis(&owner2);
+        let nm = Keypair::generate();
+        let nmd = Keypair::generate();
+        let nm_da = Ev::next(&nmd, nm.public_key(), g2.server_id(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&nm, &nmd.public_key(), 1) });
+        let bad_post = Ev::next(&nmd, nm.public_key(), g2.server_id(), Some(&nm_da), 1, 2,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
+        let _ = (owner2, od2);
+        assert!(LogState::replay(&g2, &[nm_da, bad_post]).is_err(), "non-member post must reject the replay");
     }
 }
