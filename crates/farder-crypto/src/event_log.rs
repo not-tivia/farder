@@ -89,9 +89,112 @@ impl DeviceCert {
     }
 }
 
+/// A content-addressed reference to an attachment's bytes (not the bytes
+/// themselves, which live in the file store). Round-2: the cap is validated
+/// against the actual blob in sub-project 4; here it is just the descriptor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentCap {
+    pub content_hash: String, // hex SHA-256 of the file bytes
+    pub declared_type: String, // MIME, e.g. "image/png"
+    pub size: u64,
+    pub uploader: PublicKey,
+}
+
+/// The action an event records. The authorization core (everything except
+/// MessagePosted) gets its signing/validation rules in sub-project 2; here the
+/// variants are pure data so they can be signed and round-tripped.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum EventPayload {
+    MessagePosted {
+        channel_id: u64,
+        content: String,
+        reply_to: Option<EventRef>,
+        attachments: Vec<AttachmentCap>,
+    },
+    DeviceAuthorized { cert: DeviceCert },
+    InviteCreated { code_hash: String, max_uses: u32, expires_at: u64 },
+    MemberJoined { member: PublicKey, invite: EventRef },
+    MemberRemoved { member: PublicKey },
+    MemberBanned { member: PublicKey },
+    MemberUnbanned { member: PublicKey },
+    PermissionGranted { member: PublicKey, capability: String },
+}
+
+/// The signed-over body of an event. `author` is the IDENTITY; `device` says
+/// which of its devices signed; `(author, device)` keys the chain.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EventCore {
+    pub server_id: ServerId,
+    pub author: PublicKey,
+    pub device: DeviceId,
+    pub seq: u64,
+    pub prev: Option<EventHash>,
+    pub lamport: u64,
+    pub timestamp: u64, // device wall-clock claim — UNTRUSTED, tiebreak only
+    pub payload: EventPayload,
+}
+
+/// A signed event. The signature is by the DEVICE subkey over canonical(core).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Event {
+    pub core: EventCore,
+    pub signature: Vec<u8>,
+}
+
+impl Event {
+    /// Sign a fully-formed core with the device subkey.
+    pub fn sign(core: EventCore, device: &Keypair) -> Self {
+        let bytes = rmp_serde::to_vec(&core).expect("event serialization cannot fail");
+        let signature = device.sign(&bytes);
+        Self { core, signature }
+    }
+
+    /// Verify the device-subkey signature over the core. (Whether `device` is
+    /// authorized by `core.author` is a SEPARATE check via DeviceCert, done at
+    /// validation time in later sub-projects.)
+    pub fn verify(&self, device_pubkey: &PublicKey) -> Result<()> {
+        let bytes = rmp_serde::to_vec(&self.core).context("serialize event core")?;
+        device_pubkey.verify(&bytes, &self.signature)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        rmp_serde::to_vec(self).expect("event serialization cannot fail")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        rmp_serde::from_slice(bytes).context("failed to decode event")
+    }
+
+    /// Content id: hex SHA-256 of the canonical signed-event bytes (signature
+    /// included — Ed25519 is deterministic, so this is stable). Used as the
+    /// event's id and in `prev`.
+    pub fn hash(&self) -> EventHash {
+        sha256_hex(&self.to_bytes())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn a_message(seq: u64, prev: Option<EventHash>, server_id: &str, author: &PublicKey, device: &Keypair) -> Event {
+        let core = EventCore {
+            server_id: server_id.to_string(),
+            author: author.clone(),
+            device: device_id(&device.public_key()),
+            seq,
+            prev,
+            lamport: seq + 1,
+            timestamp: 1_700_000_000 + seq,
+            payload: EventPayload::MessagePosted {
+                channel_id: 1,
+                content: format!("msg {seq}"),
+                reply_to: None,
+                attachments: vec![],
+            },
+        };
+        Event::sign(core, device)
+    }
 
     fn genesis_for(owner: &Keypair, name: &str, nonce: [u8; 16]) -> Genesis {
         Genesis {
@@ -166,5 +269,69 @@ mod tests {
         let mut cert2 = DeviceCert::create(&identity, &device.public_key(), 1);
         cert2.core.device_id = device_id(&Keypair::generate().public_key());
         assert!(cert2.verify().is_err());
+    }
+
+    #[test]
+    fn event_sign_and_verify() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let ev = a_message(0, None, "srv", &identity.public_key(), &device);
+        // Verifies under the signing DEVICE key.
+        assert!(ev.verify(&device.public_key()).is_ok());
+        // Fails under a different device key.
+        assert!(ev.verify(&Keypair::generate().public_key()).is_err());
+    }
+
+    #[test]
+    fn event_tamper_breaks_signature() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let mut ev = a_message(0, None, "srv", &identity.public_key(), &device);
+        ev.core.payload = EventPayload::MessagePosted {
+            channel_id: 1, content: "EVIL".to_string(), reply_to: None, attachments: vec![],
+        };
+        assert!(ev.verify(&device.public_key()).is_err());
+    }
+
+    #[test]
+    fn event_hash_is_stable_unique_and_roundtrips() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let a = a_message(0, None, "srv", &identity.public_key(), &device);
+        let b = a_message(1, Some(a.hash()), "srv", &identity.public_key(), &device);
+        assert_eq!(a.hash().len(), 64);
+        assert_eq!(a.hash(), a.hash(), "hash deterministic");
+        assert_ne!(a.hash(), b.hash(), "different content → different hash");
+        // Round-trip bytes preserves the hash.
+        let decoded = Event::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(decoded.hash(), a.hash());
+        assert_eq!(decoded, a);
+    }
+
+    #[test]
+    fn event_with_attachment_cap_roundtrips() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let core = EventCore {
+            server_id: "srv".to_string(),
+            author: identity.public_key(),
+            device: device_id(&device.public_key()),
+            seq: 0, prev: None, lamport: 1, timestamp: 1,
+            payload: EventPayload::MessagePosted {
+                channel_id: 2,
+                content: "pic".to_string(),
+                reply_to: None,
+                attachments: vec![AttachmentCap {
+                    content_hash: "abcd".to_string(),
+                    declared_type: "image/png".to_string(),
+                    size: 1234,
+                    uploader: identity.public_key(),
+                }],
+            },
+        };
+        let ev = Event::sign(core, &device);
+        let decoded = Event::from_bytes(&ev.to_bytes()).unwrap();
+        assert_eq!(decoded, ev);
+        assert!(decoded.verify(&device.public_key()).is_ok());
     }
 }
