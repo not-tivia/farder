@@ -5,9 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 
-use crate::event_log::{device_id, DeviceId, Event, EventHash, EventPayload, Genesis, ServerId};
+use crate::event_log::{DeviceId, Event, EventHash, EventPayload, Genesis, ServerId};
 use crate::identity::PublicKey;
 
 /// A device authorized within this server's log (identity ↔ signing subkey).
@@ -194,7 +194,34 @@ impl LogState {
                 Ok(())
             }
 
-            _ => Ok(()), // remaining arms filled in Task 4
+            EventPayload::MemberRemoved { member } => {
+                ensure!(self.is_member(member), "target is not a member");
+                ensure!(
+                    member == author || self.has_capability(author, "kick"),
+                    "must be the member (leave) or hold 'kick'"
+                );
+                Ok(())
+            }
+
+            EventPayload::MemberBanned { member } => {
+                ensure!(self.has_capability(author, "ban"), "missing 'ban' capability");
+                ensure!(!self.is_owner(member), "the owner cannot be banned");
+                Ok(())
+            }
+
+            EventPayload::MemberUnbanned { .. } => {
+                ensure!(self.has_capability(author, "ban"), "missing 'ban' capability");
+                Ok(())
+            }
+
+            EventPayload::PermissionGranted { member, capability } => {
+                ensure!(self.is_member(member), "grantee is not a member");
+                ensure!(
+                    self.is_owner(author) || self.has_capability(author, capability),
+                    "cannot grant a capability you do not hold"
+                );
+                Ok(())
+            }
         }
     }
 
@@ -224,7 +251,21 @@ impl LogState {
                 }
             }
             EventPayload::MessagePosted { .. } => {} // no authz-state change
-            _ => {} // remaining arms filled in Task 4
+            EventPayload::MemberRemoved { member } => {
+                self.members.remove(member);
+                self.capabilities.remove(member);
+            }
+            EventPayload::MemberBanned { member } => {
+                self.banned.insert(member.clone());
+                self.members.remove(member);
+                self.capabilities.remove(member);
+            }
+            EventPayload::MemberUnbanned { member } => {
+                self.banned.remove(member);
+            }
+            EventPayload::PermissionGranted { member, capability } => {
+                self.capabilities.entry(member.clone()).or_default().insert(capability.clone());
+            }
         }
     }
 }
@@ -233,7 +274,7 @@ impl LogState {
 mod tests {
     use super::*;
     use crate::identity::Keypair;
-    use crate::event_log::{AttachmentCap, DeviceCert, Event as Ev, EventPayload as EP};
+    use crate::event_log::{device_id, DeviceCert, Event as Ev, EventPayload as EP};
 
     fn genesis(owner: &Keypair) -> Genesis {
         Genesis {
@@ -454,5 +495,152 @@ mod tests {
         let bad = Ev::next(&nmd, nm.public_key(), sid.clone(), Some(&nmda), 1, 3,
             EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
         assert!(st.apply(&bad).is_err(), "non-member cannot post");
+    }
+
+    /// Make `member` a member with `cap`, returning the updated state and the
+    /// member's (keypair, device-keypair, last_event) so callers can continue
+    /// their chain. Owner grants directly.
+    fn add_member_with_cap(
+        st: &mut LogState, owner: &Keypair, owner_dev: &Keypair, owner_prev: &mut Ev,
+        cap: Option<&str>,
+    ) -> (Keypair, Keypair, Ev) {
+        let sid = st.server_id().clone();
+        // owner creates an invite, member joins, then (optional) grant.
+        let inv = Ev::next(owner_dev, owner.public_key(), sid.clone(), Some(owner_prev),
+            owner_prev.core.lamport + 1, 100,
+            EP::InviteCreated { code_hash: "c".into(), max_uses: 10, expires_at: 9999 });
+        st.apply(&inv).unwrap();
+        *owner_prev = inv.clone();
+
+        let u = Keypair::generate();
+        let ud = Keypair::generate();
+        let cert = DeviceCert::create(&u, &ud.public_key(), 1);
+        let uda = Ev::next(&ud, u.public_key(), sid.clone(), None, 0, 1, EP::DeviceAuthorized { cert });
+        st.apply(&uda).unwrap();
+        let join = Ev::next(&ud, u.public_key(), sid.clone(), Some(&uda), 1, 2,
+            EP::MemberJoined { member: u.public_key(), invite: inv.hash() });
+        st.apply(&join).unwrap();
+        let last = join; // the member's chain head (their join, seq 1)
+
+        if let Some(c) = cap {
+            // Grants ride the OWNER's chain, not the member's, so `last` is unchanged.
+            let grant = Ev::next(owner_dev, owner.public_key(), sid.clone(), Some(owner_prev),
+                owner_prev.core.lamport + 1, 100,
+                EP::PermissionGranted { member: u.public_key(), capability: c.to_string() });
+            st.apply(&grant).unwrap();
+            *owner_prev = grant;
+        }
+        (u, ud, last)
+    }
+
+    #[test]
+    fn ban_requires_authority_supersedes_rejoin_and_unban_restores_joinability() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+
+        // A "ban"-capable mod, and a victim member.
+        let (_mod_k, mod_dev, mod_last) = add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, Some("ban"));
+        let mod_pk = _mod_k.public_key();
+        let (victim_k, victim_dev, victim_last) = add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        let victim_pk = victim_k.public_key();
+
+        // A non-authority cannot ban.
+        let bad = Ev::next(&victim_dev, victim_pk.clone(), sid.clone(), Some(&victim_last),
+            victim_last.core.lamport + 1, 50, EP::MemberBanned { member: owner.public_key() });
+        assert!(st.clone().apply(&bad).is_err(), "no 'ban' capability → rejected");
+
+        // Cannot ban the owner.
+        let ban_owner = Ev::next(&mod_dev, mod_pk.clone(), sid.clone(), Some(&mod_last),
+            mod_last.core.lamport + 1, 51, EP::MemberBanned { member: owner.public_key() });
+        assert!(st.clone().apply(&ban_owner).is_err(), "owner cannot be banned");
+
+        // Mod bans the victim.
+        let ban = Ev::next(&mod_dev, mod_pk.clone(), sid.clone(), Some(&mod_last),
+            mod_last.core.lamport + 1, 52, EP::MemberBanned { member: victim_pk.clone() });
+        st.apply(&ban).expect("authorized ban succeeds");
+        assert!(st.is_banned(&victim_pk));
+        assert!(!st.is_member(&victim_pk));
+
+        // The banned victim cannot act (e.g. post) from their device.
+        let post = Ev::next(&victim_dev, victim_pk.clone(), sid.clone(), Some(&victim_last),
+            victim_last.core.lamport + 1, 53, EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
+        assert!(st.clone().apply(&post).is_err(), "banned author cannot post");
+
+        // The banned victim cannot rejoin (ban supersedes a fresh invite+join).
+        let inv2 = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&owner_prev),
+            owner_prev.core.lamport + 1, 60, EP::InviteCreated { code_hash: "c2".into(), max_uses: 5, expires_at: 9999 });
+        st.apply(&inv2).unwrap();
+        let rejoin = Ev::next(&victim_dev, victim_pk.clone(), sid.clone(), Some(&victim_last),
+            victim_last.core.lamport + 1, 61, EP::MemberJoined { member: victim_pk.clone(), invite: inv2.hash() });
+        assert!(st.clone().apply(&rejoin).is_err(), "banned identity cannot rejoin");
+
+        // Unban (mod has 'ban') then the victim can rejoin.
+        let unban = Ev::next(&mod_dev, mod_pk.clone(), sid.clone(), Some(&ban),
+            ban.core.lamport + 1, 62, EP::MemberUnbanned { member: victim_pk.clone() });
+        st.apply(&unban).expect("authorized unban succeeds");
+        assert!(!st.is_banned(&victim_pk));
+        let rejoin2 = Ev::next(&victim_dev, victim_pk.clone(), sid.clone(), Some(&victim_last),
+            victim_last.core.lamport + 1, 63, EP::MemberJoined { member: victim_pk.clone(), invite: inv2.hash() });
+        st.apply(&rejoin2).expect("unbanned identity can rejoin");
+        assert!(st.is_member(&victim_pk));
+    }
+
+    #[test]
+    fn leave_vs_kick_authority() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+        let (alice, alice_dev, alice_last) = add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        let alice_pk = alice.public_key();
+
+        // Voluntary leave (author == member) ok.
+        let leave = Ev::next(&alice_dev, alice_pk.clone(), sid.clone(), Some(&alice_last),
+            alice_last.core.lamport + 1, 70, EP::MemberRemoved { member: alice_pk.clone() });
+        st.apply(&leave).expect("self-leave succeeds");
+        assert!(!st.is_member(&alice_pk));
+
+        // Re-add alice, then a non-'kick' member tries to kick her → rejected.
+        let (alice2, _ad2, _al2) = add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        let (bob, bob_dev, bob_last) = add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        let kick = Ev::next(&bob_dev, bob.public_key(), sid.clone(), Some(&bob_last),
+            bob_last.core.lamport + 1, 80, EP::MemberRemoved { member: alice2.public_key() });
+        assert!(st.clone().apply(&kick).is_err(), "kick without 'kick' capability is rejected");
+
+        // Owner (root authority) can kick.
+        let owner_kick = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&owner_prev),
+            owner_prev.core.lamport + 1, 81, EP::MemberRemoved { member: alice2.public_key() });
+        st.apply(&owner_kick).expect("owner can kick");
+        assert!(!st.is_member(&alice2.public_key()));
+    }
+
+    #[test]
+    fn grant_only_what_you_hold() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+
+        // Owner grants "invite" to alice; alice can then grant "invite" onward but
+        // NOT "ban" (which she doesn't hold).
+        let (alice, alice_dev, alice_last) = add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, Some("invite"));
+        assert!(st.has_capability(&alice.public_key(), "invite"));
+
+        let (carol, _cd, _cl) = add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        // alice grants "invite" to carol — allowed (alice holds it).
+        let g_ok = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&alice_last),
+            alice_last.core.lamport + 1, 90, EP::PermissionGranted { member: carol.public_key(), capability: "invite".into() });
+        st.apply(&g_ok).expect("can grant a capability you hold");
+        assert!(st.has_capability(&carol.public_key(), "invite"));
+
+        // alice tries to grant "ban" — rejected (she doesn't hold it).
+        let g_bad = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&g_ok),
+            g_ok.core.lamport + 1, 91, EP::PermissionGranted { member: carol.public_key(), capability: "ban".into() });
+        assert!(st.clone().apply(&g_bad).is_err(), "cannot grant a capability you do not hold");
     }
 }
