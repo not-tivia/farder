@@ -171,9 +171,30 @@ impl LogState {
     /// cert checks already happened in `resolve_device_pubkey`) and permits the
     /// rest so the envelope can be tested in isolation.
     fn check_payload_authz(&self, event: &Event) -> Result<()> {
+        let author = &event.core.author;
         match &event.core.payload {
             EventPayload::DeviceAuthorized { .. } => Ok(()),
-            _ => Ok(()), // TEMP — replaced in Tasks 3 and 4
+
+            EventPayload::InviteCreated { .. } => {
+                ensure!(self.has_capability(author, "invite"), "missing 'invite' capability");
+                Ok(())
+            }
+
+            EventPayload::MemberJoined { member, invite } => {
+                ensure!(member == author, "MemberJoined must be self-authored");
+                ensure!(!self.is_member(author), "already a member");
+                let inv = self.invites.get(invite).context("join cites an unknown invite")?;
+                ensure!(inv.use_count < inv.max_uses, "invite has no uses left");
+                ensure!(event.core.timestamp <= inv.expires_at, "invite has expired");
+                Ok(())
+            }
+
+            EventPayload::MessagePosted { .. } => {
+                ensure!(self.is_member(author), "only members may post");
+                Ok(())
+            }
+
+            _ => Ok(()), // remaining arms filled in Task 4
         }
     }
 
@@ -190,7 +211,20 @@ impl LogState {
                     },
                 );
             }
-            _ => {} // TEMP — replaced in Tasks 3 and 4
+            EventPayload::InviteCreated { max_uses, expires_at, .. } => {
+                self.invites.insert(
+                    event.hash(),
+                    InviteRecord { max_uses: *max_uses, expires_at: *expires_at, use_count: 0 },
+                );
+            }
+            EventPayload::MemberJoined { member, invite } => {
+                self.members.insert(member.clone());
+                if let Some(inv) = self.invites.get_mut(invite) {
+                    inv.use_count += 1;
+                }
+            }
+            EventPayload::MessagePosted { .. } => {} // no authz-state change
+            _ => {} // remaining arms filled in Task 4
         }
     }
 }
@@ -324,5 +358,101 @@ mod tests {
         st.banned.insert(owner.public_key());
         let e = msg(&owner_dev, &owner.public_key(), st.server_id(), &da, 2);
         assert!(st.apply(&e).is_err(), "a banned author's event must be rejected");
+    }
+
+    fn invite(dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, seq_lamport: u64, max_uses: u32, expires_at: u64) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), seq_lamport, 10,
+            EP::InviteCreated { code_hash: "c".into(), max_uses, expires_at })
+    }
+
+    #[test]
+    fn join_requires_a_valid_invite_and_blocks_self_join() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // Owner creates an invite (owner holds "invite").
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999);
+        st.apply(&inv).expect("owner can create an invite");
+
+        // A newcomer: authorize a device, then join citing the invite.
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let acert = DeviceCert::create(&alice, &alice_dev.public_key(), 1);
+        let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 2,
+            EP::DeviceAuthorized { cert: acert });
+        st.apply(&a_da).expect("anyone may register their own device");
+
+        // Self-join WITHOUT a valid invite ref → rejected.
+        let bad_join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 1, 3,
+            EP::MemberJoined { member: alice.public_key(), invite: "nonexistent".into() });
+        assert!(st.clone().apply(&bad_join).is_err(), "join citing a non-existent invite must fail");
+
+        // Valid join.
+        let join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 2, 3,
+            EP::MemberJoined { member: alice.public_key(), invite: inv.hash() });
+        st.apply(&join).expect("valid invite join succeeds");
+        assert!(st.is_member(&alice.public_key()));
+
+        // Join where member != author (admit someone else) → rejected.
+        let bob = Keypair::generate();
+        let steal = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&join), 3, 4,
+            EP::MemberJoined { member: bob.public_key(), invite: inv.hash() });
+        assert!(st.clone().apply(&steal).is_err(), "MemberJoined must be self-authored");
+    }
+
+    #[test]
+    fn invite_requires_authority_and_enforces_max_uses() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // A non-member/non-authority cannot create an invite.
+        let mallory = Keypair::generate();
+        let m_dev = Keypair::generate();
+        let mcert = DeviceCert::create(&mallory, &m_dev.public_key(), 1);
+        let m_da = Ev::next(&m_dev, mallory.public_key(), sid.clone(), None, 0, 1,
+            EP::DeviceAuthorized { cert: mcert });
+        st.apply(&m_da).unwrap();
+        let bad = invite(&m_dev, &mallory.public_key(), &sid, &m_da, 1, 5, 9999);
+        assert!(st.clone().apply(&bad).is_err(), "no 'invite' capability → rejected");
+
+        // Owner invite with max_uses = 1: a second join must fail.
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 1, 9999);
+        st.apply(&inv).unwrap();
+        for name in ["a", "b"] {
+            let u = Keypair::generate();
+            let ud = Keypair::generate();
+            let cert = DeviceCert::create(&u, &ud.public_key(), 1);
+            let uda = Ev::next(&ud, u.public_key(), sid.clone(), None, 0, 1, EP::DeviceAuthorized { cert });
+            st.apply(&uda).unwrap();
+            let join = Ev::next(&ud, u.public_key(), sid.clone(), Some(&uda), 1, 2,
+                EP::MemberJoined { member: u.public_key(), invite: inv.hash() });
+            let r = st.apply(&join);
+            if name == "a" { assert!(r.is_ok(), "first use ok"); }
+            else { assert!(r.is_err(), "max_uses exceeded must fail"); }
+        }
+    }
+
+    #[test]
+    fn only_members_can_post() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        // Owner (a member) can post.
+        let m = msg(&owner_dev, &owner.public_key(), &sid, &da, 2);
+        st.apply(&m).expect("member can post");
+        // A non-member with a registered device cannot post.
+        let nm = Keypair::generate();
+        let nmd = Keypair::generate();
+        let cert = DeviceCert::create(&nm, &nmd.public_key(), 1);
+        let nmda = Ev::next(&nmd, nm.public_key(), sid.clone(), None, 0, 1, EP::DeviceAuthorized { cert });
+        st.apply(&nmda).unwrap();
+        let bad = Ev::next(&nmd, nm.public_key(), sid.clone(), Some(&nmda), 1, 3,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
+        assert!(st.apply(&bad).is_err(), "non-member cannot post");
     }
 }
