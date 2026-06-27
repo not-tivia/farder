@@ -78,18 +78,28 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     const el = cardRef.current;
     if (!el) return;
     const M = 8;
-    // Use the layout viewport (excludes any scrollbar and is immune to the
-    // window.innerWidth quirks some webviews report).
-    const vw = document.documentElement.clientWidth || window.innerWidth;
-    const vh = document.documentElement.clientHeight || window.innerHeight;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    // Right half → open leftward (right edge pinned at the click); left half →
-    // open rightward (left edge pinned at the click).
-    let left = position.x > vw / 2 ? position.x - w : position.x;
-    left = Math.max(M, Math.min(left, vw - w - M)); // clamp both edges
-    const top = Math.max(M, Math.min(position.y, vh - h - M));
-    setPos({ left, top });
+    // The card's HEIGHT grows after it opens (avatar/bio/status load async), so a
+    // one-shot clamp computed against the initial short height lets it spill off
+    // the bottom when opened from near the bottom (the user panel, lower member
+    // rows). Recompute on every resize so it always stays fully on-screen.
+    const compute = () => {
+      // Use the layout viewport (excludes any scrollbar and is immune to the
+      // window.innerWidth quirks some webviews report).
+      const vw = document.documentElement.clientWidth || window.innerWidth;
+      const vh = document.documentElement.clientHeight || window.innerHeight;
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      // Right half → open leftward (right edge pinned at the click); left half →
+      // open rightward (left edge pinned at the click).
+      let left = position.x > vw / 2 ? position.x - w : position.x;
+      left = Math.max(M, Math.min(left, vw - w - M)); // clamp both edges
+      const top = Math.max(M, Math.min(position.y, vh - h - M)); // never off bottom
+      setPos({ left, top });
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [position.x, position.y]);
 
   const style: React.CSSProperties = {
