@@ -100,7 +100,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
 
   return createPortal(
     <>
-      <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={onClose} />
+      <div style={{ position: "fixed", inset: 0, zIndex: 2147483646, background: "rgba(255,0,0,0.3)" }} onClick={onClose} />
       <div className="profile-card" style={style}>
         {/* Banner */}
         <div className="profile-card-banner" style={{ background: bannerColor }} />
