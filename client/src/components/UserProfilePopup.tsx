@@ -64,11 +64,15 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     setEditingBio(false);
   }
 
-  // Position the card on-screen: open it leftward when the click is near the
-  // right edge (the member list sits at the far right, so opening rightward would
-  // spill off-screen), and clamp to the card's real measured size with a margin.
+  // Position the card on-screen relative to the click. Profiles can be opened
+  // from BOTH sides — the member list at the far right AND avatars in the chat
+  // at the left — so we can't anchor a single edge. Open rightward from the
+  // click by default; if that would spill off the right edge, open leftward
+  // instead; then clamp into the viewport on BOTH edges so the card can never
+  // leave the screen in either direction. (.profile-card is a fixed 300px wide,
+  // so the measured width is stable.)
   const cardRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ right: number; top: number }>({ right: 8, top: position.y });
+  const [pos, setPos] = useState<{ left: number; top: number }>({ left: position.x, top: position.y });
   useLayoutEffect(() => {
     const el = cardRef.current;
     if (!el) return;
@@ -77,22 +81,20 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     // window.innerWidth quirks some webviews report).
     const vw = document.documentElement.clientWidth || window.innerWidth;
     const vh = document.documentElement.clientHeight || window.innerHeight;
+    const w = el.offsetWidth;
     const h = el.offsetHeight;
-    // Pin the card's RIGHT edge at the click point and let it grow leftward
-    // (the member list lives at the right edge). Anchoring the right edge —
-    // instead of deriving a left from the measured width — means the card can
-    // never spill off the right edge of the window, no matter how its width
-    // changes after async profile content loads or how big the window is.
-    const right = Math.max(M, vw - position.x);
+    let left = position.x;
+    if (left + w + M > vw) left = position.x - w; // would spill right → open leftward
+    left = Math.max(M, Math.min(left, vw - w - M)); // clamp both edges
     const top = Math.max(M, Math.min(position.y, vh - h - M));
-    setPos({ right, top });
+    setPos({ left, top });
   }, [position.x, position.y]);
 
   const style: React.CSSProperties = {
     position: "fixed",
     top: pos.top,
-    right: pos.right,
-    left: "auto",
+    left: pos.left,
+    right: "auto",
     zIndex: 1000,
   };
 
