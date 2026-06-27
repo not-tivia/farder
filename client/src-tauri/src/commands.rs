@@ -2112,7 +2112,8 @@ pub struct InviteResult {
 #[tauri::command]
 pub async fn create_invite(
     state: State<'_, Arc<AppState>>,
-    server_id: String,
+    server_id: String,             // connection key (address) — routes the request
+    log_server_id: Option<String>, // genesis hash when log-mode; None for legacy
     max_uses: Option<u32>,
 ) -> Result<InviteResult, String> {
     let response = bridge::send_request(
@@ -2148,6 +2149,62 @@ pub async fn create_invite(
                     (encoded, deep_link)
                 };
             let link = format!("https://farder.gg/join/{}", encoded);
+
+            // Mesh server: also record the invite as a signed InviteCreated event
+            // in the log, so a joiner can cite it in their MemberJoined.
+            // Instant invite for now (requires_approval = false; approval is sub-project 3).
+            if let Some(log_sid) = log_server_id {
+                let identity = {
+                    let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+                    let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+                    Keypair::from_signing_key_bytes(&bytes)
+                };
+                let device = crate::device::load_or_create_device_keypair()?;
+                let mut ds = crate::device::DeviceState::load(&log_sid)?
+                    .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+                // First action on this server authorizes the device (mirrors submit_event).
+                if !ds.authorized {
+                    let cert = crate::device::device_cert(&identity, &device);
+                    let da = event_build_next(
+                        &device,
+                        &identity,
+                        &log_sid,
+                        ds.last_event_hash.clone(),
+                        ds.next_seq,
+                        ds.lamport,
+                        farder_crypto::event_log::EventPayload::DeviceAuthorized { cert },
+                    );
+                    event_send_submit(&state, &server_id, &da).await?;
+                    ds.next_seq = da.core.seq + 1;
+                    ds.last_event_hash = Some(da.hash());
+                    ds.lamport = da.core.lamport;
+                    ds.authorized = true;
+                    ds.save(&log_sid)?;
+                }
+
+                let expires_at = event_now_secs() + 30 * 24 * 60 * 60;
+                let inv = event_build_next(
+                    &device,
+                    &identity,
+                    &log_sid,
+                    ds.last_event_hash.clone(),
+                    ds.next_seq,
+                    ds.lamport,
+                    farder_crypto::event_log::EventPayload::InviteCreated {
+                        code_hash: farder_crypto::event_log::invite_code_hash(&code),
+                        max_uses: max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX),
+                        expires_at,
+                        requires_approval: false,
+                    },
+                );
+                event_send_submit(&state, &server_id, &inv).await?;
+                ds.next_seq = inv.core.seq + 1;
+                ds.last_event_hash = Some(inv.hash());
+                ds.lamport = inv.core.lamport;
+                ds.save(&log_sid)?;
+            }
+
             Ok(InviteResult { code, link, deep_link })
         }
         ServerResponse::Error { reason } => Err(reason),

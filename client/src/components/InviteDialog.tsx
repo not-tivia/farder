@@ -1,6 +1,6 @@
 import { useState } from "react";
 import * as api from "../lib/tauri-bridge";
-import { useActiveServerId } from "../context/ServerContext";
+import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 
 interface Props {
   onClose: () => void;
@@ -8,6 +8,7 @@ interface Props {
 
 export default function InviteDialog({ onClose }: Props) {
   const serverId = useActiveServerId();
+  const activeServer = useActiveServer();
   const [link, setLink] = useState<string | null>(null);
   const [maxUses, setMaxUses] = useState<number | undefined>(undefined);
   const [loading, setLoading] = useState(false);
@@ -19,7 +20,8 @@ export default function InviteDialog({ onClose }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.createInvite(serverId, maxUses);
+      const logServerId = activeServer?.logServerId ?? null;
+      const result = await api.createInvite(serverId, logServerId, maxUses);
       setLink(result.link);
     } catch (e) {
       setError(String(e));

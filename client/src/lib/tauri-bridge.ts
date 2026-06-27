@@ -268,8 +268,8 @@ export interface InviteResult {
   deep_link: string;
 }
 
-export async function createInvite(serverId: string, maxUses?: number): Promise<InviteResult> {
-  return invoke<InviteResult>("create_invite", { serverId, maxUses: maxUses ?? null });
+export async function createInvite(serverId: string, logServerId: string | null, maxUses?: number): Promise<InviteResult> {
+  return invoke<InviteResult>("create_invite", { serverId, logServerId, maxUses: maxUses ?? null });
 }
 
 export async function fetchUrl(serverId: string, url: string, channelId: number): Promise<number> {
