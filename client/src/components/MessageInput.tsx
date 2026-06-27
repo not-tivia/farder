@@ -236,11 +236,14 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       // token positions; the message text stays as raw `:name:` for edit/search.
       const finalAttachments = await resolveInlineEmojiAttachments(text, attachments);
 
-      // activeServer.logServerId gates a send to the serverId prop, assumed equal (MessageInput is only rendered for the active server).
-      const logMode = !!activeServer?.logServerId && finalAttachments.length === 0 && !dm;
-      if (logMode) {
+      // serverId (the prop) is the connection-key ADDRESS used to route requests;
+      // activeServer.logServerId is the genesis hash that identifies the event log.
+      // They are NOT equal — submit_event needs both: the address to route, the
+      // genesis hash to stamp the event + key the device chain.
+      const logServerId = activeServer?.logServerId ?? null;
+      if (logServerId && finalAttachments.length === 0 && !dm) {
         // TODO(mesh): replies over the log need event-hash mapping; legacy replyTo is a numeric id, so drop it for now (top-level post).
-        await api.submitEvent(serverId, channelId, messageContent, null);
+        await api.submitEvent(serverId, logServerId, channelId, messageContent, null);
       } else {
         await api.sendMessage(
           serverId,

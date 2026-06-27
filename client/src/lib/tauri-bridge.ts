@@ -159,12 +159,13 @@ export async function sendMessage(serverId: string, channelId: number, content: 
 }
 
 export async function submitEvent(
-  serverId: string,
+  serverId: string,    // connection key (address) — routes the request
+  logServerId: string, // genesis hash — stamps the event + keys the device chain
   channelId: number,
   content: string,
   replyTo?: string | null,
 ): Promise<{ event_hash: string; timestamp: number }> {
-  return invoke("submit_event", { serverId, channelId, content, replyTo: replyTo ?? null });
+  return invoke("submit_event", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null });
 }
 
 export async function fetchHistory(serverId: string, channelId: number, beforeId?: number, limit?: number): Promise<MessageInfo[]> {

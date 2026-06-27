@@ -3665,7 +3665,8 @@ pub struct EventAcceptedResult {
 #[tauri::command]
 pub async fn submit_event(
     state: State<'_, Arc<AppState>>,
-    server_id: String,
+    server_id: String,     // connection key (address) — routes the request to the right server
+    log_server_id: String, // genesis hash — stamps EventCore.server_id and keys the device chain
     channel_id: u64,
     content: String,
     reply_to: Option<String>, // event-hash ref; None for top-level
@@ -3680,8 +3681,8 @@ pub async fn submit_event(
     };
     let device = crate::device::load_or_create_device_keypair()?;
 
-    // Per-(server, device) chain state.
-    let mut ds = crate::device::DeviceState::load(&server_id)?
+    // Per-(server, device) chain state. Keyed by the log server_id (genesis hash).
+    let mut ds = crate::device::DeviceState::load(&log_server_id)?
         .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
 
     // 1. First time on this server: authorize the device.
@@ -3690,7 +3691,7 @@ pub async fn submit_event(
         let da = event_build_next(
             &device,
             &identity,
-            &server_id,
+            &log_server_id,
             ds.last_event_hash.clone(),
             ds.next_seq,
             ds.lamport,
@@ -3701,14 +3702,14 @@ pub async fn submit_event(
         ds.last_event_hash = Some(da.hash());
         ds.lamport = da.core.lamport;
         ds.authorized = true;
-        ds.save(&server_id)?;
+        ds.save(&log_server_id)?;
     }
 
     // 2. Build + submit the message event, chaining from the stored head.
     let msg = event_build_next(
         &device,
         &identity,
-        &server_id,
+        &log_server_id,
         ds.last_event_hash.clone(),
         ds.next_seq,
         ds.lamport,
@@ -3725,7 +3726,7 @@ pub async fn submit_event(
     ds.next_seq = msg.core.seq + 1;
     ds.last_event_hash = Some(msg.hash());
     ds.lamport = msg.core.lamport;
-    ds.save(&server_id)?;
+    ds.save(&log_server_id)?;
     Ok(result)
 }
 
