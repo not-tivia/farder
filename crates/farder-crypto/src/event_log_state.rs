@@ -23,6 +23,7 @@ struct InviteRecord {
     max_uses: u32,
     expires_at: u64,
     use_count: u32,
+    requires_approval: bool,
 }
 
 /// Head of one `(author, device)` chain.
@@ -39,6 +40,7 @@ pub struct LogState {
     server_id: ServerId,
     owner: PublicKey,
     members: HashSet<PublicKey>,
+    pending: HashSet<PublicKey>,
     banned: HashSet<PublicKey>,
     capabilities: HashMap<PublicKey, HashSet<String>>,
     devices: HashMap<DeviceId, DeviceRecord>,
@@ -55,6 +57,7 @@ impl LogState {
             server_id: g.server_id(),
             owner: g.owner.clone(),
             members,
+            pending: HashSet::new(),
             banned: HashSet::new(),
             capabilities: HashMap::new(),
             devices: HashMap::new(),
@@ -74,6 +77,14 @@ impl LogState {
     }
     pub fn is_member(&self, pk: &PublicKey) -> bool {
         self.members.contains(pk)
+    }
+    /// A member who joined via an approval-required invite and has not yet been approved.
+    pub fn is_pending(&self, pk: &PublicKey) -> bool {
+        self.pending.contains(pk)
+    }
+    /// All members currently awaiting approval (for the approval queue / content gating).
+    pub fn pending_members(&self) -> Vec<PublicKey> {
+        self.pending.iter().cloned().collect()
     }
     pub fn is_banned(&self, pk: &PublicKey) -> bool {
         self.banned.contains(pk)
@@ -194,6 +205,7 @@ impl LogState {
             EventPayload::MemberJoined { member, invite } => {
                 ensure!(member == author, "MemberJoined must be self-authored");
                 ensure!(!self.is_member(author), "already a member");
+                ensure!(!self.is_pending(author), "already pending approval");
                 let inv = self.invites.get(invite).context("join cites an unknown invite")?;
                 ensure!(inv.use_count < inv.max_uses, "invite has no uses left");
                 ensure!(event.core.timestamp <= inv.expires_at, "invite has expired");
@@ -249,14 +261,25 @@ impl LogState {
                     },
                 );
             }
-            EventPayload::InviteCreated { max_uses, expires_at, .. } => {
+            EventPayload::InviteCreated { max_uses, expires_at, requires_approval, .. } => {
                 self.invites.insert(
                     event.hash(),
-                    InviteRecord { max_uses: *max_uses, expires_at: *expires_at, use_count: 0 },
+                    InviteRecord {
+                        max_uses: *max_uses,
+                        expires_at: *expires_at,
+                        use_count: 0,
+                        requires_approval: *requires_approval,
+                    },
                 );
             }
             EventPayload::MemberJoined { member, invite } => {
-                self.members.insert(member.clone());
+                let requires_approval =
+                    self.invites.get(invite).is_some_and(|i| i.requires_approval);
+                if requires_approval {
+                    self.pending.insert(member.clone());
+                } else {
+                    self.members.insert(member.clone());
+                }
                 if let Some(inv) = self.invites.get_mut(invite) {
                     inv.use_count += 1;
                 }
@@ -412,9 +435,9 @@ mod tests {
         assert!(st.apply(&e).is_err(), "a banned author's event must be rejected");
     }
 
-    fn invite(dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, seq_lamport: u64, max_uses: u32, expires_at: u64) -> Ev {
+    fn invite(dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, seq_lamport: u64, max_uses: u32, expires_at: u64, requires_approval: bool) -> Ev {
         Ev::next(dev, author.clone(), sid.to_string(), Some(prev), seq_lamport, 10,
-            EP::InviteCreated { code_hash: "c".into(), max_uses, expires_at })
+            EP::InviteCreated { code_hash: "c".into(), max_uses, expires_at, requires_approval })
     }
 
     #[test]
@@ -425,7 +448,7 @@ mod tests {
         let sid = st.server_id().clone();
 
         // Owner creates an invite (owner holds "invite").
-        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999);
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999, false);
         st.apply(&inv).expect("owner can create an invite");
 
         // A newcomer: authorize a device, then join citing the invite.
@@ -468,11 +491,11 @@ mod tests {
         let m_da = Ev::next(&m_dev, mallory.public_key(), sid.clone(), None, 0, 1,
             EP::DeviceAuthorized { cert: mcert });
         st.apply(&m_da).unwrap();
-        let bad = invite(&m_dev, &mallory.public_key(), &sid, &m_da, 1, 5, 9999);
+        let bad = invite(&m_dev, &mallory.public_key(), &sid, &m_da, 1, 5, 9999, false);
         assert!(st.clone().apply(&bad).is_err(), "no 'invite' capability → rejected");
 
         // Owner invite with max_uses = 1: a second join must fail.
-        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 1, 9999);
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 1, 9999, false);
         st.apply(&inv).unwrap();
         for name in ["a", "b"] {
             let u = Keypair::generate();
@@ -519,7 +542,7 @@ mod tests {
         // owner creates an invite, member joins, then (optional) grant.
         let inv = Ev::next(owner_dev, owner.public_key(), sid.clone(), Some(owner_prev),
             owner_prev.core.lamport + 1, 100,
-            EP::InviteCreated { code_hash: "c".into(), max_uses: 10, expires_at: 9999 });
+            EP::InviteCreated { code_hash: "c".into(), max_uses: 10, expires_at: 9999, requires_approval: false });
         st.apply(&inv).unwrap();
         *owner_prev = inv.clone();
 
@@ -582,7 +605,7 @@ mod tests {
 
         // The banned victim cannot rejoin (ban supersedes a fresh invite+join).
         let inv2 = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&owner_prev),
-            owner_prev.core.lamport + 1, 60, EP::InviteCreated { code_hash: "c2".into(), max_uses: 5, expires_at: 9999 });
+            owner_prev.core.lamport + 1, 60, EP::InviteCreated { code_hash: "c2".into(), max_uses: 5, expires_at: 9999, requires_approval: false });
         st.apply(&inv2).unwrap();
         let rejoin = Ev::next(&victim_dev, victim_pk.clone(), sid.clone(), Some(&victim_last),
             victim_last.core.lamport + 1, 61, EP::MemberJoined { member: victim_pk.clone(), invite: inv2.hash() });
@@ -666,7 +689,7 @@ mod tests {
         let da = Ev::next(&owner_dev, owner.public_key(), sid.clone(), None, 0, 1,
             EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &owner_dev.public_key(), 1) });
         let inv = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&da), 1, 2,
-            EP::InviteCreated { code_hash: "c".into(), max_uses: 5, expires_at: 9999 });
+            EP::InviteCreated { code_hash: "c".into(), max_uses: 5, expires_at: 9999, requires_approval: false });
         let alice = Keypair::generate();
         let alice_dev = Keypair::generate();
         let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 3,
@@ -706,5 +729,50 @@ mod tests {
             EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
         let _ = (owner2, od2);
         assert!(LogState::replay(&g2, &[nm_da, bad_post]).is_err(), "non-member post must reject the replay");
+    }
+
+    #[test]
+    fn approval_invite_lands_joiner_in_pending_not_members() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // Owner creates an APPROVAL-REQUIRED invite.
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999, true);
+        st.apply(&inv).expect("owner can create an approval invite");
+
+        // Newcomer authorizes a device, then joins citing the invite.
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let acert = DeviceCert::create(&alice, &alice_dev.public_key(), 1);
+        let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 2,
+            EP::DeviceAuthorized { cert: acert });
+        st.apply(&a_da).expect("device registers");
+        let join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 2, 3,
+            EP::MemberJoined { member: alice.public_key(), invite: inv.hash() });
+        st.apply(&join).expect("join against an approval invite succeeds");
+
+        // Joiner is PENDING, not a member, and cannot post.
+        assert!(st.is_pending(&alice.public_key()), "approval join → pending");
+        assert!(!st.is_member(&alice.public_key()), "approval join is NOT yet a member");
+        assert_eq!(st.pending_members(), vec![alice.public_key()]);
+        let post = msg(&alice_dev, &alice.public_key(), &sid, &join, 4);
+        assert!(st.clone().apply(&post).is_err(), "a pending member cannot post");
+
+        // An INSTANT invite still makes an immediate member (regression).
+        let inv2 = invite(&owner_dev, &owner.public_key(), &sid, &inv, 2, 5, 9999, false);
+        st.apply(&inv2).expect("owner can create an instant invite");
+        let bob = Keypair::generate();
+        let bob_dev = Keypair::generate();
+        let bcert = DeviceCert::create(&bob, &bob_dev.public_key(), 1);
+        let b_da = Ev::next(&bob_dev, bob.public_key(), sid.clone(), None, 0, 5,
+            EP::DeviceAuthorized { cert: bcert });
+        st.apply(&b_da).expect("device registers");
+        let bjoin = Ev::next(&bob_dev, bob.public_key(), sid.clone(), Some(&b_da), 2, 6,
+            EP::MemberJoined { member: bob.public_key(), invite: inv2.hash() });
+        st.apply(&bjoin).expect("instant join succeeds");
+        assert!(st.is_member(&bob.public_key()), "instant join → member immediately");
+        assert!(!st.is_pending(&bob.public_key()));
     }
 }

@@ -112,7 +112,7 @@ pub enum EventPayload {
         attachments: Vec<AttachmentCap>,
     },
     DeviceAuthorized { cert: DeviceCert },
-    InviteCreated { code_hash: String, max_uses: u32, expires_at: u64 },
+    InviteCreated { code_hash: String, max_uses: u32, expires_at: u64, #[serde(default)] requires_approval: bool },
     MemberJoined { member: PublicKey, invite: EventRef },
     MemberRemoved { member: PublicKey },
     MemberBanned { member: PublicKey },
