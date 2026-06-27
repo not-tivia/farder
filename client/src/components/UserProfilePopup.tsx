@@ -101,7 +101,14 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   return createPortal(
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 2147483646, background: "rgba(255,0,0,0.3)" }} onClick={onClose} />
-      <div className="profile-card" style={style}>
+      <div className="profile-card" style={style} ref={(el) => {
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        const op = el.offsetParent as HTMLElement | null;
+        console.log("[pp] RECT", "left=" + Math.round(r.left), "top=" + Math.round(r.top),
+          "w=" + Math.round(r.width), "h=" + Math.round(r.height),
+          "offsetParent=" + (op ? op.tagName + "." + (op.className || "") : "null(viewport)"));
+      }}>
         {/* Banner */}
         <div className="profile-card-banner" style={{ background: bannerColor }} />
 
