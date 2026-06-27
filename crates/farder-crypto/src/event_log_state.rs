@@ -306,6 +306,7 @@ impl LogState {
             EventPayload::MemberBanned { member } => {
                 self.banned.insert(member.clone());
                 self.members.remove(member);
+                self.pending.remove(member);
                 self.capabilities.remove(member);
             }
             EventPayload::MemberUnbanned { member } => {
@@ -852,6 +853,46 @@ mod tests {
         // The banned identity can no longer act (ban gate fires before payload).
         let post = msg(&alice_dev, &alice.public_key(), &sid, &join, 5);
         assert!(st.clone().apply(&post).is_err(), "a banned (formerly pending) identity is blocked");
+    }
+
+    #[test]
+    fn ban_clears_pending_so_a_banned_identity_cannot_be_approved() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // Owner creates an approval invite; alice authorizes a device and joins → pending.
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999, true);
+        st.apply(&inv).unwrap();
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let acert = DeviceCert::create(&alice, &alice_dev.public_key(), 1);
+        let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 2,
+            EP::DeviceAuthorized { cert: acert });
+        st.apply(&a_da).unwrap();
+        let join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 2, 3,
+            EP::MemberJoined { member: alice.public_key(), invite: inv.hash() });
+        st.apply(&join).unwrap();
+        assert!(st.is_pending(&alice.public_key()), "alice should be pending before ban");
+
+        // Owner bans the pending alice.
+        let ban = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&inv), 2, 4,
+            EP::MemberBanned { member: alice.public_key() });
+        st.apply(&ban).expect("owner can ban a pending identity");
+
+        // Invariant: ban must have cleared pending.
+        assert!(!st.is_pending(&alice.public_key()), "ban must clear pending");
+        assert!(st.is_banned(&alice.public_key()), "alice must be banned");
+
+        // A subsequent MemberApproved for alice is rejected: she is no longer pending.
+        let approve = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&ban),
+            ban.core.seq + 1, ban.core.lamport + 1,
+            EP::MemberApproved { member: alice.public_key() });
+        assert!(
+            st.clone().apply(&approve).is_err(),
+            "approving a banned (non-pending) identity must be rejected"
+        );
     }
 
     #[test]
