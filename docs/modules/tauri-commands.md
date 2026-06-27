@@ -1441,12 +1441,23 @@ skips the music source on the next tick.
 
 ---
 
-### `create_invite(state, server_id, max_uses) -> Result<InviteResult, String>`
+### `create_invite(state, server_id, log_server_id, max_uses) -> Result<InviteResult, String>`
 
-**What it does:** creates a server invite. Builds two shareable URLs from the
-returned invite code:
+**Parameters:**
+- `server_id: String` — the server to create the invite for.
+- `log_server_id: Option<String>` — genesis hash of the server when operating in
+  log/mesh mode; `None` for legacy servers.
+- `max_uses: Option<u32>` — usage cap; `None` = unlimited.
+
+**What it does:** creates a server invite (`requires_approval: false`). Builds
+two shareable URLs from the returned invite code:
 - `link`: `https://farder.gg/join/<base64url(address/code)>`
 - `deep_link`: `farder://<address>/<code>`
+
+When `log_server_id` is `Some`, also emits a signed `InviteCreated` log event to
+the server (auto-authorizing the device on first use) so a joiner can later cite
+it in a `MemberJoined`. For legacy servers (`log_server_id: None`) behavior is
+unchanged.
 
 **ServerRequest:** `CreateInvite { max_uses, expires_in_secs: None, target_channel: None }`.
 **invoke name:** `"create_invite"` → `createInvite()`.

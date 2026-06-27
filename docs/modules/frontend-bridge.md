@@ -341,7 +341,7 @@ These commands drive the `VoiceController` (the local Opus/QUIC audio subsystem)
 
 | Function | Rust command | What it does |
 |---|---|---|
-| `createInvite(serverId, maxUses?)` | `create_invite` | Creates an invite link. `maxUses` null = unlimited. Returns `InviteResult` with the code and share-ready URLs. |
+| `createInvite(serverId, logServerId, maxUses?)` | `create_invite` | Creates an invite link. `logServerId` is the genesis hash for log/mesh-mode servers, or `null` for legacy servers. `maxUses` null = unlimited. Returns `InviteResult` with the code and share-ready URLs. |
 
 ---
 
