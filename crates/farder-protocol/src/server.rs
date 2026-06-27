@@ -260,6 +260,9 @@ pub enum ServerRequest {
     ListAuditEvents { before_id: Option<u64>, limit: u32 },
     ListBanned,
     CreateInvite { max_uses: Option<u32>, expires_in_secs: Option<u64>, target_channel: Option<u64> },
+    /// Resolve an invite code to the hash of its log `InviteCreated` event, so a
+    /// joiner can cite it in a `MemberJoined`. Returns None for an unknown code.
+    ResolveInvite { code: String },
     GetServerInfo,
     GetMembers,
     /// Store the sender's signed profile (serialized `farder_crypto::profile::SignedProfile`).
@@ -336,6 +339,7 @@ pub enum ServerResponse {
     },
     AuditEventsList { events: Vec<AuditEvent> },
     InviteCreated { code: String },
+    InviteResolved { invite_event: Option<String> },
     DeletionStatusResp { status: DeletionStatus },
     UrlFetched { file_id: u64 },
     DmOpened { channel: ChannelInfo, participant: MemberInfo },

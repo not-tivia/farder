@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use farder_crypto::event_log::{Event, EventPayload, Genesis};
+use farder_crypto::event_log::{Event, EventHash, EventPayload, Genesis};
 use farder_crypto::event_log_state::LogState;
 
 pub fn save_genesis(conn: &Connection, g: &Genesis) -> Result<()> {
@@ -37,6 +37,7 @@ fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::MemberBanned { .. } => "MemberBanned",
         EventPayload::MemberUnbanned { .. } => "MemberUnbanned",
         EventPayload::PermissionGranted { .. } => "PermissionGranted",
+        EventPayload::MemberApproved { .. } => "MemberApproved",
     }
 }
 
@@ -136,6 +137,23 @@ pub fn reconcile_messages(conn: &Connection) -> Result<usize> {
     Ok(repaired)
 }
 
+/// Resolve a presented invite code to the hash of its `InviteCreated` event, by
+/// matching `invite_code_hash(code)` against stored events. Returns `None` if no
+/// invite matches (unknown/typo code). The raw code is never stored — only its hash.
+pub fn find_invite_event_by_code(conn: &Connection, code: &str) -> Result<Option<EventHash>> {
+    let target = farder_crypto::event_log::invite_code_hash(code);
+    for event in load_events_in_order(conn)? {
+        if let farder_crypto::event_log::EventPayload::InviteCreated { code_hash, .. } =
+            &event.core.payload
+        {
+            if code_hash == &target {
+                return Ok(Some(event.hash()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +195,40 @@ mod tests {
 
         // Duplicate event hash is rejected (UNIQUE).
         assert!(store_event(&conn, &msg).is_err());
+    }
+
+    #[test]
+    fn find_invite_event_by_code_matches_on_hash() {
+        use farder_crypto::event_log::{DeviceCert, invite_code_hash};
+
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        save_genesis(&conn, &g).unwrap();
+
+        // Owner authorizes their device, then creates an invite for code "JOINME12".
+        let da = Event::next(
+            &dev, owner.public_key(), g.server_id(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &dev.public_key(), 1) },
+        );
+        store_event(&conn, &da).unwrap();
+
+        let code = "JOINME12";
+        let inv = Event::next(
+            &dev, owner.public_key(), g.server_id(), Some(&da), 1, 2,
+            EP::InviteCreated {
+                code_hash: invite_code_hash(code),
+                max_uses: 5,
+                expires_at: 9_999_999_999,
+                requires_approval: false,
+            },
+        );
+        store_event(&conn, &inv).unwrap();
+
+        // The right code resolves to the invite's event hash; a wrong code resolves to None.
+        assert_eq!(find_invite_event_by_code(&conn, code).unwrap().as_deref(), Some(inv.hash().as_str()));
+        assert_eq!(find_invite_event_by_code(&conn, "WRONGcode").unwrap(), None);
     }
 
     #[test]

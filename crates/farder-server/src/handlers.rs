@@ -960,6 +960,11 @@ pub fn handle_request(
         // ----------------------------------------------------------------
         // Invites
         // ----------------------------------------------------------------
+        ServerRequest::ResolveInvite { code } => {
+            let invite_event = crate::event_ingest::find_invite_event_by_code(conn, &code)?;
+            ok(ServerResponse::InviteResolved { invite_event })
+        }
+
         ServerRequest::CreateInvite {
             max_uses,
             expires_in_secs,
