@@ -75,22 +75,25 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   const cardRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number }>({ left: position.x, top: position.y });
   useLayoutEffect(() => {
+    console.log("[profile-popup] positioning v3 (toward-chat, const-width, height-capped)", position);
     const el = cardRef.current;
     if (!el) return;
     const M = 8;
+    const CARD_W = 300; // .profile-card is a fixed 300px — use the constant so we
+    // never depend on a possibly-unmeasured offsetWidth (which would let the card
+    // open off the right edge from the member list).
     // The card's HEIGHT grows after it opens (avatar/bio/status load async), so a
-    // one-shot clamp computed against the initial short height lets it spill off
-    // the bottom when opened from near the bottom (the user panel, lower member
-    // rows). Recompute on every resize so it always stays fully on-screen.
+    // one-shot clamp against the initial short height lets it spill off the bottom
+    // when opened from near the bottom. Recompute on every resize.
     const compute = () => {
       // Use the layout viewport (excludes any scrollbar and is immune to the
       // window.innerWidth quirks some webviews report).
       const vw = document.documentElement.clientWidth || window.innerWidth;
       const vh = document.documentElement.clientHeight || window.innerHeight;
-      const w = el.offsetWidth;
-      const h = el.offsetHeight;
+      const w = Math.min(CARD_W, vw - 2 * M);
+      const h = el.offsetHeight || 0;
       // Right half → open leftward (right edge pinned at the click); left half →
-      // open rightward (left edge pinned at the click).
+      // open rightward (left edge pinned at the click). Toward the chat either way.
       let left = position.x > vw / 2 ? position.x - w : position.x;
       left = Math.max(M, Math.min(left, vw - w - M)); // clamp both edges
       const top = Math.max(M, Math.min(position.y, vh - h - M)); // never off bottom
@@ -107,6 +110,10 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     top: pos.top,
     left: pos.left,
     right: "auto",
+    // Cap the height to the viewport so an unusually tall card can never run off
+    // the bottom; it scrolls internally instead.
+    maxHeight: "calc(100vh - 16px)",
+    overflowY: "auto",
     zIndex: 1000,
   };
 
