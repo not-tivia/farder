@@ -1649,7 +1649,7 @@ pub fn handle_request(
             }
 
             let hash = crate::attachments::compute_sha256(&profile);
-            members::set_member_profile(conn, member, &profile, &hash)?;
+            members::set_member_profile(conn, member, &signed.data.display_name, &profile, &hash)?;
             ok_with(
                 ServerResponse::Ok,
                 vec![BroadcastEvent {

@@ -189,10 +189,18 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
                 setNameInput(isPlaceholder ? "" : cur);
                 setEditingName(true);
               } : undefined}
-              style={isSelf ? { cursor: "text" } : undefined}
+              style={isSelf ? { cursor: "text", display: "inline-flex", alignItems: "center", gap: 6 } : undefined}
               title={isSelf ? "Click to edit your display name" : undefined}
             >
-              {memberDisplayName(member.display_name)}
+              <span>{memberDisplayName(member.display_name)}</span>
+              {isSelf && (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                  style={{ opacity: 0.55, flexShrink: 0 }} aria-hidden="true">
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" />
+                </svg>
+              )}
             </div>
           )}
           <div className="profile-card-id">{pkStr.slice(0, 18)}...</div>

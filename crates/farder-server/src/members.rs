@@ -31,10 +31,19 @@ pub fn register_member(conn: &Connection, pk: &PublicKey, display_name: &str) ->
     Ok(())
 }
 
-pub fn set_member_profile(conn: &Connection, pk: &PublicKey, profile: &[u8], hash: &str) -> Result<()> {
+pub fn set_member_profile(
+    conn: &Connection,
+    pk: &PublicKey,
+    display_name: &str,
+    profile: &[u8],
+    hash: &str,
+) -> Result<()> {
+    // Update display_name too: it feeds the member list + message authorship, and
+    // is otherwise stuck at the auto-assigned "vk_…" from registration (which the
+    // client renders as "Anonymous"). The signed profile is the source of the name.
     conn.execute(
-        "UPDATE members SET avatar = ?2, profile_hash = ?3 WHERE public_key = ?1",
-        params![pk.as_bytes().as_slice(), profile, hash],
+        "UPDATE members SET display_name = ?2, avatar = ?3, profile_hash = ?4 WHERE public_key = ?1",
+        params![pk.as_bytes().as_slice(), display_name, profile, hash],
     )?;
     Ok(())
 }
@@ -1046,16 +1055,19 @@ mod tests {
         assert!(get_member(&conn, &pk).unwrap().unwrap().profile_hash.is_none());
 
         let blob = vec![9u8, 8, 7];
-        set_member_profile(&conn, &pk, &blob, "deadbeef").unwrap();
+        set_member_profile(&conn, &pk, "Alice Renamed", &blob, "deadbeef").unwrap();
 
         assert_eq!(get_member_profile(&conn, &pk).unwrap().as_deref(), Some(&blob[..]));
         assert_eq!(
             get_member(&conn, &pk).unwrap().unwrap().profile_hash.as_deref(),
             Some("deadbeef")
         );
-        // list_members carries the hash too.
+        // Updating the profile updates the rendered display_name too.
+        assert_eq!(get_member(&conn, &pk).unwrap().unwrap().display_name, "Alice Renamed");
+        // list_members carries the hash + the new name.
         let listed = list_members(&conn).unwrap();
         assert_eq!(listed[0].profile_hash.as_deref(), Some("deadbeef"));
+        assert_eq!(listed[0].display_name, "Alice Renamed");
     }
 
     #[test]
