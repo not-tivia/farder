@@ -1969,4 +1969,4 @@ desync the chain.
 
 **ServerRequest:** `SubmitEvent { event }` → `ServerResponse::EventAccepted { event_hash, timestamp }`.
 
-**invoke name:** `"submit_event"` (no TS wrapper yet; add one in `tauri-bridge.ts` when wiring the frontend).
+**invoke name:** `"submit_event"` → `submitEvent()` in `client/src/lib/tauri-bridge.ts`.
