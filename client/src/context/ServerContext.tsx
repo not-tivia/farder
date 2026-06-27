@@ -21,6 +21,7 @@ export interface PerServerState {
   currentVoiceChannelId: number | null;
   ownerPublicKey: string | null;
   relayed: boolean;
+  logServerId: string | null;
   highlightMessageId: number | null;
 }
 
@@ -55,6 +56,7 @@ const initialPerServerState: PerServerState = {
   currentVoiceChannelId: null,
   ownerPublicKey: null,
   relayed: false,
+  logServerId: null,
   highlightMessageId: null,
 };
 
@@ -141,6 +143,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ownerPublicKey: action.payload.owner_public_key
           ? publicKeyToString(action.payload.owner_public_key)
           : null,
+        logServerId: action.payload.server_id ?? null,
       };
     case "DISCONNECTED":
       return { ...initialPerServerState, connected: false };
@@ -389,6 +392,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
           ? publicKeyToString(payload.owner_public_key)
           : null,
         relayed: payload.relayed ?? false,
+        logServerId: payload.server_id ?? null,
       };
 
       return {

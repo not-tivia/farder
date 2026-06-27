@@ -158,6 +158,15 @@ export async function sendMessage(serverId: string, channelId: number, content: 
   return invoke<SendMessageResult>("send_message", { serverId, channelId, content, replyTo: replyTo ?? null, attachmentIds: attachmentIds ?? [] });
 }
 
+export async function submitEvent(
+  serverId: string,
+  channelId: number,
+  content: string,
+  replyTo?: string | null,
+): Promise<{ event_hash: string; timestamp: number }> {
+  return invoke("submit_event", { serverId, channelId, content, replyTo: replyTo ?? null });
+}
+
 export async function fetchHistory(serverId: string, channelId: number, beforeId?: number, limit?: number): Promise<MessageInfo[]> {
   return invoke<MessageInfo[]>("fetch_history", { serverId, channelId, beforeId: beforeId ?? null, limit: limit ?? null });
 }

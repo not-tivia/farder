@@ -236,13 +236,18 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       // token positions; the message text stays as raw `:name:` for edit/search.
       const finalAttachments = await resolveInlineEmojiAttachments(text, attachments);
 
-      await api.sendMessage(
-        serverId,
-        channelId,
-        messageContent,
-        replyTo,
-        finalAttachments.length > 0 ? finalAttachments : undefined,
-      );
+      const logMode = !!activeServer?.logServerId && finalAttachments.length === 0;
+      if (logMode) {
+        await api.submitEvent(serverId, channelId, messageContent, null);
+      } else {
+        await api.sendMessage(
+          serverId,
+          channelId,
+          messageContent,
+          replyTo,
+          finalAttachments.length > 0 ? finalAttachments : undefined,
+        );
+      }
       setContent("");
       setAttachedFileId(null);
       setAttachedFileName(null);
