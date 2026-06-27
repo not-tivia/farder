@@ -82,6 +82,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   let left = position.x > vw / 2 ? position.x - w : position.x;
   left = Math.max(M, Math.min(left, vw - w - M));
   const openUp = position.y > vh / 2;
+  console.log("[profile-popup] v4 pos", { clickX: position.x, clickY: position.y, vw, vh, w, computedLeft: left, rightEdge: left + w, openUp });
   const style: React.CSSProperties = {
     position: "fixed",
     left,
