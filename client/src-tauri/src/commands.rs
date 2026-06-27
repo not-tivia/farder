@@ -75,14 +75,27 @@ pub fn get_public_key(state: State<'_, Arc<AppState>>) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn set_display_name(name: String) -> Result<(), String> {
+pub async fn set_display_name(state: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("display name cannot be empty".to_string());
+    }
+    if trimmed.chars().count() > 128 {
+        return Err("display name too long (max 128 characters)".to_string());
+    }
     let path = profile_path();
     let mut data: serde_json::Value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    data["display_name"] = serde_json::json!(name);
-    std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())
+    data["display_name"] = serde_json::json!(trimmed);
+    std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())?;
+    // Propagate to every connected server so member lists + message authorship
+    // show the new name (mirrors set_profile_status). Without this the name only
+    // lived locally and servers kept the auto-assigned "vk_…" → "Anonymous".
+    let state_arc = Arc::clone(state.inner());
+    tokio::spawn(async move { crate::profile_sync::push_profile_everywhere(&state_arc).await; });
+    Ok(())
 }
 
 #[tauri::command]

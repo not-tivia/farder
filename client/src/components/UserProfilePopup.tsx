@@ -44,6 +44,8 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   const [status, setStatus] = useState<string | null>(null);
   const [editingStatus, setEditingStatus] = useState(false);
   const [statusInput, setStatusInput] = useState("");
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState("");
 
   useEffect(() => {
     if (isSelf) {
@@ -150,7 +152,42 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
 
         {/* Info */}
         <div className="profile-card-body">
-          <div className="profile-card-name">{memberDisplayName(member.display_name)}</div>
+          {isSelf && editingName ? (
+            <input
+              className="profile-card-status-input"
+              value={nameInput}
+              maxLength={128}
+              autoFocus
+              onChange={(e) => setNameInput(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === "Enter") {
+                  const v = nameInput.trim();
+                  if (!v) { toast.error("Display name cannot be empty"); return; }
+                  try {
+                    await api.setDisplayName(v);
+                    setEditingName(false); // member list refreshes via member_profile_updated
+                  } catch (err) { toast.error(`Couldn't save name: ${err}`); }
+                }
+                if (e.key === "Escape") setEditingName(false);
+              }}
+              onBlur={() => setEditingName(false)}
+              placeholder="Set a display name..."
+            />
+          ) : (
+            <div
+              className="profile-card-name"
+              onClick={isSelf ? () => {
+                const cur = member.display_name;
+                const isPlaceholder = !cur || /^vk_[0-9a-f]{8}$/.test(cur);
+                setNameInput(isPlaceholder ? "" : cur);
+                setEditingName(true);
+              } : undefined}
+              style={isSelf ? { cursor: "text" } : undefined}
+              title={isSelf ? "Click to edit your display name" : undefined}
+            >
+              {memberDisplayName(member.display_name)}
+            </div>
+          )}
           <div className="profile-card-id">{pkStr.slice(0, 18)}...</div>
 
           {member.presence && <div className="profile-presence">{formatPresence(member.presence)}</div>}
