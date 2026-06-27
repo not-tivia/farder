@@ -66,13 +66,12 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     setEditingBio(false);
   }
 
-  // Position the card on-screen relative to the click. Profiles can be opened
-  // from BOTH sides — the member list at the far right AND avatars in the chat
-  // at the left — so we can't anchor a single edge. Open rightward from the
-  // click by default; if that would spill off the right edge, open leftward
-  // instead; then clamp into the viewport on BOTH edges so the card can never
-  // leave the screen in either direction. (.profile-card is a fixed 300px wide,
-  // so the measured width is stable.)
+  // Open the card TOWARD THE CHAT (the centre of the screen): clicks in the right
+  // half — the member list — grow the card leftward into the chat; clicks in the
+  // left half — chat avatars — grow it rightward into the chat. Either way it
+  // expands into open space and never runs off an edge. Clamp both edges as a
+  // final guard. (.profile-card is a fixed 300px wide, so the measured width is
+  // stable.)
   const cardRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number }>({ left: position.x, top: position.y });
   useLayoutEffect(() => {
@@ -85,8 +84,9 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     const vh = document.documentElement.clientHeight || window.innerHeight;
     const w = el.offsetWidth;
     const h = el.offsetHeight;
-    let left = position.x;
-    if (left + w + M > vw) left = position.x - w; // would spill right → open leftward
+    // Right half → open leftward (right edge pinned at the click); left half →
+    // open rightward (left edge pinned at the click).
+    let left = position.x > vw / 2 ? position.x - w : position.x;
     left = Math.max(M, Math.min(left, vw - w - M)); // clamp both edges
     const top = Math.max(M, Math.min(position.y, vh - h - M));
     setPos({ left, top });
