@@ -342,6 +342,7 @@ These commands drive the `VoiceController` (the local Opus/QUIC audio subsystem)
 | Function | Rust command | What it does |
 |---|---|---|
 | `createInvite(serverId, logServerId, maxUses?)` | `create_invite` | Creates an invite link. `logServerId` is the genesis hash for log/mesh-mode servers, or `null` for legacy servers. `maxUses` null = unlimited. Returns `InviteResult` with the code and share-ready URLs. |
+| `joinLogServer(serverId, logServerId, inviteCode)` | `join_log_server` | Emits a self-signed `MemberJoined` event so the joiner becomes a recognized log member who can post. `serverId` is the connection address (routes the request); `logServerId` is the genesis hash (stamps events and keys the device chain). Idempotent — returns immediately if already joined. Called automatically after a successful `connectServer` when an invite code was used and the server is mesh-mode (`result.server_id` is present). |
 
 ---
 

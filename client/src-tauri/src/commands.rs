@@ -3854,6 +3854,81 @@ async fn event_send_submit(
 }
 
 // ---------------------------------------------------------------------------
+// join_log_server — joiner emits MemberJoined so they can post to the log
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn join_log_server(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,       // connection key (address) — routes requests
+    log_server_id: String,   // genesis hash — stamps events + keys the device chain
+    invite_code: String,
+) -> Result<(), String> {
+    use farder_crypto::event_log::EventPayload;
+
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair()?;
+    let mut ds = crate::device::DeviceState::load(&log_server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    if ds.joined {
+        return Ok(()); // already a log member on this server
+    }
+
+    // 1. Authorize this device if needed (mirrors submit_event / create_invite).
+    if !ds.authorized {
+        let cert = crate::device::device_cert(&identity, &device);
+        let da = event_build_next(&device, &identity, &log_server_id, ds.last_event_hash.clone(),
+            ds.next_seq, ds.lamport, EventPayload::DeviceAuthorized { cert });
+        event_send_submit(&state, &server_id, &da).await?;
+        ds.next_seq = da.core.seq + 1;
+        ds.last_event_hash = Some(da.hash());
+        ds.lamport = da.core.lamport;
+        ds.authorized = true;
+        ds.save(&log_server_id)?;
+    }
+
+    // 2. Resolve the invite code to its InviteCreated event hash.
+    let resolved = bridge::send_request(&state, &server_id,
+        ServerRequest::ResolveInvite { code: invite_code })
+        .await.map_err(|e| e.to_string())?;
+    let invite_event = match resolved {
+        ServerResponse::InviteResolved { invite_event: Some(h) } => h,
+        ServerResponse::InviteResolved { invite_event: None } =>
+            return Err("invite not found on this server (it may not be a mesh invite)".to_string()),
+        ServerResponse::Error { reason } => return Err(reason),
+        other => return Err(format!("unexpected response to ResolveInvite: {:?}", other)),
+    };
+
+    // 3. Emit the self-signed MemberJoined citing the invite.
+    let join = event_build_next(&device, &identity, &log_server_id, ds.last_event_hash.clone(),
+        ds.next_seq, ds.lamport, EventPayload::MemberJoined { member: identity.public_key(), invite: invite_event });
+    match event_send_submit(&state, &server_id, &join).await {
+        Ok(_) => {
+            ds.next_seq = join.core.seq + 1;
+            ds.last_event_hash = Some(join.hash());
+            ds.lamport = join.core.lamport;
+            ds.joined = true;
+            ds.save(&log_server_id)?;
+            Ok(())
+        }
+        // Already a member (e.g. joined on another device): treat as success so we
+        // stop retrying. The chain head advanced server-side only if accepted; on a
+        // rejection nothing advanced, so just mark joined and move on.
+        Err(e) if e.to_string().contains("already a member") => {
+            ds.joined = true;
+            ds.save(&log_server_id)?;
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 // Public re-export so other modules can resolve paths under ~/.farder/.
 pub(crate) fn farder_data_dir_pub() -> std::path::PathBuf {

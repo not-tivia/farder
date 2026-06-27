@@ -54,6 +54,9 @@ pub struct DeviceState {
     pub lamport: u64,
     /// Whether this device has already submitted its DeviceAuthorized to the server.
     pub authorized: bool,
+    /// Whether this identity has already submitted its MemberJoined to the server.
+    #[serde(default)]
+    pub joined: bool,
 }
 
 impl DeviceState {
@@ -64,6 +67,7 @@ impl DeviceState {
             last_event_hash: None,
             lamport: 0,
             authorized: false,
+            joined: false,
         }
     }
 
@@ -130,12 +134,14 @@ mod tests {
         st.last_event_hash = Some("abc".into());
         st.lamport = 9;
         st.authorized = true;
+        st.joined = true;
         let json = serde_json::to_string(&st).unwrap();
         let back: DeviceState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.next_seq, 3);
         assert_eq!(back.last_event_hash.as_deref(), Some("abc"));
         assert_eq!(back.lamport, 9);
         assert!(back.authorized);
+        assert!(back.joined);
         assert_eq!(back.device_id, device_id(&device.public_key()));
     }
 }

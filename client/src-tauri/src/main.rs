@@ -255,6 +255,7 @@ fn main() {
             commands::get_presence_music,
             commands::set_presence_music,
             commands::submit_event,
+            commands::join_log_server,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

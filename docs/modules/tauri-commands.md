@@ -1981,3 +1981,32 @@ desync the chain.
 **ServerRequest:** `SubmitEvent { event }` → `ServerResponse::EventAccepted { event_hash, timestamp }`.
 
 **invoke name:** `"submit_event"` → `submitEvent()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `join_log_server(state, server_id, log_server_id, invite_code) -> Result<(), String>`
+
+**What it does:** emits a self-signed `MemberJoined` event so the joining client
+becomes a recognized log member who can post messages on a mesh server. On first
+call for a given `(log_server_id, device)` pair, automatically emits a
+`DeviceAuthorized` event first (same as `submit_event`). Resolves the invite code
+to its `InviteCreated` event hash via `ServerRequest::ResolveInvite`, then builds
+and submits a `MemberJoined { member, invite }` event. Chain state — `next_seq`,
+`last_event_hash`, `lamport`, `authorized`, `joined` — is persisted in
+`~/.farder/servers/<log_server_id>/device_state.json` and is advanced ONLY after
+`EventAccepted` is returned. An "already a member" rejection is treated as success
+(idempotent). If `ds.joined` is already true the command returns immediately without
+sending any events.
+
+**Params:**
+- `server_id: String` — connection key (address) — routes requests to the right server.
+- `log_server_id: String` — genesis hash — stamps events and keys the device chain.
+- `invite_code: String` — the invite code used when connecting (from the invite link).
+
+**Returns:** `()` on success.
+
+**Side effects:** may emit up to two events — `DeviceAuthorized` (first use only)
+and `MemberJoined` — via `ServerRequest::SubmitEvent`. Also sends
+`ServerRequest::ResolveInvite` to look up the invite event hash.
+
+**invoke name:** `"join_log_server"` → `joinLogServer()` in `client/src/lib/tauri-bridge.ts`.

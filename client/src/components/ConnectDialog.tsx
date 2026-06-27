@@ -149,6 +149,10 @@ export default function ConnectDialog() {
       const result = await api.connectServer(address, parsed.inviteCode, parsed.setupToken);
       dispatch({ type: "SERVER_ADDED", serverId: address, payload: result });
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: address });
+      if (parsed.inviteCode && result.server_id) {
+        try { await api.joinLogServer(address, result.server_id, parsed.inviteCode); }
+        catch (e) { console.error("[mesh] join_log_server failed:", e); }
+      }
       try {
         const members = await api.getMembers(address);
         dispatch({ type: "SET_MEMBERS", serverId: address, payload: members });

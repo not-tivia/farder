@@ -811,3 +811,9 @@ export const getPresenceEnabled = () => invoke<boolean>("get_presence_enabled");
 export const setPresenceEnabled = (enabled: boolean) => invoke<void>("set_presence_enabled", { enabled });
 export const getPresenceMusic = () => invoke<boolean>("get_presence_music");
 export const setPresenceMusic = (enabled: boolean) => invoke<void>("set_presence_music", { enabled });
+
+// ── Mesh log membership ───────────────────────────────────────────────────────
+
+export async function joinLogServer(serverId: string, logServerId: string, inviteCode: string): Promise<void> {
+  return invoke("join_log_server", { serverId, logServerId, inviteCode });
+}
