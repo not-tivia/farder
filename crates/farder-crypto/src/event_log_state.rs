@@ -224,7 +224,10 @@ impl LogState {
             }
 
             EventPayload::MemberRemoved { member } => {
-                ensure!(self.is_member(member), "target is not a member");
+                ensure!(
+                    self.is_member(member) || self.is_pending(member),
+                    "target is neither a member nor pending"
+                );
                 ensure!(
                     member == author || self.has_capability(author, "kick"),
                     "must be the member (leave) or hold 'kick'"
@@ -297,6 +300,7 @@ impl LogState {
             EventPayload::MessagePosted { .. } => {} // no authz-state change
             EventPayload::MemberRemoved { member } => {
                 self.members.remove(member);
+                self.pending.remove(member);
                 self.capabilities.remove(member);
             }
             EventPayload::MemberBanned { member } => {
@@ -789,6 +793,65 @@ mod tests {
         let again = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&approve), 4, 9,
             EP::MemberApproved { member: alice.public_key() });
         assert!(st.clone().apply(&again).is_err(), "cannot approve a non-pending identity");
+    }
+
+    #[test]
+    fn member_removed_denies_a_pending_request() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // Approval invite; Alice joins → pending.
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999, true);
+        st.apply(&inv).unwrap();
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let acert = DeviceCert::create(&alice, &alice_dev.public_key(), 1);
+        let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 2,
+            EP::DeviceAuthorized { cert: acert });
+        st.apply(&a_da).unwrap();
+        let join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 2, 3,
+            EP::MemberJoined { member: alice.public_key(), invite: inv.hash() });
+        st.apply(&join).unwrap();
+        assert!(st.is_pending(&alice.public_key()));
+
+        // Owner denies the request via MemberRemoved → no longer pending, not a member.
+        let deny = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&inv), 2, 4,
+            EP::MemberRemoved { member: alice.public_key() });
+        st.apply(&deny).expect("owner ('kick') can remove a pending request");
+        assert!(!st.is_pending(&alice.public_key()), "denied → no longer pending");
+        assert!(!st.is_member(&alice.public_key()), "denied → not a member");
+    }
+
+    #[test]
+    fn ban_supersedes_a_pending_join() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999, true);
+        st.apply(&inv).unwrap();
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let acert = DeviceCert::create(&alice, &alice_dev.public_key(), 1);
+        let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 2,
+            EP::DeviceAuthorized { cert: acert });
+        st.apply(&a_da).unwrap();
+        let join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 2, 3,
+            EP::MemberJoined { member: alice.public_key(), invite: inv.hash() });
+        st.apply(&join).unwrap();
+
+        // Owner bans the pending identity.
+        let ban = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&inv), 2, 4,
+            EP::MemberBanned { member: alice.public_key() });
+        st.apply(&ban).expect("owner can ban a pending identity");
+        assert!(st.is_banned(&alice.public_key()));
+
+        // The banned identity can no longer act (ban gate fires before payload).
+        let post = msg(&alice_dev, &alice.public_key(), &sid, &join, 5);
+        assert!(st.clone().apply(&post).is_err(), "a banned (formerly pending) identity is blocked");
     }
 
     #[test]
