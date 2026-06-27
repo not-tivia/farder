@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString, memberDisplayName } from "../lib/types";
@@ -66,49 +66,51 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     setEditingBio(false);
   }
 
-  // Position the card synchronously from the click + viewport — no measuring, no
-  // post-mount effect (an effect that bailed left the card stuck at the raw click
-  // point). The card is a fixed 300px wide, so width is a constant. Horizontally:
-  // clicks in the right half (member list) anchor the card's LEFT so it opens
-  // leftward toward the chat; left-half clicks anchor at the click. Vertically:
-  // bottom-half clicks anchor the card's BOTTOM edge at the click so it grows
-  // UPWARD into open space (never off the bottom); top-half clicks anchor the top.
-  // maxHeight caps it to the viewport as a final guard.
+  // Position the card from the click + viewport, opening TOWARD THE CHAT.
+  //
+  // The subtle part: with display scaling / UI zoom (e.g. Windows at 125%), the
+  // click coordinates and clientWidth/Height arrive in SCREEN pixels, but the CSS
+  // left/top we set are interpreted in CSS pixels and then multiplied back up by
+  // the scale — so on a 125% display, left:2081 renders at 2601 and the member-
+  // list popup flies off the right edge (invisible). We measure that scale
+  // (rendered width ÷ layout width), compute the position in SCREEN space (where
+  // the click lives), then convert to CSS px (÷ scale) so it lands correctly.
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  useLayoutEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const measured = el.getBoundingClientRect().width / (el.offsetWidth || 300);
+    if (measured > 0.1 && Math.abs(measured - scale) > 0.01) setScale(measured);
+  });
   const M = 8;
-  const CARD_W = 300;
-  const vw = document.documentElement.clientWidth || window.innerWidth;
-  const vh = document.documentElement.clientHeight || window.innerHeight;
-  const w = Math.min(CARD_W, vw - 2 * M);
-  let left = position.x > vw / 2 ? position.x - w : position.x;
-  left = Math.max(M, Math.min(left, vw - w - M));
+  const CARD_W = 300; // .profile-card CSS width
+  const vw = document.documentElement.clientWidth || window.innerWidth;   // screen px
+  const vh = document.documentElement.clientHeight || window.innerHeight; // screen px
+  const cardW = CARD_W * scale; // the card's on-screen width
+  // Right-half clicks (member list) open leftward; bottom-half clicks anchor the
+  // card's bottom so it grows upward. Computed in screen space, clamped on-screen.
+  let leftScreen = position.x > vw / 2 ? position.x - cardW : position.x;
+  leftScreen = Math.max(M, Math.min(leftScreen, vw - cardW - M));
   const openUp = position.y > vh / 2;
-  console.log("[pp]", "x=" + position.x, "y=" + position.y, "left=" + left, "openUp=" + openUp,
-    "top=" + (openUp ? "auto" : Math.max(M, position.y)), "bottom=" + (openUp ? Math.max(M, vh - position.y) : "auto"),
-    "vw=" + vw, "vh=" + vh);
+  const topScreen = Math.max(M, position.y);
+  const bottomScreen = Math.max(M, vh - position.y);
   const style: React.CSSProperties = {
     position: "fixed",
-    left,
+    left: leftScreen / scale, // screen px → CSS px so the post-zoom result is right
     right: "auto",
     ...(openUp
-      ? { bottom: Math.max(M, vh - position.y), top: "auto" }
-      : { top: Math.max(M, position.y), bottom: "auto" }),
-    maxHeight: `calc(100vh - ${2 * M}px)`,
+      ? { bottom: bottomScreen / scale, top: "auto" }
+      : { top: topScreen / scale, bottom: "auto" }),
+    maxHeight: `${(vh - 2 * M) / scale}px`,
     overflowY: "auto",
-    zIndex: 2147483647, // DIAGNOSTIC: max z-index to test if it's being covered
-    outline: "4px solid red", // DIAGNOSTIC: make it unmissable
+    zIndex: 1000,
   };
 
   return createPortal(
     <>
-      <div style={{ position: "fixed", inset: 0, zIndex: 2147483646, background: "rgba(255,0,0,0.3)" }} onClick={onClose} />
-      <div className="profile-card" style={style} ref={(el) => {
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        const op = el.offsetParent as HTMLElement | null;
-        console.log("[pp] RECT", "left=" + Math.round(r.left), "top=" + Math.round(r.top),
-          "w=" + Math.round(r.width), "h=" + Math.round(r.height),
-          "offsetParent=" + (op ? op.tagName + "." + (op.className || "") : "null(viewport)"));
-      }}>
+      <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={onClose} />
+      <div ref={cardRef} className="profile-card" style={style}>
         {/* Banner */}
         <div className="profile-card-banner" style={{ background: bannerColor }} />
 
