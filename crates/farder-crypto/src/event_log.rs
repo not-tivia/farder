@@ -114,6 +114,7 @@ pub enum EventPayload {
     DeviceAuthorized { cert: DeviceCert },
     InviteCreated { code_hash: String, max_uses: u32, expires_at: u64, #[serde(default)] requires_approval: bool },
     MemberJoined { member: PublicKey, invite: EventRef },
+    MemberApproved { member: PublicKey },
     MemberRemoved { member: PublicKey },
     MemberBanned { member: PublicKey },
     MemberUnbanned { member: PublicKey },

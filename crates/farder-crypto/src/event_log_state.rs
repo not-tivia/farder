@@ -212,6 +212,12 @@ impl LogState {
                 Ok(())
             }
 
+            EventPayload::MemberApproved { member } => {
+                ensure!(self.has_capability(author, "kick"), "missing 'kick' capability");
+                ensure!(self.is_pending(member), "target is not pending approval");
+                Ok(())
+            }
+
             EventPayload::MessagePosted { .. } => {
                 ensure!(self.is_member(author), "only members may post");
                 Ok(())
@@ -283,6 +289,10 @@ impl LogState {
                 if let Some(inv) = self.invites.get_mut(invite) {
                     inv.use_count += 1;
                 }
+            }
+            EventPayload::MemberApproved { member } => {
+                self.pending.remove(member);
+                self.members.insert(member.clone());
             }
             EventPayload::MessagePosted { .. } => {} // no authz-state change
             EventPayload::MemberRemoved { member } => {
@@ -729,6 +739,56 @@ mod tests {
             EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
         let _ = (owner2, od2);
         assert!(LogState::replay(&g2, &[nm_da, bad_post]).is_err(), "non-member post must reject the replay");
+    }
+
+    #[test]
+    fn member_approved_promotes_pending_and_requires_kick() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // Owner creates an approval invite; Alice joins → pending.
+        let inv = invite(&owner_dev, &owner.public_key(), &sid, &da, 1, 5, 9999, true);
+        st.apply(&inv).unwrap();
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let acert = DeviceCert::create(&alice, &alice_dev.public_key(), 1);
+        let a_da = Ev::next(&alice_dev, alice.public_key(), sid.clone(), None, 0, 2,
+            EP::DeviceAuthorized { cert: acert });
+        st.apply(&a_da).unwrap();
+        let join = Ev::next(&alice_dev, alice.public_key(), sid.clone(), Some(&a_da), 2, 3,
+            EP::MemberJoined { member: alice.public_key(), invite: inv.hash() });
+        st.apply(&join).unwrap();
+        assert!(st.is_pending(&alice.public_key()));
+
+        // A non-"kick" member cannot approve. Make Bob a plain member first.
+        let inv2 = invite(&owner_dev, &owner.public_key(), &sid, &inv, 2, 5, 9999, false);
+        st.apply(&inv2).unwrap();
+        let bob = Keypair::generate();
+        let bob_dev = Keypair::generate();
+        let bcert = DeviceCert::create(&bob, &bob_dev.public_key(), 1);
+        let b_da = Ev::next(&bob_dev, bob.public_key(), sid.clone(), None, 0, 5,
+            EP::DeviceAuthorized { cert: bcert });
+        st.apply(&b_da).unwrap();
+        let bjoin = Ev::next(&bob_dev, bob.public_key(), sid.clone(), Some(&b_da), 2, 6,
+            EP::MemberJoined { member: bob.public_key(), invite: inv2.hash() });
+        st.apply(&bjoin).unwrap();
+        let bob_try = Ev::next(&bob_dev, bob.public_key(), sid.clone(), Some(&bjoin), 3, 7,
+            EP::MemberApproved { member: alice.public_key() });
+        assert!(st.clone().apply(&bob_try).is_err(), "a member without 'kick' cannot approve");
+
+        // The owner (holds every capability) approves Alice → member, not pending.
+        let approve = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&inv2), 3, 8,
+            EP::MemberApproved { member: alice.public_key() });
+        st.apply(&approve).expect("owner can approve");
+        assert!(st.is_member(&alice.public_key()), "approved → member");
+        assert!(!st.is_pending(&alice.public_key()), "approved → no longer pending");
+
+        // Approving someone who is not pending is rejected.
+        let again = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&approve), 4, 9,
+            EP::MemberApproved { member: alice.public_key() });
+        assert!(st.clone().apply(&again).is_err(), "cannot approve a non-pending identity");
     }
 
     #[test]
