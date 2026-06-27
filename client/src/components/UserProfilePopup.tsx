@@ -82,7 +82,9 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   let left = position.x > vw / 2 ? position.x - w : position.x;
   left = Math.max(M, Math.min(left, vw - w - M));
   const openUp = position.y > vh / 2;
-  console.log("[profile-popup] v4 pos", { clickX: position.x, clickY: position.y, vw, vh, w, computedLeft: left, rightEdge: left + w, openUp });
+  console.log("[pp]", "x=" + position.x, "y=" + position.y, "left=" + left, "openUp=" + openUp,
+    "top=" + (openUp ? "auto" : Math.max(M, position.y)), "bottom=" + (openUp ? Math.max(M, vh - position.y) : "auto"),
+    "vw=" + vw, "vh=" + vh);
   const style: React.CSSProperties = {
     position: "fixed",
     left,
@@ -92,7 +94,8 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
       : { top: Math.max(M, position.y), bottom: "auto" }),
     maxHeight: `calc(100vh - ${2 * M}px)`,
     overflowY: "auto",
-    zIndex: 1000,
+    zIndex: 2147483647, // DIAGNOSTIC: max z-index to test if it's being covered
+    outline: "4px solid red", // DIAGNOSTIC: make it unmissable
   };
 
   return createPortal(
