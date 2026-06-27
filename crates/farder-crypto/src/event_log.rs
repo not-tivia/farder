@@ -11,6 +11,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Canonical hash of an invite code, stored as `InviteCreated.code_hash` and used
+/// by the server to resolve a presented code to its invite event. The raw code is
+/// never put in the log — only this hash.
+pub fn invite_code_hash(code: &str) -> String {
+    sha256_hex(code.as_bytes())
+}
+
 pub type ServerId = String; // hex SHA-256 of canonical Genesis bytes
 pub type DeviceId = String; // hex SHA-256 of a device public key
 pub type EventHash = String; // hex SHA-256 of canonical signed-Event bytes
@@ -407,5 +414,18 @@ mod tests {
         assert_eq!(a0.core.author, b0.core.author); // same identity
         assert_ne!(a0.core.device, b0.core.device);  // different devices
         assert_ne!(a0.hash(), b0.hash());            // distinct events
+    }
+}
+
+#[cfg(test)]
+mod invite_code_hash_tests {
+    use super::invite_code_hash;
+
+    #[test]
+    fn invite_code_hash_is_stable_and_distinct() {
+        let h = invite_code_hash("AbCd1234");
+        assert_eq!(h.len(), 64, "sha-256 hex is 64 chars");
+        assert_eq!(h, invite_code_hash("AbCd1234"), "deterministic");
+        assert_ne!(h, invite_code_hash("AbCd1235"), "distinct codes -> distinct hashes");
     }
 }
