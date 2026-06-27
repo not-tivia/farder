@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useLayoutEffect } from "react";
+import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString, memberDisplayName } from "../lib/types";
@@ -66,53 +66,30 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     setEditingBio(false);
   }
 
-  // Open the card TOWARD THE CHAT (the centre of the screen): clicks in the right
-  // half — the member list — grow the card leftward into the chat; clicks in the
-  // left half — chat avatars — grow it rightward into the chat. Either way it
-  // expands into open space and never runs off an edge. Clamp both edges as a
-  // final guard. (.profile-card is a fixed 300px wide, so the measured width is
-  // stable.)
-  const cardRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number }>({ left: position.x, top: position.y });
-  useLayoutEffect(() => {
-    console.log("[profile-popup] positioning v3 (toward-chat, const-width, height-capped)", position);
-    const el = cardRef.current;
-    if (!el) return;
-    const M = 8;
-    const CARD_W = 300; // .profile-card is a fixed 300px — use the constant so we
-    // never depend on a possibly-unmeasured offsetWidth (which would let the card
-    // open off the right edge from the member list).
-    // The card's HEIGHT grows after it opens (avatar/bio/status load async), so a
-    // one-shot clamp against the initial short height lets it spill off the bottom
-    // when opened from near the bottom. Recompute on every resize.
-    const compute = () => {
-      // Use the layout viewport (excludes any scrollbar and is immune to the
-      // window.innerWidth quirks some webviews report).
-      const vw = document.documentElement.clientWidth || window.innerWidth;
-      const vh = document.documentElement.clientHeight || window.innerHeight;
-      const w = Math.min(CARD_W, vw - 2 * M);
-      const h = el.offsetHeight || 0;
-      // Right half → open leftward (right edge pinned at the click); left half →
-      // open rightward (left edge pinned at the click). Toward the chat either way.
-      let left = position.x > vw / 2 ? position.x - w : position.x;
-      left = Math.max(M, Math.min(left, vw - w - M)); // clamp both edges
-      const top = Math.max(M, Math.min(position.y, vh - h - M)); // never off bottom
-      setPos({ left, top });
-    };
-    compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [position.x, position.y]);
-
+  // Position the card synchronously from the click + viewport — no measuring, no
+  // post-mount effect (an effect that bailed left the card stuck at the raw click
+  // point). The card is a fixed 300px wide, so width is a constant. Horizontally:
+  // clicks in the right half (member list) anchor the card's LEFT so it opens
+  // leftward toward the chat; left-half clicks anchor at the click. Vertically:
+  // bottom-half clicks anchor the card's BOTTOM edge at the click so it grows
+  // UPWARD into open space (never off the bottom); top-half clicks anchor the top.
+  // maxHeight caps it to the viewport as a final guard.
+  const M = 8;
+  const CARD_W = 300;
+  const vw = document.documentElement.clientWidth || window.innerWidth;
+  const vh = document.documentElement.clientHeight || window.innerHeight;
+  const w = Math.min(CARD_W, vw - 2 * M);
+  let left = position.x > vw / 2 ? position.x - w : position.x;
+  left = Math.max(M, Math.min(left, vw - w - M));
+  const openUp = position.y > vh / 2;
   const style: React.CSSProperties = {
     position: "fixed",
-    top: pos.top,
-    left: pos.left,
+    left,
     right: "auto",
-    // Cap the height to the viewport so an unusually tall card can never run off
-    // the bottom; it scrolls internally instead.
-    maxHeight: "calc(100vh - 16px)",
+    ...(openUp
+      ? { bottom: Math.max(M, vh - position.y), top: "auto" }
+      : { top: Math.max(M, position.y), bottom: "auto" }),
+    maxHeight: `calc(100vh - ${2 * M}px)`,
     overflowY: "auto",
     zIndex: 1000,
   };
@@ -120,7 +97,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   return createPortal(
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={onClose} />
-      <div ref={cardRef} className="profile-card" style={style}>
+      <div className="profile-card" style={style}>
         {/* Banner */}
         <div className="profile-card-banner" style={{ background: bannerColor }} />
 
