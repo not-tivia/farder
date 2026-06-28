@@ -92,20 +92,22 @@ export default function MemberSidebar() {
     : { bits: 0n };
   const showModBadges = isModerator(viewerBits);
 
+  // Returns the highest role position for a member, excluding @everyone (position 0 / builtin).
+  // Members whose only role is @everyone return -1 so they sort below any role-holding member.
   function highestRolePosition(member: MemberInfo): number {
-    if (member.role_ids.length === 0) return -1;
-    return Math.max(
-      ...member.role_ids.map((id) => {
-        const role = roles.find((r) => r.id === id);
-        return role ? role.position : -1;
-      }),
-    );
+    let best = -1;
+    for (const id of member.role_ids) {
+      const role = roles.find((r) => r.id === id);
+      if (!role || role.name === "@everyone") continue;
+      if (role.position > best) best = role.position;
+    }
+    return best;
   }
 
   const sortedMembers = [...members].sort((a, b) => {
     const diff = highestRolePosition(b) - highestRolePosition(a);
     if (diff !== 0) return diff;
-    return a.display_name.localeCompare(b.display_name);
+    return memberDisplayName(a.display_name).localeCompare(memberDisplayName(b.display_name));
   });
 
   return (
