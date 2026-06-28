@@ -242,6 +242,7 @@ mod tests {
         let state = AppState {
             signing_key_bytes: std::sync::Mutex::new(None),
             servers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            device_chain_lock: tokio::sync::Mutex::new(()),
         };
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
@@ -301,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_push_profile_is_noop_when_locked() {
-        let state = crate::state::AppState { signing_key_bytes: std::sync::Mutex::new(None), servers: std::sync::Mutex::new(std::collections::HashMap::new()) };
+        let state = crate::state::AppState { signing_key_bytes: std::sync::Mutex::new(None), servers: std::sync::Mutex::new(std::collections::HashMap::new()), device_chain_lock: tokio::sync::Mutex::new(()) };
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             assert!(push_profile(&state, "srv-x").await.is_ok());

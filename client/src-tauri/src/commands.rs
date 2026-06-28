@@ -2154,6 +2154,9 @@ pub async fn create_invite(
             // in the log, so a joiner can cite it in their MemberJoined.
             // Instant invite for now (requires_approval = false; approval is sub-project 3).
             if let Some(log_sid) = log_server_id {
+                // Serialize chain writes against submit_event and join_log_server.
+                let _chain_guard = state.device_chain_lock.lock().await;
+
                 let identity = {
                     let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
                     let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
@@ -3751,6 +3754,11 @@ pub async fn submit_event(
     };
     let device = crate::device::load_or_create_device_keypair()?;
 
+    // Serialize all chain writes: load → mutate → save must not interleave with
+    // concurrent commands (join_log_server, create_invite) that touch the same
+    // per-(server,device) state file.  tokio::sync::Mutex is held across awaits.
+    let _chain_guard = state.device_chain_lock.lock().await;
+
     // Per-(server, device) chain state. Keyed by the log server_id (genesis hash).
     let mut ds = crate::device::DeviceState::load(&log_server_id)?
         .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
@@ -3872,6 +3880,10 @@ pub async fn join_log_server(
         Keypair::from_signing_key_bytes(&bytes)
     };
     let device = crate::device::load_or_create_device_keypair()?;
+
+    // Serialize chain writes against submit_event and create_invite.
+    let _chain_guard = state.device_chain_lock.lock().await;
+
     let mut ds = crate::device::DeviceState::load(&log_server_id)?
         .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
 

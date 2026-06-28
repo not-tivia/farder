@@ -34,6 +34,10 @@ impl ServerConnection {
 pub struct AppState {
     pub signing_key_bytes: Mutex<Option<[u8; 32]>>,
     pub servers: Mutex<HashMap<String, Arc<ServerConnection>>>,
+    /// Serializes all device-chain critical sections (load → mutate → save)
+    /// across the three commands that write the per-(server,device) state file.
+    /// Must be tokio::sync::Mutex so it can be held across `.await` points.
+    pub device_chain_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -41,6 +45,7 @@ impl AppState {
         Self {
             signing_key_bytes: Mutex::new(None),
             servers: Mutex::new(HashMap::new()),
+            device_chain_lock: tokio::sync::Mutex::new(()),
         }
     }
 
