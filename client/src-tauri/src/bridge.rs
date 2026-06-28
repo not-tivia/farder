@@ -199,6 +199,8 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:voice_left", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "public_key": public_key.to_string() })),
         ServerEvent::StreamCallIncoming { .. }
         | ServerEvent::StreamCallEnded { .. } => Ok(()), // DM call signaling; no roster UI yet
+        ServerEvent::MembershipChanged { public_key } =>
+            app.emit("server:membership_changed", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string() })),
         _ => Ok(()),
     };
 }

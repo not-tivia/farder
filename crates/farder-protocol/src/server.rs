@@ -454,6 +454,9 @@ pub enum ServerEvent {
         kind: TrackKind,
         wrapped_key: Vec<u8>,
     },
+    /// A membership transition (join-pending / approve / remove / ban) for `public_key`.
+    /// Clients re-fetch their own status + the member list + the pending queue on this.
+    MembershipChanged { public_key: PublicKey },
 }
 
 #[cfg(test)]

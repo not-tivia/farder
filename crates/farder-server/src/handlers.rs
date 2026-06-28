@@ -1857,6 +1857,23 @@ pub fn handle_request(
                     }
                 }
             }
+
+            // Broadcast a membership change so every client re-fetches its own
+            // status + the member list + the pending queue.
+            let membership_pk: Option<PublicKey> = match &event.core.payload {
+                EventPayload::MemberJoined { member, .. }
+                | EventPayload::MemberApproved { member }
+                | EventPayload::MemberRemoved { member }
+                | EventPayload::MemberBanned { member } => Some(member.clone()),
+                _ => None,
+            };
+            if let Some(pk) = membership_pk {
+                events.push(BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::MembershipChanged { public_key: pk },
+                });
+            }
+
             ok_with(ServerResponse::EventAccepted { event_hash: event.hash(), timestamp }, events)
         }
     }
@@ -4542,6 +4559,117 @@ mod tests {
             }
             other => panic!("expected Error for non-kick member, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn submit_event_broadcasts_membership_changed_on_member_event() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        let everyone_id = members::create_role(
+            &conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true,
+        ).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        let g = Genesis {
+            version: 1,
+            name: "membership-broadcast-test".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        let mut ls = LogState::from_genesis(&g);
+
+        // Owner DeviceAuthorized — apply directly to build log state.
+        let owner_cert = DeviceCert::create(&owner_kp, &owner_dev.public_key(), 1);
+        let owner_da = Event::next(
+            &owner_dev,
+            owner_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: owner_cert },
+        );
+        ls.apply(&owner_da).unwrap();
+
+        // Owner creates an instant-join invite (requires_approval: false).
+        let inv = Event::next(
+            &owner_dev,
+            owner_kp.public_key(),
+            g.server_id(),
+            Some(&owner_da),
+            1,
+            2,
+            EP::InviteCreated {
+                code_hash: "joinhash".into(),
+                max_uses: 10,
+                expires_at: 9999999999,
+                requires_approval: false,
+            },
+        );
+        ls.apply(&inv).unwrap();
+
+        // Alice registers her device.
+        let alice_kp = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let alice_cert = DeviceCert::create(&alice_kp, &alice_dev.public_key(), 1);
+        let alice_da = Event::next(
+            &alice_dev,
+            alice_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            3,
+            EP::DeviceAuthorized { cert: alice_cert },
+        );
+        ls.apply(&alice_da).unwrap();
+
+        // Build Alice's MemberJoined event (not yet applied to ls — SubmitEvent will do it).
+        let alice_join = Event::next(
+            &alice_dev,
+            alice_kp.public_key(),
+            g.server_id(),
+            Some(&alice_da),
+            1,
+            4,
+            EP::MemberJoined { member: alice_kp.public_key(), invite: inv.hash() },
+        );
+
+        // Register alice in the legacy members table (needed for internal lookups).
+        members::register_member(&conn, &alice_kp.public_key(), "Alice").unwrap();
+
+        // Seed the live log_state with ls (before alice's join).
+        *state.log_state.lock().unwrap() = Some(ls);
+
+        // Submit the MemberJoined event through the real handler.
+        let result = handle_request(
+            &conn,
+            &alice_kp.public_key(),
+            false,
+            ServerRequest::SubmitEvent { event: alice_join },
+            "",
+            &state,
+        ).unwrap();
+
+        assert!(
+            matches!(result.response, ServerResponse::EventAccepted { .. }),
+            "MemberJoined should be accepted, got {:?}",
+            result.response,
+        );
+        assert!(
+            result.events.iter().any(|b| matches!(&b.event, ServerEvent::MembershipChanged { .. })),
+            "an accepted membership event must broadcast MembershipChanged",
+        );
     }
 
     #[test]
