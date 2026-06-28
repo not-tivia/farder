@@ -74,6 +74,7 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `MediaJoined` | `server:voice_joined` | `channel_id, public_key, display_name` | `VOICE_JOINED` (roster) |
 | `MediaLeft` | `server:voice_left` | `channel_id, public_key` | `VOICE_LEFT` (roster) |
 | `StreamCallIncoming` / `StreamCallEnded` | — (no-op) | — | DM-call signaling; no UI yet |
+| `MembershipChanged` | `server:membership_changed` | `public_key` | `useServerEvents` → `membership_changed` listener re-fetches caller's membership status, member list, and pending queue |
 
 **`server:member_presence_updated` payload fields:**
 - `server_id` — the server this event came from (added by `dispatch_event`, common to all `server:*` events).
