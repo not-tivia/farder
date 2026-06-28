@@ -317,7 +317,7 @@ export function useServerEvents(): void {
       // Re-fetch my own status (I may have just been approved/denied), the member
       // list, and the pending queue — all derive from the changed log membership.
       api.getMembershipStatus(serverId).then(status =>
-        dispatch({ type: "SET_MEMBERSHIP_STATUS", serverId, status: status as any })).catch(() => {});
+        dispatch({ type: "SET_MEMBERSHIP_STATUS", serverId, status: status as "member" | "pending" | "none" })).catch(() => {});
       api.getMembers(serverId).then(members =>
         dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
       // The approval queue component refetches getPendingMembers on this event (Task 8).
