@@ -27,6 +27,7 @@ export default function ServerStrip() {
   async function handleSelectServer(serverId: string) {
     dispatch({ type: "SET_ACTIVE_SERVER", serverId });
     dispatch({ type: "CLEAR_UNREAD", serverId });
+    void api.setLastServer(serverId);
     try {
       const info = await api.getServerInfo(serverId);
       dispatch({ type: "SERVER_REFRESHED", serverId, payload: info });

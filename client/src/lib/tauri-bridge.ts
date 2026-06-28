@@ -95,6 +95,10 @@ export async function getLastServer(): Promise<string | null> {
   return invoke<string | null>("get_last_server");
 }
 
+export async function setLastServer(address: string): Promise<void> {
+  return invoke<void>("save_last_server", { address });
+}
+
 export async function pickFile(): Promise<string | null> {
   return invoke<string | null>("pick_file");
 }

@@ -65,15 +65,19 @@ function AppInner() {
         }
       }
 
-      // Activate the first one
+      // Activate the last-used server (fall back to first if missing/not found)
       if (savedServers.length > 0) {
-        const firstId = savedServers[0].id;
-        dispatch({ type: "SET_ACTIVE_SERVER", serverId: firstId });
+        const lastServerId = await api.getLastServer().catch(() => null);
+        const connectedIds = new Set(savedServers.map((s) => s.id));
+        const targetId =
+          (lastServerId && connectedIds.has(lastServerId) ? lastServerId : null) ??
+          savedServers[0].id;
+        dispatch({ type: "SET_ACTIVE_SERVER", serverId: targetId });
         try {
-          const members = await api.getMembers(firstId);
-          dispatch({ type: "SET_MEMBERS", serverId: firstId, payload: members });
-          const dms = await api.listDms(firstId);
-          dispatch({ type: "SET_DMS", serverId: firstId, payload: dms });
+          const members = await api.getMembers(targetId);
+          dispatch({ type: "SET_MEMBERS", serverId: targetId, payload: members });
+          const dms = await api.listDms(targetId);
+          dispatch({ type: "SET_DMS", serverId: targetId, payload: dms });
         } catch {}
       }
 
