@@ -4679,7 +4679,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn get_server_info_hides_structure_from_non_members() {
         use crate::event_ingest;
         use farder_crypto::event_log::Genesis;
