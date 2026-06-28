@@ -423,6 +423,9 @@ pub(crate) async fn handle_auxiliary_stream(
     send: SendStream,
     mut recv: RecvStream,
 ) -> Result<()> {
+    if let Some(reason) = handlers::content_block_reason(state, member_key) {
+        anyhow::bail!("auxiliary stream denied: {}", reason);
+    }
     let data = read_frame(&mut recv).await?;
 
     // Try UploadRequest first
@@ -854,44 +857,60 @@ pub(crate) async fn main_loop(
                     ClientFrame::Request { id, body } => {
                         match body {
                             ServerRequest::Subscribe { channel_ids } => {
-                                // Update subscriptions: remove from all, add to requested
-                                let pk_bytes = *member_key.as_bytes();
-                                {
-                                    let mut subs = state.subscriptions.write().await;
-                                    // Remove from all channels
-                                    for subscribers in subs.values_mut() {
-                                        subscribers.remove(&pk_bytes);
+                                if let Some(reason) = handlers::content_block_reason(&state, &member_key) {
+                                    let response = ServerFrame::Response {
+                                        request_id: id,
+                                        body: ServerResponse::Error { reason },
+                                    };
+                                    send_server_frame(send, &response).await?;
+                                } else {
+                                    // Update subscriptions: remove from all, add to requested
+                                    let pk_bytes = *member_key.as_bytes();
+                                    {
+                                        let mut subs = state.subscriptions.write().await;
+                                        // Remove from all channels
+                                        for subscribers in subs.values_mut() {
+                                            subscribers.remove(&pk_bytes);
+                                        }
+                                        // Add to requested channels
+                                        for channel_id in channel_ids {
+                                            subs.entry(channel_id)
+                                                .or_insert_with(HashSet::new)
+                                                .insert(pk_bytes);
+                                        }
                                     }
-                                    // Add to requested channels
-                                    for channel_id in channel_ids {
-                                        subs.entry(channel_id)
-                                            .or_insert_with(HashSet::new)
-                                            .insert(pk_bytes);
-                                    }
+                                    let response = ServerFrame::Response {
+                                        request_id: id,
+                                        body: ServerResponse::Ok,
+                                    };
+                                    send_server_frame(send, &response).await?;
                                 }
-                                let response = ServerFrame::Response {
-                                    request_id: id,
-                                    body: ServerResponse::Ok,
-                                };
-                                send_server_frame(send, &response).await?;
                             }
                             ServerRequest::FetchUrl { url, channel_id } => {
-                                // Handle URL fetch async — can't hold DB lock during HTTP request
-                                let result = handle_fetch_url(&state, &member_key, is_owner, &url, channel_id).await;
-                                match result {
-                                    Ok(file_id) => {
-                                        let response = ServerFrame::Response {
-                                            request_id: id,
-                                            body: ServerResponse::UrlFetched { file_id },
-                                        };
-                                        send_server_frame(send, &response).await?;
-                                    }
-                                    Err(reason) => {
-                                        let response = ServerFrame::Response {
-                                            request_id: id,
-                                            body: ServerResponse::Error { reason },
-                                        };
-                                        send_server_frame(send, &response).await?;
+                                if let Some(reason) = handlers::content_block_reason(&state, &member_key) {
+                                    let response = ServerFrame::Response {
+                                        request_id: id,
+                                        body: ServerResponse::Error { reason },
+                                    };
+                                    send_server_frame(send, &response).await?;
+                                } else {
+                                    // Handle URL fetch async — can't hold DB lock during HTTP request
+                                    let result = handle_fetch_url(&state, &member_key, is_owner, &url, channel_id).await;
+                                    match result {
+                                        Ok(file_id) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::UrlFetched { file_id },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                        }
+                                        Err(reason) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error { reason },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                        }
                                     }
                                 }
                             }

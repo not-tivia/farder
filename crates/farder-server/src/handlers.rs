@@ -299,6 +299,22 @@ fn request_requires_membership(req: &ServerRequest) -> bool {
     )
 }
 
+/// On a mesh server (event log present), returns `Some(reason)` if `member` is
+/// NOT a log member — meaning content must be denied. Returns `None` when the
+/// caller is a log member OR this is a legacy server (no log). The reason
+/// distinguishes a pending-approval join from a plain non-member (for client UX).
+pub fn content_block_reason(state: &crate::state::ServerState, member: &PublicKey) -> Option<String> {
+    let guard = state.log_state.lock().unwrap();
+    match guard.as_ref() {
+        Some(ls) if !ls.is_member(member) => Some(if ls.is_pending(member) {
+            "pending approval: waiting for a moderator to approve your join".to_string()
+        } else {
+            "not a member of this server".to_string()
+        }),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main dispatch
 // ---------------------------------------------------------------------------
@@ -315,18 +331,10 @@ pub fn handle_request(
     // authoritative for membership. A caller who is not a log member may only
     // make bootstrap requests (submit join events, resolve an invite, read
     // server info); everything else is rejected. Legacy servers (no log) skip
-    // this entirely. Lock briefly + drop before dispatch (SubmitEvent re-locks).
-    let membership = {
-        let guard = state.log_state.lock().unwrap();
-        guard.as_ref().map(|ls| (ls.is_member(member), ls.is_pending(member)))
-    };
-    if let Some((is_log_member, is_pending)) = membership {
-        if !is_log_member && request_requires_membership(&request) {
-            return err(if is_pending {
-                "pending approval: waiting for a moderator to approve your join"
-            } else {
-                "not a member of this server"
-            });
+    // this entirely.
+    if request_requires_membership(&request) {
+        if let Some(reason) = content_block_reason(state, member) {
+            return err(&reason);
         }
     }
 
@@ -4247,6 +4255,56 @@ mod tests {
         let keys: Vec<_> = listed.iter().map(|m| m.public_key.clone()).collect();
         assert!(keys.contains(&owner), "owner (log member) shown");
         assert!(!keys.contains(&pending), "non-log member hidden from the member list");
+    }
+
+    #[test]
+    fn content_block_reason_helper_correctness() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        // --- Mesh server ---
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let g = Genesis {
+            version: 1,
+            name: "mesh-test".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        drop(conn);
+
+        let owner_pk = owner_kp.public_key();
+        let stranger_pk = Keypair::generate().public_key();
+
+        // Owner is a log member — must not be blocked.
+        assert!(
+            content_block_reason(&state, &owner_pk).is_none(),
+            "log member must not be blocked"
+        );
+
+        // Stranger is not a log member — must be blocked.
+        let reason = content_block_reason(&state, &stranger_pk);
+        assert!(reason.is_some(), "non-member must be blocked on a mesh server");
+        assert!(
+            reason.unwrap().contains("not a member"),
+            "reason should indicate non-member"
+        );
+
+        // --- Legacy server (no log_state) ---
+        let legacy_state = Arc::new(ServerState::new_for_test().unwrap());
+        // log_state stays None
+        assert!(
+            content_block_reason(&legacy_state, &stranger_pk).is_none(),
+            "legacy server (no log) must never block"
+        );
     }
 
 }
