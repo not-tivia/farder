@@ -296,6 +296,7 @@ fn request_requires_membership(req: &ServerRequest) -> bool {
         ServerRequest::SubmitEvent { .. }
             | ServerRequest::ResolveInvite { .. }
             | ServerRequest::GetServerInfo
+            | ServerRequest::GetMembershipStatus
     )
 }
 
@@ -1040,6 +1041,18 @@ pub fn handle_request(
                 owner_public_key: None, // patched by connection handler
                 server_id: state.genesis.lock().unwrap().as_ref().map(|g| g.server_id()),
             })
+        }
+
+        ServerRequest::GetMembershipStatus => {
+            let status = {
+                let guard = state.log_state.lock().unwrap();
+                match guard.as_ref() {
+                    Some(ls) if ls.is_member(member) => "member",
+                    Some(ls) if ls.is_pending(member) => "pending",
+                    _ => "none",
+                }
+            };
+            ok(ServerResponse::MembershipStatus { status: status.to_string() })
         }
 
         ServerRequest::GetMembers => {
@@ -4255,6 +4268,56 @@ mod tests {
         let keys: Vec<_> = listed.iter().map(|m| m.public_key.clone()).collect();
         assert!(keys.contains(&owner), "owner (log member) shown");
         assert!(!keys.contains(&pending), "non-log member hidden from the member list");
+    }
+
+    #[test]
+    fn membership_status_reports_member_pending_none() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let everyone_id: u64 = conn
+            .query_row("SELECT id FROM roles WHERE name = '@everyone'", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })
+            .unwrap();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        let g = Genesis {
+            version: 1,
+            name: "mesh-test".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        let owner = owner_kp.public_key();
+        let stranger = farder_crypto::identity::Keypair::generate().public_key();
+
+        // Owner (log member) → "member"
+        let r = handle_request(&conn, &owner, true, ServerRequest::GetMembershipStatus, "", &state).unwrap();
+        assert!(
+            matches!(r.response, ServerResponse::MembershipStatus { ref status } if status == "member"),
+            "log member should get status 'member', got: {:?}",
+            r.response
+        );
+
+        // Stranger (not a log member) → "none"
+        let r2 = handle_request(&conn, &stranger, false, ServerRequest::GetMembershipStatus, "", &state).unwrap();
+        assert!(
+            matches!(r2.response, ServerResponse::MembershipStatus { ref status } if status == "none"),
+            "non-member should get status 'none', got: {:?}",
+            r2.response
+        );
     }
 
     #[test]
