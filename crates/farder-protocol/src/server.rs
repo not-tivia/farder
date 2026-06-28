@@ -303,6 +303,9 @@ pub enum ServerRequest {
     /// Ask the server whether the caller is a member, pending approval, or neither
     /// (per the event log). Allowed for non-members so a pending joiner can learn it.
     GetMembershipStatus,
+    /// List members currently awaiting approval (pending-approval joins). Gated to
+    /// holders of KICK_MEMBERS (i.e. approvers) and the owner.
+    GetPendingMembers,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -351,6 +354,7 @@ pub enum ServerResponse {
     MediaStateResp { participants: Vec<VoiceMember> },
     EventAccepted { event_hash: String, timestamp: u64 },
     MembershipStatus { status: String },
+    PendingMembers { members: Vec<MemberInfo> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

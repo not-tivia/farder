@@ -1092,6 +1092,32 @@ pub fn handle_request(
             })
         }
 
+        ServerRequest::GetPendingMembers => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::KICK_MEMBERS, "KICK_MEMBERS")? {
+                return Ok(denied);
+            }
+            let pending_pks = {
+                let guard = state.log_state.lock().unwrap();
+                guard.as_ref().map(|ls| ls.pending_members()).unwrap_or_default()
+            };
+            let mut members_out = Vec::new();
+            for pk in pending_pks {
+                if let Ok(Some(rec)) = members::get_member(conn, &pk) {
+                    members_out.push(MemberInfo {
+                        public_key: pk,
+                        display_name: rec.display_name,
+                        joined_at: rec.joined_at,
+                        role_ids: vec![],
+                        timeout_until: None,
+                        timeout_reason: None,
+                        profile_hash: rec.profile_hash,
+                        presence: None,
+                    });
+                }
+            }
+            ok(ServerResponse::PendingMembers { members: members_out })
+        }
+
         // ----------------------------------------------------------------
         // Override management
         // ----------------------------------------------------------------
@@ -4318,6 +4344,204 @@ mod tests {
             "non-member should get status 'none', got: {:?}",
             r2.response
         );
+    }
+
+    #[test]
+    fn get_pending_members_lists_pending_and_requires_kick() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        // ---- Build mesh state: owner + @everyone role ----
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        let everyone_id = members::create_role(
+            &conn,
+            "@everyone",
+            permissions::DEFAULT_EVERYONE,
+            None,
+            0,
+            true,
+        )
+        .unwrap();
+
+        // Owner keypair + device.
+        let owner_kp = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        let g = Genesis {
+            version: 1,
+            name: "mesh-pending-test".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        let mut ls = LogState::from_genesis(&g);
+
+        // ---- Drive an approval join through the LogState ----
+        // Owner DeviceAuthorized.
+        let owner_cert = DeviceCert::create(&owner_kp, &owner_dev.public_key(), 1);
+        let owner_da = Event::next(
+            &owner_dev,
+            owner_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: owner_cert },
+        );
+        ls.apply(&owner_da).unwrap();
+
+        // Owner creates an approval-required invite.
+        let inv = Event::next(
+            &owner_dev,
+            owner_kp.public_key(),
+            g.server_id(),
+            Some(&owner_da),
+            1,
+            2,
+            EP::InviteCreated {
+                code_hash: "testhash".into(),
+                max_uses: 10,
+                expires_at: 9999999999,
+                requires_approval: true,
+            },
+        );
+        ls.apply(&inv).unwrap();
+
+        // Alice joins via that invite → pending.
+        let alice_kp = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let alice_cert = DeviceCert::create(&alice_kp, &alice_dev.public_key(), 1);
+        let alice_da = Event::next(
+            &alice_dev,
+            alice_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            3,
+            EP::DeviceAuthorized { cert: alice_cert },
+        );
+        ls.apply(&alice_da).unwrap();
+        let alice_join = Event::next(
+            &alice_dev,
+            alice_kp.public_key(),
+            g.server_id(),
+            Some(&alice_da),
+            1,
+            4,
+            EP::MemberJoined { member: alice_kp.public_key(), invite: inv.hash() },
+        );
+        ls.apply(&alice_join).unwrap();
+        assert!(ls.is_pending(&alice_kp.public_key()), "alice must be pending after approval join");
+
+        // Register alice in the legacy members table so get_member can resolve her.
+        members::register_member(&conn, &alice_kp.public_key(), "Alice").unwrap();
+
+        // Seed the live log_state.
+        *state.log_state.lock().unwrap() = Some(ls);
+
+        let owner_pk = owner_kp.public_key();
+        let alice_pk = alice_kp.public_key();
+
+        // ---- Owner (holds kick via is_owner) sees the pending list ----
+        let r = handle_request(
+            &conn,
+            &owner_pk,
+            true, // is_owner
+            ServerRequest::GetPendingMembers,
+            "",
+            &state,
+        )
+        .unwrap();
+        let pending = match r.response {
+            ServerResponse::PendingMembers { members } => members,
+            other => panic!("expected PendingMembers, got {:?}", other),
+        };
+        assert_eq!(pending.len(), 1, "exactly one pending member");
+        assert_eq!(pending[0].public_key, alice_pk, "pending member is Alice");
+        assert_eq!(pending[0].display_name, "Alice");
+        assert!(pending[0].role_ids.is_empty(), "role_ids must be empty for pending members");
+        assert!(pending[0].timeout_until.is_none());
+        assert!(pending[0].presence.is_none());
+
+        // ---- A member WITHOUT kick permission is denied ----
+        // Build a plain member: registered in legacy table, IS a log member,
+        // but @everyone has no KICK_MEMBERS bit.
+        let plain_kp = Keypair::generate();
+        members::register_member(&conn, &plain_kp.public_key(), "Plain").unwrap();
+        members::assign_role(&conn, &plain_kp.public_key(), everyone_id).unwrap();
+        // Add plain to the log_state as a real member so the content gate passes.
+        {
+            let mut guard = state.log_state.lock().unwrap();
+            let ls = guard.as_mut().unwrap();
+            // Manually insert via a second approval-free invite + join chain.
+            let inv2 = Event::next(
+                &owner_dev,
+                owner_kp.public_key(),
+                g.server_id(),
+                Some(&inv),
+                2,
+                5,
+                EP::InviteCreated {
+                    code_hash: "testhash2".into(),
+                    max_uses: 10,
+                    expires_at: 9999999999,
+                    requires_approval: false,
+                },
+            );
+            ls.apply(&inv2).unwrap();
+            let plain_dev = Keypair::generate();
+            let plain_cert = DeviceCert::create(&plain_kp, &plain_dev.public_key(), 1);
+            let plain_da = Event::next(
+                &plain_dev,
+                plain_kp.public_key(),
+                g.server_id(),
+                None,
+                0,
+                6,
+                EP::DeviceAuthorized { cert: plain_cert },
+            );
+            ls.apply(&plain_da).unwrap();
+            let plain_join = Event::next(
+                &plain_dev,
+                plain_kp.public_key(),
+                g.server_id(),
+                Some(&plain_da),
+                1,
+                7,
+                EP::MemberJoined { member: plain_kp.public_key(), invite: inv2.hash() },
+            );
+            ls.apply(&plain_join).unwrap();
+        }
+        assert!(
+            state.log_state.lock().unwrap().as_ref().unwrap().is_member(&plain_kp.public_key()),
+            "plain member must be a log member for the content gate to pass"
+        );
+
+        let r2 = handle_request(
+            &conn,
+            &plain_kp.public_key(),
+            false, // not owner
+            ServerRequest::GetPendingMembers,
+            "",
+            &state,
+        )
+        .unwrap();
+        match r2.response {
+            ServerResponse::Error { reason } => {
+                assert!(
+                    reason.contains("KICK_MEMBERS"),
+                    "expected KICK_MEMBERS error, got: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Error for non-kick member, got {:?}", other),
+        }
     }
 
     #[test]
