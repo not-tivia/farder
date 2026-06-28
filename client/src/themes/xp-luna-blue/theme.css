@@ -2938,3 +2938,45 @@ body {
   cursor: col-resize; z-index: 3; background: transparent;
 }
 .member-sidebar-resize:hover { background: var(--xp-blue); opacity: 0.6; }
+
+/* ── Pending Approvals (Task 8) ─────────────────────────── */
+.pending-approvals-section {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--xp-border);
+}
+.pending-approval-item {
+  cursor: default;
+}
+.pending-approval-actions {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.pending-approve-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--xp-green, #1a7a1a);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 4px;
+}
+.pending-approve-btn:hover {
+  background: var(--xp-green-subtle, rgba(40,160,40,0.15));
+  border-color: var(--xp-green, #1a7a1a);
+}
+.pending-deny-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--xp-red, #a00);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 4px;
+}
+.pending-deny-btn:hover {
+  background: var(--xp-red-subtle, rgba(160,0,0,0.12));
+  border-color: var(--xp-red, #a00);
+}

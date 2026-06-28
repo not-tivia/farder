@@ -6,6 +6,7 @@ import { publicKeyToString, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
+import PendingApprovals from "./PendingApprovals";
 import TimedOutBadge from "./TimedOutBadge";
 import { getActorPermissions, isModerator } from "../lib/permissions";
 import MemberAvatar from "./MemberAvatar";
@@ -124,6 +125,7 @@ export default function MemberSidebar() {
       <div className="member-sidebar-header">
         Members — {members.length}
       </div>
+      {serverId && <PendingApprovals serverId={serverId} />}
       <div className="member-list">
         {serverId && sortedMembers.map((member) => (
           <MemberRow
