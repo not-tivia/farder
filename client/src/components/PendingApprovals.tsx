@@ -65,13 +65,21 @@ export default function PendingApprovals({ serverId }: Props) {
   // Not an approver, or nothing pending — render nothing.
   if (!canApprove || pending.length === 0) return null;
 
+  // A race (another approver acted first, or the target already transitioned)
+  // surfaces as "not pending"/"already a member" — the outcome is already correct,
+  // so swallow those rather than show a scary error. The queue refreshes via the
+  // membership_changed broadcast either way.
+  function isBenignRace(msg: string): boolean {
+    return /not pending|already a member|is not a member|neither a member nor pending/i.test(msg);
+  }
+
   async function handleApprove(m: MemberInfo) {
     if (!logServerId) return;
     const pk = publicKeyToString(m.public_key);
     try {
       await api.approveMember(serverId, logServerId, pk);
     } catch (e) {
-      setError(String(e));
+      if (!isBenignRace(String(e))) setError(String(e));
     }
   }
 
@@ -81,7 +89,7 @@ export default function PendingApprovals({ serverId }: Props) {
     try {
       await api.denyMember(serverId, logServerId, pk);
     } catch (e) {
-      setError(String(e));
+      if (!isBenignRace(String(e))) setError(String(e));
     }
   }
 
