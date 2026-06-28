@@ -1029,9 +1029,15 @@ pub fn handle_request(
         ServerRequest::GetServerInfo => {
             let all_members = members::list_members(conn)?;
             let member_count = all_members.len() as u32;
-            let channels_list = channels::list_channels(conn)?;
-            let categories_list = channels::list_categories(conn)?;
-            let roles_list = members::list_roles(conn)?;
+            let is_member = {
+                let guard = state.log_state.lock().unwrap();
+                guard.as_ref().map(|ls| ls.is_member(member)).unwrap_or(true) // legacy: full info
+            };
+            let (channels_list, categories_list, roles_list) = if is_member {
+                (channels::list_channels(conn)?, channels::list_categories(conn)?, members::list_roles(conn)?)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
             ok(ServerResponse::ServerInfo {
                 name: String::new(), // patched by connection handler
                 member_count,
@@ -4670,6 +4676,60 @@ mod tests {
             result.events.iter().any(|b| matches!(&b.event, ServerEvent::MembershipChanged { .. })),
             "an accepted membership event must broadcast MembershipChanged",
         );
+    }
+
+    #[test]
+    #[test]
+    fn get_server_info_hides_structure_from_non_members() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let everyone_id: u64 = conn
+            .query_row("SELECT id FROM roles WHERE name = '@everyone'", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })
+            .unwrap();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        let g = Genesis {
+            version: 1,
+            name: "mesh-test".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        *state.genesis.lock().unwrap() = Some(g);
+
+        let owner = owner_kp.public_key();
+        let stranger = farder_crypto::identity::Keypair::generate().public_key();
+
+        // Non-member gets empty channels/categories/roles but still gets server_id.
+        let r = handle_request(&conn, &stranger, false, ServerRequest::GetServerInfo, "", &state).unwrap();
+        match r.response {
+            ServerResponse::ServerInfo { channels, categories, roles, server_id, .. } => {
+                assert!(channels.is_empty() && categories.is_empty() && roles.is_empty(),
+                    "non-member gets no channel/role structure");
+                assert!(server_id.is_some(), "but still learns server_id to join");
+            }
+            o => panic!("got {:?}", o),
+        }
+
+        // Owner (log member) still gets full ServerInfo response (not an Error).
+        let r2 = handle_request(&conn, &owner, true, ServerRequest::GetServerInfo, "", &state).unwrap();
+        match r2.response {
+            ServerResponse::ServerInfo { .. } => {}
+            o => panic!("owner should get ServerInfo, got {:?}", o),
+        }
     }
 
     #[test]
