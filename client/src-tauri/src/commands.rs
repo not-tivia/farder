@@ -1058,9 +1058,6 @@ pub async fn connect_server(
         servers.insert(address.clone(), Arc::clone(&server_conn));
     }
 
-    // Save to settings for get_last_server compatibility (non-fatal).
-    let _ = save_last_server(address.clone());
-
     // Fetch initial server info.
     let response = bridge::send_request(&state, &address, ServerRequest::GetServerInfo)
         .await
