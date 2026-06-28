@@ -92,9 +92,8 @@ function AppInner() {
       const result = await api.connectServer(parsed.address, parsed.inviteCode, parsed.setupToken);
       dispatch({ type: "SERVER_ADDED", serverId: parsed.address, payload: result });
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: parsed.address });
-      console.log("[mesh] join check:", { inviteCode: parsed.inviteCode, serverId: result.server_id, willJoin: !!(parsed.inviteCode && result.server_id) });
       if (parsed.inviteCode && result.server_id) {
-        try { await api.joinLogServer(parsed.address, result.server_id, parsed.inviteCode); console.log("[mesh] join_log_server OK"); }
+        try { await api.joinLogServer(parsed.address, result.server_id, parsed.inviteCode); }
         catch (e) { console.error("[mesh] join_log_server failed:", e); }
       }
       try { const members = await api.getMembers(parsed.address); dispatch({ type: "SET_MEMBERS", serverId: parsed.address, payload: members }); } catch {}
