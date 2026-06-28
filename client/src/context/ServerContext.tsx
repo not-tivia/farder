@@ -30,7 +30,7 @@ export interface AppState {
   activeServerId: string | null;
   serverList: ServerListEntry[];
   servers: Record<string, PerServerState>;
-  kickedBanned: { kind: "kick" | "ban"; serverId: string; reason: string | null } | null;
+  kickedBanned: { kind: "kick" | "ban"; serverId: string; serverName: string; reason: string | null } | null;
   joinConfirmLink: string | null;
 }
 
@@ -119,8 +119,8 @@ export type AppAction =
   | { type: "LEAVE_VOICE_CHANNEL"; serverId: string }
   | { type: "MEMBER_TIMEOUT_CHANGED"; serverId: string; payload: { publicKey: string; untilMs: number | null; reason: string | null } }
   | { type: "UPDATE_MEMBER_PRESENCE"; serverId: string; payload: { publicKey: string; presence: Presence | null } }
-  | { type: "YOU_WERE_KICKED"; serverId: string }
-  | { type: "YOU_WERE_BANNED"; serverId: string; reason: string | null }
+  | { type: "YOU_WERE_KICKED"; serverId: string; serverName: string }
+  | { type: "YOU_WERE_BANNED"; serverId: string; serverName: string; reason: string | null }
   | { type: "CLEAR_KICKED_BANNED" }
   | { type: "OPEN_JOIN_CONFIRM"; link: string }
   | { type: "CLOSE_JOIN_CONFIRM" };
@@ -436,10 +436,10 @@ function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case "YOU_WERE_KICKED":
-      return { ...state, kickedBanned: { kind: "kick", serverId: action.serverId, reason: null } };
+      return { ...state, kickedBanned: { kind: "kick", serverId: action.serverId, serverName: action.serverName, reason: null } };
 
     case "YOU_WERE_BANNED":
-      return { ...state, kickedBanned: { kind: "ban", serverId: action.serverId, reason: action.reason } };
+      return { ...state, kickedBanned: { kind: "ban", serverId: action.serverId, serverName: action.serverName, reason: action.reason } };
 
     case "CLEAR_KICKED_BANNED":
       return { ...state, kickedBanned: null };

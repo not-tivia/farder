@@ -139,18 +139,10 @@ export default function AppShell() {
         {state.kickedBanned && (
           <KickedBannedDialog
             kind={state.kickedBanned.kind}
-            serverName={
-              state.serverList.find((s) => s.id === state.kickedBanned!.serverId)?.name ?? "the server"
-            }
+            serverName={state.kickedBanned.serverName}
             reason={state.kickedBanned.reason}
             onClose={() => {
-              const sid = state.kickedBanned!.serverId;
               dispatch({ type: "CLEAR_KICKED_BANNED" });
-              // Stop any voice call (mic) and clear the in-call UI for this server.
-              api.voiceLeave().catch(() => {});
-              dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId: sid });
-              // Also disconnect the server so the dialog doesn't recur on reconnect.
-              api.disconnectServer(sid).catch(() => {});
             }}
           />
         )}

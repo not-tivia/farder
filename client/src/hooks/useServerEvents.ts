@@ -253,12 +253,33 @@ export function useServerEvents(): void {
 
     listen("server:you_were_kicked", (e) => {
       const data = e.payload as { server_id: string };
-      dispatch({ type: "YOU_WERE_KICKED", serverId: data.server_id });
+      const sid = data.server_id;
+      // Capture the server name before ejecting it from state.
+      const serverName =
+        stateRef.current.serverList.find((s) => s.id === sid)?.name ?? "the server";
+      // Set the notice flag (carries server name so the dialog works after ejection).
+      dispatch({ type: "YOU_WERE_KICKED", serverId: sid, serverName });
+      // Immediately disconnect and eject the server from client state.
+      // Voice cleanup is best-effort; failure does not block ejection.
+      api.voiceLeave().catch(() => {});
+      dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId: sid });
+      api.disconnectServer(sid).catch(() => {});
+      dispatch({ type: "SERVER_REMOVED", serverId: sid });
     }).then(safePush);
 
     listen("server:you_were_banned", (e) => {
       const data = e.payload as { server_id: string; reason: string | null };
-      dispatch({ type: "YOU_WERE_BANNED", serverId: data.server_id, reason: data.reason });
+      const sid = data.server_id;
+      // Capture the server name before ejecting it from state.
+      const serverName =
+        stateRef.current.serverList.find((s) => s.id === sid)?.name ?? "the server";
+      // Set the notice flag (carries server name so the dialog works after ejection).
+      dispatch({ type: "YOU_WERE_BANNED", serverId: sid, serverName, reason: data.reason });
+      // Immediately disconnect and eject the server from client state.
+      api.voiceLeave().catch(() => {});
+      dispatch({ type: "LEAVE_VOICE_CHANNEL", serverId: sid });
+      api.disconnectServer(sid).catch(() => {});
+      dispatch({ type: "SERVER_REMOVED", serverId: sid });
     }).then(safePush);
 
     listen("server:audit_event_created", (e) => {
