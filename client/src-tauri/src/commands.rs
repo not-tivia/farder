@@ -3939,6 +3939,147 @@ pub async fn join_log_server(
 }
 
 // ---------------------------------------------------------------------------
+// Membership approval — approve_member / deny_member
+// ---------------------------------------------------------------------------
+
+/// Shared helper: emit any membership-moderation event signed by the approver's
+/// device. Mirrors `join_log_server`'s emit section: acquires the chain lock,
+/// loads identity+device+DeviceState, auto-emits DeviceAuthorized if needed,
+/// builds+submits the given payload, and advances+saves chain state ONLY on Ok.
+async fn moderate_member(
+    state: &AppState,
+    server_id: &str,
+    log_server_id: &str,
+    payload: farder_crypto::event_log::EventPayload,
+) -> Result<(), String> {
+    use farder_crypto::event_log::EventPayload;
+
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair()?;
+
+    // Serialize chain writes against submit_event and join_log_server.
+    let _chain_guard = state.device_chain_lock.lock().await;
+
+    let mut ds = crate::device::DeviceState::load(log_server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    // 1. Authorize this device if needed (mirrors submit_event / join_log_server).
+    if !ds.authorized {
+        let cert = crate::device::device_cert(&identity, &device);
+        let da = event_build_next(
+            &device,
+            &identity,
+            log_server_id,
+            ds.last_event_hash.clone(),
+            ds.next_seq,
+            ds.lamport,
+            EventPayload::DeviceAuthorized { cert },
+        );
+        event_send_submit(state, server_id, &da).await?;
+        ds.next_seq = da.core.seq + 1;
+        ds.last_event_hash = Some(da.hash());
+        ds.lamport = da.core.lamport;
+        ds.authorized = true;
+        ds.save(log_server_id)?;
+    }
+
+    // 2. Build + submit the moderation event, chaining from the stored head.
+    let ev = event_build_next(
+        &device,
+        &identity,
+        log_server_id,
+        ds.last_event_hash.clone(),
+        ds.next_seq,
+        ds.lamport,
+        payload,
+    );
+    match event_send_submit(state, server_id, &ev).await {
+        Ok(_) => {
+            ds.next_seq = ev.core.seq + 1;
+            ds.last_event_hash = Some(ev.hash());
+            ds.lamport = ev.core.lamport;
+            ds.save(log_server_id)?;
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Approve a pending member: emits a signed `MemberApproved { member }` event.
+#[tauri::command]
+pub async fn approve_member(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    member: String,
+) -> Result<(), String> {
+    let target = parse_public_key(&member)?;
+    moderate_member(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::MemberApproved { member: target },
+    )
+    .await
+}
+
+/// Deny / remove a pending member: emits a signed `MemberRemoved { member }` event.
+#[tauri::command]
+pub async fn deny_member(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    member: String,
+) -> Result<(), String> {
+    let target = parse_public_key(&member)?;
+    moderate_member(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::MemberRemoved { member: target },
+    )
+    .await
+}
+
+/// Return the caller's membership status on this server: "member" / "pending" / "none".
+/// Allowed for non-members so a pending joiner can poll their own status.
+#[tauri::command]
+pub async fn get_membership_status(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<String, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetMembershipStatus)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::MembershipStatus { status } => Ok(status),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Return the list of members currently awaiting approval.
+/// Gated server-side to holders of KICK_MEMBERS and the owner.
+#[tauri::command]
+pub async fn get_pending_members(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<MemberInfo>, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetPendingMembers)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::PendingMembers { members } => Ok(members),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 // Public re-export so other modules can resolve paths under ~/.farder/.
 pub(crate) fn farder_data_dir_pub() -> std::path::PathBuf {

@@ -821,3 +821,23 @@ export const setPresenceMusic = (enabled: boolean) => invoke<void>("set_presence
 export async function joinLogServer(serverId: string, logServerId: string, inviteCode: string): Promise<void> {
   return invoke("join_log_server", { serverId, logServerId, inviteCode });
 }
+
+/** Emit a signed `MemberApproved` event for the target member. Requires approver identity to be unlocked. */
+export async function approveMember(serverId: string, logServerId: string, member: string): Promise<void> {
+  return invoke("approve_member", { serverId, logServerId, member });
+}
+
+/** Emit a signed `MemberRemoved` event for the target member (deny approval or remove). Requires approver identity to be unlocked. */
+export async function denyMember(serverId: string, logServerId: string, member: string): Promise<void> {
+  return invoke("deny_member", { serverId, logServerId, member });
+}
+
+/** Return the caller's membership status on a server: `"member"` | `"pending"` | `"none"`. */
+export async function getMembershipStatus(serverId: string): Promise<string> {
+  return invoke("get_membership_status", { serverId });
+}
+
+/** Return the list of members currently awaiting approval on this server (approver-gated). */
+export async function getPendingMembers(serverId: string): Promise<MemberInfo[]> {
+  return invoke("get_pending_members", { serverId });
+}

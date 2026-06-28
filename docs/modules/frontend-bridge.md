@@ -343,6 +343,10 @@ These commands drive the `VoiceController` (the local Opus/QUIC audio subsystem)
 |---|---|---|
 | `createInvite(serverId, logServerId, maxUses?, requiresApproval?)` | `create_invite` | Creates an invite link. `logServerId` is the genesis hash for log/mesh-mode servers, or `null` for legacy servers. `maxUses` null = unlimited. `requiresApproval` (default `false`) — when `true`, emits `InviteCreated` with `requires_approval: true` so joiners must be approved. Returns `InviteResult` with the code and share-ready URLs. |
 | `joinLogServer(serverId, logServerId, inviteCode)` | `join_log_server` | Emits a self-signed `MemberJoined` event so the joiner becomes a recognized log member who can post. `serverId` is the connection address (routes the request); `logServerId` is the genesis hash (stamps events and keys the device chain). Idempotent — returns immediately if already joined. Called automatically after a successful `connectServer` when an invite code was used and the server is mesh-mode (`result.server_id` is present). |
+| `approveMember(serverId, logServerId, member)` | `approve_member` | Emit a signed `MemberApproved` event for the target member (hex pubkey). Requires approver identity to be unlocked. `serverId` routes the request; `logServerId` is the genesis hash for chain stamping. |
+| `denyMember(serverId, logServerId, member)` | `deny_member` | Emit a signed `MemberRemoved` event to deny or remove a pending member. Same ID convention as `approveMember`. |
+| `getMembershipStatus(serverId)` | `get_membership_status` | Returns `"member"` \| `"pending"` \| `"none"` for the caller's status on this server. Allowed for non-members so a pending joiner can poll. |
+| `getPendingMembers(serverId)` | `get_pending_members` | Returns `MemberInfo[]` of members awaiting approval. Gated server-side to approvers (KICK\_MEMBERS) and the owner. |
 
 ---
 

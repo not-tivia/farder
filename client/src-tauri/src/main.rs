@@ -256,6 +256,10 @@ fn main() {
             commands::set_presence_music,
             commands::submit_event,
             commands::join_log_server,
+            commands::approve_member,
+            commands::deny_member,
+            commands::get_membership_status,
+            commands::get_pending_members,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

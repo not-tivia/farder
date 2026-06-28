@@ -2012,3 +2012,67 @@ and `MemberJoined` — via `ServerRequest::SubmitEvent`. Also sends
 `ServerRequest::ResolveInvite` to look up the invite event hash.
 
 **invoke name:** `"join_log_server"` → `joinLogServer()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `approve_member(state, server_id, log_server_id, member) -> Result<(), String>`
+
+Emit a signed `MemberApproved { member }` event on behalf of the approver.
+
+**Parameters:**
+- `server_id: String` — connection address, routes the request.
+- `log_server_id: String` — genesis hash, stamps events and keys the device chain.
+- `member: String` — hex public key of the target member to approve.
+
+**Returns:** `()` on success.
+
+**Side effects:** may emit `DeviceAuthorized` (first use) and `MemberApproved` via `ServerRequest::SubmitEvent`. Identity must be unlocked.
+
+**invoke name:** `"approve_member"` → `approveMember()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `deny_member(state, server_id, log_server_id, member) -> Result<(), String>`
+
+Emit a signed `MemberRemoved { member }` event to deny or remove a member.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `log_server_id: String` — genesis hash.
+- `member: String` — hex public key of the target member.
+
+**Returns:** `()` on success.
+
+**Side effects:** may emit `DeviceAuthorized` (first use) and `MemberRemoved` via `ServerRequest::SubmitEvent`. Identity must be unlocked.
+
+**invoke name:** `"deny_member"` → `denyMember()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `get_membership_status(state, server_id) -> Result<String, String>`
+
+Query the caller's membership status on the given server.
+
+**Parameters:**
+- `server_id: String` — connection address.
+
+**Returns:** `"member"` | `"pending"` | `"none"`.
+
+**Side effects:** sends `ServerRequest::GetMembershipStatus`. Allowed for non-members (so a pending joiner can poll their own status).
+
+**invoke name:** `"get_membership_status"` → `getMembershipStatus()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `get_pending_members(state, server_id) -> Result<Vec<MemberInfo>, String>`
+
+Return the list of members currently awaiting approval.
+
+**Parameters:**
+- `server_id: String` — connection address.
+
+**Returns:** `Vec<MemberInfo>` — zero or more pending members.
+
+**Side effects:** sends `ServerRequest::GetPendingMembers`. Gated server-side to holders of `KICK_MEMBERS` permission and the owner.
+
+**invoke name:** `"get_pending_members"` → `getPendingMembers()` in `client/src/lib/tauri-bridge.ts`.
