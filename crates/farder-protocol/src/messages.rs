@@ -67,7 +67,7 @@ pub struct LinkEmbed {
 /// Result of a `ProxyLinkEmbed` lookup. Uniform failure leaks nothing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum EmbedOutcome {
-    Embed(LinkEmbed),
+    Embed(Box<LinkEmbed>),
     /// URL host is allowlisted but the specific URL shape isn't handled.
     Unsupported,
     /// Timeout, SSRF refusal, non-allowlisted host, rate-limit, parse failure.
@@ -279,7 +279,7 @@ mod tests {
             duration_secs: Some(12),
         };
         for outcome in [
-            EmbedOutcome::Embed(embed.clone()),
+            EmbedOutcome::Embed(Box::new(embed.clone())),
             EmbedOutcome::Unsupported,
             EmbedOutcome::Unavailable,
         ] {

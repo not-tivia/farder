@@ -49,7 +49,7 @@ impl RateLimiter {
     pub fn allow(&self, user: &[u8; 32]) -> bool {
         let now = crate::db::now();
         let mut users = self.users.lock().unwrap();
-        let queue = users.entry(*user).or_insert_with(VecDeque::new);
+        let queue = users.entry(*user).or_default();
         while let Some(&front) = queue.front() {
             if now.saturating_sub(front) >= self.window_secs {
                 queue.pop_front();

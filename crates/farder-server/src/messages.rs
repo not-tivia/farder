@@ -366,6 +366,7 @@ pub fn delete_messages_before(
 /// Anonymize all messages by the given author:
 /// - Removes old content from the FTS5 index and inserts "[deleted]"
 /// - Sets author = DELETED_USER_KEY, content = '[deleted]' in the messages table
+///
 /// Returns the count of messages updated.
 pub fn anonymize_messages_by_author(conn: &Connection, author: &PublicKey) -> Result<u64> {
     // Collect all (id, content) for this author.

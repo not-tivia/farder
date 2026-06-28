@@ -267,6 +267,7 @@ pub fn list_channels(conn: &Connection) -> Result<Vec<ChannelInfo>> {
     Ok(channels)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_channel(
     conn: &Connection,
     id: u64,

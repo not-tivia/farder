@@ -106,6 +106,7 @@ async fn connect_and_serve(endpoint: &Endpoint, relay_addr: SocketAddr, server_i
         let dg_conn = conn.clone();
         tokio::spawn(async move {
             let media_config = crate::media_stream::MediaConfig::default();
+            #[allow(clippy::while_let_loop)]
             loop {
                 match dg_conn.read_datagram().await {
                     Ok(dg) => {

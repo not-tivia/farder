@@ -73,12 +73,13 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
     let state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
     if !first_run {
         // Detect owner: first member by joined_at
-        let db = state.db.lock().unwrap();
-        let owner_key: Option<Vec<u8>> = db.query_row(
-            "SELECT public_key FROM members WHERE banned = 0 AND revoked = 0 ORDER BY joined_at ASC LIMIT 1",
-            [], |row| row.get(0),
-        ).ok();
-        drop(db);
+        let owner_key: Option<Vec<u8>> = {
+            let db = state.db.lock().unwrap();
+            db.query_row(
+                "SELECT public_key FROM members WHERE banned = 0 AND revoked = 0 ORDER BY joined_at ASC LIMIT 1",
+                [], |row| row.get(0),
+            ).ok()
+        };
         if let Some(key_bytes) = owner_key {
             if let Ok(arr) = <[u8; 32]>::try_from(key_bytes.as_slice()) {
                 let pk = farder_crypto::identity::PublicKey::from_bytes(arr);
@@ -125,7 +126,7 @@ async fn main() -> Result<()> {
 
     if first_run {
         let setup_token = auth::generate_setup_token();
-        let setup_hex = hex::encode(&setup_token);
+        let setup_hex = hex::encode(setup_token);
         info!("=== FIRST RUN ===");
         info!("The first user to connect will automatically become the server owner.");
         info!("For headless/remote setup, use this token instead: {}", setup_hex);

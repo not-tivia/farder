@@ -54,6 +54,7 @@ pub struct FileRecord {
 
 /// Verify declared_hash matches actual data hash, write file to disk, INSERT
 /// into `files` with ref_count=0, and return the new file_id.
+#[allow(clippy::too_many_arguments)]
 pub fn store_file(
     conn: &Connection,
     storage_dir: &str,
@@ -113,6 +114,7 @@ pub fn store_file(
 /// against `declared_hash`, moves to content-addressed path, inserts DB record.
 /// If a file with the same hash already exists, deletes the temp file and returns
 /// the existing file_id.
+#[allow(clippy::too_many_arguments)]
 pub fn store_or_reuse_from_temp_file(
     conn: &Connection,
     storage_dir: &str,
@@ -187,6 +189,7 @@ pub fn store_or_reuse_from_temp_file(
 
 /// If a file with `declared_hash` already exists in the DB, return its id.
 /// Otherwise call `store_file` and return the new id.
+#[allow(clippy::too_many_arguments)]
 pub fn store_or_reuse(
     conn: &Connection,
     storage_dir: &str,
@@ -355,6 +358,7 @@ pub fn cleanup_all_orphans(
 // Message attachments
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_message_attachment(
     conn: &Connection,
     message_id: u64,

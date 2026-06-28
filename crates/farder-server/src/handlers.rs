@@ -308,7 +308,7 @@ pub fn handle_request(
     member: &PublicKey,
     is_owner: bool,
     request: ServerRequest,
-    storage_dir: &str,
+    _storage_dir: &str,
     state: &Arc<ServerState>,
 ) -> Result<HandleResult> {
     // Mesh content gate: when this server has an event log, the log is
@@ -1035,7 +1035,15 @@ pub fn handle_request(
         }
 
         ServerRequest::GetMembers => {
-            let all_members = members::list_members(conn)?;
+            let mut all_members = members::list_members(conn)?;
+            // Mesh server: the log is authoritative — hide anyone not yet a log member
+            // (e.g. a pending-approval join). Legacy servers keep the full list.
+            {
+                let guard = state.log_state.lock().unwrap();
+                if let Some(ls) = guard.as_ref() {
+                    all_members.retain(|m| ls.is_member(&m.public_key));
+                }
+            }
             let now_ms = current_unix_ms();
             let presences = state.presences.read().unwrap();
             let mut member_infos: Vec<MemberInfo> = Vec::new();
@@ -1477,12 +1485,12 @@ pub fn handle_request(
         }
 
         ServerRequest::JoinStream { channel_id } => {
-            use crate::media_stream::{StreamState, ServerSession};
+            use crate::media_stream::ServerSession;
             let member_bytes = *member.as_bytes();
             let display_name = members::get_member(conn, member)?
                 .map(|m| m.display_name).unwrap_or_default();
             let mut channels_map = state.media.channels.write().unwrap();
-            let stream_state = channels_map.entry(channel_id).or_insert_with(StreamState::new);
+            let stream_state = channels_map.entry(channel_id).or_default();
             let session_id = stream_state.allocate_session_id();
             stream_state.sessions.insert(session_id, ServerSession {
                 connection_pk: member_bytes,
@@ -1723,7 +1731,7 @@ pub fn handle_request(
                 if p.details.chars().count() > 128 {
                     return err("presence details too long (max 128 characters)");
                 }
-                if p.state.as_ref().map_or(false, |s| s.chars().count() > 128) {
+                if p.state.as_ref().is_some_and(|s| s.chars().count() > 128) {
                     return err("presence state too long (max 128 characters)");
                 }
             }
@@ -4192,6 +4200,53 @@ mod tests {
             }
             other => panic!("expected Error for bad channel, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn get_members_hides_non_log_members_on_mesh() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let everyone_id: u64 = conn
+            .query_row("SELECT id FROM roles WHERE name = '@everyone'", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })
+            .unwrap();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        let g = Genesis {
+            version: 1,
+            name: "mesh-test".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        // A second identity registered in the legacy members table but NOT in the log.
+        let pending = farder_crypto::identity::Keypair::generate().public_key();
+        members::register_member(&conn, &pending, "vk_pending").unwrap();
+
+        // GetMembers (called by the owner, a member) must include the owner and
+        // EXCLUDE the non-log member.
+        let owner = owner_kp.public_key();
+        let r = handle_request(&conn, &owner, true, ServerRequest::GetMembers, "", &state).unwrap();
+        let listed = match r.response {
+            ServerResponse::Members { members } => members,
+            other => panic!("expected Members, got {:?}", other),
+        };
+        let keys: Vec<_> = listed.iter().map(|m| m.public_key.clone()).collect();
+        assert!(keys.contains(&owner), "owner (log member) shown");
+        assert!(!keys.contains(&pending), "non-log member hidden from the member list");
     }
 
 }

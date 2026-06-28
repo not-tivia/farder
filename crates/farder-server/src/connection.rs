@@ -1,4 +1,4 @@
-use crate::{attachments, auth, channels, events::EventTarget, handlers, invites, members, permissions, state::{EventSender, ServerState}};
+use crate::{attachments, auth, events::EventTarget, handlers, invites, members, permissions, state::{EventSender, ServerState}};
 use anyhow::{Context, Result};
 use farder_crypto::identity::PublicKey;
 use farder_protocol::{codec, server::*};
@@ -534,7 +534,7 @@ pub(crate) async fn authenticate(
             }
         } else {
             let display_name = format!("vk_{}", hex::encode(&pk_bytes[..4]));
-            let active_setup_token = state.setup_token.lock().unwrap().clone();
+            let active_setup_token = *state.setup_token.lock().unwrap();
             match auth::authenticate_new_member(
                 &conn_db,
                 &public_key,
@@ -591,18 +591,15 @@ pub(crate) async fn authenticate(
     }
 
     // Step 5: Send Authenticated or AuthError
-    match &auth_result {
-        Err(reason) => {
-            let _ = send_server_frame(
-                send,
-                &ServerFrame::AuthError {
-                    reason: reason.clone(),
-                },
-            )
-            .await;
-            anyhow::bail!("auth rejected: {}", reason);
-        }
-        Ok(()) => {}
+    if let Err(reason) = &auth_result {
+        let _ = send_server_frame(
+            send,
+            &ServerFrame::AuthError {
+                reason: reason.clone(),
+            },
+        )
+        .await;
+        anyhow::bail!("auth rejected: {}", reason);
     }
 
     let session_token = auth::generate_session_token();
@@ -746,6 +743,7 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
     let member_clone = public_key.clone();
     let semaphore = Arc::new(Semaphore::new(10)); // max 10 concurrent uploads/downloads
     let stream_acceptor = tokio::spawn(async move {
+        #[allow(clippy::while_let_loop)]
         loop {
             match conn_clone.accept_bi().await {
                 Ok((s, r)) => {

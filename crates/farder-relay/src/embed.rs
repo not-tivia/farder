@@ -317,7 +317,7 @@ pub async fn resolve_embed<F: LinkFetcher + ?Sized>(url: &str, f: &F) -> EmbedOu
         Provider::Spotify => adapt_spotify(url, f).await,
     };
     match adapted {
-        Some(e) => EmbedOutcome::Embed(e),
+        Some(e) => EmbedOutcome::Embed(Box::new(e)),
         None => EmbedOutcome::Unsupported,
     }
 }
