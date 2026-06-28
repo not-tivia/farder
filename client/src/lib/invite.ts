@@ -45,10 +45,19 @@ export function parseInviteLink(input: string): ParsedInvite {
     return {};
   }
 
-  // Relay deep link (full or compact default-relay form): return the whole
-  // URL as the address (token embedded; the Rust parser expands relayd/).
-  if (/^farder:\/\/relayd?\//i.test(trimmed)) {
-    return { address: trimmed };
+  // Relay deep link (full or compact default-relay form): return the whole URL
+  // as the address (the Rust connect parser needs it intact for the handshake),
+  // BUT also surface the embedded invite code so the mesh join (join_log_server /
+  // ResolveInvite) can use the bare code. Segment positions mirror the Rust
+  // parse_relay_target: compact `farder://relayd/<server_id>/<code>` → code is
+  // index 1; full `farder://relay/<addr>/<server_id>/<cert_fp>/<code>` → index 3.
+  if (/^farder:\/\/relayd\//i.test(trimmed)) {
+    const parts = trimmed.replace(/^farder:\/\/relayd\//i, "").split("/");
+    return { address: trimmed, inviteCode: parts[1] || undefined };
+  }
+  if (/^farder:\/\/relay\//i.test(trimmed)) {
+    const parts = trimmed.replace(/^farder:\/\/relay\//i, "").split("/");
+    return { address: trimmed, inviteCode: parts[3] || undefined };
   }
 
   // Direct farder://addr/code
