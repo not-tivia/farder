@@ -283,6 +283,23 @@ fn require_member_hierarchy(
 }
 
 // ---------------------------------------------------------------------------
+// Mesh content gate
+// ---------------------------------------------------------------------------
+
+/// Whether a request requires the caller to be a LOG member on a mesh server.
+/// Default-deny: everything is gated EXCEPT a small bootstrap allow-list that a
+/// not-yet-member must be able to call — submit their join/device events, resolve
+/// an invite code, and read server info. Adding to this list is a deliberate act.
+fn request_requires_membership(req: &ServerRequest) -> bool {
+    !matches!(
+        req,
+        ServerRequest::SubmitEvent { .. }
+            | ServerRequest::ResolveInvite { .. }
+            | ServerRequest::GetServerInfo
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatch
 // ---------------------------------------------------------------------------
 
@@ -294,6 +311,25 @@ pub fn handle_request(
     storage_dir: &str,
     state: &Arc<ServerState>,
 ) -> Result<HandleResult> {
+    // Mesh content gate: when this server has an event log, the log is
+    // authoritative for membership. A caller who is not a log member may only
+    // make bootstrap requests (submit join events, resolve an invite, read
+    // server info); everything else is rejected. Legacy servers (no log) skip
+    // this entirely. Lock briefly + drop before dispatch (SubmitEvent re-locks).
+    let membership = {
+        let guard = state.log_state.lock().unwrap();
+        guard.as_ref().map(|ls| (ls.is_member(member), ls.is_pending(member)))
+    };
+    if let Some((is_log_member, is_pending)) = membership {
+        if !is_log_member && request_requires_membership(&request) {
+            return err(if is_pending {
+                "pending approval: waiting for a moderator to approve your join"
+            } else {
+                "not a member of this server"
+            });
+        }
+    }
+
     match request {
         // ----------------------------------------------------------------
         // Messaging
@@ -3997,6 +4033,85 @@ mod tests {
             }
             other => panic!("expected Error for non-member MessagePosted, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn non_member_is_gated_from_content_but_can_bootstrap() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+
+        let owner_kp = Keypair::generate();
+        let everyone_id: u64 = conn
+            .query_row("SELECT id FROM roles WHERE name = '@everyone'", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })
+            .unwrap();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        let g = Genesis {
+            version: 1,
+            name: "mesh-test".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        // A stranger who is NOT a log member.
+        let stranger = Keypair::generate().public_key();
+
+        // Gated request (FetchHistory) is rejected for the non-member.
+        let r = handle_request(
+            &conn,
+            &stranger,
+            false,
+            ServerRequest::FetchHistory { channel_id: 1, before_id: None, limit: 50 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert!(
+            matches!(r.response, ServerResponse::Error { .. }),
+            "non-member must be denied content"
+        );
+
+        // The owner (a log member) is allowed.
+        let r2 = handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::FetchHistory { channel_id: 1, before_id: None, limit: 50 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert!(
+            !matches!(&r2.response, ServerResponse::Error { reason } if reason.contains("member")),
+            "a log member must not be gated"
+        );
+
+        // Allow-listed bootstrap request (GetServerInfo) is permitted for the non-member.
+        let r3 = handle_request(
+            &conn,
+            &stranger,
+            false,
+            ServerRequest::GetServerInfo,
+            "",
+            &state,
+        )
+        .unwrap();
+        assert!(
+            !matches!(&r3.response, ServerResponse::Error { reason } if reason.contains("member")),
+            "bootstrap requests must stay open to non-members"
+        );
     }
 
     #[test]
