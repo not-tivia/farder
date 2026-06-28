@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useLayoutEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString, memberDisplayName } from "../lib/types";
@@ -7,6 +7,7 @@ import { useApp, useActiveServer } from "../context/ServerContext";
 import { useMemberProfile } from "../hooks/useMemberProfile";
 import { toast } from "../lib/toast";
 import { formatPresence } from "../lib/presence";
+import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 
 interface Props {
   member: MemberInfo;
@@ -66,44 +67,16 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     setEditingBio(false);
   }
 
-  // Position the card from the click + viewport, opening TOWARD THE CHAT.
-  //
-  // The subtle part: with display scaling / UI zoom (e.g. Windows at 125%), the
-  // click coordinates and clientWidth/Height arrive in SCREEN pixels, but the CSS
-  // left/top we set are interpreted in CSS pixels and then multiplied back up by
-  // the scale — so on a 125% display, left:2081 renders at 2601 and the member-
-  // list popup flies off the right edge (invisible). We measure that scale
-  // (rendered width ÷ layout width), compute the position in SCREEN space (where
-  // the click lives), then convert to CSS px (÷ scale) so it lands correctly.
+  // Position the card toward the chat area (away from the member list on the right),
+  // capped to the viewport, using scale-aware positioning via the shared helper.
   const cardRef = useRef<HTMLDivElement>(null);
-  const [scale, setScale] = useState(1);
-  useLayoutEffect(() => {
-    const el = cardRef.current;
-    if (!el) return;
-    const measured = el.getBoundingClientRect().width / (el.offsetWidth || 300);
-    if (measured > 0.1 && Math.abs(measured - scale) > 0.01) setScale(measured);
+  const posStyle = useClickAnchoredPosition(cardRef, position, {
+    anchor: "toward-center",
+    capHeight: true,
+    elementW: 300, // .profile-card CSS width
   });
-  const M = 8;
-  const CARD_W = 300; // .profile-card CSS width
-  const vw = document.documentElement.clientWidth || window.innerWidth;   // screen px
-  const vh = document.documentElement.clientHeight || window.innerHeight; // screen px
-  const cardW = CARD_W * scale; // the card's on-screen width
-  // Right-half clicks (member list) open leftward; bottom-half clicks anchor the
-  // card's bottom so it grows upward. Computed in screen space, clamped on-screen.
-  let leftScreen = position.x > vw / 2 ? position.x - cardW : position.x;
-  leftScreen = Math.max(M, Math.min(leftScreen, vw - cardW - M));
-  const openUp = position.y > vh / 2;
-  const topScreen = Math.max(M, position.y);
-  const bottomScreen = Math.max(M, vh - position.y);
   const style: React.CSSProperties = {
-    position: "fixed",
-    left: leftScreen / scale, // screen px → CSS px so the post-zoom result is right
-    right: "auto",
-    ...(openUp
-      ? { bottom: bottomScreen / scale, top: "auto" }
-      : { top: topScreen / scale, bottom: "auto" }),
-    maxHeight: `${(vh - 2 * M) / scale}px`,
-    overflowY: "auto",
+    ...posStyle,
     zIndex: 1000,
   };
 

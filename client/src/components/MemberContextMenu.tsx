@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
@@ -9,6 +9,7 @@ import TimeoutDialog from "./TimeoutDialog";
 import UserProfilePopup from "./UserProfilePopup";
 import { getTranslationSettings, setTranslationSettings } from "../lib/translation/api";
 import { SourceLanguagePicker } from "./SourceLanguagePicker";
+import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 
 interface Props {
   target: MemberInfo;
@@ -70,11 +71,6 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Scale between CSS px and rendered px (display scaling / UI zoom, e.g. 125%).
-  // Without compensating, `top/left: <clickCoord>` get re-multiplied by the zoom
-  // and the menu lands off-screen — same bug the profile popup had.
-  const [scale, setScale] = useState(1);
-
   const targetPk = publicKeyToString(target.public_key);
   const isSelf = ownPk === targetPk;
   const members = activeServer?.members ?? [];
@@ -109,13 +105,6 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
       document.removeEventListener("keydown", handleKey);
     };
   }, [onClose, dialogOpen]);
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const measured = el.getBoundingClientRect().width / (el.offsetWidth || 1);
-    if (measured > 0.1 && Math.abs(measured - scale) > 0.01) setScale(measured);
-  });
 
   useEffect(() => {
     (async () => {
@@ -258,26 +247,18 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   }
   if (cleaned.length > 0 && cleaned[cleaned.length - 1].kind === "separator") cleaned.pop();
 
-  // Position at the click in SCREEN space, then convert to CSS px (÷ scale) so the
-  // post-zoom result lands correctly. Right-click is in the right-edge member
-  // sidebar, so open leftward if it would overflow the right; clamp on-screen.
-  const M = 8;
-  const vw = document.documentElement.clientWidth || window.innerWidth;
-  const vh = document.documentElement.clientHeight || window.innerHeight;
-  const menuW = (ref.current?.offsetWidth ?? 180) * scale;
-  const menuH = (ref.current?.offsetHeight ?? 0) * scale;
-  let leftScreen = position.x;
-  if (leftScreen + menuW + M > vw) leftScreen = position.x - menuW;
-  leftScreen = Math.max(M, Math.min(leftScreen, vw - menuW - M));
-  let topScreen = Math.max(M, position.y);
-  if (topScreen + menuH + M > vh) topScreen = Math.max(M, vh - menuH - M);
-  const menuTop = topScreen / scale;
-  const menuLeft = leftScreen / scale;
+  // Position at the click — scale-compensated via the shared helper.
+  // The member sidebar is on the right, so use "toward-center" to open leftward.
+  const menuPosStyle = useClickAnchoredPosition(ref, position, {
+    anchor: "toward-center",
+    elementW: 180,
+    elementH: ref.current?.offsetHeight ?? 0,
+  });
 
   return (
     <>
       {!dialogOpen && (
-      <div ref={ref} style={{ ...menuStyle, top: menuTop, left: menuLeft }}>
+      <div ref={ref} style={{ ...menuStyle, ...menuPosStyle }}>
         {cleaned.map((row, i) => {
           if (row.kind === "separator") {
             return <div key={`sep-${i}`} style={separatorStyle} />;
