@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 
 interface Props {
   /** Initial color (any CSS color string). May be undefined for "no override". */
@@ -33,6 +33,13 @@ export default function ColorPickerPopover({
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pickerVal, setPickerVal] = useState<string>(value ?? "#000000");
+  const [scale, setScale] = useState(1);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measured = el.getBoundingClientRect().width / (el.offsetWidth || 1);
+    if (measured > 0.1 && Math.abs(measured - scale) > 0.01) setScale(measured);
+  });
 
   // Close on outside click.
   useEffect(() => {
@@ -48,8 +55,8 @@ export default function ColorPickerPopover({
       ref={ref}
       style={{
         position: "fixed",
-        top: anchorRect.bottom + 4,
-        left: anchorRect.left,
+        top: (anchorRect.bottom + 4) / scale,
+        left: anchorRect.left / scale,
         background: "var(--xp-panel-bg, #fff)",
         color: "var(--xp-text-normal, #000)",
         border: "1px solid var(--xp-border, #888)",

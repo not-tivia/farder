@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 
 interface Props {
   /** Participant pubkey hex (the same string the Rust controller keys by). */
@@ -44,6 +45,11 @@ export default function VoiceParticipantContextMenu({
   const ref = useRef<HTMLDivElement | null>(null);
   // Local slider state for smooth dragging; seeded from the saved volume.
   const [pct, setPct] = useState<number>(Math.round((currentVolume ?? 1) * 100));
+  const menuPosStyle = useClickAnchoredPosition(ref, position, {
+    anchor: "toward-center",
+    elementW: 180,
+    elementH: ref.current?.offsetHeight ?? 0,
+  });
 
   useEffect(() => {
     function handleMouse(e: MouseEvent) {
@@ -61,7 +67,7 @@ export default function VoiceParticipantContextMenu({
   }, [onClose]);
 
   return (
-    <div ref={ref} style={{ ...menuStyle, top: position.y, left: position.x }}>
+    <div ref={ref} style={{ ...menuStyle, ...menuPosStyle }}>
       <div style={headerStyle} title={pubkeyHex}>
         {displayName}
       </div>

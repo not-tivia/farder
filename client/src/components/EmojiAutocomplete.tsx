@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { BookItem } from "../lib/book/types";
 import { searchShorthand, lookupShorthand, renderUnicodeEmoji } from "../lib/unicodeEmoji";
 import { useBookItemSrc } from "./BookItemTile";
@@ -49,6 +49,15 @@ function BookThumb({ item }: { item: BookItem }) {
 }
 
 export default function EmojiAutocomplete({ query, bookIndex, position, onSelect, onClose }: Props) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [scale, setScale] = useState(1);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measured = el.getBoundingClientRect().width / (el.offsetWidth || 1);
+    if (measured > 0.1 && Math.abs(measured - scale) > 0.01) setScale(measured);
+  });
+
   const [selectedIdx, setSelectedIdx] = useState(0);
 
   const q = query.toLowerCase();
@@ -91,7 +100,7 @@ export default function EmojiAutocomplete({ query, bookIndex, position, onSelect
   if (matches.length === 0) return null;
 
   return (
-    <div style={{ ...popover, top: position.y, left: position.x }}>
+    <div ref={ref} style={{ ...popover, top: position.y / scale, left: position.x / scale }}>
       {matches.map((m, i) => (
         <div
           key={`${m.kind}-${m.name}`}

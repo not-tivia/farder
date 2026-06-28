@@ -8,6 +8,7 @@ import { publicKeyToString } from "../lib/types";
 import InviteDialog from "./InviteDialog";
 import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";
+import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 import UserProfilePopup from "./UserProfilePopup";
 import NotificationSettings from "./NotificationSettings";
 import SettingsModal from "./settings/SettingsModal";
@@ -121,6 +122,8 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
   const [showSettings, setShowSettings] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
   const [voiceMenu, setVoiceMenu] = useState<{ x: number; y: number; pubkeyHex: string; displayName: string } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuPos = useClickAnchoredPosition(contextMenuRef, contextMenu ?? { x: 0, y: 0 }, { anchor: "auto" });
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
   const [editCategory, setEditCategory] = useState<CategoryInfo | null>(null);
 
@@ -582,7 +585,7 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
       {contextMenu && (
         <>
           <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setContextMenu(null)} />
-          <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+          <div ref={contextMenuRef} className="context-menu" style={contextMenuPos}>
             {contextMenu.type === "channel" && (() => {
               const ch = channels.find(c => c.id === contextMenu.channelId);
               const siblingsInCategory = visibleChannels

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { MessageInfo, AttachmentInfo } from "../lib/types";
 import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
@@ -24,6 +24,7 @@ import { detectEmbedUrls } from "../lib/linkEmbed";
 import MemberAvatar from "./MemberAvatar";
 import { useDataSaver } from "../context/DataSaverContext";
 import { imageIsGated } from "../lib/dataSaver";
+import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
@@ -166,6 +167,8 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [memberMenu, setMemberMenu] = useState<{ x: number; y: number } | null>(null);
   const [editing, setEditing] = useState(false);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuPos = useClickAnchoredPosition(contextMenuRef, contextMenu ?? { x: 0, y: 0 }, { anchor: "auto" });
   const [editContent, setEditContent] = useState("");
 
   const [pendingDownload, setPendingDownload] = useState<{
@@ -538,7 +541,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
       {contextMenu && (
         <>
           <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setContextMenu(null)} />
-          <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+          <div ref={contextMenuRef} className="context-menu" style={contextMenuPos}>
             <div className="context-menu-item" onClick={() => {
               if (onReply) onReply(message);
               setContextMenu(null);
@@ -644,6 +647,8 @@ function AttachmentDisplay({
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; isRightClick: boolean } | null>(null);
+  const attachMenuRef = useRef<HTMLDivElement | null>(null);
+  const attachMenuPos = useClickAnchoredPosition(attachMenuRef, menu ?? { x: 0, y: 0 }, { anchor: "auto" });
   const isImage = attachment.mime_type.startsWith("image/");
   const isAudio = attachment.mime_type.startsWith("audio/");
   const { settings: ds } = useDataSaver();
@@ -758,7 +763,7 @@ function AttachmentDisplay({
         {menu && (
           <>
             <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setMenu(null)} />
-            <div className="context-menu" style={{ top: menu.y, left: menu.x }}>
+            <div ref={attachMenuRef} className="context-menu" style={attachMenuPos}>
               <div className="context-menu-item" onClick={handleCopyLink}>Copy Image Link</div>
               {/* "Favorite" was removed: it wrote to a legacy favorites store
                   nothing in the UI reads anymore — the book replaced it. */}
