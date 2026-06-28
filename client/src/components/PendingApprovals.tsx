@@ -87,7 +87,7 @@ export default function PendingApprovals({ serverId }: Props) {
 
   return (
     <div className="pending-approvals-section">
-      <div className="member-role-group pending-approvals-header">
+      <div className="member-role-group">
         Pending requests ({pending.length})
       </div>
       {pending.map((m) => {
