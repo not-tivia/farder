@@ -2112,6 +2112,7 @@ pub async fn create_invite(
     server_id: String,             // connection key (address) — routes the request
     log_server_id: Option<String>, // genesis hash when log-mode; None for legacy
     max_uses: Option<u32>,
+    requires_approval: Option<bool>,
 ) -> Result<InviteResult, String> {
     let response = bridge::send_request(
         &state,
@@ -2195,7 +2196,7 @@ pub async fn create_invite(
                         code_hash: farder_crypto::event_log::invite_code_hash(&code),
                         max_uses: max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX),
                         expires_at,
-                        requires_approval: false,
+                        requires_approval: requires_approval.unwrap_or(false),
                     },
                 );
                 event_send_submit(&state, &server_id, &inv).await?;

@@ -11,6 +11,7 @@ export default function InviteDialog({ onClose }: Props) {
   const activeServer = useActiveServer();
   const [link, setLink] = useState<string | null>(null);
   const [maxUses, setMaxUses] = useState<number | undefined>(undefined);
+  const [requiresApproval, setRequiresApproval] = useState(false);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,7 +22,7 @@ export default function InviteDialog({ onClose }: Props) {
     setError(null);
     try {
       const logServerId = activeServer?.logServerId ?? null;
-      const result = await api.createInvite(serverId, logServerId, maxUses);
+      const result = await api.createInvite(serverId, logServerId, maxUses, requiresApproval);
       setLink(result.link);
     } catch (e) {
       setError(String(e));
@@ -64,6 +65,16 @@ export default function InviteDialog({ onClose }: Props) {
                   <option value="10">10 uses</option>
                   <option value="25">25 uses</option>
                 </select>
+              </div>
+              <div className="connect-section">
+                <label className="connect-label">
+                  <input
+                    type="checkbox"
+                    checked={requiresApproval}
+                    onChange={(e) => setRequiresApproval(e.target.checked)}
+                  />
+                  {" "}Require approval to join
+                </label>
               </div>
               {error && <div className="error-text">{error}</div>}
               <div className="connect-actions">
