@@ -121,6 +121,52 @@ export default function AppShell() {
     }
   }, [serverId, activeServer?.connectionLost, activeServer?.currentVoiceChannelId]);
 
+  // Fetch membership status when connected to a log-mode (invite/join) server.
+  // Default is "member" so the normal flow is never gated until explicitly fetched.
+  useEffect(() => {
+    if (!serverId || !activeServer?.connected || !activeServer?.logServerId) return;
+    api.getMembershipStatus(serverId).then((status) => {
+      dispatch({ type: "SET_MEMBERSHIP_STATUS", serverId, status: status as "member" | "pending" | "none" });
+    }).catch(() => {});
+  }, [serverId, activeServer?.connected, activeServer?.logServerId]);
+
+  // Render waiting/declined screens for pending/none membership states
+  if (activeServer?.connected && activeServer?.logServerId) {
+    if (activeServer.membershipStatus === "pending") {
+      return (
+        <>
+          <TitleBar />
+          <div className="main-layout" style={{ position: "relative" }}>
+            <ServerStrip />
+            <div className="waiting-approval-panel">
+              <div className="waiting-approval-heading">Waiting for approval</div>
+              <div className="waiting-approval-text">
+                Your request to join <strong>{activeServer.serverName}</strong> is pending review by the server owner.
+                You will be admitted automatically once approved.
+              </div>
+            </div>
+          </div>
+        </>
+      );
+    }
+    if (activeServer.membershipStatus === "none") {
+      return (
+        <>
+          <TitleBar />
+          <div className="main-layout" style={{ position: "relative" }}>
+            <ServerStrip />
+            <div className="waiting-approval-panel">
+              <div className="waiting-approval-heading">Not a member</div>
+              <div className="waiting-approval-text">
+                Your request to join <strong>{activeServer.serverName}</strong> was not approved, or you are no longer a member of this server.
+              </div>
+            </div>
+          </div>
+        </>
+      );
+    }
+  }
+
   return (
     <>
       <TitleBar />

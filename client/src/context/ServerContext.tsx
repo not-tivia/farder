@@ -23,6 +23,7 @@ export interface PerServerState {
   relayed: boolean;
   logServerId: string | null;
   highlightMessageId: number | null;
+  membershipStatus: "member" | "pending" | "none";
 }
 
 export interface AppState {
@@ -58,6 +59,7 @@ const initialPerServerState: PerServerState = {
   relayed: false,
   logServerId: null,
   highlightMessageId: null,
+  membershipStatus: "member",
 };
 
 const initialAppState: AppState = {
@@ -123,7 +125,8 @@ export type AppAction =
   | { type: "YOU_WERE_BANNED"; serverId: string; serverName: string; reason: string | null }
   | { type: "CLEAR_KICKED_BANNED" }
   | { type: "OPEN_JOIN_CONFIRM"; link: string }
-  | { type: "CLOSE_JOIN_CONFIRM" };
+  | { type: "CLOSE_JOIN_CONFIRM" }
+  | { type: "SET_MEMBERSHIP_STATUS"; serverId: string; status: "member" | "pending" | "none" };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -180,6 +183,8 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     }
     case "HIGHLIGHT_MESSAGE":
       return { ...state, highlightMessageId: action.payload.messageId };
+    case "SET_MEMBERSHIP_STATUS":
+      return { ...state, membershipStatus: action.status };
     case "SET_MESSAGES":
       return {
         ...state,

@@ -311,6 +311,18 @@ export function useServerEvents(): void {
       }).catch((err) => console.error("[members] refresh on profile update failed:", err));
     }).then(safePush);
 
+    listen("server:membership_changed", (e) => {
+      const data = e.payload as { server_id: string; public_key: string };
+      const serverId = data.server_id;
+      // Re-fetch my own status (I may have just been approved/denied), the member
+      // list, and the pending queue — all derive from the changed log membership.
+      api.getMembershipStatus(serverId).then(status =>
+        dispatch({ type: "SET_MEMBERSHIP_STATUS", serverId, status: status as any })).catch(() => {});
+      api.getMembers(serverId).then(members =>
+        dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
+      // The approval queue component refetches getPendingMembers on this event (Task 8).
+    }).then(safePush);
+
     listen("server:member_presence_updated", (e) => {
       const data = e.payload as { server_id: string; public_key: string; presence: Presence | null };
       console.log("[presence] member_presence_updated", data.public_key, data.presence);
