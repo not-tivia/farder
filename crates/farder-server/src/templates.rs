@@ -92,6 +92,7 @@ pub fn apply_template(conn: &Connection, template: &Template) -> Result<()> {
                 role.color.as_deref(),
                 role.position,
                 false,
+                false,
             )?;
         }
     }

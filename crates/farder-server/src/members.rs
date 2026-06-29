@@ -239,16 +239,18 @@ pub fn create_role(
     color: Option<&str>,
     position: u32,
     builtin: bool,
+    hoist: bool,
 ) -> Result<u64> {
     conn.execute(
-        "INSERT INTO roles (name, permissions, color, position, builtin) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO roles (name, permissions, color, position, builtin, hoist) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             name,
             permissions as i64,
             color,
             position as i64,
             builtin as i64,
+            hoist as i64,
         ],
     )?;
     Ok(conn.last_insert_rowid() as u64)
@@ -257,7 +259,7 @@ pub fn create_role(
 pub fn get_role(conn: &Connection, id: u64) -> Result<Option<RoleInfo>> {
     let row = conn
         .query_row(
-            "SELECT id, name, permissions, color, position FROM roles WHERE id = ?1",
+            "SELECT id, name, permissions, color, position, hoist FROM roles WHERE id = ?1",
             params![id as i64],
             |row| {
                 let id: i64 = row.get(0)?;
@@ -265,12 +267,14 @@ pub fn get_role(conn: &Connection, id: u64) -> Result<Option<RoleInfo>> {
                 let permissions: i64 = row.get(2)?;
                 let color: Option<String> = row.get(3)?;
                 let position: i64 = row.get(4)?;
+                let hoist: bool = row.get(5)?;
                 Ok(RoleInfo {
                     id: id as u64,
                     name,
                     permissions: permissions as u64,
                     color,
                     position: position as u32,
+                    hoist,
                 })
             },
         )
@@ -280,7 +284,7 @@ pub fn get_role(conn: &Connection, id: u64) -> Result<Option<RoleInfo>> {
 
 pub fn list_roles(conn: &Connection) -> Result<Vec<RoleInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, permissions, color, position FROM roles ORDER BY position ASC",
+        "SELECT id, name, permissions, color, position, hoist FROM roles ORDER BY position ASC",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -289,12 +293,14 @@ pub fn list_roles(conn: &Connection) -> Result<Vec<RoleInfo>> {
         let permissions: i64 = row.get(2)?;
         let color: Option<String> = row.get(3)?;
         let position: i64 = row.get(4)?;
+        let hoist: bool = row.get(5)?;
         Ok(RoleInfo {
             id: id as u64,
             name,
             permissions: permissions as u64,
             color,
             position: position as u32,
+            hoist,
         })
     })?;
 
@@ -312,30 +318,10 @@ pub fn update_role(
     permissions: Option<u64>,
     color: Option<Option<&str>>,
     position: Option<u32>,
+    hoist: Option<bool>,
 ) -> Result<()> {
     // Build a dynamic UPDATE statement from only the provided fields.
-    let mut sets: Vec<String> = Vec::new();
-
-    if name.is_some() {
-        sets.push("name = ?2".to_string());
-    }
-    if permissions.is_some() {
-        sets.push(format!("permissions = ?{}", sets.len() + 2));
-    }
-    if color.is_some() {
-        sets.push(format!("color = ?{}", sets.len() + 2));
-    }
-    if position.is_some() {
-        sets.push(format!("position = ?{}", sets.len() + 2));
-    }
-
-    if sets.is_empty() {
-        return Ok(());
-    }
-
-    // We rebuild with correct indices after knowing the final count.
-    // Simpler: just use a manual approach with concrete param positions.
-    // Recompute correctly:
+    // Recompute correctly with proper param indices:
     let mut sets2: Vec<String> = Vec::new();
     let mut param_idx: usize = 2; // ?1 is the id
     if name.is_some() {
@@ -352,6 +338,14 @@ pub fn update_role(
     }
     if position.is_some() {
         sets2.push(format!("position = ?{}", param_idx));
+        param_idx += 1;
+    }
+    if hoist.is_some() {
+        sets2.push(format!("hoist = ?{}", param_idx));
+    }
+
+    if sets2.is_empty() {
+        return Ok(());
     }
 
     let sql = format!("UPDATE roles SET {} WHERE id = ?1", sets2.join(", "));
@@ -380,6 +374,10 @@ pub fn update_role(
     }
     if let Some(pos) = position {
         stmt.raw_bind_parameter(idx, pos as i64)?;
+        idx += 1;
+    }
+    if let Some(h) = hoist {
+        stmt.raw_bind_parameter(idx, h as i64)?;
     }
 
     stmt.raw_execute()?;
@@ -702,7 +700,7 @@ mod tests {
         register_member(&conn, &pk, "Frank").unwrap();
 
         // Assign a role so member_roles row is created too.
-        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
+        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
         assign_role(&conn, &pk, role_id).unwrap();
 
         remove_member(&conn, &pk).unwrap();
@@ -719,7 +717,7 @@ mod tests {
     #[test]
     fn test_create_and_get_role() {
         let conn = db::open_in_memory().unwrap();
-        let id = create_role(&conn, "Admin", 0xFFFF, Some("#FF0000"), 0, false).unwrap();
+        let id = create_role(&conn, "Admin", 0xFFFF, Some("#FF0000"), 0, false, false).unwrap();
         let role = get_role(&conn, id).unwrap().expect("role should exist");
         assert_eq!(role.name, "Admin");
         assert_eq!(role.permissions, 0xFFFF);
@@ -730,9 +728,9 @@ mod tests {
     #[test]
     fn test_list_roles() {
         let conn = db::open_in_memory().unwrap();
-        create_role(&conn, "C", 0, None, 2, false).unwrap();
-        create_role(&conn, "A", 0, None, 0, false).unwrap();
-        create_role(&conn, "B", 0, None, 1, false).unwrap();
+        create_role(&conn, "C", 0, None, 2, false, false).unwrap();
+        create_role(&conn, "A", 0, None, 0, false, false).unwrap();
+        create_role(&conn, "B", 0, None, 1, false, false).unwrap();
 
         let roles = list_roles(&conn).unwrap();
         assert_eq!(roles.len(), 3);
@@ -744,10 +742,10 @@ mod tests {
     #[test]
     fn test_update_role() {
         let conn = db::open_in_memory().unwrap();
-        let id = create_role(&conn, "Guest", 0x01, Some("#AAAAAA"), 5, false).unwrap();
+        let id = create_role(&conn, "Guest", 0x01, Some("#AAAAAA"), 5, false, false).unwrap();
 
         // Update name and permissions only.
-        update_role(&conn, id, Some("Member"), Some(0x0F), None, None).unwrap();
+        update_role(&conn, id, Some("Member"), Some(0x0F), None, None, None).unwrap();
         let role = get_role(&conn, id).unwrap().unwrap();
         assert_eq!(role.name, "Member");
         assert_eq!(role.permissions, 0x0F);
@@ -757,7 +755,7 @@ mod tests {
         assert_eq!(role.position, 5);
 
         // Update color to None (clear it).
-        update_role(&conn, id, None, None, Some(None), None).unwrap();
+        update_role(&conn, id, None, None, Some(None), None, None).unwrap();
         let role = get_role(&conn, id).unwrap().unwrap();
         assert!(role.color.is_none());
     }
@@ -765,7 +763,7 @@ mod tests {
     #[test]
     fn test_delete_role() {
         let conn = db::open_in_memory().unwrap();
-        let id = create_role(&conn, "Temp", 0, None, 0, false).unwrap();
+        let id = create_role(&conn, "Temp", 0, None, 0, false, false).unwrap();
         delete_role(&conn, id).unwrap();
         assert!(get_role(&conn, id).unwrap().is_none());
     }
@@ -773,7 +771,7 @@ mod tests {
     #[test]
     fn test_cannot_delete_builtin_role() {
         let conn = db::open_in_memory().unwrap();
-        let id = create_role(&conn, "everyone", 0, None, 0, true).unwrap();
+        let id = create_role(&conn, "everyone", 0, None, 0, true, false).unwrap();
         let result = delete_role(&conn, id);
         assert!(result.is_err());
         // Role still exists.
@@ -790,8 +788,8 @@ mod tests {
         let pk = gen_pk();
         register_member(&conn, &pk, "Grace").unwrap();
 
-        let r1 = create_role(&conn, "Mod", 0x10, None, 1, false).unwrap();
-        let r2 = create_role(&conn, "VIP", 0x20, None, 2, false).unwrap();
+        let r1 = create_role(&conn, "Mod", 0x10, None, 1, false, false).unwrap();
+        let r2 = create_role(&conn, "VIP", 0x20, None, 2, false, false).unwrap();
 
         assign_role(&conn, &pk, r1).unwrap();
         assign_role(&conn, &pk, r2).unwrap();
@@ -810,7 +808,7 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         let pk = gen_pk();
         register_member(&conn, &pk, "Heidi").unwrap();
-        let r1 = create_role(&conn, "Mod", 0x10, None, 1, false).unwrap();
+        let r1 = create_role(&conn, "Mod", 0x10, None, 1, false, false).unwrap();
         assign_role(&conn, &pk, r1).unwrap();
 
         unassign_role(&conn, &pk, r1).unwrap();
@@ -824,8 +822,8 @@ mod tests {
         let pk = gen_pk();
         register_member(&conn, &pk, "Ivan").unwrap();
 
-        let r1 = create_role(&conn, "ReadOnly", 0x01, None, 1, false).unwrap();
-        let r2 = create_role(&conn, "Write", 0x02, None, 2, false).unwrap();
+        let r1 = create_role(&conn, "ReadOnly", 0x01, None, 1, false, false).unwrap();
+        let r2 = create_role(&conn, "Write", 0x02, None, 2, false, false).unwrap();
 
         assign_role(&conn, &pk, r1).unwrap();
         assign_role(&conn, &pk, r2).unwrap();
@@ -1074,5 +1072,28 @@ mod tests {
     fn test_get_member_profile_unknown_member_is_none() {
         let conn = db::open_in_memory().unwrap();
         assert!(get_member_profile(&conn, &gen_pk()).unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Hoist tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn role_hoist_round_trips() {
+        let conn = db::open_in_memory().unwrap();
+        // Create a role with hoist = true.
+        let id = create_role(&conn, "Mods", 0, None, 5, false, true).unwrap();
+        let r = get_role(&conn, id).unwrap().unwrap();
+        assert!(r.hoist, "create_role should persist hoist=true");
+
+        // Flip hoist to false via update_role.
+        update_role(&conn, id, None, None, None, None, Some(false)).unwrap();
+        let r2 = get_role(&conn, id).unwrap().unwrap();
+        assert!(!r2.hoist, "update_role should flip hoist to false");
+
+        // Flip back to true.
+        update_role(&conn, id, None, None, None, None, Some(true)).unwrap();
+        let r3 = get_role(&conn, id).unwrap().unwrap();
+        assert!(r3.hoist, "update_role should flip hoist back to true");
     }
 }

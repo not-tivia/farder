@@ -790,7 +790,7 @@ mod tests {
         let ch_id = create_channel(&conn, "general", ChannelType::Text, Some(cat_id), 0).unwrap();
 
         // Add a category override so we can verify deletion.
-        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
+        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
         set_category_override(&conn, cat_id, role_id, 0x01, 0x02).unwrap();
 
         delete_category(&conn, cat_id).unwrap();
@@ -893,7 +893,7 @@ mod tests {
         let id = create_channel(&conn, "gone", ChannelType::Text, None, 0).unwrap();
 
         // Add an override to ensure cascade delete.
-        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
+        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
         set_channel_override(&conn, id, role_id, 0x01, 0x02).unwrap();
 
         hard_delete_channel(&conn, id).unwrap();
@@ -913,7 +913,7 @@ mod tests {
     fn test_set_and_get_channel_overrides() {
         let conn = db::open_in_memory().unwrap();
         let ch_id = create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
-        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
+        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
 
         set_channel_override(&conn, ch_id, role_id, 0xAA, 0xBB).unwrap();
 
@@ -928,7 +928,7 @@ mod tests {
     fn test_set_and_get_category_overrides() {
         let conn = db::open_in_memory().unwrap();
         let cat_id = create_category(&conn, "General", 0).unwrap();
-        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
+        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
 
         set_category_override(&conn, cat_id, role_id, 0x11, 0x22).unwrap();
 
@@ -943,7 +943,7 @@ mod tests {
     fn test_override_upsert() {
         let conn = db::open_in_memory().unwrap();
         let ch_id = create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
-        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
+        let role_id = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
 
         // Set once.
         set_channel_override(&conn, ch_id, role_id, 0x01, 0x02).unwrap();
@@ -960,9 +960,9 @@ mod tests {
     fn test_get_channel_overrides_for_roles() {
         let conn = db::open_in_memory().unwrap();
         let ch_id = create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
-        let r1 = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
-        let r2 = create_role(&conn, "VIP", 0x0F, None, 2, false).unwrap();
-        let r3 = create_role(&conn, "Other", 0x01, None, 3, false).unwrap();
+        let r1 = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
+        let r2 = create_role(&conn, "VIP", 0x0F, None, 2, false, false).unwrap();
+        let r3 = create_role(&conn, "Other", 0x01, None, 3, false, false).unwrap();
 
         set_channel_override(&conn, ch_id, r1, 0xAA, 0x00).unwrap();
         set_channel_override(&conn, ch_id, r2, 0xBB, 0x00).unwrap();
@@ -984,9 +984,9 @@ mod tests {
     fn test_get_category_overrides_for_roles() {
         let conn = db::open_in_memory().unwrap();
         let cat_id = create_category(&conn, "General", 0).unwrap();
-        let r1 = create_role(&conn, "Mod", 0xFF, None, 1, false).unwrap();
-        let r2 = create_role(&conn, "VIP", 0x0F, None, 2, false).unwrap();
-        let r3 = create_role(&conn, "Other", 0x01, None, 3, false).unwrap();
+        let r1 = create_role(&conn, "Mod", 0xFF, None, 1, false, false).unwrap();
+        let r2 = create_role(&conn, "VIP", 0x0F, None, 2, false, false).unwrap();
+        let r3 = create_role(&conn, "Other", 0x01, None, 3, false, false).unwrap();
 
         set_category_override(&conn, cat_id, r1, 0x11, 0x00).unwrap();
         set_category_override(&conn, cat_id, r2, 0x22, 0x00).unwrap();

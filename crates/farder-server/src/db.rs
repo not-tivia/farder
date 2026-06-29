@@ -25,7 +25,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             permissions INTEGER NOT NULL,
             color       TEXT,
             position    INTEGER NOT NULL,
-            builtin     INTEGER NOT NULL DEFAULT 0
+            builtin     INTEGER NOT NULL DEFAULT 0,
+            hoist       INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS member_roles (
@@ -305,6 +306,19 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     };
     if !has_profile_hash {
         conn.execute("ALTER TABLE members ADD COLUMN profile_hash TEXT NULL", [])?;
+    }
+
+    // Roles: add hoist column (display role members as a named group in the member list).
+    let has_role_hoist = {
+        let mut stmt = conn.prepare("PRAGMA table_info(roles)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "hoist")
+    };
+    if !has_role_hoist {
+        conn.execute("ALTER TABLE roles ADD COLUMN hoist INTEGER NOT NULL DEFAULT 0", [])?;
     }
 
     // Audit events: forever-retention moderator action log (Phase 2).

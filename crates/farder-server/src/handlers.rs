@@ -743,6 +743,7 @@ pub fn handle_request(
             permissions: perms_bits,
             color,
             position,
+            hoist,
         } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
                 return Ok(denied);
@@ -758,6 +759,7 @@ pub fn handle_request(
                 color.as_deref(),
                 pos,
                 false,
+                hoist.unwrap_or(false),
             )?;
             let role = members::get_role(conn, role_id)?.unwrap();
             let audit_meta = json!({
@@ -781,6 +783,7 @@ pub fn handle_request(
             permissions: perms_bits,
             color,
             position,
+            hoist,
         } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_ROLES, "MANAGE_ROLES")? {
                 return Ok(denied);
@@ -806,6 +809,7 @@ pub fn handle_request(
                 perms_bits,
                 color_param,
                 position,
+                hoist,
             )?;
             let role = members::get_role(conn, role_id)?.unwrap();
             let mut events = vec![BroadcastEvent {
@@ -1904,6 +1908,7 @@ mod tests {
             None,
             0,
             true,
+            false,
         )
         .unwrap();
         let owner_kp = Keypair::generate();
@@ -2085,6 +2090,7 @@ mod tests {
                 permissions: permissions::MANAGE_MESSAGES,
                 color: Some("#FF0000".to_string()),
                 position: Some(1),
+                hoist: None,
             },
             "",
             &fake_state(),
@@ -2304,7 +2310,7 @@ mod tests {
     fn test_cannot_create_role_above_own_position() {
         let (conn, _owner) = setup();
         // Create a mod role at position 2
-        let mod_role_id = members::create_role(&conn, "Mod", permissions::MANAGE_ROLES | permissions::DEFAULT_EVERYONE, None, 2, false).unwrap();
+        let mod_role_id = members::create_role(&conn, "Mod", permissions::MANAGE_ROLES | permissions::DEFAULT_EVERYONE, None, 2, false, false).unwrap();
         let moderator = add_member(&conn, "Moderator");
         members::assign_role(&conn, &moderator, mod_role_id).unwrap();
 
@@ -2314,6 +2320,7 @@ mod tests {
             permissions: permissions::ALL_PERMISSIONS,
             color: None,
             position: Some(3),
+            hoist: None,
         }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Error { .. } => {}
@@ -2325,8 +2332,8 @@ mod tests {
     fn test_cannot_kick_member_with_higher_role() {
         let (conn, _owner) = setup();
         // Create admin role at position 3, mod role at position 2
-        let admin_role = members::create_role(&conn, "Admin", permissions::ALL_PERMISSIONS, None, 3, false).unwrap();
-        let mod_role = members::create_role(&conn, "Mod", permissions::KICK_MEMBERS | permissions::DEFAULT_EVERYONE, None, 2, false).unwrap();
+        let admin_role = members::create_role(&conn, "Admin", permissions::ALL_PERMISSIONS, None, 3, false, false).unwrap();
+        let mod_role = members::create_role(&conn, "Mod", permissions::KICK_MEMBERS | permissions::DEFAULT_EVERYONE, None, 2, false, false).unwrap();
 
         let admin = add_member(&conn, "Admin");
         members::assign_role(&conn, &admin, admin_role).unwrap();
@@ -2363,6 +2370,7 @@ mod tests {
             permissions: 0xFF,
             color: None,
             position: Some(999),
+            hoist: None,
         }, "", &fake_state()).unwrap();
         match result.response {
             ServerResponse::Ok => {}
@@ -3093,6 +3101,7 @@ mod tests {
             None,
             1,
             false,
+            false,
         )
         .unwrap();
         let result = handle_request(
@@ -3126,6 +3135,7 @@ mod tests {
             permissions::DEFAULT_EVERYONE,
             None,
             1,
+            false,
             false,
         )
         .unwrap();
@@ -3263,6 +3273,7 @@ mod tests {
                 permissions: permissions::MANAGE_MESSAGES,
                 color: None,
                 position: Some(1),
+                hoist: None,
             },
             "/tmp",
             &fake_state(),
@@ -3283,7 +3294,7 @@ mod tests {
     #[test]
     fn test_delete_role_emits_audit_event() {
         let (conn, owner_pk) = setup();
-        let role_id = members::create_role(&conn, "Doomed", 0, None, 1, false).unwrap();
+        let role_id = members::create_role(&conn, "Doomed", 0, None, 1, false, false).unwrap();
         let result = handle_request(
             &conn,
             &owner_pk,
@@ -3305,7 +3316,7 @@ mod tests {
     #[test]
     fn test_update_role_perms_changed_emits_audit_event() {
         let (conn, owner_pk) = setup();
-        let role_id = members::create_role(&conn, "Changeling", 0, None, 1, false).unwrap();
+        let role_id = members::create_role(&conn, "Changeling", 0, None, 1, false, false).unwrap();
         let new_perms = permissions::MANAGE_MESSAGES | permissions::KICK_MEMBERS;
         let result = handle_request(
             &conn,
@@ -3317,6 +3328,7 @@ mod tests {
                 permissions: Some(new_perms),
                 color: None,
                 position: None,
+                hoist: None,
             },
             "/tmp",
             &fake_state(),
@@ -3341,6 +3353,7 @@ mod tests {
                 permissions: Some(new_perms),
                 color: None,
                 position: None,
+                hoist: None,
             },
             "/tmp",
             &fake_state(),
@@ -3354,7 +3367,7 @@ mod tests {
     fn test_set_channel_override_emits_audit_event() {
         let (conn, owner_pk) = setup();
         let channel_id = make_channel(&conn);
-        let role_id = members::create_role(&conn, "OverrideRole", 0, None, 1, false).unwrap();
+        let role_id = members::create_role(&conn, "OverrideRole", 0, None, 1, false, false).unwrap();
         let allow = permissions::SEND_MESSAGES;
         let deny = permissions::MANAGE_MESSAGES;
         let result = handle_request(
@@ -3866,6 +3879,7 @@ mod tests {
             None,
             0,
             true,
+            false,
         )
         .unwrap();
 
@@ -4030,7 +4044,7 @@ mod tests {
         let state = Arc::new(ServerState::new_for_test().unwrap());
         let conn = state.db.lock().unwrap();
 
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
 
         let owner_kp = Keypair::generate();
         let g = Genesis {
@@ -4122,7 +4136,7 @@ mod tests {
         let state = Arc::new(ServerState::new_for_test().unwrap());
         let conn = state.db.lock().unwrap();
 
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
 
         let owner_kp = Keypair::generate();
         let everyone_id: u64 = conn
@@ -4201,7 +4215,7 @@ mod tests {
         let state = Arc::new(ServerState::new_for_test().unwrap());
         let conn = state.db.lock().unwrap();
 
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
 
         let owner_kp = Keypair::generate();
         let dev_kp = Keypair::generate();
@@ -4281,7 +4295,7 @@ mod tests {
         let state = Arc::new(ServerState::new_for_test().unwrap());
         let conn = state.db.lock().unwrap();
 
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
 
         let owner_kp = Keypair::generate();
         let everyone_id: u64 = conn
@@ -4328,7 +4342,7 @@ mod tests {
         let state = Arc::new(ServerState::new_for_test().unwrap());
         let conn = state.db.lock().unwrap();
 
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
 
         let owner_kp = Keypair::generate();
         let everyone_id: u64 = conn
@@ -4386,6 +4400,7 @@ mod tests {
             None,
             0,
             true,
+            false,
         )
         .unwrap();
 
@@ -4577,7 +4592,7 @@ mod tests {
         let conn = state.db.lock().unwrap();
 
         let everyone_id = members::create_role(
-            &conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true,
+            &conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false,
         ).unwrap();
 
         let owner_kp = Keypair::generate();
@@ -4687,7 +4702,7 @@ mod tests {
         let state = Arc::new(ServerState::new_for_test().unwrap());
         let conn = state.db.lock().unwrap();
 
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
 
         let owner_kp = Keypair::generate();
         let everyone_id: u64 = conn
@@ -4741,7 +4756,7 @@ mod tests {
         let state = Arc::new(ServerState::new_for_test().unwrap());
         let conn = state.db.lock().unwrap();
 
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true).unwrap();
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
 
         let owner_kp = Keypair::generate();
         let g = Genesis {

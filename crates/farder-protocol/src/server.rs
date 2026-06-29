@@ -149,6 +149,8 @@ pub struct RoleInfo {
     pub permissions: u64,
     pub color: Option<String>,
     pub position: u32,
+    #[serde(default)]
+    pub hoist: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -241,8 +243,8 @@ pub enum ServerRequest {
     CreateCategory { name: String, position: Option<u32> },
     UpdateCategory { category_id: u64, name: Option<String>, position: Option<u32> },
     DeleteCategory { category_id: u64 },
-    CreateRole { name: String, permissions: u64, color: Option<String>, position: Option<u32> },
-    UpdateRole { role_id: u64, name: Option<String>, permissions: Option<u64>, color: Option<String>, position: Option<u32> },
+    CreateRole { name: String, permissions: u64, color: Option<String>, position: Option<u32>, #[serde(default)] hoist: Option<bool> },
+    UpdateRole { role_id: u64, name: Option<String>, permissions: Option<u64>, color: Option<String>, position: Option<u32>, #[serde(default)] hoist: Option<bool> },
     DeleteRole { role_id: u64 },
     AssignRole { member_key: PublicKey, role_id: u64 },
     RemoveRole { member_key: PublicKey, role_id: u64 },
@@ -642,8 +644,8 @@ mod tests {
             ServerRequest::CreateCategory { name: "General".into(), position: Some(0) },
             ServerRequest::UpdateCategory { category_id: 1, name: Some("Renamed".into()), position: None },
             ServerRequest::DeleteCategory { category_id: 1 },
-            ServerRequest::CreateRole { name: "Mod".into(), permissions: 0xFF, color: Some("#00FF00".into()), position: Some(2) },
-            ServerRequest::UpdateRole { role_id: 1, name: None, permissions: Some(0xFFFF), color: None, position: None },
+            ServerRequest::CreateRole { name: "Mod".into(), permissions: 0xFF, color: Some("#00FF00".into()), position: Some(2), hoist: None },
+            ServerRequest::UpdateRole { role_id: 1, name: None, permissions: Some(0xFFFF), color: None, position: None, hoist: None },
             ServerRequest::DeleteRole { role_id: 1 },
             ServerRequest::AssignRole { member_key: kp.public_key(), role_id: 1 },
             ServerRequest::RemoveRole { member_key: kp.public_key(), role_id: 1 },

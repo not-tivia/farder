@@ -59,7 +59,7 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
     let first_run = member_count == 0;
 
     if first_run {
-        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true)?;
+        members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false)?;
         let builtin = templates::list_builtin_templates();
         let template = builtin.iter()
             .find(|t| t.template.name.to_lowercase().replace(' ', "-") == args.template)
