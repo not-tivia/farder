@@ -283,21 +283,60 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           <div className="organizer-create" style={{ marginTop: 16, borderTop: "1px solid var(--xp-border)", paddingTop: 12 }}>
             <div className="connect-section-title" style={{ marginBottom: 8 }}>Roles</div>
 
-            {/* Existing roles */}
-            {(activeServer?.roles ?? []).filter(r => r.name !== "@everyone").map(r => (
-              <div key={r.id} className="organizer-row">
-                <span className="organizer-name" style={{
-                  color: r.color ?? undefined
-                }}>
-                  {r.name}
-                </span>
-                <div className="organizer-actions">
-                  <button className="organizer-btn organizer-delete" onClick={async () => {
-                    if (serverId) try { await api.deleteRole(serverId, r.id); } catch {}
-                  }} title="Delete">x</button>
+            {/* Existing roles — sorted by position descending (highest rank at top) */}
+            {(() => {
+              const sortedRoles = (activeServer?.roles ?? [])
+                .filter(r => r.name !== "@everyone")
+                .sort((a, b) => b.position - a.position);
+              return sortedRoles.map((r, index) => (
+                <div key={r.id} className="organizer-row">
+                  <span className="organizer-name" style={{ color: r.color ?? undefined }}>
+                    {r.name}
+                  </span>
+                  <div className="organizer-actions">
+                    <label className="connect-label" style={{ display: "flex", alignItems: "center", gap: 4, margin: 0, whiteSpace: "nowrap" }}>
+                      <input
+                        type="checkbox"
+                        checked={r.hoist}
+                        onChange={async (e) => {
+                          if (serverId) try { await api.updateRole(serverId, r.id, { hoist: e.target.checked }); } catch {}
+                        }}
+                      />
+                      Display separately
+                    </label>
+                    <button
+                      className="organizer-btn"
+                      disabled={index === 0}
+                      onClick={async () => {
+                        if (!serverId) return;
+                        const neighbor = sortedRoles[index - 1];
+                        try {
+                          await api.updateRole(serverId, r.id, { position: neighbor.position });
+                          await api.updateRole(serverId, neighbor.id, { position: r.position });
+                        } catch (e) { setError(String(e)); }
+                      }}
+                      title="Move up"
+                    >^</button>
+                    <button
+                      className="organizer-btn"
+                      disabled={index === sortedRoles.length - 1}
+                      onClick={async () => {
+                        if (!serverId) return;
+                        const neighbor = sortedRoles[index + 1];
+                        try {
+                          await api.updateRole(serverId, r.id, { position: neighbor.position });
+                          await api.updateRole(serverId, neighbor.id, { position: r.position });
+                        } catch (e) { setError(String(e)); }
+                      }}
+                      title="Move down"
+                    >v</button>
+                    <button className="organizer-btn organizer-delete" onClick={async () => {
+                      if (serverId) try { await api.deleteRole(serverId, r.id); } catch {}
+                    }} title="Delete">x</button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ));
+            })()}
 
             {/* Create new role */}
             <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "flex-end" }}>
