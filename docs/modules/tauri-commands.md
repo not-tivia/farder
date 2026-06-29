@@ -511,23 +511,23 @@ Public-key parameters accept either `"vk_<hex>"` or bare hex; the internal
 
 ---
 
-### `kick_member(state, server_id, member_key) -> Result<(), String>`
+### `kick_member(state, server_id, member_key, log_server_id) -> Result<(), String>`
 
-**ServerRequest:** `KickMember { member_key }`.
+**ServerRequest:** `KickMember { member_key }`. On success, if `log_server_id` is `Some`, also emits a signed `MemberRemoved { member }` event to the mesh event log via `moderate_member` (requires the caller hold the `"kick"` capability on the log server).
 **invoke name:** `"kick_member"` → `kickMember()`.
 
 ---
 
-### `ban_member(state, server_id, member_key, reason) -> Result<(), String>`
+### `ban_member(state, server_id, member_key, log_server_id, reason) -> Result<(), String>`
 
-**ServerRequest:** `BanMember { member_key, reason }`.
+**ServerRequest:** `BanMember { member_key, reason }`. On success, if `log_server_id` is `Some`, also emits a signed `MemberBanned { member }` event to the mesh event log via `moderate_member` (requires `"ban"` capability). The log ban gate then blocks the banned identity from future events (prevents rejoin via invite).
 **invoke name:** `"ban_member"` → `banMember()`.
 
 ---
 
-### `unban_member(state, server_id, member_key) -> Result<(), String>`
+### `unban_member(state, server_id, member_key, log_server_id) -> Result<(), String>`
 
-**ServerRequest:** `UnbanMember { member_key }`.
+**ServerRequest:** `UnbanMember { member_key }`. On success, if `log_server_id` is `Some`, also emits a signed `MemberUnbanned { member }` event to the mesh event log via `moderate_member` (requires `"ban"` capability).
 **invoke name:** `"unban_member"` → `unbanMember()`.
 
 ---

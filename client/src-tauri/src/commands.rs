@@ -2347,13 +2347,25 @@ pub async fn kick_member(
     state: State<'_, Arc<AppState>>,
     server_id: String,
     member_key: String,
+    log_server_id: Option<String>,
 ) -> Result<(), String> {
     let pk = parse_public_key(&member_key)?;
-    let response = bridge::send_request(&state, &server_id, ServerRequest::KickMember { member_key: pk })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::KickMember { member_key: pk.clone() })
         .await
         .map_err(|e| e.to_string())?;
     match response {
-        ServerResponse::Ok => Ok(()),
+        ServerResponse::Ok => {
+            if let Some(log_sid) = log_server_id {
+                moderate_member(
+                    &state,
+                    &server_id,
+                    &log_sid,
+                    farder_crypto::event_log::EventPayload::MemberRemoved { member: pk },
+                )
+                .await?;
+            }
+            Ok(())
+        }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected: {:?}", other)),
     }
@@ -2364,14 +2376,26 @@ pub async fn ban_member(
     state: State<'_, Arc<AppState>>,
     server_id: String,
     member_key: String,
+    log_server_id: Option<String>,
     reason: Option<String>,
 ) -> Result<(), String> {
     let pk = parse_public_key(&member_key)?;
-    let response = bridge::send_request(&state, &server_id, ServerRequest::BanMember { member_key: pk, reason })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::BanMember { member_key: pk.clone(), reason })
         .await
         .map_err(|e| e.to_string())?;
     match response {
-        ServerResponse::Ok => Ok(()),
+        ServerResponse::Ok => {
+            if let Some(log_sid) = log_server_id {
+                moderate_member(
+                    &state,
+                    &server_id,
+                    &log_sid,
+                    farder_crypto::event_log::EventPayload::MemberBanned { member: pk },
+                )
+                .await?;
+            }
+            Ok(())
+        }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected: {:?}", other)),
     }
@@ -2382,13 +2406,25 @@ pub async fn unban_member(
     state: State<'_, Arc<AppState>>,
     server_id: String,
     member_key: String,
+    log_server_id: Option<String>,
 ) -> Result<(), String> {
     let pk = parse_public_key(&member_key)?;
-    let response = bridge::send_request(&state, &server_id, ServerRequest::UnbanMember { member_key: pk })
+    let response = bridge::send_request(&state, &server_id, ServerRequest::UnbanMember { member_key: pk.clone() })
         .await
         .map_err(|e| e.to_string())?;
     match response {
-        ServerResponse::Ok => Ok(()),
+        ServerResponse::Ok => {
+            if let Some(log_sid) = log_server_id {
+                moderate_member(
+                    &state,
+                    &server_id,
+                    &log_sid,
+                    farder_crypto::event_log::EventPayload::MemberUnbanned { member: pk },
+                )
+                .await?;
+            }
+            Ok(())
+        }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected: {:?}", other)),
     }

@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import { publicKeyToString, type BannedMember } from "../lib/types";
+import { useActiveServer } from "../context/ServerContext";
 
 interface Props {
   serverId: string;
@@ -16,6 +17,7 @@ const row: CSSProperties = {
 };
 
 export default function BannedMembersTab({ serverId }: Props) {
+  const activeServer = useActiveServer();
   const [entries, setEntries] = useState<BannedMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +49,7 @@ export default function BannedMembersTab({ serverId }: Props) {
   async function unban(entry: BannedMember) {
     if (!window.confirm(`Unban ${entry.display_name}? They'll be able to rejoin with this identity.`)) return;
     try {
-      await api.unbanMember(serverId, publicKeyToString(entry.public_key));
+      await api.unbanMember(serverId, publicKeyToString(entry.public_key), activeServer?.logServerId ?? null);
       await refresh();
     } catch (e) {
       setError(String(e));

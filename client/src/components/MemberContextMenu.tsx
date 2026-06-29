@@ -144,7 +144,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   async function kickConfirm() {
     if (!window.confirm(`Kick ${target.display_name} from this server?`)) return;
     try {
-      await api.kickMember(serverId, targetPk);
+      await api.kickMember(serverId, targetPk, activeServer?.logServerId ?? null);
     } catch (e) {
       setError(String(e));
     }
@@ -154,7 +154,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   async function banConfirm(reason: string) {
     setShowBanDialog(false);
     try {
-      await api.banMember(serverId, targetPk, reason || undefined);
+      await api.banMember(serverId, targetPk, activeServer?.logServerId ?? null, reason || undefined);
     } catch (e) {
       setError(String(e));
     }

@@ -712,16 +712,16 @@ export async function setThemeOrder(ids: string[]): Promise<void> {
   return invoke<void>("set_theme_order", { ids });
 }
 
-export async function kickMember(serverId: string, memberKey: string): Promise<void> {
-  return invoke<void>("kick_member", { serverId, memberKey });
+export async function kickMember(serverId: string, memberKey: string, logServerId: string | null): Promise<void> {
+  return invoke<void>("kick_member", { serverId, memberKey, logServerId });
 }
 
-export async function banMember(serverId: string, memberKey: string, reason?: string): Promise<void> {
-  return invoke<void>("ban_member", { serverId, memberKey, reason: reason ?? null });
+export async function banMember(serverId: string, memberKey: string, logServerId: string | null, reason?: string): Promise<void> {
+  return invoke<void>("ban_member", { serverId, memberKey, logServerId, reason: reason ?? null });
 }
 
-export async function unbanMember(serverId: string, memberKey: string): Promise<void> {
-  return invoke<void>("unban_member", { serverId, memberKey });
+export async function unbanMember(serverId: string, memberKey: string, logServerId: string | null): Promise<void> {
+  return invoke<void>("unban_member", { serverId, memberKey, logServerId });
 }
 
 export async function listBanned(serverId: string): Promise<BannedMember[]> {

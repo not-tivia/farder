@@ -222,9 +222,9 @@ All functions are `async` and throw on Tauri/Rust error. Every `serverId` is the
 | Function | Rust command | What it does |
 |---|---|---|
 | `getMembers(serverId)` | `get_members` | Returns the full member roster as `MemberInfo[]`. |
-| `kickMember(serverId, memberKey)` | `kick_member` | Kicks a member (they can rejoin). `memberKey` is a `"vk_<hex>"` string. |
-| `banMember(serverId, memberKey, reason?)` | `ban_member` | Bans a member with an optional reason. |
-| `unbanMember(serverId, memberKey)` | `unban_member` | Removes a ban. |
+| `kickMember(serverId, memberKey, logServerId)` | `kick_member` | Kicks a member (they can rejoin). `memberKey` is a `"vk_<hex>"` string. `logServerId` is the mesh log server ID or `null` for legacy servers; when non-null also emits `MemberRemoved` to the event log. |
+| `banMember(serverId, memberKey, logServerId, reason?)` | `ban_member` | Bans a member with an optional reason. `logServerId` non-null also emits `MemberBanned` to the event log, preventing rejoin via the log ban gate. |
+| `unbanMember(serverId, memberKey, logServerId)` | `unban_member` | Removes a ban. `logServerId` non-null also emits `MemberUnbanned` to the event log. |
 | `listBanned(serverId)` | `list_banned` | Returns `BannedMember[]`. Public keys are `{ bytes }` objects — normalize before use. |
 | `timeoutMember(serverId, memberKey, untilMs, reason)` | `timeout_member` | Mutes a member until `untilMs` (Unix ms). `reason` may be null. |
 | `removeTimeout(serverId, memberKey)` | `remove_timeout` | Clears an active timeout immediately. |
