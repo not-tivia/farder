@@ -212,7 +212,9 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     rows.push({ kind: "separator" });
     rows.push({ kind: "item", label: "Send Message", onClick: sendMessage });
   }
-  if (!isSelf && canManageRoles && roles.length > 0) {
+  // Assign Role shows on your OWN row too (self-assign is allowed; the server
+  // bounds non-owners by role hierarchy). Kick/Ban/Timeout stay self-gated below.
+  if (canManageRoles && roles.length > 0) {
     rows.push({ kind: "separator" });
     rows.push({ kind: "submenu", label: "Assign Role…  ▶" });
   }
