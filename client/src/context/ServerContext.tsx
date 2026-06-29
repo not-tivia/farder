@@ -114,6 +114,7 @@ export type AppAction =
   | { type: "TYPING_EXPIRED"; serverId: string; payload: { channelId: number; publicKey: string } }
   | { type: "ROLE_CREATED"; serverId: string; payload: RoleInfo }
   | { type: "ROLE_DELETED"; serverId: string; payload: { roleId: number } }
+  | { type: "ROLE_UPDATED"; serverId: string; payload: RoleInfo }
   | { type: "VOICE_JOINED"; serverId: string; payload: { channelId: number; publicKey: string; displayName: string } }
   | { type: "VOICE_LEFT"; serverId: string; payload: { channelId: number; publicKey: string } }
   | { type: "SET_VOICE_STATE"; serverId: string; payload: { channelId: number; participants: { publicKey: string; displayName: string }[] } }
@@ -342,6 +343,16 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       return { ...state, roles: [...state.roles, action.payload] };
     case "ROLE_DELETED":
       return { ...state, roles: state.roles.filter(r => r.id !== action.payload.roleId) };
+    case "ROLE_UPDATED": {
+      const updated = action.payload;
+      const exists = state.roles.some(r => r.id === updated.id);
+      return {
+        ...state,
+        roles: exists
+          ? state.roles.map(r => r.id === updated.id ? updated : r)
+          : [...state.roles, updated],
+      };
+    }
     case "VOICE_JOINED": {
       const { channelId, publicKey, displayName } = action.payload;
       const existing = state.voiceStates[channelId] ?? [];

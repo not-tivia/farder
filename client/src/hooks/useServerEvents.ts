@@ -424,6 +424,13 @@ export function useServerEvents(): void {
       dispatch({ type: "ROLE_DELETED", serverId, payload: { roleId: data.role_id as number } });
     }).then(safePush);
 
+    listen("server:role_updated", (e) => {
+      const data = e.payload as any;
+      const serverId = data.server_id as string;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "ROLE_UPDATED", serverId, payload: data.role as RoleInfo });
+    }).then(safePush);
+
     listen("server:typing", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import { getMemberSidebarWidth, setMemberSidebarWidth, clampMemberWidth, MEMBER_SIDEBAR_DEFAULT } from "../lib/memberWidth";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { MemberInfo, RoleInfo } from "../lib/types";
@@ -153,7 +153,7 @@ export default function MemberSidebar() {
         {serverId && (
           <>
             {sections.map(({ role, members: sectionMembers }) => (
-              <div key={role.id}>
+              <Fragment key={role.id}>
                 <div className="member-role-group">{role.name}</div>
                 {sectionMembers.map((member) => (
                   <MemberRow
@@ -169,10 +169,10 @@ export default function MemberSidebar() {
                     }}
                   />
                 ))}
-              </div>
+              </Fragment>
             ))}
             {ungroupedMembers.length > 0 && (
-              <div>
+              <>
                 <div className="member-role-group">Members</div>
                 {ungroupedMembers.map((member) => (
                   <MemberRow
@@ -188,7 +188,7 @@ export default function MemberSidebar() {
                     }}
                   />
                 ))}
-              </div>
+              </>
             )}
           </>
         )}

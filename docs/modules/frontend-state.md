@@ -133,6 +133,7 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | `CATEGORY_DELETED` | Removes from `categories` |
 | `ROLE_CREATED` | Appends to `roles` |
 | `ROLE_DELETED` | Removes from `roles` |
+| `ROLE_UPDATED` | Replaces the matching role in `roles` by id; appends if not present |
 | `VIEW_THREAD` | Sets `threadChannelId` (pass `null` to close) |
 | `MARK_READ` | Updates `readState[channelId]` to `lastMessageId` |
 
@@ -197,6 +198,7 @@ Two module-level caches are populated at import time (not inside the effect): `n
 | `server:category_updated` | active only | `CATEGORY_UPDATED` | |
 | `server:role_created` | active only | `ROLE_CREATED` | |
 | `server:role_deleted` | active only | `ROLE_DELETED` | |
+| `server:role_updated` | active only | `ROLE_UPDATED` | Enables live refresh of hoist, reorder, color, and rename in member sidebar and role settings |
 | `server:typing` | active only | `TYPING_STARTED` then `TYPING_EXPIRED` after 8 s via `setTimeout` | `displayName` is not available in the payload; `publicKey` is used as a fallback display name |
 | `server:dm_created` | active only | `DM_CREATED` | |
 | `server:disconnected` | none | `CONNECTION_LOST` | |
