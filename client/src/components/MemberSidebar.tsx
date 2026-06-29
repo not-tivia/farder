@@ -16,6 +16,14 @@ import { formatPresence } from "../lib/presence";
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
 
+// Returns the member's highest-position hoisted role (excl @everyone), or null.
+function hoistGroup(member: MemberInfo, roles: RoleInfo[]): RoleInfo | null {
+  const hoisted = roles
+    .filter(r => r.hoist && r.name !== "@everyone" && member.role_ids.includes(r.id))
+    .sort((a, b) => b.position - a.position);
+  return hoisted[0] ?? null;
+}
+
 function nameColor(member: MemberInfo, roles: RoleInfo[]): string | undefined {
   const mine = roles
     .filter(r => r.name !== "@everyone" && r.color && member.role_ids.includes(r.id))
@@ -101,23 +109,30 @@ export default function MemberSidebar() {
     : { bits: 0n };
   const showModBadges = isModerator(viewerBits);
 
-  // Returns the highest role position for a member, excluding @everyone (position 0 / builtin).
-  // Members whose only role is @everyone return -1 so they sort below any role-holding member.
-  function highestRolePosition(member: MemberInfo): number {
-    let best = -1;
-    for (const id of member.role_ids) {
-      const role = roles.find((r) => r.id === id);
-      if (!role || role.name === "@everyone") continue;
-      if (role.position > best) best = role.position;
+  // Sort all members by display name within each section.
+  const nameSortedMembers = [...members].sort((a, b) =>
+    memberDisplayName(a.display_name).localeCompare(memberDisplayName(b.display_name))
+  );
+
+  // Build sections: one per hoisted role that has ≥1 member (highest position first),
+  // then a catch-all "Members" section for members with no hoisted role.
+  const hoistedRoleMap = new Map<number, { role: RoleInfo; members: MemberInfo[] }>();
+  const ungroupedMembers: MemberInfo[] = [];
+
+  for (const member of nameSortedMembers) {
+    const role = hoistGroup(member, roles);
+    if (role) {
+      if (!hoistedRoleMap.has(role.id)) {
+        hoistedRoleMap.set(role.id, { role, members: [] });
+      }
+      hoistedRoleMap.get(role.id)!.members.push(member);
+    } else {
+      ungroupedMembers.push(member);
     }
-    return best;
   }
 
-  const sortedMembers = [...members].sort((a, b) => {
-    const diff = highestRolePosition(b) - highestRolePosition(a);
-    if (diff !== 0) return diff;
-    return memberDisplayName(a.display_name).localeCompare(memberDisplayName(b.display_name));
-  });
+  // Sort sections by role position descending (highest rank first).
+  const sections = [...hoistedRoleMap.values()].sort((a, b) => b.role.position - a.role.position);
 
   return (
     <div className="member-sidebar" style={{ width, minWidth: width, position: "relative" }}>
@@ -135,20 +150,48 @@ export default function MemberSidebar() {
       </div>
       {serverId && <PendingApprovals serverId={serverId} />}
       <div className="member-list">
-        {serverId && sortedMembers.map((member) => (
-          <MemberRow
-            key={member.public_key.bytes.join(",")}
-            member={member}
-            serverId={serverId}
-            roles={roles}
-            showModBadges={showModBadges}
-            onClick={(e) => setProfilePopup({ member, x: e.clientX, y: e.clientY })}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setContextMenu({ target: member, position: { x: e.clientX, y: e.clientY } });
-            }}
-          />
-        ))}
+        {serverId && (
+          <>
+            {sections.map(({ role, members: sectionMembers }) => (
+              <div key={role.id}>
+                <div className="member-role-group">{role.name}</div>
+                {sectionMembers.map((member) => (
+                  <MemberRow
+                    key={member.public_key.bytes.join(",")}
+                    member={member}
+                    serverId={serverId}
+                    roles={roles}
+                    showModBadges={showModBadges}
+                    onClick={(e) => setProfilePopup({ member, x: e.clientX, y: e.clientY })}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu({ target: member, position: { x: e.clientX, y: e.clientY } });
+                    }}
+                  />
+                ))}
+              </div>
+            ))}
+            {ungroupedMembers.length > 0 && (
+              <div>
+                <div className="member-role-group">Members</div>
+                {ungroupedMembers.map((member) => (
+                  <MemberRow
+                    key={member.public_key.bytes.join(",")}
+                    member={member}
+                    serverId={serverId}
+                    roles={roles}
+                    showModBadges={showModBadges}
+                    onClick={(e) => setProfilePopup({ member, x: e.clientX, y: e.clientY })}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu({ target: member, position: { x: e.clientX, y: e.clientY } });
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </div>
       {profilePopup && serverId && (
         <UserProfilePopup
