@@ -299,7 +299,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                         type="checkbox"
                         checked={r.hoist}
                         onChange={async (e) => {
-                          if (serverId) try { await api.updateRole(serverId, r.id, { hoist: e.target.checked }); } catch {}
+                          if (serverId) try { await api.updateRole(serverId, r.id, { hoist: e.target.checked }); } catch (e) { setError(String(e)); }
                         }}
                       />
                       Display separately
@@ -309,10 +309,15 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                       disabled={index === 0}
                       onClick={async () => {
                         if (!serverId) return;
-                        const neighbor = sortedRoles[index - 1];
                         try {
-                          await api.updateRole(serverId, r.id, { position: neighbor.position });
-                          await api.updateRole(serverId, neighbor.id, { position: r.position });
+                          const newOrder = [...sortedRoles];
+                          [newOrder[index], newOrder[index - 1]] = [newOrder[index - 1], newOrder[index]];
+                          for (let j = 0; j < newOrder.length; j++) {
+                            const newPosition = (newOrder.length - 1) - j;
+                            if (newOrder[j].position !== newPosition) {
+                              await api.updateRole(serverId, newOrder[j].id, { position: newPosition });
+                            }
+                          }
                         } catch (e) { setError(String(e)); }
                       }}
                       title="Move up"
@@ -322,10 +327,15 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                       disabled={index === sortedRoles.length - 1}
                       onClick={async () => {
                         if (!serverId) return;
-                        const neighbor = sortedRoles[index + 1];
                         try {
-                          await api.updateRole(serverId, r.id, { position: neighbor.position });
-                          await api.updateRole(serverId, neighbor.id, { position: r.position });
+                          const newOrder = [...sortedRoles];
+                          [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
+                          for (let j = 0; j < newOrder.length; j++) {
+                            const newPosition = (newOrder.length - 1) - j;
+                            if (newOrder[j].position !== newPosition) {
+                              await api.updateRole(serverId, newOrder[j].id, { position: newPosition });
+                            }
+                          }
                         } catch (e) { setError(String(e)); }
                       }}
                       title="Move down"
