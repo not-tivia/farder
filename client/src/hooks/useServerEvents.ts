@@ -323,6 +323,19 @@ export function useServerEvents(): void {
       // The approval queue component refetches getPendingMembers on this event (Task 8).
     }).then(safePush);
 
+    listen("server:permissions_changed", (e) => {
+      const data = e.payload as { server_id: string };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      // A role was assigned/removed (or a role's permissions changed): refresh the
+      // member list (member.role_ids) and the server info (the roles themselves) so
+      // the change is reflected immediately.
+      api.getMembers(serverId).then(members =>
+        dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
+      api.getServerInfo(serverId).then(info =>
+        dispatch({ type: "SERVER_REFRESHED", serverId, payload: info })).catch(() => {});
+    }).then(safePush);
+
     listen("server:member_presence_updated", (e) => {
       const data = e.payload as { server_id: string; public_key: string; presence: Presence | null };
       console.log("[presence] member_presence_updated", data.public_key, data.presence);
