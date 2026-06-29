@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { getMemberSidebarWidth, setMemberSidebarWidth, clampMemberWidth, MEMBER_SIDEBAR_DEFAULT } from "../lib/memberWidth";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
-import type { MemberInfo } from "../lib/types";
+import type { MemberInfo, RoleInfo } from "../lib/types";
 import { publicKeyToString, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import UserProfilePopup from "./UserProfilePopup";
@@ -16,9 +16,17 @@ import { formatPresence } from "../lib/presence";
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
 
-function MemberRow({ member, serverId, showModBadges, onClick, onContextMenu }: {
+function nameColor(member: MemberInfo, roles: RoleInfo[]): string | undefined {
+  const mine = roles
+    .filter(r => r.name !== "@everyone" && r.color && member.role_ids.includes(r.id))
+    .sort((a, b) => b.position - a.position);
+  return mine[0]?.color ?? undefined;
+}
+
+function MemberRow({ member, serverId, roles, showModBadges, onClick, onContextMenu }: {
   member: MemberInfo;
   serverId: string;
+  roles: RoleInfo[];
   showModBadges: boolean;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
@@ -36,7 +44,7 @@ function MemberRow({ member, serverId, showModBadges, onClick, onContextMenu }: 
       />
       <span className="online-dot" />
       <span className="member-text">
-        <span className="member-name">{memberDisplayName(member.display_name)}</span>
+        <span className="member-name" style={{ color: nameColor(member, roles) }}>{memberDisplayName(member.display_name)}</span>
         {member.presence
           ? <span className="member-presence" title={formatPresence(member.presence)}>{formatPresence(member.presence)}</span>
           : status && <span className="member-status" title={status}>{status}</span>}
@@ -132,6 +140,7 @@ export default function MemberSidebar() {
             key={member.public_key.bytes.join(",")}
             member={member}
             serverId={serverId}
+            roles={roles}
             showModBadges={showModBadges}
             onClick={(e) => setProfilePopup({ member, x: e.clientX, y: e.clientY })}
             onContextMenu={(e) => {
