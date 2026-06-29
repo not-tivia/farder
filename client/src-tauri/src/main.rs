@@ -150,6 +150,7 @@ fn main() {
             commands::list_audit_events,
             commands::create_role,
             commands::delete_role,
+            commands::update_role,
             commands::set_avatar,
             commands::get_avatar,
             commands::set_server_avatar,

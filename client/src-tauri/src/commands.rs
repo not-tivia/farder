@@ -2275,6 +2275,7 @@ pub async fn create_role(
         permissions,
         color,
         position: None,
+        hoist: None,
     }).await.map_err(|e| e.to_string())?;
     match response {
         ServerResponse::Ok => Ok(()),
@@ -2290,6 +2291,27 @@ pub async fn delete_role(
     role_id: u64,
 ) -> Result<(), String> {
     let response = bridge::send_request(&state, &server_id, ServerRequest::DeleteRole { role_id })
+        .await.map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn update_role(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    role_id: u64,
+    name: Option<String>,
+    permissions: Option<u64>,
+    color: Option<String>,
+    position: Option<u32>,
+    hoist: Option<bool>,
+) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id,
+        ServerRequest::UpdateRole { role_id, name, permissions, color, position, hoist })
         .await.map_err(|e| e.to_string())?;
     match response {
         ServerResponse::Ok => Ok(()),

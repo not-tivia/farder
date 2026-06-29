@@ -233,6 +233,7 @@ All functions are `async` and throw on Tauri/Rust error. Every `serverId` is the
 | `removeRole(serverId, memberKey, roleId)` | `remove_role` | Removes a role from a member. |
 | `createRole(serverId, name, permissions, color?)` | `create_role` | Creates a new role. `permissions` is an integer bitmask. |
 | `deleteRole(serverId, roleId)` | `delete_role` | Deletes a role and strips it from all members. |
+| `updateRole(serverId, roleId, patch)` | `update_role` | Partially updates a role. `patch` fields (`name`, `permissions`, `color`, `position`, `hoist`) are all optional; omitted fields are sent as `null` and left unchanged server-side. |
 
 ---
 

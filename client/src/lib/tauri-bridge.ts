@@ -333,6 +333,10 @@ export async function deleteRole(serverId: string, roleId: number): Promise<void
   return invoke("delete_role", { serverId, roleId });
 }
 
+export async function updateRole(serverId: string, roleId: number, patch: { name?: string; permissions?: number; color?: string; position?: number; hoist?: boolean }): Promise<void> {
+  return invoke<void>("update_role", { serverId, roleId, name: patch.name ?? null, permissions: patch.permissions ?? null, color: patch.color ?? null, position: patch.position ?? null, hoist: patch.hoist ?? null });
+}
+
 export async function removeRole(serverId: string, memberKey: string, roleId: number): Promise<void> {
   return invoke<void>("remove_role", { serverId, memberKey, roleId });
 }

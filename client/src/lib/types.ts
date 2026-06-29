@@ -23,6 +23,7 @@ export interface RoleInfo {
   permissions: number;
   color: string | null;
   position: number;
+  hoist: boolean;
 }
 
 export type PresenceKind = "Music" | "Game";

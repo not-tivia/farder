@@ -577,6 +577,14 @@ Public-key parameters accept either `"vk_<hex>"` or bare hex; the internal
 
 ---
 
+### `update_role(state, server_id, role_id, name, permissions, color, position, hoist) -> Result<(), String>`
+
+**Parameters:** all fields except `role_id` are optional (`Option<T>`); only supplied fields are applied server-side.  `permissions` — bitmask; `color` — optional hex string; `hoist` — whether to display role members separately in the member list.
+**ServerRequest:** `UpdateRole { role_id, name, permissions, color, position, hoist }`.
+**invoke name:** `"update_role"` → `updateRole()`.
+
+---
+
 ### `assign_role(state, server_id, member_key, role_id) -> Result<(), String>`
 
 **ServerRequest:** `AssignRole { member_key, role_id }`.
