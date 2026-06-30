@@ -226,7 +226,7 @@ async fn handle_download_stream(
         Some(f) => f,
         None => {
             let resp = codec::encode(&DownloadResponse::Error {
-                reason: "file not found".to_string(),
+                reason: "not available".to_string(),
             })?;
             write_frame(&mut send, &resp).await?;
             return Ok(());
@@ -268,7 +268,9 @@ async fn handle_download_stream(
 
     if !has_access {
         let resp = codec::encode(&DownloadResponse::Error {
-            reason: "access denied".to_string(),
+            // Uniform with the "missing" case so a file_id / content hash can't be
+            // used as an existence oracle (mesh design: existence-oracle gating).
+            reason: "not available".to_string(),
         })?;
         write_frame(&mut send, &resp).await?;
         return Ok(());
