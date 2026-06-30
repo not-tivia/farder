@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use farder_crypto::event_log::{AttachmentCap, Event, EventHash, EventPayload, Genesis};
+use farder_crypto::event_log::{Event, EventHash, EventPayload, Genesis};
 use farder_crypto::event_log_state::LogState;
 use farder_crypto::identity::PublicKey;
 
