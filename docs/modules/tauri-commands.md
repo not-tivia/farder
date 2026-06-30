@@ -642,14 +642,14 @@ the user cancels.
 
 ---
 
-### `upload_file(state, server_id, channel_id, file_path) -> Result<u64, String>`
+### `upload_file(state, server_id, channel_id, file_path) -> Result<UploadOutcome, String>`
 
 **What it does:** reads the file, computes SHA-256, opens a new QUIC bi-stream
 on the existing connection (separate from the main request stream), sends an
 `UploadRequest` frame, streams the raw bytes, waits for `UploadResponse::Complete`.
 If the server already has this hash it responds with `Complete` immediately
 (deduplication).
-**Returns:** `file_id` (`u64`).
+**Returns:** `UploadOutcome { fileId: u64, contentHash: String, declaredType: String, size: u64 }` (serialized as camelCase JSON). `fileId` is used for legacy `sendMessage` attachment IDs; `contentHash`/`declaredType`/`size` are the cap fields passed in `attachments` when calling `submit_event` for a mesh-mode message.
 **Side effects:** opens a new QUIC bi-stream on the live server connection; network I/O.
 **Connects to:** `upload_file_internal_with_channel` (shared with `book.rs`'s
 internal uploads). Uses its own stream — does NOT use `bridge::send_request`.
@@ -1969,22 +1969,30 @@ will exit and no further `screenshare:frame` events will be emitted.
 
 ---
 
-### `submit_event(state, server_id, channel_id, content, reply_to) -> Result<EventAcceptedResult, String>`
+### `submit_event(state, server_id, log_server_id, channel_id, content, reply_to, attachments) -> Result<EventAcceptedResult, String>`
 
-**What it does:** builds and signs a `MessagePosted` event using the local device
-subkey, then submits it to the server via `ServerRequest::SubmitEvent`. On first
-use for a given `(server_id, device)` pair, automatically submits a
-`DeviceAuthorized` event first (authorizing the device subkey under the identity
-key). Chain state — `next_seq`, `last_event_hash`, `lamport`, `authorized` — is
-persisted in `~/.farder/servers/<server_id>/device_state.json` and is advanced
-ONLY after `EventAccepted` is returned by the server, so a failed submit does not
-desync the chain.
+**What it does:** builds and signs a `MessagePosted` event (carrying optional
+`AttachmentCap`s) using the local device subkey, then submits it to the server
+via `ServerRequest::SubmitEvent`. On first use for a given `(log_server_id,
+device)` pair, automatically submits a `DeviceAuthorized` event first
+(authorizing the device subkey under the identity key). Chain state —
+`next_seq`, `last_event_hash`, `lamport`, `authorized` — is persisted in
+`~/.farder/servers/<log_server_id>/device_state.json` and is advanced ONLY after
+`EventAccepted` is returned by the server, so a failed submit does not desync the
+chain.
 
 **Params:**
-- `server_id: String` — hex SHA-256 server id (as returned by `GetServerInfo`).
+- `server_id: String` — connection key (address) — routes the request to the right server.
+- `log_server_id: String` — genesis hash — stamps `EventCore.server_id` and keys the device chain.
 - `channel_id: u64` — target channel.
 - `content: String` — message text.
 - `reply_to: Option<String>` — event-hash of the event being replied to, or `null`.
+- `attachments: Vec<AttachmentCapInput>` — cap descriptors for staged-file attachments; each is `{ contentHash: String, declaredType: String, size: u64 }`. The command stamps `uploader` from the caller's unlocked identity before embedding the caps in the event. Pass `[]` for messages with no file attachments.
+
+**`AttachmentCapInput` struct** (defined in `commands.rs`, deserializable from camelCase JSON):
+```
+AttachmentCapInput { content_hash: String, declared_type: String, size: u64 }
+```
 
 **Returns:** `{ event_hash: String, timestamp: u64 }` (`EventAcceptedResult`).
 

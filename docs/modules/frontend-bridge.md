@@ -94,6 +94,29 @@ Theme catalog entry vs the currently-applied theme. `source: "builtin" | "user"`
 
 Metadata for a locally-hosted server (port, data dir, template, privacy mode) and for a server template available at creation time.
 
+### `UploadOutcome` (tauri-bridge.ts)
+
+Returned by `uploadFile()`. Carries all the fields needed to post an attachment on both paths:
+
+| Field | Type | Use |
+|---|---|---|
+| `fileId` | `number` | Legacy attachment ID — pass in `attachmentIds` to `sendMessage`. |
+| `contentHash` | `string` | SHA-256 hex of the file content — used as the cap `contentHash` in `submitEvent`. |
+| `declaredType` | `string` | MIME type as reported by the server — used as the cap `declaredType` in `submitEvent`. |
+| `size` | `number` | File size in bytes — used as the cap `size` in `submitEvent`. |
+
+### `AttachmentCapInput` (tauri-bridge.ts)
+
+Input shape for the `attachments` parameter of `submitEvent()`. One entry per staged file attachment.
+
+| Field | Type |
+|---|---|
+| `contentHash` | `string` |
+| `declaredType` | `string` |
+| `size` | `number` |
+
+(`uploader` is NOT included here — `submit_event` in `commands.rs` stamps it from the caller's identity.)
+
 ### `EmbedKind` / `EmbedMedia` / `LinkEmbed` / `EmbedOutcome` (`lib/linkEmbed.ts`)
 
 Mirror types for `farder_protocol::messages` embed types. `EmbedKind` is a string
@@ -185,7 +208,8 @@ All functions are `async` and throw on Tauri/Rust error. Every `serverId` is the
 
 | Function | Rust command | What it does |
 |---|---|---|
-| `sendMessage(serverId, channelId, content, replyTo?, attachmentIds?)` | `send_message` | Posts a message. `replyTo` is a message ID to thread-reply to; `attachmentIds` are file IDs previously uploaded with `uploadFile`. Returns `SendMessageResult` with the assigned `id` and `timestamp`. |
+| `sendMessage(serverId, channelId, content, replyTo?, attachmentIds?)` | `send_message` | Posts a message on the **legacy path** (non-mesh servers, URL-fetched images, inline-emoji attachments). `replyTo` is a message ID to thread-reply to; `attachmentIds` are file IDs previously uploaded with `uploadFile`. Returns `SendMessageResult` with the assigned `id` and `timestamp`. |
+| `submitEvent(serverId, logServerId, channelId, content, replyTo?, attachments?)` | `submit_event` | Posts a signed `MessagePosted` event on the **mesh/log path** (mesh-mode servers only). `serverId` is the connection key; `logServerId` is the genesis hash. `attachments` is an `AttachmentCapInput[]` (default `[]`) — only staged-file attachments with a known content hash belong here. **URL-fetched images** (via `fetchUrl`) and **inline-emoji** attachments have no client-known content hash and must remain on the legacy `sendMessage` path. Returns `{ event_hash: string, timestamp: number }`. |
 | `fetchHistory(serverId, channelId, beforeId?, limit?)` | `fetch_history` | Returns messages older than `beforeId` (null = latest), up to `limit` (null = server default). Used for infinite-scroll pagination. |
 | `editMessage(serverId, messageId, newContent)` | `edit_message` | Replaces message content. Server records `edited_at`. |
 | `deleteMessage(serverId, messageId)` | `delete_message` | Permanently deletes a message. |
@@ -198,7 +222,7 @@ All functions are `async` and throw on Tauri/Rust error. Every `serverId` is the
 
 | Function | Rust command | What it does |
 |---|---|---|
-| `uploadFile(serverId, channelId, filePath)` | `upload_file` | Uploads a local file and returns a `file_id` integer. Pass to `sendMessage` as an attachment. |
+| `uploadFile(serverId, channelId, filePath)` | `upload_file` | Uploads a local file and returns `Promise<UploadOutcome>`. `UploadOutcome.fileId` can be passed to `sendMessage` (legacy path); `contentHash`/`declaredType`/`size` are the cap fields for `submitEvent` (mesh path). |
 | `fetchUrl(serverId, url, channelId)` | `fetch_url` | Asks the server to fetch a URL and store it as a file, returning a `file_id`. Used for link-preview attachments. |
 | `downloadFile(serverId, fileId)` | `download_file` | Downloads a file by ID. Returns `DownloadResult` with an inline data URL and optional saved-to-disk path. |
 | `addFavorite(serverId, fileId, originalUrl?)` | `add_favorite` | Saves a file to the local favorites store. Returns `FavoriteEntry`. |

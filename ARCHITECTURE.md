@@ -52,12 +52,20 @@ Data crosses several hard boundaries; each is a place bugs hide.
 
 ## Two end-to-end flows (the ones worth knowing)
 
-**Sending a text message:** UI calls `invoke("send_message")` → `commands.rs`
+**Sending a text message (legacy path):** UI calls `invoke("send_message")` → `commands.rs`
 → `bridge::send_request(ServerRequest::SendMessage)` over QUIC → server
 `handlers.rs` checks permissions, writes to SQLite, broadcasts
 `ServerEvent::NewMessage` to subscribers → each client's `bridge.rs` re-emits
 the Tauri event `server:new_message` → `useServerEvents.ts` dispatches into
 `ServerContext` → the UI re-renders.
+
+**Sending a message with a file attachment (mesh/log path — mesh-mode servers only):**
+1. UI calls `uploadFile` → `invoke("upload_file")` → server stores the blob and returns `UploadOutcome { fileId, contentHash, declaredType, size }`.
+2. UI calls `submitEvent` → `invoke("submit_event", { ..., attachments: [{ contentHash, declaredType, size }] })` → `commands.rs` stamps `uploader` from the caller's identity and builds a signed `MessagePosted` event carrying `AttachmentCap`s.
+3. Server `handlers.rs` (`SubmitEvent` arm) validates the event, then in a single SQLite transaction: stores the event body, derives the `messages` row, and calls `event_ingest::derive_attachments` to validate each cap (size/mime/uploader match + author-is-uploader-or-owner) and materialize `message_attachments` rows. Invalid caps are quarantined; the message still renders.
+4. `NewMessage` is broadcast; downloaders go through the normal `download_file` path gated on `message_attachments` join rows. Both "not found" and "access denied" download responses are uniform (`"not available"`) so a `file_id` or hash cannot be used as an existence oracle.
+
+Note: URL-fetched images (via `fetchUrl`) and inline-emoji attachments have no client-known content hash and stay on the legacy `sendMessage` path even on mesh-mode servers.
 
 **Joining voice:** there are TWO independent tracks. (1) **Presence/roster:**
 `invoke("join_voice")` → `ServerRequest::JoinChannelMedia` → server adds you to

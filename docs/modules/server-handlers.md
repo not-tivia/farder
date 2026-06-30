@@ -111,7 +111,8 @@ the primary mutation still completes.
 
 | `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
 |---|---|---|---|---|
-| `SendMessage` | Insert a message into a channel or DM, attach files | `SEND_MESSAGES` (channel); DM checks participation and block list | `messages::insert_message`, `attachments::create_message_attachment` | `NewMessage` → `Subscribers(channel_id)` |
+| `SendMessage` | Insert a message into a channel or DM, attach files (legacy path) | `SEND_MESSAGES` (channel); DM checks participation and block list | `messages::insert_message`, `attachments::create_message_attachment` | `NewMessage` → `Subscribers(channel_id)` |
+| `SubmitEvent` | Accept a signed event from the mesh event log (log-mode servers only). For a `MessagePosted` event: (1) validates the event against the in-memory `LogState`; (2) checks the channel exists and content length (max 8 000 chars); (3) persists the event body, derives the `messages` row, and materializes validated `AttachmentCap`s into `message_attachments` — all inside a single SQLite transaction (atomic); (4) advances the in-memory `LogState`. Each cap is validated by `event_ingest::derive_attachments`: a cap is valid iff the stored blob's `size`/`mime_type`/`uploaded_by` match AND the event author is the cap's uploader or the server owner. Invalid caps are quarantined (logged + skipped — the message still renders, just without the attachment). | Log membership + `LogState::apply` authorization | `event_ingest::store_event`, `event_ingest::derive_message_row`, `event_ingest::derive_attachments` (all in one TX) | `NewMessage` → `Subscribers(channel_id)` (when a message is derived); `EventAccepted` returned to caller |
 | `EditMessage` | Replace a message's content | Author-only (no permission bit) | `messages::edit_message` | `MessageEdited` → `Subscribers(channel_id)` |
 | `DeleteMessage` | Soft-delete a message | Author-only, OR `MANAGE_MESSAGES` | `messages::delete_message`; orphaned file IDs returned to caller | `MessageDeleted` → `Subscribers(channel_id)` |
 | `FetchHistory` | Paginated message fetch (cursor by `before_id`, max 500) | `READ_MESSAGES` | Read only | None |
@@ -259,6 +260,44 @@ frame.
 an auth failure — it is normal termination. `connection.rs` logs it at `debug`
 level. The relay's `run_relay_primary` enforces that handle-0 streams never
 progress to a full authenticated session (see `docs/modules/relay.md`).
+
+---
+
+## Event ingest helpers (`crates/farder-server/src/event_ingest.rs`)
+
+These public functions are the source of truth for deriving persistent rows from
+the immutable event log. They are called inside the `SubmitEvent` handler and
+also by the startup reconciliation path in `main.rs`.
+
+### `derive_attachments(conn, message_id, event, owner) -> Result<usize>`
+
+Validates each `AttachmentCap` on a `MessagePosted` event against the stored
+blob and materializes a `message_attachments` row for each valid cap. A cap is
+valid iff:
+- A blob with its `content_hash` exists in the `files` table.
+- The blob's `size`, `mime_type`, and `uploaded_by` match the cap's `size`,
+  `declared_type`, and `uploader` fields exactly.
+- The event author equals the cap's uploader OR equals the server owner (mirrors
+  the legacy `SendMessage` ownership rule).
+
+Invalid caps are **quarantined**: logged at `WARN` level and skipped. The message
+still renders; only the attachment is unavailable. Idempotent — a cap already
+materialized for this `message_id` is skipped, so reconcile can re-run safely.
+Non-`MessagePosted` payloads return `Ok(0)`.
+
+**Returns:** the count of newly-created `message_attachments` rows.
+
+---
+
+### `reconcile_attachments(conn) -> Result<usize>`
+
+Startup repair: for every stored `MessagePosted` event that already has a derived
+`messages` row, (re)materializes any missing valid `message_attachments` rows by
+calling `derive_attachments` for each event. Idempotent. No-op for legacy
+(non-log-mode) servers — returns `Ok(0)` if no genesis row exists. Called once
+at server startup after `reconcile_messages`.
+
+**Returns:** the total count of attachment rows created across all repaired events.
 
 ---
 
