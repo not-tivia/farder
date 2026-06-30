@@ -121,6 +121,8 @@ async fn main() -> Result<()> {
             if repaired_att > 0 {
                 tracing::info!(count = repaired_att, "reconciled missing attachment rows from the event log");
             }
+            let swept = farder_server::event_ingest::sweep_redacted_bytes(&conn, &server_state.storage_dir).unwrap_or(0);
+            if swept > 0 { tracing::info!(count = swept, "swept bytes of already-redacted attachments"); }
             drop(conn);
         }
     }

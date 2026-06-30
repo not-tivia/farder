@@ -1841,6 +1841,18 @@ pub fn handle_request(
             //    validated attachments — atomically, so a crash never leaves a message
             //    without its attachment rows.
             let owner_pk = state.genesis.lock().unwrap().as_ref().map(|g| g.owner.clone());
+
+            // Compute by_moderator from `trial` BEFORE it is moved into ls_guard.
+            let redaction_info: Option<(String, bool)> = if let EventPayload::AttachmentRedacted { content_hash } = &event.core.payload {
+                let by_moderator = trial
+                    .attachment_uploader(content_hash)
+                    .map(|up| up != &event.core.author)
+                    .unwrap_or(true);
+                Some((content_hash.clone(), by_moderator))
+            } else {
+                None
+            };
+
             let derived_id = {
                 let tx = conn.unchecked_transaction()
                     .map_err(|e| anyhow::anyhow!("failed to begin tx: {}", e))?;
@@ -1851,6 +1863,10 @@ pub fn handle_request(
                 if let (Some(mid), Some(owner)) = (id, owner_pk.as_ref()) {
                     crate::event_ingest::derive_attachments(&tx, mid, &event, owner)
                         .map_err(|e| anyhow::anyhow!("failed to derive attachments: {}", e))?;
+                }
+                if let EventPayload::AttachmentRedacted { content_hash } = &event.core.payload {
+                    crate::attachments::redact_blob(&tx, &state.storage_dir, content_hash, &event.core.author)
+                        .map_err(|e| anyhow::anyhow!("failed to redact attachment: {}", e))?;
                 }
                 tx.commit().map_err(|e| anyhow::anyhow!("failed to commit event: {}", e))?;
                 id
@@ -1888,6 +1904,14 @@ pub fn handle_request(
                 events.push(BroadcastEvent {
                     target: EventTarget::All,
                     event: ServerEvent::MembershipChanged { public_key: pk },
+                });
+            }
+
+            // Broadcast redaction so connected clients flip the placeholder.
+            if let Some((content_hash, by_moderator)) = redaction_info {
+                events.push(BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::AttachmentRedacted { content_hash, by_moderator },
                 });
             }
 
@@ -4408,6 +4432,153 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn submit_event_attachment_redacted_takes_down_blob() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{AttachmentCap, DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+
+        let everyone_id = members::create_role(
+            &conn,
+            "@everyone",
+            permissions::DEFAULT_EVERYONE,
+            None,
+            0,
+            true,
+            false,
+        )
+        .unwrap();
+
+        let owner_kp = Keypair::generate();
+        let dev_kp = Keypair::generate();
+
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        *state.genesis.lock().unwrap() = Some(g.clone());
+
+        let channel_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+
+        let cert = DeviceCert::create(&owner_kp, &dev_kp.public_key(), 1);
+        let da = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert },
+        );
+
+        // Submit DeviceAuthorized to advance log state.
+        handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: da.clone() },
+            "",
+            &state,
+        )
+        .unwrap();
+
+        // Insert a blob owned by the owner.
+        conn.execute(
+            "INSERT INTO files (hash, size, mime_type, original_name, uploaded_by, uploaded_at, ref_count) \
+             VALUES ('cafef00d', 5, 'image/png', 'pic.png', ?1, 1, 0)",
+            rusqlite::params![owner_kp.public_key().as_bytes().as_slice()],
+        )
+        .unwrap();
+
+        // Build a MessagePosted carrying a matching cap, chained after the device-auth event.
+        let cap = AttachmentCap {
+            content_hash: "cafef00d".into(),
+            declared_type: "image/png".into(),
+            size: 5,
+            uploader: owner_kp.public_key(),
+        };
+        let msg = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            Some(&da),
+            1,
+            2,
+            EP::MessagePosted {
+                channel_id,
+                content: "look".into(),
+                reply_to: None,
+                attachments: vec![cap],
+            },
+        );
+
+        handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: msg.clone() },
+            "",
+            &state,
+        )
+        .unwrap();
+
+        // Now submit AttachmentRedacted chained from the MessagePosted.
+        let redact = Event::next(
+            &dev_kp,
+            owner_kp.public_key(),
+            g.server_id(),
+            Some(&msg),
+            2,
+            3,
+            EP::AttachmentRedacted { content_hash: "cafef00d".into() },
+        );
+
+        let result = handle_request(
+            &conn,
+            &owner_kp.public_key(),
+            true,
+            ServerRequest::SubmitEvent { event: redact },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.response, ServerResponse::EventAccepted { .. }),
+            "expected acceptance, got {:?}",
+            result.response
+        );
+
+        // files.redacted_by set, message_attachments row still present.
+        let redacted_by: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT redacted_by FROM files WHERE hash = 'cafef00d'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(redacted_by.is_some(), "redacted_by should be set");
+
+        let att_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_attachments ma JOIN files f ON f.id = ma.file_id WHERE f.hash = 'cafef00d'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(att_count, 1, "message_attachments row should still exist");
     }
 
     #[test]

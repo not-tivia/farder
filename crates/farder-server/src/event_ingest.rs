@@ -226,6 +226,27 @@ pub fn reconcile_attachments(conn: &Connection) -> Result<usize> {
     Ok(repaired)
 }
 
+/// Delete on-disk bytes for any blob already marked redacted (heals a crash between
+/// the redacted_by mark and the byte delete). Idempotent. Returns bytes-deleted count.
+pub fn sweep_redacted_bytes(conn: &Connection, storage_dir: &str) -> Result<usize> {
+    let hashes: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT hash FROM files WHERE redacted_by IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for row in rows { v.push(row?); }
+        v
+    };
+    let mut deleted = 0;
+    for hash in hashes {
+        let path = crate::attachments::content_path(storage_dir, &hash);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 /// Resolve a presented invite code to the hash of its `InviteCreated` event, by
 /// matching `invite_code_hash(code)` against stored events. Returns `None` if no
 /// invite matches (unknown/typo code). The raw code is never stored — only its hash.

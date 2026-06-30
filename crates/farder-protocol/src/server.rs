@@ -466,6 +466,8 @@ pub enum ServerEvent {
     /// A membership transition (join-pending / approve / remove / ban) for `public_key`.
     /// Clients re-fetch their own status + the member list + the pending queue on this.
     MembershipChanged { public_key: PublicKey },
+    /// An attachment was taken down (bytes gone). Clients flip its placeholder.
+    AttachmentRedacted { content_hash: String, by_moderator: bool },
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use crate::{attachments, auth, events::EventTarget, handlers, invites, members, permissions, state::{EventSender, ServerState}};
+use rusqlite::OptionalExtension;
 use anyhow::{Context, Result};
 use farder_crypto::identity::PublicKey;
 use farder_protocol::{codec, server::*};
@@ -232,6 +233,21 @@ async fn handle_download_stream(
             return Ok(());
         }
     };
+
+    // Redacted blobs behave exactly like absent ones (uniform "not available").
+    let is_redacted: bool = {
+        let db = state.db.lock().unwrap();
+        db.query_row(
+            "SELECT redacted_by IS NOT NULL FROM files WHERE id = ?1",
+            rusqlite::params![req.file_id as i64],
+            |r| r.get::<_, bool>(0),
+        ).optional()?.unwrap_or(false)
+    };
+    if is_redacted {
+        let resp = codec::encode(&DownloadResponse::Error { reason: "not available".to_string() })?;
+        write_frame(&mut send, &resp).await?;
+        return Ok(());
+    }
 
     // 2. Permission check: member needs VIEW_CHANNEL + READ_MESSAGES for at least one channel
     //    that this file is attached to via a message.
