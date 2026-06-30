@@ -2,6 +2,19 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
+export interface UploadOutcome {
+  fileId: number;
+  contentHash: string;
+  declaredType: string;
+  size: number;
+}
+
+export interface AttachmentCapInput {
+  contentHash: string;
+  declaredType: string;
+  size: number;
+}
+
 // ── Server management (no serverId needed) ───────────────────────────────────
 
 export async function connectServer(address: string, inviteCode?: string, setupToken?: string): Promise<ConnectResult> {
@@ -168,8 +181,9 @@ export async function submitEvent(
   channelId: number,
   content: string,
   replyTo?: string | null,
+  attachments: AttachmentCapInput[] = [],
 ): Promise<{ event_hash: string; timestamp: number }> {
-  return invoke("submit_event", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null });
+  return invoke("submit_event", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null, attachments });
 }
 
 export async function fetchHistory(serverId: string, channelId: number, beforeId?: number, limit?: number): Promise<MessageInfo[]> {
@@ -280,8 +294,8 @@ export async function fetchUrl(serverId: string, url: string, channelId: number)
   return invoke<number>("fetch_url", { serverId, url, channelId });
 }
 
-export async function uploadFile(serverId: string, channelId: number, filePath: string): Promise<number> {
-  return invoke<number>("upload_file", { serverId, channelId, filePath });
+export async function uploadFile(serverId: string, channelId: number, filePath: string): Promise<UploadOutcome> {
+  return invoke<UploadOutcome>("upload_file", { serverId, channelId, filePath });
 }
 
 export interface DownloadResult {

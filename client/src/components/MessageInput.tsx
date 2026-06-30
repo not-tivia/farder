@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, KeyboardEvent } from "react";
 import * as api from "../lib/tauri-bridge";
+import type { AttachmentCapInput } from "../lib/tauri-bridge";
 import * as bookApi from "../lib/book/client";
 import * as gifApi from "../lib/gifSearch";
 import type { MemberInfo } from "../lib/types";
@@ -27,6 +28,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const lastTypingSent = useRef(0);
   const [attachedFileId, setAttachedFileId] = useState<number | null>(null);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
+  const [attachedCap, setAttachedCap] = useState<AttachmentCapInput | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
@@ -78,8 +80,9 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setAttachedFileName(fileName);
     setUploading(true);
     try {
-      const fileId = await api.uploadFile(serverId, channelId, path);
-      setAttachedFileId(fileId);
+      const outcome = await api.uploadFile(serverId, channelId, path);
+      setAttachedFileId(outcome.fileId);
+      setAttachedCap({ contentHash: outcome.contentHash, declaredType: outcome.declaredType, size: outcome.size });
     } catch (e) {
       setError(String(e));
       setAttachedFileName(null);
@@ -92,6 +95,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   function handleRemoveAttachment() {
     setAttachedFileId(null);
     setAttachedFileName(null);
+    setAttachedCap(null);
     setError(null);
   }
 
@@ -185,10 +189,10 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setSending(true);
     try {
       // Upload the WAV file via existing system
-      const fileId = await api.uploadFile(serverId, channelId, filePath);
+      const outcome = await api.uploadFile(serverId, channelId, filePath);
 
       // Send message with attachment
-      await api.sendMessage(serverId, channelId, "", undefined, [fileId]);
+      await api.sendMessage(serverId, channelId, "", undefined, [outcome.fileId]);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -206,8 +210,9 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     try {
       const attachments: number[] = attachedFileId ? [attachedFileId] : [];
 
-      // Auto-fetch image URLs found in the message text
+      // Auto-fetch image URLs found in the message text (legacy-only: no client-known hash).
       const urls = text.match(imageUrlRegex) || [];
+      let hasUncappableAttachment = urls.length > 0;
       for (const url of urls) {
         try {
           const fileId = await api.fetchUrl(serverId, url, channelId);
@@ -225,25 +230,24 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         try {
           messageContent = await api.dmEncrypt(peerPk, text);
         } catch {
-          // If encryption fails, abort — don't send plaintext in a DM
           setError("Encryption failed — message not sent");
           return;
         }
       }
 
-      // Resolve inline :name: tokens in the message text into book-item file_ids,
-      // appended to the attachment list. Receiver renders them inline at the
-      // token positions; the message text stays as raw `:name:` for edit/search.
+      // Resolve inline :name: tokens into book-item file_ids (legacy-only: no client cap).
+      const beforeEmoji = attachments.length;
       const finalAttachments = await resolveInlineEmojiAttachments(text, attachments);
+      if (finalAttachments.length > beforeEmoji) hasUncappableAttachment = true;
 
-      // serverId (the prop) is the connection-key ADDRESS used to route requests;
-      // activeServer.logServerId is the genesis hash that identifies the event log.
-      // They are NOT equal — submit_event needs both: the address to route, the
-      // genesis hash to stamp the event + key the device chain.
       const logServerId = activeServer?.logServerId ?? null;
-      if (logServerId && finalAttachments.length === 0 && !dm) {
+      // Route over the mesh log when this is a log server, not a DM, and every
+      // attachment carries a client-known cap (i.e. only the staged upload — URL
+      // images and inline emoji have no client-side hash and stay on legacy).
+      if (logServerId && !dm && !hasUncappableAttachment) {
+        const caps = attachedCap ? [attachedCap] : [];
         // TODO(mesh): replies over the log need event-hash mapping; legacy replyTo is a numeric id, so drop it for now (top-level post).
-        await api.submitEvent(serverId, logServerId, channelId, messageContent, null);
+        await api.submitEvent(serverId, logServerId, channelId, messageContent, null, caps);
       } else {
         await api.sendMessage(
           serverId,
@@ -256,6 +260,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       setContent("");
       setAttachedFileId(null);
       setAttachedFileName(null);
+      setAttachedCap(null);
       if (onSent) onSent();
     } catch (e) {
       setError(String(e));
