@@ -63,7 +63,7 @@ the Tauri event `server:new_message` → `useServerEvents.ts` dispatches into
 1. UI calls `uploadFile` → `invoke("upload_file")` → server stores the blob and returns `UploadOutcome { fileId, contentHash, declaredType, size }`.
 2. UI calls `submitEvent` → `invoke("submit_event", { ..., attachments: [{ contentHash, declaredType, size }] })` → `commands.rs` stamps `uploader` from the caller's identity and builds a signed `MessagePosted` event carrying `AttachmentCap`s.
 3. Server `handlers.rs` (`SubmitEvent` arm) validates the event, then in a single SQLite transaction: stores the event body, derives the `messages` row, and calls `event_ingest::derive_attachments` to validate each cap (size/mime/uploader match + author-is-uploader-or-owner) and materialize `message_attachments` rows. Invalid caps are quarantined; the message still renders.
-4. `NewMessage` is broadcast; downloaders go through the normal `download_file` path gated on `message_attachments` join rows. Both "not found" and "access denied" download responses are uniform (`"not available"`) so a `file_id` or hash cannot be used as an existence oracle.
+4. `NewMessage` is broadcast; downloaders go through the normal `download_file` path gated on `message_attachments` join rows. Both "not found" and "access denied" download responses are uniform (`"not available"`) so a `file_id` cannot be used as a *download-path* existence oracle. (The upload-dedup path still short-circuits on a known hash — a separate, pre-existing hash-existence oracle tracked under the file-hardening track, not closed by 4a.)
 
 Note: URL-fetched images (via `fetchUrl`) and inline-emoji attachments have no client-known content hash and stay on the legacy `sendMessage` path even on mesh-mode servers.
 
