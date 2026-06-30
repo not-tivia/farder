@@ -355,6 +355,19 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE messages ADD COLUMN event_hash TEXT", [])?;
     }
 
+    // Migration: attachment redaction — who took the blob down (NULL = live).
+    let has_redacted_by: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "redacted_by")
+    };
+    if !has_redacted_by {
+        conn.execute("ALTER TABLE files ADD COLUMN redacted_by BLOB", [])?;
+    }
+
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
     // supported for virtual tables in older SQLite versions).
     let fts_exists: bool = conn.query_row(

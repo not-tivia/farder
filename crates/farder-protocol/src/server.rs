@@ -64,6 +64,13 @@ pub struct AttachmentInfo {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub duration_secs: Option<f64>,
+    /// Hex SHA-256 of the bytes — lets the client build an AttachmentRedacted event.
+    #[serde(default)]
+    pub content_hash: String,
+    /// Redaction state: None = live; Some(false) = removed by the uploader;
+    /// Some(true) = removed by a moderator (redactor != original uploader).
+    #[serde(default)]
+    pub redacted_by_moderator: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -931,6 +938,8 @@ mod tests {
                     width: None,
                     height: None,
                     duration_secs: None,
+                    content_hash: String::new(),
+                    redacted_by_moderator: None,
                 },
             ],
             reactions: vec![],

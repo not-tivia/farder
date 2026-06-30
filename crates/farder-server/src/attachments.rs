@@ -323,6 +323,30 @@ pub fn cleanup_orphaned_file(
     Ok(true)
 }
 
+/// Mark a blob redacted (records who) and delete its bytes from disk. The `files`
+/// row stays as a tombstone so message_attachments joins still resolve (and render
+/// the "removed" placeholder). Returns true if a matching row existed. Idempotent:
+/// re-running after the bytes are already gone just re-asserts redacted_by.
+pub fn redact_blob(
+    conn: &Connection,
+    storage_dir: &str,
+    content_hash: &str,
+    redactor: &PublicKey,
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE files SET redacted_by = ?1 WHERE hash = ?2",
+        params![redactor.as_bytes().as_slice(), content_hash],
+    )?;
+    if updated == 0 {
+        return Ok(false);
+    }
+    let path = content_path(storage_dir, content_hash);
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(true)
+}
+
 /// Delete all files with ref_count=0 that are older than max_age_secs.
 /// Returns the count of deleted files.
 pub fn cleanup_all_orphans(
@@ -394,7 +418,7 @@ pub fn get_attachments_for_message(
 ) -> Result<Vec<AttachmentInfo>> {
     let mut stmt = conn.prepare(
         "SELECT ma.id, ma.file_id, ma.original_name, f.size, f.mime_type, \
-                ma.width, ma.height, ma.duration_secs \
+                ma.width, ma.height, ma.duration_secs, f.hash, f.redacted_by, f.uploaded_by \
          FROM message_attachments ma \
          JOIN files f ON f.id = ma.file_id \
          WHERE ma.message_id = ?1 \
@@ -410,6 +434,10 @@ pub fn get_attachments_for_message(
         let width: Option<i64> = row.get(5)?;
         let height: Option<i64> = row.get(6)?;
         let duration_secs: Option<f64> = row.get(7)?;
+        let content_hash: String = row.get(8)?;
+        let redacted_by: Option<Vec<u8>> = row.get(9)?;
+        let uploaded_by: Vec<u8> = row.get(10)?;
+        let redacted_by_moderator = redacted_by.map(|r| r != uploaded_by);
         Ok(AttachmentInfo {
             id: id as u64,
             file_id: file_id as u64,
@@ -419,6 +447,8 @@ pub fn get_attachments_for_message(
             width: width.map(|v| v as u32),
             height: height.map(|v| v as u32),
             duration_secs,
+            content_hash,
+            redacted_by_moderator,
         })
     })?;
 
@@ -446,7 +476,7 @@ pub fn get_attachments_for_messages(
         .collect();
     let sql = format!(
         "SELECT ma.message_id, ma.id, ma.file_id, ma.original_name, f.size, f.mime_type, \
-                ma.width, ma.height, ma.duration_secs \
+                ma.width, ma.height, ma.duration_secs, f.hash, f.redacted_by, f.uploaded_by \
          FROM message_attachments ma \
          JOIN files f ON f.id = ma.file_id \
          WHERE ma.message_id IN ({}) \
@@ -472,6 +502,10 @@ pub fn get_attachments_for_messages(
         let width: Option<i64> = row.get(6)?;
         let height: Option<i64> = row.get(7)?;
         let duration_secs: Option<f64> = row.get(8)?;
+        let content_hash: String = row.get(9)?;
+        let redacted_by: Option<Vec<u8>> = row.get(10)?;
+        let uploaded_by: Vec<u8> = row.get(11)?;
+        let redacted_by_moderator = redacted_by.map(|r| r != uploaded_by);
         Ok((
             message_id as u64,
             AttachmentInfo {
@@ -483,6 +517,8 @@ pub fn get_attachments_for_messages(
                 width: width.map(|v| v as u32),
                 height: height.map(|v| v as u32),
                 duration_secs,
+                content_hash,
+                redacted_by_moderator,
             },
         ))
     })?;
@@ -812,6 +848,42 @@ mod tests {
         let empty = get_attachments_for_messages(&conn, &[]).unwrap();
         assert!(empty.is_empty());
 
+        std::fs::remove_dir_all(&storage).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: redact_blob marks redacted_by and deletes on-disk bytes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn redact_blob_marks_and_deletes_bytes() {
+        let conn = db::open_in_memory().unwrap();
+        let storage = make_temp_dir();
+        let uploader = gen_pk();
+        // Store a real blob so bytes exist on disk.
+        let data = b"hello redact test";
+        let hash = compute_sha256(data);
+        let file_id = store_file(
+            &conn, &storage, &uploader, "f.txt", data, &hash, "text/plain", None, None, None,
+        ).unwrap();
+        let rec = get_file(&conn, file_id).unwrap().unwrap();
+        assert!(content_path(&storage, &rec.hash).exists(), "bytes should be on disk before redaction");
+        let mod_pk = gen_pk();
+        assert!(redact_blob(&conn, &storage, &rec.hash, &mod_pk).unwrap(), "redact_blob should return true for existing row");
+        // Bytes gone; row stays with redacted_by set.
+        assert!(!content_path(&storage, &rec.hash).exists(), "bytes should be gone after redaction");
+        let redacted_by: Option<Vec<u8>> = conn.query_row(
+            "SELECT redacted_by FROM files WHERE hash = ?1",
+            params![rec.hash],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(
+            redacted_by.as_deref(),
+            Some(mod_pk.as_bytes().as_slice()),
+            "redacted_by should be the moderator's public key"
+        );
+        // Row must still exist as a tombstone.
+        assert!(get_file(&conn, file_id).unwrap().is_some(), "file row should still exist as tombstone");
         std::fs::remove_dir_all(&storage).ok();
     }
 
