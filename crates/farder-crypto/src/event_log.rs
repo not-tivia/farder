@@ -126,6 +126,10 @@ pub enum EventPayload {
     MemberBanned { member: PublicKey },
     MemberUnbanned { member: PublicKey },
     PermissionGranted { member: PublicKey, capability: String },
+    /// Take down an attachment: delete its bytes + mark it redacted. Authorized by
+    /// the original uploader or a moderator (holds "kick"). Content-hash-keyed so it
+    /// is meaningful across hosts/replication (file_ids are server-local).
+    AttachmentRedacted { content_hash: String },
 }
 
 /// The signed-over body of an event. `author` is the IDENTITY; `device` says

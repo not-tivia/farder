@@ -39,6 +39,7 @@ fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::MemberUnbanned { .. } => "MemberUnbanned",
         EventPayload::PermissionGranted { .. } => "PermissionGranted",
         EventPayload::MemberApproved { .. } => "MemberApproved",
+        EventPayload::AttachmentRedacted { .. } => "AttachmentRedacted",
     }
 }
 

@@ -46,6 +46,10 @@ pub struct LogState {
     devices: HashMap<DeviceId, DeviceRecord>,
     invites: HashMap<EventHash, InviteRecord>,
     chains: HashMap<(PublicKey, DeviceId), ChainHead>,
+    /// content_hash -> first uploader seen (from MessagePosted caps); authz basis for self-takedown.
+    attachment_uploaders: HashMap<String, PublicKey>,
+    /// content hashes that have been redacted.
+    redacted_attachments: HashSet<String>,
 }
 
 impl LogState {
@@ -63,6 +67,8 @@ impl LogState {
             devices: HashMap::new(),
             invites: HashMap::new(),
             chains: HashMap::new(),
+            attachment_uploaders: HashMap::new(),
+            redacted_attachments: HashSet::new(),
         }
     }
 
@@ -92,6 +98,14 @@ impl LogState {
     /// The owner holds every capability; everyone else holds only what was granted.
     pub fn has_capability(&self, pk: &PublicKey, cap: &str) -> bool {
         self.is_owner(pk) || self.capabilities.get(pk).is_some_and(|c| c.contains(cap))
+    }
+    /// Whether this attachment (by content hash) has been redacted.
+    pub fn is_attachment_redacted(&self, hash: &str) -> bool {
+        self.redacted_attachments.contains(hash)
+    }
+    /// The recorded (first) uploader of an attachment hash, if any MessagePosted cited it.
+    pub fn attachment_uploader(&self, hash: &str) -> Option<&PublicKey> {
+        self.attachment_uploaders.get(hash)
     }
 
     /// Fold a genesis + an ordered slice of events into the resulting state,
@@ -254,6 +268,21 @@ impl LogState {
                 );
                 Ok(())
             }
+            EventPayload::AttachmentRedacted { content_hash } => {
+                let uploader = self
+                    .attachment_uploaders
+                    .get(content_hash)
+                    .context("redaction cites an unknown attachment")?;
+                ensure!(
+                    author == uploader || self.has_capability(author, "kick"),
+                    "must be the uploader or hold 'kick'"
+                );
+                ensure!(
+                    !self.redacted_attachments.contains(content_hash),
+                    "attachment already redacted"
+                );
+                Ok(())
+            }
         }
     }
 
@@ -297,7 +326,13 @@ impl LogState {
                 self.pending.remove(member);
                 self.members.insert(member.clone());
             }
-            EventPayload::MessagePosted { .. } => {} // no authz-state change
+            EventPayload::MessagePosted { attachments, .. } => {
+                for cap in attachments {
+                    self.attachment_uploaders
+                        .entry(cap.content_hash.clone())
+                        .or_insert_with(|| cap.uploader.clone());
+                }
+            }
             EventPayload::MemberRemoved { member } => {
                 self.members.remove(member);
                 self.pending.remove(member);
@@ -315,6 +350,9 @@ impl LogState {
             EventPayload::PermissionGranted { member, capability } => {
                 self.capabilities.entry(member.clone()).or_default().insert(capability.clone());
             }
+            EventPayload::AttachmentRedacted { content_hash } => {
+                self.redacted_attachments.insert(content_hash.clone());
+            }
         }
     }
 }
@@ -323,7 +361,7 @@ impl LogState {
 mod tests {
     use super::*;
     use crate::identity::Keypair;
-    use crate::event_log::{device_id, DeviceCert, Event as Ev, EventPayload as EP};
+    use crate::event_log::{device_id, AttachmentCap, DeviceCert, Event as Ev, EventPayload as EP};
 
     fn genesis(owner: &Keypair) -> Genesis {
         Genesis {
@@ -893,6 +931,105 @@ mod tests {
             st.clone().apply(&approve).is_err(),
             "approving a banned (non-pending) identity must be rejected"
         );
+    }
+
+    // ---- AttachmentRedacted tests ----
+
+    #[test]
+    fn uploader_can_redact_own_attachment() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        // Owner posts a message with an attachment cap (hash "h").
+        let post = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&da), 2, 10,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None,
+                attachments: vec![AttachmentCap { content_hash: "h".into(), declared_type: "image/png".into(), size: 1, uploader: owner.public_key() }] });
+        st.apply(&post).unwrap();
+        // Owner redacts their own attachment.
+        let redact = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&post), 3, 11,
+            EP::AttachmentRedacted { content_hash: "h".into() });
+        assert!(st.apply(&redact).is_ok());
+        assert!(st.is_attachment_redacted("h"));
+    }
+
+    #[test]
+    fn moderator_can_redact_any_attachment() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+        // Owner posts with an attachment cap "h" (uploader = owner).
+        let post = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&owner_prev),
+            owner_prev.core.lamport + 1, 10,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None,
+                attachments: vec![AttachmentCap { content_hash: "h".into(), declared_type: "image/png".into(), size: 1, uploader: owner.public_key() }] });
+        st.apply(&post).unwrap();
+        owner_prev = post;
+        // Add a member with "kick" capability.
+        let (mod_k, mod_dev, mod_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, Some("kick"));
+        // Moderator (not the uploader, but holds "kick") redacts the attachment.
+        let redact = Ev::next(&mod_dev, mod_k.public_key(), sid.clone(), Some(&mod_last),
+            mod_last.core.lamport + 1, 20,
+            EP::AttachmentRedacted { content_hash: "h".into() });
+        assert!(st.apply(&redact).is_ok());
+        assert!(st.is_attachment_redacted("h"));
+    }
+
+    #[test]
+    fn non_uploader_non_mod_cannot_redact() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+        // Owner posts with attachment cap "h" (uploader = owner).
+        let post = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&owner_prev),
+            owner_prev.core.lamport + 1, 10,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None,
+                attachments: vec![AttachmentCap { content_hash: "h".into(), declared_type: "image/png".into(), size: 1, uploader: owner.public_key() }] });
+        st.apply(&post).unwrap();
+        owner_prev = post;
+        // Add a plain member (no "kick").
+        let (member_k, member_dev, member_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        // Plain member (not uploader, no "kick") tries to redact → rejected.
+        let redact = Ev::next(&member_dev, member_k.public_key(), sid.clone(), Some(&member_last),
+            member_last.core.lamport + 1, 20,
+            EP::AttachmentRedacted { content_hash: "h".into() });
+        assert!(st.apply(&redact).is_err());
+    }
+
+    #[test]
+    fn redacting_unknown_hash_is_rejected() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        // No MessagePosted citing "never-posted" has been applied.
+        let redact = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&da), 2, 10,
+            EP::AttachmentRedacted { content_hash: "never-posted".into() });
+        assert!(st.apply(&redact).is_err());
+    }
+
+    #[test]
+    fn double_redact_is_rejected() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let post = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&da), 2, 10,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None,
+                attachments: vec![AttachmentCap { content_hash: "h".into(), declared_type: "image/png".into(), size: 1, uploader: owner.public_key() }] });
+        st.apply(&post).unwrap();
+        let r1 = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&post), 3, 11,
+            EP::AttachmentRedacted { content_hash: "h".into() });
+        st.apply(&r1).unwrap();
+        let r2 = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&r1), 4, 12,
+            EP::AttachmentRedacted { content_hash: "h".into() });
+        assert!(st.apply(&r2).is_err());
     }
 
     #[test]
