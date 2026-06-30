@@ -87,6 +87,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       setError(String(e));
       setAttachedFileName(null);
       setAttachedFileId(null);
+      setAttachedCap(null);
     } finally {
       setUploading(false);
     }
