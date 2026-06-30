@@ -1361,6 +1361,23 @@ pub async fn create_thread(
 // File upload commands
 // ---------------------------------------------------------------------------
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadOutcome {
+    pub file_id: u64,
+    pub content_hash: String,
+    pub declared_type: String,
+    pub size: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentCapInput {
+    pub content_hash: String,
+    pub declared_type: String,
+    pub size: u64,
+}
+
 /// Open a native file picker dialog and return the selected file path.
 #[tauri::command]
 pub async fn pick_file() -> Result<Option<String>, String> {
@@ -1372,14 +1389,14 @@ pub async fn pick_file() -> Result<Option<String>, String> {
     Ok(path.map(|p| p.to_string_lossy().to_string()))
 }
 
-/// Upload a file via a new QUIC bi-stream and return the file_id.
+/// Upload a file via a new QUIC bi-stream and return the upload outcome (file_id + cap fields).
 #[tauri::command]
 pub async fn upload_file(
     state: State<'_, Arc<AppState>>,
     server_id: String,
     channel_id: u64,
     file_path: String,
-) -> Result<u64, String> {
+) -> Result<UploadOutcome, String> {
     upload_file_internal_with_channel(&state, &server_id, channel_id, &file_path).await
 }
 
@@ -1390,7 +1407,9 @@ pub(crate) async fn upload_file_internal(
     server_id: &str,
     file_path: &str,
 ) -> Result<u64, String> {
-    upload_file_internal_with_channel(state, server_id, 0, file_path).await
+    upload_file_internal_with_channel(state, server_id, 0, file_path)
+        .await
+        .map(|o| o.file_id)
 }
 
 /// Write the RelayStreamRole::Session marker on a file-transfer stream when the
@@ -1420,7 +1439,7 @@ async fn upload_file_internal_with_channel(
     server_id: &str,
     channel_id: u64,
     file_path: &str,
-) -> Result<u64, String> {
+) -> Result<UploadOutcome, String> {
     use sha2::{Digest, Sha256};
 
     // Read file from disk
@@ -1458,13 +1477,16 @@ async fn upload_file_internal_with_channel(
     // Relayed connections demux file streams by a Session role marker.
     write_relay_session_marker(&mut send, &conn).await?;
 
+    // Capture size before moving data into the request.
+    let size = data.len() as u64;
+
     // Send UploadRequest
     let req = farder_protocol::server::UploadRequest {
         channel_id,
         file_name,
-        file_size: data.len() as u64,
-        hash,
-        mime_type,
+        file_size: size,
+        hash: hash.clone(),
+        mime_type: mime_type.clone(),
         width: None,
         height: None,
         duration_secs: None,
@@ -1494,12 +1516,22 @@ async fn upload_file_internal_with_channel(
             let resp2: farder_protocol::server::UploadResponse =
                 farder_protocol::codec::decode(&resp2_bytes).map_err(|e| e.to_string())?;
             match resp2 {
-                farder_protocol::server::UploadResponse::Complete { file_id } => Ok(file_id),
+                farder_protocol::server::UploadResponse::Complete { file_id } => Ok(UploadOutcome {
+                    file_id,
+                    content_hash: hash.clone(),
+                    declared_type: mime_type.clone(),
+                    size,
+                }),
                 farder_protocol::server::UploadResponse::Error { reason } => Err(reason),
                 _ => Err("unexpected upload response".to_string()),
             }
         }
-        farder_protocol::server::UploadResponse::Complete { file_id } => Ok(file_id), // dedup
+        farder_protocol::server::UploadResponse::Complete { file_id } => Ok(UploadOutcome {
+            file_id,
+            content_hash: hash.clone(),
+            declared_type: mime_type.clone(),
+            size,
+        }), // dedup
         farder_protocol::server::UploadResponse::Error { reason } => Err(reason),
     }
 }
@@ -3799,6 +3831,7 @@ pub async fn submit_event(
     channel_id: u64,
     content: String,
     reply_to: Option<String>, // event-hash ref; None for top-level
+    attachments: Vec<AttachmentCapInput>,
 ) -> Result<EventAcceptedResult, String> {
     use farder_crypto::event_log::EventPayload;
 
@@ -3840,6 +3873,18 @@ pub async fn submit_event(
     }
 
     // 2. Build + submit the message event, chaining from the stored head.
+    // Map AttachmentCapInputs -> AttachmentCaps, stamping uploader = caller's identity.
+    // NOTE: pure construction — no network I/O; correctness is verified in the inline
+    // test in farder-crypto's event_log tests (see AttachmentCap round-trip test there).
+    let caps: Vec<farder_crypto::event_log::AttachmentCap> = attachments
+        .into_iter()
+        .map(|a| farder_crypto::event_log::AttachmentCap {
+            content_hash: a.content_hash,
+            declared_type: a.declared_type,
+            size: a.size,
+            uploader: identity.public_key(),
+        })
+        .collect();
     let msg = event_build_next(
         &device,
         &identity,
@@ -3851,7 +3896,7 @@ pub async fn submit_event(
             channel_id,
             content,
             reply_to,
-            attachments: vec![],
+            attachments: caps,
         },
     );
     let result = event_send_submit(&state, &server_id, &msg).await?;
