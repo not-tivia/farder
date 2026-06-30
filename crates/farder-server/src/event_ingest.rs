@@ -197,6 +197,34 @@ pub fn reconcile_messages(conn: &Connection) -> Result<usize> {
     Ok(repaired)
 }
 
+/// Repair drift: for every stored `MessagePosted` event that already has a derived
+/// `messages` row, (re)materialize any missing VALID attachment rows. Idempotent
+/// (each cap is guarded inside `derive_attachments`). Returns the number of attachment
+/// rows created. No-op if there is no genesis (legacy server) — and legacy
+/// `MessagePosted` events carry empty `attachments`, so this only does work for
+/// log-mode servers that crashed mid-derive or that replicate events (forward-compat).
+pub fn reconcile_attachments(conn: &Connection) -> Result<usize> {
+    let Some(g) = load_genesis(conn)? else { return Ok(0) };
+    let owner = g.owner.clone();
+    let rows: Vec<(Vec<u8>, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT e.event_body, m.id FROM events e \
+             JOIN messages m ON m.event_hash = e.event_hash \
+             WHERE e.payload_type = 'MessagePosted' ORDER BY e.accept_seq ASC",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut v = Vec::new();
+        for row in mapped { v.push(row?); }
+        v
+    };
+    let mut repaired = 0;
+    for (body, mid) in rows {
+        let event = Event::from_bytes(&body).context("decode event for reconcile_attachments")?;
+        repaired += derive_attachments(conn, mid as u64, &event, &owner)?;
+    }
+    Ok(repaired)
+}
+
 /// Resolve a presented invite code to the hash of its `InviteCreated` event, by
 /// matching `invite_code_hash(code)` against stored events. Returns `None` if no
 /// invite matches (unknown/typo code). The raw code is never stored — only its hash.
@@ -421,5 +449,21 @@ mod tests {
             "SELECT content, event_hash FROM messages", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(content, "drifted");
         assert_eq!(eh, msg.hash());
+    }
+
+    #[test]
+    fn reconcile_attachments_repairs_missing_rows_idempotently() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        insert_file(&conn, "rr", 3, "image/png", &owner.public_key());
+        let cap = AttachmentCap { content_hash: "rr".into(), declared_type: "image/png".into(), size: 3, uploader: owner.public_key() };
+        // Store the event + derive the message row, but NOT the attachment (crash window).
+        let (mid, _msg) = setup_message(&conn, &owner, &dev, &owner, vec![cap]);
+        assert_eq!(attachment_count(&conn, mid), 0);
+        // Reconcile materializes it once; a second run is a no-op.
+        assert_eq!(reconcile_attachments(&conn).unwrap(), 1);
+        assert_eq!(reconcile_attachments(&conn).unwrap(), 0);
+        assert_eq!(attachment_count(&conn, mid), 1);
     }
 }

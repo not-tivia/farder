@@ -117,6 +117,10 @@ async fn main() -> Result<()> {
             if repaired > 0 {
                 tracing::info!("reconciled {} event-sourced messages missing from the view", repaired);
             }
+            let repaired_att = farder_server::event_ingest::reconcile_attachments(&conn).unwrap_or(0);
+            if repaired_att > 0 {
+                tracing::info!(count = repaired_att, "reconciled missing attachment rows from the event log");
+            }
             drop(conn);
         }
     }
