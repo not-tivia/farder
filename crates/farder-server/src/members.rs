@@ -17,6 +17,7 @@ pub struct MemberRecord {
     pub banned: bool,
     pub revoked: bool,
     pub profile_hash: Option<String>,
+    pub is_bot: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,21 @@ pub fn register_member(conn: &Connection, pk: &PublicKey, display_name: &str) ->
         "INSERT INTO members (public_key, display_name, joined_at) VALUES (?1, ?2, ?3)",
         params![pk.as_bytes().as_slice(), display_name, now() as i64],
     )?;
+    Ok(())
+}
+
+/// Register a server-managed bot as a member (is_bot = 1).
+pub fn register_bot_member(conn: &Connection, pk: &PublicKey, display_name: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO members (public_key, display_name, joined_at, is_bot) VALUES (?1, ?2, ?3, 1)",
+        params![pk.as_bytes().as_slice(), display_name, now() as i64],
+    )?;
+    Ok(())
+}
+
+/// Hard-delete a member row (used to remove a bot).
+pub fn remove_member_row(conn: &Connection, pk: &PublicKey) -> Result<()> {
+    conn.execute("DELETE FROM members WHERE public_key = ?1", params![pk.as_bytes().as_slice()])?;
     Ok(())
 }
 
@@ -62,7 +78,7 @@ pub fn get_member_profile(conn: &Connection, pk: &PublicKey) -> Result<Option<Ve
 pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberRecord>> {
     let row = conn
         .query_row(
-            "SELECT public_key, display_name, joined_at, banned, revoked, profile_hash \
+            "SELECT public_key, display_name, joined_at, banned, revoked, profile_hash, is_bot \
              FROM members WHERE public_key = ?1",
             params![pk.as_bytes().as_slice()],
             |row| {
@@ -72,14 +88,15 @@ pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberReco
                 let banned: i64 = row.get(3)?;
                 let revoked: i64 = row.get(4)?;
                 let profile_hash: Option<String> = row.get(5)?;
-                Ok((key_bytes, display_name, joined_at, banned, revoked, profile_hash))
+                let is_bot: i64 = row.get(6)?;
+                Ok((key_bytes, display_name, joined_at, banned, revoked, profile_hash, is_bot))
             },
         )
         .optional()?;
 
     match row {
         None => Ok(None),
-        Some((key_bytes, display_name, joined_at, banned, revoked, profile_hash)) => {
+        Some((key_bytes, display_name, joined_at, banned, revoked, profile_hash, is_bot)) => {
             let arr: [u8; 32] = key_bytes
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("public_key blob wrong length"))?;
@@ -90,6 +107,7 @@ pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberReco
                 banned: banned != 0,
                 revoked: revoked != 0,
                 profile_hash,
+                is_bot: is_bot != 0,
             }))
         }
     }
@@ -97,7 +115,7 @@ pub fn get_member(conn: &Connection, pk: &PublicKey) -> Result<Option<MemberReco
 
 pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT public_key, display_name, joined_at, banned, revoked, profile_hash \
+        "SELECT public_key, display_name, joined_at, banned, revoked, profile_hash, is_bot \
          FROM members WHERE banned = 0 AND revoked = 0",
     )?;
 
@@ -108,12 +126,13 @@ pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
         let banned: i64 = row.get(3)?;
         let revoked: i64 = row.get(4)?;
         let profile_hash: Option<String> = row.get(5)?;
-        Ok((key_bytes, display_name, joined_at, banned, revoked, profile_hash))
+        let is_bot: i64 = row.get(6)?;
+        Ok((key_bytes, display_name, joined_at, banned, revoked, profile_hash, is_bot))
     })?;
 
     let mut members = Vec::new();
     for row in rows {
-        let (key_bytes, display_name, joined_at, banned, revoked, profile_hash) = row?;
+        let (key_bytes, display_name, joined_at, banned, revoked, profile_hash, is_bot) = row?;
         let arr: [u8; 32] = key_bytes
             .try_into()
             .map_err(|_| rusqlite::Error::InvalidColumnType(0, "public_key".into(), rusqlite::types::Type::Blob))?;
@@ -124,6 +143,7 @@ pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
             banned: banned != 0,
             revoked: revoked != 0,
             profile_hash,
+            is_bot: is_bot != 0,
         });
     }
     Ok(members)

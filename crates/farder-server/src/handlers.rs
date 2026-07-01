@@ -1072,7 +1072,7 @@ pub fn handle_request(
             {
                 let guard = state.log_state.lock().unwrap();
                 if let Some(ls) = guard.as_ref() {
-                    all_members.retain(|m| ls.is_member(&m.public_key));
+                    all_members.retain(|m| m.is_bot || ls.is_member(&m.public_key));
                 }
             }
             let now_ms = current_unix_ms();
@@ -1086,6 +1086,7 @@ pub fn handle_request(
                 };
                 let profile_hash = m.profile_hash.clone();
                 let presence = presences.get(m.public_key.as_bytes()).cloned();
+                let is_bot = m.is_bot;
                 member_infos.push(MemberInfo {
                     public_key: m.public_key,
                     display_name: m.display_name,
@@ -1095,6 +1096,7 @@ pub fn handle_request(
                     timeout_reason,
                     profile_hash,
                     presence,
+                    is_bot,
                 });
             }
             ok(ServerResponse::Members {
@@ -1122,6 +1124,7 @@ pub fn handle_request(
                         timeout_reason: None,
                         profile_hash: rec.profile_hash,
                         presence: None,
+                        is_bot: rec.is_bot,
                     });
                 }
             }
@@ -1333,6 +1336,7 @@ pub fn handle_request(
                 timeout_reason,
                 profile_hash: target_record.profile_hash.clone(),
                 presence: state.presences.read().unwrap().get(target_key.as_bytes()).cloned(),
+                is_bot: target_record.is_bot,
             };
 
             let mut events = Vec::new();
@@ -1372,6 +1376,7 @@ pub fn handle_request(
                     timeout_reason,
                     profile_hash: other_record.profile_hash.clone(),
                     presence: state.presences.read().unwrap().get(other_key.as_bytes()).cloned(),
+                    is_bot: other_record.is_bot,
                 };
                 let ch_id = ch.id;
                 let last_msgs = messages::fetch_history(conn, ch_id, None, 1, member)?;
@@ -1916,6 +1921,36 @@ pub fn handle_request(
             }
 
             ok_with(ServerResponse::EventAccepted { event_hash: event.hash(), timestamp }, events)
+        }
+
+        ServerRequest::AddBot { coin_id, label } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            let kp = farder_crypto::identity::Keypair::generate();
+            let pk = kp.public_key();
+            members::register_bot_member(conn, &pk, &label)?;
+            crate::bots::register_bot(conn, &pk, kp.signing_key_bytes().as_slice(), &coin_id, &label)?;
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::MemberJoined { public_key: pk, display_name: label },
+            }])
+        }
+
+        ServerRequest::RemoveBot { bot_public_key } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            crate::bots::remove_bot(conn, &bot_public_key)?;
+            members::remove_member_row(conn, &bot_public_key)?;
+            {
+                let mut map = state.presences.write().unwrap();
+                map.remove(bot_public_key.as_bytes());
+            }
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::All,
+                event: ServerEvent::MemberLeft { public_key: bot_public_key },
+            }])
         }
     }
 }
@@ -5088,6 +5123,67 @@ mod tests {
         assert!(
             content_block_reason(&legacy_state, &stranger_pk).is_none(),
             "legacy server (no log) must never block"
+        );
+    }
+
+    #[test]
+    fn add_bot_creates_member_and_remove_deletes_it() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+
+        // Owner can add a bot.
+        let res = handle_request(
+            &conn, &owner, true,
+            ServerRequest::AddBot { coin_id: "bitcoin".into(), label: "BTC".into() },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(res.response, ServerResponse::Ok), "AddBot should return Ok");
+        assert_eq!(res.events.len(), 1, "AddBot should broadcast MemberJoined");
+        assert!(
+            matches!(&res.events[0].event, ServerEvent::MemberJoined { display_name, .. } if display_name == "BTC"),
+            "broadcast should be MemberJoined with bot label"
+        );
+
+        // Bots table and members table are both populated.
+        let bots = crate::bots::list_bots(&conn).unwrap();
+        assert_eq!(bots.len(), 1, "one bot should exist in bots table");
+        let bot_pk = bots[0].public_key.clone();
+        let all_members = members::list_members(&conn).unwrap();
+        assert!(
+            all_members.iter().any(|m| m.public_key == bot_pk && m.is_bot),
+            "bot should appear in members with is_bot=true"
+        );
+
+        // Non-owner cannot add a bot.
+        let stranger = farder_crypto::identity::Keypair::generate().public_key();
+        let denied = handle_request(
+            &conn, &stranger, false,
+            ServerRequest::AddBot { coin_id: "ethereum".into(), label: "ETH".into() },
+            "", &state,
+        ).unwrap();
+        assert!(
+            !matches!(denied.response, ServerResponse::Ok),
+            "non-owner AddBot must be denied"
+        );
+
+        // Owner can remove the bot.
+        let res2 = handle_request(
+            &conn, &owner, true,
+            ServerRequest::RemoveBot { bot_public_key: bot_pk.clone() },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(res2.response, ServerResponse::Ok), "RemoveBot should return Ok");
+        assert_eq!(res2.events.len(), 1, "RemoveBot should broadcast MemberLeft");
+        assert!(
+            matches!(&res2.events[0].event, ServerEvent::MemberLeft { public_key } if *public_key == bot_pk),
+            "broadcast should be MemberLeft for the bot's key"
+        );
+
+        // Both tables cleaned up.
+        assert!(crate::bots::list_bots(&conn).unwrap().is_empty(), "bots table should be empty");
+        assert!(
+            !members::list_members(&conn).unwrap().iter().any(|m| m.public_key == bot_pk),
+            "bot should be gone from members table"
         );
     }
 

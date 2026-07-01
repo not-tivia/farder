@@ -1,4 +1,5 @@
 pub mod attachments;
+pub mod bots;
 pub mod event_ingest;
 pub mod audit;
 pub mod auth;

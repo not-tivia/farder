@@ -175,6 +175,8 @@ pub struct MemberInfo {
     pub profile_hash: Option<String>,
     #[serde(default)]
     pub presence: Option<Presence>,
+    #[serde(default)]
+    pub is_bot: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -315,6 +317,10 @@ pub enum ServerRequest {
     /// List members currently awaiting approval (pending-approval joins). Gated to
     /// holders of KICK_MEMBERS (i.e. approvers) and the owner.
     GetPendingMembers,
+    /// Register a new server-managed crypto-ticker bot (owner only).
+    AddBot { coin_id: String, label: String },
+    /// Remove a server-managed bot by its public key (owner only).
+    RemoveBot { bot_public_key: PublicKey },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -308,6 +308,27 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE members ADD COLUMN profile_hash TEXT NULL", [])?;
     }
 
+    // Bots: mark server-managed ticker members.
+    let has_is_bot: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
+        let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).collect();
+        cols.iter().any(|c| c == "is_bot")
+    };
+    if !has_is_bot {
+        conn.execute("ALTER TABLE members ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0", [])?;
+    }
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS bots (
+            public_key BLOB PRIMARY KEY,
+            secret_key BLOB NOT NULL,
+            kind       TEXT NOT NULL,
+            coin_id    TEXT NOT NULL,
+            label      TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     // Roles: add hoist column (display role members as a named group in the member list).
     let has_role_hoist = {
         let mut stmt = conn.prepare("PRAGMA table_info(roles)")?;
