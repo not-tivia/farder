@@ -351,6 +351,14 @@ export async function deleteRole(serverId: string, roleId: number): Promise<void
   return invoke("delete_role", { serverId, roleId });
 }
 
+export async function addBot(serverId: string, coinId: string, label: string): Promise<void> {
+  return invoke("add_bot", { serverId, coinId, label });
+}
+
+export async function removeBot(serverId: string, botPublicKey: string): Promise<void> {
+  return invoke("remove_bot", { serverId, botPublicKey });
+}
+
 export async function updateRole(serverId: string, roleId: number, patch: { name?: string; permissions?: number; color?: string; position?: number; hoist?: boolean }): Promise<void> {
   return invoke<void>("update_role", { serverId, roleId, name: patch.name ?? null, permissions: patch.permissions ?? null, color: patch.color ?? null, position: patch.position ?? null, hoist: patch.hoist ?? null });
 }

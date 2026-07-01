@@ -2332,6 +2332,40 @@ pub async fn delete_role(
 }
 
 #[tauri::command]
+pub async fn add_bot(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    coin_id: String,
+    label: String,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::AddBot { coin_id, label })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_bot(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    bot_public_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&bot_public_key)?;
+    match bridge::send_request(&state, &server_id, ServerRequest::RemoveBot { bot_public_key: pk })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
 pub async fn update_role(
     state: State<'_, Arc<AppState>>,
     server_id: String,

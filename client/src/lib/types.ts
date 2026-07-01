@@ -26,7 +26,7 @@ export interface RoleInfo {
   hoist: boolean;
 }
 
-export type PresenceKind = "Music" | "Game";
+export type PresenceKind = "Music" | "Game" | "Ticker";
 export interface Presence { kind: PresenceKind; details: string; state?: string | null }
 
 export interface MemberInfo {
@@ -38,6 +38,7 @@ export interface MemberInfo {
   timeout_reason?: string | null;
   profile_hash?: string | null;
   presence?: Presence | null;
+  is_bot?: boolean;
 }
 
 export interface AttachmentInfo {

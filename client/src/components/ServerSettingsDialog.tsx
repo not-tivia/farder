@@ -4,6 +4,7 @@ import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { ChannelInfo } from "../lib/types";
 import BannedMembersTab from "./BannedMembersTab";
 import AuditLogTab from "./AuditLogTab";
+import BotsTab from "./BotsTab";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 
 // Module-level cache for own public key (same pattern as MemberSidebar)
@@ -22,7 +23,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newRoleColor, setNewRoleColor] = useState("#3169C6");
   const [error, setError] = useState<string | null>(null);
   const [serverAvatarUrl, setServerAvatarUrl] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"general" | "banned" | "audit">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "banned" | "audit" | "bots">("general");
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
 
   useEffect(() => {
@@ -190,6 +191,14 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               Audit Log
             </button>
           )}
+          {canManageServer && (
+            <button
+              className={`tab-btn${activeTab === "bots" ? " tab-btn--active" : ""}`}
+              onClick={() => setActiveTab("bots")}
+            >
+              Bots
+            </button>
+          )}
         </div>
 
         <div className="modal-body" style={{ overflowY: "auto", flex: 1 }}>
@@ -198,6 +207,9 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           )}
           {activeTab === "audit" && serverId && (
             <AuditLogTab serverId={serverId} />
+          )}
+          {activeTab === "bots" && serverId && (
+            <BotsTab serverId={serverId} />
           )}
           {activeTab === "general" && <>
           {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}

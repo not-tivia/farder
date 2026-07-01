@@ -150,6 +150,8 @@ fn main() {
             commands::list_audit_events,
             commands::create_role,
             commands::delete_role,
+            commands::add_bot,
+            commands::remove_bot,
             commands::update_role,
             commands::set_avatar,
             commands::get_avatar,

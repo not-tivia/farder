@@ -2109,3 +2109,36 @@ Return the list of members currently awaiting approval.
 **Side effects:** sends `ServerRequest::GetPendingMembers`. Gated server-side to holders of `KICK_MEMBERS` permission and the owner.
 
 **invoke name:** `"get_pending_members"` → `getPendingMembers()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `add_bot(state, server_id, coin_id, label) -> Result<(), String>`
+
+Register a new ticker bot on the server. Owner-gated server-side.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `coin_id: String` — CoinGecko coin id (e.g. `"bitcoin"`, `"ethereum"`).
+- `label: String` — display label for the bot (e.g. `"BTC"`).
+
+**Returns:** `()` on success.
+
+**Side effects:** sends `ServerRequest::AddBot`. The bot appears in the member roster with `is_bot=true` and `presence.kind="Ticker"`.
+
+**invoke name:** `"add_bot"` → `addBot()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `remove_bot(state, server_id, bot_public_key) -> Result<(), String>`
+
+Remove a ticker bot from the server. Owner-gated server-side.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `bot_public_key: String` — `vk_<hex>` string identifying the bot (use `publicKeyToString(member.public_key)` on the TS side).
+
+**Returns:** `()` on success.
+
+**Side effects:** sends `ServerRequest::RemoveBot`. The bot is removed from the member roster.
+
+**invoke name:** `"remove_bot"` → `removeBot()` in `client/src/lib/tauri-bridge.ts`.
