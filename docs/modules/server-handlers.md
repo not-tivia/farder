@@ -112,7 +112,7 @@ the primary mutation still completes.
 | `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
 |---|---|---|---|---|
 | `SendMessage` | Insert a message into a channel or DM, attach files (legacy path) | `SEND_MESSAGES` (channel); DM checks participation and block list | `messages::insert_message`, `attachments::create_message_attachment` | `NewMessage` → `Subscribers(channel_id)` |
-| `SubmitEvent` | Accept a signed event from the mesh event log (log-mode servers only). For a `MessagePosted` event: (1) validates the event against the in-memory `LogState`; (2) checks the channel exists and content length (max 8 000 chars); (3) persists the event body, derives the `messages` row, and materializes validated `AttachmentCap`s into `message_attachments` — all inside a single SQLite transaction (atomic); (4) advances the in-memory `LogState`. Each cap is validated by `event_ingest::derive_attachments`: a cap is valid iff the stored blob's `size`/`mime_type`/`uploaded_by` match AND the event author is the cap's uploader or the server owner. Invalid caps are quarantined (logged + skipped — the message still renders, just without the attachment). | Log membership + `LogState::apply` authorization | `event_ingest::store_event`, `event_ingest::derive_message_row`, `event_ingest::derive_attachments` (all in one TX) | `NewMessage` → `Subscribers(channel_id)` (when a message is derived); `EventAccepted` returned to caller |
+| `SubmitEvent` | Accept a signed event from the mesh event log (log-mode servers only). **For `MessagePosted`:** (1) validates the event against the in-memory `LogState`; (2) checks the channel exists and content length (max 8 000 chars); (3) persists the event body, derives the `messages` row, and materializes validated `AttachmentCap`s into `message_attachments` — all inside a single SQLite transaction (atomic); (4) advances `LogState`. Each cap is validated by `event_ingest::derive_attachments`: a cap is valid iff the stored blob's `size`/`mime_type`/`uploaded_by` match AND the event author is the cap's uploader or the server owner. Invalid caps are quarantined (logged + skipped — the message still renders). **For `AttachmentRedacted`:** (1) trial-applies to verify authz (uploader OR `"kick"`, hash known, not already redacted); (2) calls `attachments::redact_blob` inside the persist TX, which sets `files.redacted_by` to the requester's public-key bytes and deletes the on-disk file bytes (tombstone row); (3) advances `LogState` (`redacted_attachments` set gains the hash); (4) broadcasts `ServerEvent::AttachmentRedacted { content_hash, by_moderator }` to all clients. `by_moderator` is derived before the state advance by checking whether the requester matches the recorded uploader (`LogState::attachment_uploader`). | Log membership + `LogState::apply` authorization | `event_ingest::store_event`; `attachments::redact_blob` (all in one TX) | `NewMessage` → `Subscribers(channel_id)` (when a `MessagePosted` is derived); `AttachmentRedacted { content_hash, by_moderator }` → `All` (when an `AttachmentRedacted` is ingested); `EventAccepted` returned to caller |
 | `EditMessage` | Replace a message's content | Author-only (no permission bit) | `messages::edit_message` | `MessageEdited` → `Subscribers(channel_id)` |
 | `DeleteMessage` | Soft-delete a message | Author-only, OR `MANAGE_MESSAGES` | `messages::delete_message`; orphaned file IDs returned to caller | `MessageDeleted` → `Subscribers(channel_id)` |
 | `FetchHistory` | Paginated message fetch (cursor by `before_id`, max 500) | `READ_MESSAGES` | Read only | None |
@@ -298,6 +298,19 @@ calling `derive_attachments` for each event. Idempotent. No-op for legacy
 at server startup after `reconcile_messages`.
 
 **Returns:** the total count of attachment rows created across all repaired events.
+
+---
+
+### `sweep_redacted_bytes(conn, storage_dir) -> Result<usize>`
+
+Startup sweep: finds every `files` row where `redacted_by IS NOT NULL` and
+deletes the on-disk bytes at `attachments::content_path(storage_dir, hash)` for
+each. Heals a crash that occurred between setting `redacted_by` (inside the
+persist TX) and the file delete that follows it. Idempotent — missing on-disk
+files are silently skipped. Called once at server startup after
+`reconcile_attachments`.
+
+**Returns:** the count of on-disk files actually deleted.
 
 ---
 

@@ -1,6 +1,6 @@
 # farder-crypto
 
-> **File(s):** `crates/farder-crypto/src/identity.rs`, `key_exchange.rs`, `encryption.rs`, `media.rs`, `recovery.rs`, `lib.rs`
+> **File(s):** `crates/farder-crypto/src/identity.rs`, `key_exchange.rs`, `encryption.rs`, `media.rs`, `recovery.rs`, `event_log.rs`, `event_log_state.rs`, `lib.rs`
 > **Layer:** Crypto crate
 > **Last reviewed:** 2026-06-04
 
@@ -351,3 +351,74 @@ TypeScript types in `types.ts` use `{ bytes: number[] }` for the serde form. Cal
 ### Voice stream keys are per-call, not per-session
 
 `derive_stream_key` generates a fresh random key. `VoiceController` calls this every time it sends a `StreamKeyOffer` — but whether that is truly once per voice-channel join or repeated during re-keys is controlled by `voice/mod.rs`, not by this crate. The crypto layer itself provides no replay protection beyond the `seq` nonce counter.
+
+---
+
+## `event_log.rs` — the signed event type system
+
+`event_log.rs` defines the data structures that form the mesh server's immutable audit log. All types are `Serialize`/`Deserialize` via `rmp_serde` (MessagePack on the wire, JSON-compatible for test tooling).
+
+### `EventPayload` — variant reference
+
+| Variant | Fields | Authorization rule (enforced by `LogState::apply`) |
+|---|---|---|
+| `MessagePosted` | `channel_id`, `content`, `reply_to?`, `attachments: Vec<AttachmentCap>` | Any active (non-pending) member |
+| `DeviceAuthorized` | `cert: DeviceCert` | Identity matches the cert's identity field |
+| `InviteCreated` | `code_hash`, `max_uses`, `expires_at`, `requires_approval` | Owner or member holding `"create_invite"` |
+| `MemberJoined` | `member`, `invite` | Invite valid and unused |
+| `MemberApproved` | `member` | Owner or member holding `"kick"` |
+| `MemberRemoved` | `member` | Owner or member holding `"kick"` |
+| `MemberBanned` | `member` | Owner or member holding `"kick"` |
+| `MemberUnbanned` | `member` | Owner or member holding `"kick"` |
+| `PermissionGranted` | `member`, `capability` | Owner or member who already holds the capability |
+| `AttachmentRedacted` | `content_hash: String` | Author is the recorded uploader OR holds `"kick"`; hash must be known; not already redacted |
+
+#### `EventPayload::AttachmentRedacted { content_hash: String }`
+
+Signals that the bytes for the attachment identified by `content_hash` (hex SHA-256) should be permanently deleted and the attachment replaced by a tombstone. Authorization is content-addressed and log-derived: the server derives the uploader from `LogState::attachment_uploader`, so the right applies globally even if the attachment was uploaded to a different node.
+
+Authz rules enforced by `LogState::apply_payload_check`:
+1. `content_hash` must appear in `LogState::attachment_uploaders` (a `MessagePosted` event must have cited it first).
+2. The event author must equal the recorded uploader, OR hold the `"kick"` capability.
+3. `content_hash` must NOT already be in `LogState::redacted_attachments` (double-redact rejected).
+
+### `AttachmentCap`
+
+```
+pub struct AttachmentCap {
+    pub content_hash: String,   // hex SHA-256 of the file bytes
+    pub declared_type: String,  // MIME type, e.g. "image/png"
+    pub size: u64,
+    pub uploader: PublicKey,
+}
+```
+
+Embedded in `MessagePosted.attachments`. Validated at ingest by `event_ingest::derive_attachments` (size/mime/uploader must match the stored blob).
+
+---
+
+## `event_log_state.rs` — authorization state machine (`LogState`)
+
+`LogState` folds the ordered sequence of validated events into the current membership, capabilities, device bindings, and attachment redaction state. It is pure (no I/O); replays deterministically from any checkpoint via `LogState::replay(genesis, events)`.
+
+### New fields introduced by mesh-4b
+
+| Field | Type | Populated by | Purpose |
+|---|---|---|---|
+| `attachment_uploaders` | `HashMap<String, PublicKey>` | `MessagePosted` effect (`or_insert_with`) | Maps `content_hash` → first uploader seen; first-writer-wins. Authz basis for self-takedown. |
+| `redacted_attachments` | `HashSet<String>` | `AttachmentRedacted` effect | Set of `content_hash` values that have been redacted. Once in this set, the hash is permanently blocked from re-upload via the authz check. |
+
+### Public query methods
+
+#### `is_attachment_redacted(hash: &str) -> bool`
+
+Returns `true` if `hash` is in `redacted_attachments`. Used by `handlers.rs` to gate ingest (double-redact rejection) and optionally by the download path.
+
+#### `attachment_uploader(hash: &str) -> Option<&PublicKey>`
+
+Returns the recorded first uploader of `hash`, or `None` if no `MessagePosted` event has cited it. Used by `handlers.rs` to resolve `by_moderator` before broadcasting `ServerEvent::AttachmentRedacted`.
+
+### Integration map
+
+- **`event_log_state.rs`** is consumed by `farder-server::handlers.rs` (the `SubmitEvent` arm), which holds a single `Arc<Mutex<Option<LogState>>>` per server. `handlers.rs` acquires the mutex, trial-applies the event to validate authz, then commits to DB in a transaction, and on success replaces the mutex value with the advanced state.
+- **`event_log.rs`** is consumed by `farder-crypto` itself (signing/verification), `farder-server::event_ingest` (persistence), and `client/src-tauri/src/commands.rs` (building events on the client side).

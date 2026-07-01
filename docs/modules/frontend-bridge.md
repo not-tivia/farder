@@ -40,7 +40,26 @@ A server member. `public_key` is a `{ bytes: number[] }` object — call `public
 
 ### `MessageInfo`
 
-A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any.
+A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any. `attachments` is an `AttachmentInfo[]`.
+
+### `AttachmentInfo` (types.ts)
+
+A single attachment as returned inside `MessageInfo.attachments`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `number` | `message_attachments.id` row key. |
+| `file_id` | `number` | Server-side file ID (used with `downloadFile`). |
+| `name` | `string` | Original filename. |
+| `size` | `number` | Bytes. |
+| `mime_type` | `string` | MIME, e.g. `"image/png"`. |
+| `width` | `number \| null` | Image/video width, or `null`. |
+| `height` | `number \| null` | Image/video height, or `null`. |
+| `duration_secs` | `number \| null` | Audio/video duration, or `null`. |
+| `content_hash` | `string \| undefined` | Hex SHA-256 of the file bytes. Present on mesh-mode servers (set at upload / cap derivation). Used to call `redactAttachment`. |
+| `redacted_by_moderator` | `boolean \| null \| undefined` | Redaction state: `null` = not redacted (live); `false` = removed by the original uploader; `true` = taken down by a moderator. `undefined` means the server hasn't emitted a value (legacy server or not yet redacted). The `ATTACHMENT_REDACTED` reducer sets this field live on a matching `content_hash`. |
+
+The UI renders a placeholder (`Removed by the uploader` / `Removed by a moderator`) when `redacted_by_moderator != null`.
 
 ### `BannedMember`
 
@@ -225,6 +244,7 @@ All functions are `async` and throw on Tauri/Rust error. Every `serverId` is the
 | `uploadFile(serverId, channelId, filePath)` | `upload_file` | Uploads a local file and returns `Promise<UploadOutcome>`. `UploadOutcome.fileId` can be passed to `sendMessage` (legacy path); `contentHash`/`declaredType`/`size` are the cap fields for `submitEvent` (mesh path). |
 | `fetchUrl(serverId, url, channelId)` | `fetch_url` | Asks the server to fetch a URL and store it as a file, returning a `file_id`. Used for link-preview attachments. |
 | `downloadFile(serverId, fileId)` | `download_file` | Downloads a file by ID. Returns `DownloadResult` with an inline data URL and optional saved-to-disk path. |
+| `redactAttachment(serverId, logServerId, contentHash)` | `redact_attachment` | Builds and submits a signed `AttachmentRedacted` event to the mesh log, permanently removing the attachment's bytes from the server. `serverId` is the connection key (address); `logServerId` is the genesis hash. `contentHash` is the hex SHA-256 from `AttachmentInfo.content_hash`. Returns `{ event_hash: string, timestamp: number }`. Gate in the UI: show only on mesh servers (`logServerId` non-null), only when `redacted_by_moderator == null`, and only to the uploader (`isOwnMessage`) or a member holding `canKick` (`KICK_MEMBERS` permission). |
 | `addFavorite(serverId, fileId, originalUrl?)` | `add_favorite` | Saves a file to the local favorites store. Returns `FavoriteEntry`. |
 | `listFavorites()` | `list_favorites` | Returns all locally-saved favorites (cross-server). |
 | `removeFavorite(id)` | `remove_favorite` | Removes a favorite by its UUID. |
