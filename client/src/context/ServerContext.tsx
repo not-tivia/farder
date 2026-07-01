@@ -94,6 +94,7 @@ export type AppAction =
   | { type: "NEW_MESSAGE"; serverId: string; payload: MessageInfo }
   | { type: "MESSAGE_EDITED"; serverId: string; payload: { channelId: number; messageId: number; newContent: string; editedAt: number } }
   | { type: "MESSAGE_DELETED"; serverId: string; payload: { channelId: number; messageId: number } }
+  | { type: "ATTACHMENT_REDACTED"; serverId: string; payload: { contentHash: string; byModerator: boolean } }
   | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean; fileId?: number } }
   | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; fileId?: number } }
   | { type: "MEMBER_JOINED"; serverId: string; payload: MemberInfo }
@@ -228,6 +229,20 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ...state,
         messages: { ...state.messages, [channelId]: msgs.filter((m) => m.id !== messageId) },
       };
+    }
+    case "ATTACHMENT_REDACTED": {
+      const { contentHash, byModerator } = action.payload;
+      const messages: typeof state.messages = {};
+      for (const [chId, msgs] of Object.entries(state.messages)) {
+        messages[Number(chId)] = msgs.map((m) => {
+          if (!m.attachments?.some((a) => a.content_hash === contentHash)) return m;
+          return { ...m, attachments: m.attachments.map((a) =>
+            a.content_hash === contentHash
+              ? { ...a, redacted_by_moderator: byModerator }
+              : a) };
+        });
+      }
+      return { ...state, messages };
     }
     case "REACTION_ADDED": {
       const { channelId, messageId, emoji, me, fileId } = action.payload;

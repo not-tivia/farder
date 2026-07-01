@@ -56,6 +56,7 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `NewMessage` | `server:new_message` | `message` | `useServerEvents` → `NEW_MESSAGE` |
 | `MessageEdited` | `server:message_edited` | `message_id, channel_id, new_content, edited_at` | `MESSAGE_EDITED` |
 | `MessageDeleted` | `server:message_deleted` | `message_id, channel_id` | `MESSAGE_DELETED` |
+| `AttachmentRedacted` | `server:attachment_redacted` | `content_hash, by_moderator` | `ATTACHMENT_REDACTED` |
 | `ReactionAdded` | `server:reaction_added` | `message_id, channel_id, emoji, public_key, file_id` | `REACTION_ADDED` |
 | `ReactionRemoved` | `server:reaction_removed` | (same) | `REACTION_REMOVED` |
 | `MemberJoined` | `server:member_joined` | `public_key, display_name` | `getMembers` refresh |

@@ -196,6 +196,12 @@ export function useServerEvents(): void {
       });
     }).then(safePush);
 
+    listen("server:attachment_redacted", (e) => {
+      const data = e.payload as { server_id: string; content_hash: string; by_moderator: boolean };
+      if (data.server_id !== activeRef.current) return;
+      dispatch({ type: "ATTACHMENT_REDACTED", serverId: data.server_id, payload: { contentHash: data.content_hash, byModerator: data.by_moderator } });
+    }).then(safePush);
+
     listen("server:reaction_added", (e) => {
       const data = e.payload as ReactionAddedPayload;
       const serverId = data.server_id;

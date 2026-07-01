@@ -116,6 +116,7 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | `NEW_MESSAGE` | Appends one message; deduplicates by id |
 | `MESSAGE_EDITED` | Patches `content` and `edited_at` on the matching message |
 | `MESSAGE_DELETED` | Removes the matching message |
+| `ATTACHMENT_REDACTED` | Sets `redacted_by_moderator` on every `AttachmentInfo` whose `content_hash` matches, across all channels; leaves the message/attachment in place (placeholder stays) |
 | `REACTION_ADDED` | Increments a reaction counter (or creates a new reaction entry); sets `me = true` if the reactor is the local user |
 | `REACTION_REMOVED` | Decrements a reaction counter; removes the entry when count reaches 0 |
 | `HIGHLIGHT_MESSAGE` | Sets `highlightMessageId` |
@@ -180,6 +181,7 @@ Two module-level caches are populated at import time (not inside the effect): `n
 | `server:new_message` | none (DM decrypt path runs for all servers; unread increment runs for non-active) | `NEW_MESSAGE` (active server) or `INCREMENT_UNREAD` (background) | DM messages are decrypted via `api.dmDecrypt` before dispatch; on decryption failure the ciphertext is dispatched as-is. Triggers `api.showNotification` for background servers if `notifPrefs` allow it. |
 | `server:message_edited` | active only | `MESSAGE_EDITED` | |
 | `server:message_deleted` | active only | `MESSAGE_DELETED` | |
+| `server:attachment_redacted` | active only | `ATTACHMENT_REDACTED` | Scans all channels' message lists for attachments matching `content_hash`; sets `redacted_by_moderator` in-place |
 | `server:reaction_added` | active only | `REACTION_ADDED` | Sets `me: true` if `data.public_key === cachedOwnPk` |
 | `server:reaction_removed` | active only | `REACTION_REMOVED` | |
 | `server:member_banned` | none | dispatches a `farder:banned-list-changed` DOM `CustomEvent` | Consumed by the BannedList component directly via `window.addEventListener` |
