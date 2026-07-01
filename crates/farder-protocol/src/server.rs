@@ -29,7 +29,7 @@ pub enum TrackKind {
 /// What a member is doing right now (ephemeral activity). Source-agnostic so a
 /// future game source produces the same shape as the music source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum PresenceKind { Music, Game }
+pub enum PresenceKind { Music, Game, Ticker }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Presence {

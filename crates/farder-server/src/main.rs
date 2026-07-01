@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
     }
 
     let _retention = retention::spawn_retention_task(Arc::clone(&state), args.retention_interval);
+    let _bot_poller = farder_server::bots::spawn_bot_poll_task(Arc::clone(&state), 60);
 
     if let Some(relay_addr) = args.relay {
         let server_id = farder_server::relay::load_or_generate_server_id(&args.data_dir)?;
