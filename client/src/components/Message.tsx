@@ -11,7 +11,7 @@ import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
 import RenderedMessageContent from "./RenderedMessageContent";
 import TimedOutBadge from "./TimedOutBadge";
-import { getActorPermissions, isModerator } from "../lib/permissions";
+import { getActorPermissions, isModerator, hasPermission, PERMISSIONS } from "../lib/permissions";
 import { renderUnicodeEmoji } from "../lib/unicodeEmoji";
 import { TranslatedRow } from "./TranslatedRow";
 import { TranslationDownloadDialog } from "./TranslationDownloadDialog";
@@ -283,6 +283,8 @@ export default function Message({ message, memberNames, grouped = false, serverI
     ? getActorPermissions(activeServer?.members ?? [], roles, ownPk, activeServer?.ownerPublicKey ?? null)
     : { bits: 0n };
   const showModBadges = isModerator(viewerBits);
+  const canTakeDown = hasPermission(viewerBits, PERMISSIONS.KICK_MEMBERS);
+  const logServerId = activeServer?.logServerId ?? null;
 
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
@@ -456,6 +458,9 @@ export default function Message({ message, memberNames, grouped = false, serverI
                         messageContent={message.content}
                         serverId={serverId}
                         messageActions={messageActions}
+                        logServerId={logServerId}
+                        isOwnMessage={isOwnMessage}
+                        canTakeDown={canTakeDown}
                       />
                     ))}
                   </div>
@@ -637,11 +642,17 @@ function AttachmentDisplay({
   messageContent,
   serverId,
   messageActions,
+  logServerId,
+  isOwnMessage,
+  canTakeDown,
 }: {
   attachment: AttachmentInfo;
   messageContent: string;
   serverId: string;
   messageActions?: { label: string; onClick: () => void }[];
+  logServerId: string | null;
+  isOwnMessage: boolean;
+  canTakeDown: boolean;
 }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -707,6 +718,16 @@ function AttachmentDisplay({
     setMenu(null);
   }
 
+  if (attachment.redacted_by_moderator != null) {
+    const who = attachment.redacted_by_moderator ? "a moderator" : "the uploader";
+    return (
+      <div className="attachment-item">
+        <span>&#x1F6AB;</span>
+        <span>Removed by {who}</span>
+      </div>
+    );
+  }
+
   if (isImage && gated) {
     // Reserve the image's real footprint so loading doesn't shift layout,
     // capped to the same 400x300 max the loaded <img> uses.
@@ -768,6 +789,15 @@ function AttachmentDisplay({
               {/* "Favorite" was removed: it wrote to a legacy favorites store
                   nothing in the UI reads anymore — the book replaced it. */}
               <div className="context-menu-item" onClick={() => { void handleSaveToBook(); }}>Save to book</div>
+              {logServerId && attachment.redacted_by_moderator == null && attachment.content_hash && (isOwnMessage || canTakeDown) && (
+                <div className="context-menu-item" onClick={async () => {
+                  try { await api.redactAttachment(serverId, logServerId, attachment.content_hash!); }
+                  catch (e) { console.error("[attachment:redact]", e); }
+                  setMenu(null);
+                }}>
+                  {isOwnMessage ? "Remove" : "Take down"}
+                </div>
+              )}
               {menu.isRightClick && messageActions && messageActions.length > 0 && (
                 <>
                   <div className="context-menu-divider" />
