@@ -256,6 +256,7 @@ fn main() {
             commands::get_presence_music,
             commands::set_presence_music,
             commands::submit_event,
+            commands::redact_attachment,
             commands::join_log_server,
             commands::approve_member,
             commands::deny_member,

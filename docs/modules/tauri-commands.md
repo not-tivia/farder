@@ -2002,6 +2002,23 @@ AttachmentCapInput { content_hash: String, declared_type: String, size: u64 }
 
 ---
 
+### `redact_attachment(state, server_id, log_server_id, content_hash) -> Result<EventAcceptedResult, String>`
+
+**What it does:** builds and signs an `AttachmentRedacted` event using the local device subkey, then submits it to the server via `ServerRequest::SubmitEvent`. On first use for a given `(log_server_id, device)` pair, automatically submits a `DeviceAuthorized` event first (same as `submit_event`). Chain state — `next_seq`, `last_event_hash`, `lamport`, `authorized` — is persisted in `~/.farder/servers/<log_server_id>/device_state.json` and is advanced ONLY after `EventAccepted` is returned by the server.
+
+**Params:**
+- `server_id: String` — connection key (address) — routes the request to the right server.
+- `log_server_id: String` — genesis hash — stamps `EventCore.server_id` and keys the device chain.
+- `content_hash: String` — hex SHA-256 of the attachment bytes to redact.
+
+**Returns:** `{ event_hash: String, timestamp: u64 }` (`EventAcceptedResult`).
+
+**ServerRequest:** `SubmitEvent { event }` → `ServerResponse::EventAccepted { event_hash, timestamp }`.
+
+**invoke name:** `"redact_attachment"` → `redactAttachment()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
 ### `join_log_server(state, server_id, log_server_id, invite_code) -> Result<(), String>`
 
 **What it does:** emits a self-signed `MemberJoined` event so the joining client

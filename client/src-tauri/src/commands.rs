@@ -3963,6 +3963,76 @@ async fn event_send_submit(
 }
 
 // ---------------------------------------------------------------------------
+// redact_attachment — moderator redacts an attachment from the log
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn redact_attachment(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — stamps EventCore.server_id + keys the device chain
+    content_hash: String,
+) -> Result<EventAcceptedResult, String> {
+    use farder_crypto::event_log::EventPayload;
+
+    // Identity (must be unlocked) + device key.
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair()?;
+
+    // Serialize all chain writes: load → mutate → save must not interleave with
+    // concurrent commands (join_log_server, submit_event) that touch the same
+    // per-(server,device) state file.  tokio::sync::Mutex is held across awaits.
+    let _chain_guard = state.device_chain_lock.lock().await;
+
+    // Per-(server, device) chain state. Keyed by the log server_id (genesis hash).
+    let mut ds = crate::device::DeviceState::load(&log_server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    // 1. First time on this server: authorize the device.
+    if !ds.authorized {
+        let cert = crate::device::device_cert(&identity, &device);
+        let da = event_build_next(
+            &device,
+            &identity,
+            &log_server_id,
+            ds.last_event_hash.clone(),
+            ds.next_seq,
+            ds.lamport,
+            EventPayload::DeviceAuthorized { cert },
+        );
+        event_send_submit(&state, &server_id, &da).await?;
+        ds.next_seq = da.core.seq + 1;
+        ds.last_event_hash = Some(da.hash());
+        ds.lamport = da.core.lamport;
+        ds.authorized = true;
+        ds.save(&log_server_id)?;
+    }
+
+    // 2. Build + submit the AttachmentRedacted event, chaining from the stored head.
+    let redact = event_build_next(
+        &device,
+        &identity,
+        &log_server_id,
+        ds.last_event_hash.clone(),
+        ds.next_seq,
+        ds.lamport,
+        EventPayload::AttachmentRedacted { content_hash },
+    );
+    let result = event_send_submit(&state, &server_id, &redact).await?;
+
+    // 3. Advance + persist chain state ONLY on confirmed acceptance.
+    ds.next_seq = redact.core.seq + 1;
+    ds.last_event_hash = Some(redact.hash());
+    ds.lamport = redact.core.lamport;
+    ds.save(&log_server_id)?;
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // join_log_server — joiner emits MemberJoined so they can post to the log
 // ---------------------------------------------------------------------------
 

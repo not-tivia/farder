@@ -49,6 +49,8 @@ export interface AttachmentInfo {
   width: number | null;
   height: number | null;
   duration_secs: number | null;
+  content_hash?: string;
+  redacted_by_moderator?: boolean | null;
 }
 
 export interface ReactionGroup {

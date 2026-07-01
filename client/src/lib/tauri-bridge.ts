@@ -186,6 +186,10 @@ export async function submitEvent(
   return invoke("submit_event", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null, attachments });
 }
 
+export async function redactAttachment(serverId: string, logServerId: string, contentHash: string): Promise<{ event_hash: string; timestamp: number }> {
+  return invoke("redact_attachment", { serverId, logServerId, contentHash });
+}
+
 export async function fetchHistory(serverId: string, channelId: number, beforeId?: number, limit?: number): Promise<MessageInfo[]> {
   return invoke<MessageInfo[]>("fetch_history", { serverId, channelId, beforeId: beforeId ?? null, limit: limit ?? null });
 }
