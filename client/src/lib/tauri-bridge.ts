@@ -359,6 +359,13 @@ export async function removeBot(serverId: string, botPublicKey: string): Promise
   return invoke("remove_bot", { serverId, botPublicKey });
 }
 
+export async function getBotPollInterval(serverId: string): Promise<number> {
+  return invoke("get_bot_poll_interval", { serverId });
+}
+export async function setBotPollInterval(serverId: string, secs: number): Promise<void> {
+  return invoke("set_bot_poll_interval", { serverId, secs });
+}
+
 export async function updateRole(serverId: string, roleId: number, patch: { name?: string; permissions?: number; color?: string; position?: number; hoist?: boolean }): Promise<void> {
   return invoke<void>("update_role", { serverId, roleId, name: patch.name ?? null, permissions: patch.permissions ?? null, color: patch.color ?? null, position: patch.position ?? null, hoist: patch.hoist ?? null });
 }

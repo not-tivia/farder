@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer } from "../context/ServerContext";
 import { publicKeyToString, memberDisplayName } from "../lib/types";
@@ -26,6 +26,10 @@ export default function BotsTab({ serverId }: Props) {
   const [customCoinId, setCustomCoinId] = useState("");
   const [customLabel, setCustomLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [interval, setIntervalSecs] = useState<number>(60);
+  useEffect(() => {
+    api.getBotPollInterval(serverId).then(setIntervalSecs).catch(() => {});
+  }, [serverId]);
 
   const coinId = isCustom ? customCoinId.trim() : selectedMajor;
   const label = isCustom
@@ -56,6 +60,26 @@ export default function BotsTab({ serverId }: Props) {
       <div className="connect-section-title" style={{ marginBottom: 8 }}>Bots</div>
 
       {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
+
+      <div style={{ display: "flex", gap: 6, alignItems: "flex-end", marginBottom: 10 }}>
+        <div>
+          <label className="connect-label">Update interval (seconds, min 30)</label>
+          <input
+            className="connect-input"
+            type="number"
+            min={30}
+            value={interval}
+            onChange={(e) => setIntervalSecs(Number(e.target.value))}
+          />
+        </div>
+        <button
+          className="organizer-btn"
+          onClick={async () => {
+            try { await api.setBotPollInterval(serverId, Math.max(30, Math.floor(interval))); }
+            catch (e) { console.error("[bots:set-interval]", e); }
+          }}
+        >Save</button>
+      </div>
 
       {/* Existing bots */}
       {bots.length === 0 && (

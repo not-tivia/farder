@@ -152,6 +152,8 @@ fn main() {
             commands::delete_role,
             commands::add_bot,
             commands::remove_bot,
+            commands::get_bot_poll_interval,
+            commands::set_bot_poll_interval,
             commands::update_role,
             commands::set_avatar,
             commands::get_avatar,

@@ -2366,6 +2366,22 @@ pub async fn remove_bot(
 }
 
 #[tauri::command]
+pub async fn get_bot_poll_interval(state: State<'_, Arc<AppState>>, server_id: String) -> Result<u64, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetBotPollInterval).await.map_err(|e| e.to_string())? {
+        ServerResponse::BotPollInterval { secs } => Ok(secs),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn set_bot_poll_interval(state: State<'_, Arc<AppState>>, server_id: String, secs: u64) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::SetBotPollInterval { secs }).await.map_err(|e| e.to_string())? {
+        ServerResponse::Ok => Ok(()),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
 pub async fn update_role(
     state: State<'_, Arc<AppState>>,
     server_id: String,
