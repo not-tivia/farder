@@ -57,7 +57,8 @@ pub fn parse_webhook_payload(body: &[u8]) -> Result<WebhookPayload> {
     let username = v
         .get("username")
         .and_then(|u| u.as_str())
-        .map(|s| s.trim().to_string())
+        // Cap the display-name override (untrusted external input) at Discord's 80-char limit.
+        .map(|s| s.trim().chars().take(80).collect::<String>())
         .filter(|s| !s.is_empty());
     Ok(WebhookPayload { content, username })
 }
@@ -164,7 +165,7 @@ pub async fn deliver(
 
     // All DB work is done inside a synchronous block so the MutexGuard is
     // dropped before we hit the broadcast await.
-    let (channel_id, author, message) = {
+    let (channel_id, message) = {
         let conn = state.db.lock().unwrap();
 
         let Some(wh) = find_by_token(&conn, token).ok().flatten() else {
@@ -198,10 +199,9 @@ pub async fn deliver(
             _ => return WebhookAck::BadRequest,
         };
 
-        (wh.channel_id, wh.public_key, message)
+        (wh.channel_id, message)
     };
     // Lock is released here — safe to await.
-    let _ = author; // suppress unused warning; author key is embedded in message
 
     crate::connection::broadcast_event(
         state,
@@ -233,6 +233,14 @@ mod tests {
         let p2 = parse_webhook_payload(br#"{"content":"only"}"#).unwrap();
         assert_eq!(p2.content, "only");
         assert!(p2.username.is_none());
+    }
+
+    #[test]
+    fn parse_caps_username_length() {
+        let long = "x".repeat(500);
+        let body = format!(r#"{{"content":"c","username":"{long}"}}"#);
+        let p = parse_webhook_payload(body.as_bytes()).unwrap();
+        assert_eq!(p.username.as_deref().map(|u| u.chars().count()), Some(80));
     }
 
     #[test]
