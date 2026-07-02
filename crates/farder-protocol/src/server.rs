@@ -126,6 +126,10 @@ pub struct MessageInfo {
     pub reactions: Vec<ReactionGroup>,
     pub thread_id: Option<u64>,
     pub thread_message_count: Option<u32>,
+    /// Display-name override for webhook-posted messages (non-member author).
+    /// None for all regular member messages.
+    #[serde(default)]
+    pub author_name_override: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -225,6 +229,9 @@ pub enum RelayStreamRole {
     /// A file-transfer stream for an already-authenticated session, identified
     /// by the session token the server issued at login.
     Session { token: Vec<u8> },
+    /// An incoming webhook delivery: the relay forwards the raw HTTP body and
+    /// the webhook token to the server. The server validates, parses, and posts.
+    Webhook { token: String, body: Vec<u8> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -615,6 +622,7 @@ mod tests {
             reactions: vec![],
             thread_id: None,
             thread_message_count: None,
+            author_name_override: None,
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -654,6 +662,7 @@ mod tests {
                 reactions: vec![],
                 thread_id: None,
                 thread_message_count: None,
+                author_name_override: None,
             },
         };
         let frame = ServerFrame::Event(event);
@@ -989,6 +998,7 @@ mod tests {
             reactions: vec![],
             thread_id: None,
             thread_message_count: None,
+            author_name_override: None,
         };
         let bytes = codec::encode(&msg).unwrap();
         let decoded: MessageInfo = codec::decode(&bytes).unwrap();

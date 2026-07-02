@@ -394,6 +394,32 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE files ADD COLUMN redacted_by BLOB", [])?;
     }
 
+    // Webhooks: incoming-webhook delivery (token-authenticated external POST → message).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS webhooks (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            token      TEXT    NOT NULL UNIQUE,
+            name       TEXT    NOT NULL,
+            public_key BLOB    NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // Migration: author_name_override for webhook-posted messages (non-member display name).
+    let has_author_name_override: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "author_name_override")
+    };
+    if !has_author_name_override {
+        conn.execute("ALTER TABLE messages ADD COLUMN author_name_override TEXT", [])?;
+    }
+
     // Bot alerts + subscriptions (price-alert engine, Task 2).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS bot_alerts (

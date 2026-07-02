@@ -8,6 +8,7 @@
 
 use crate::connection::{authenticate, cleanup_session, handle_auxiliary_stream, main_loop};
 use crate::state::ServerState;
+use crate::webhooks::WebhookAck;
 use anyhow::{Context, Result};
 use farder_protocol::{codec, messages::Message, server::RelayStreamRole};
 use quinn::{Endpoint, RecvStream, SendStream};
@@ -155,6 +156,9 @@ async fn serve_relay_stream(state: Arc<ServerState>, relay_conn: quinn::Connecti
             // auxiliary streams are authenticated by their session token, not the handle.
             run_relay_aux(state, send, recv, token).await
         }
+        RelayStreamRole::Webhook { token, body } => {
+            run_relay_webhook(state, send, &token, &body).await
+        }
     }
 }
 
@@ -188,6 +192,26 @@ async fn run_relay_aux(state: Arc<ServerState>, send: SendStream, recv: RecvStre
     let token: [u8; 32] = token.as_slice().try_into().map_err(|_| anyhow::anyhow!("bad session token length"))?;
     let (member_key, is_owner) = state.lookup_session(&token).await.ok_or_else(|| anyhow::anyhow!("unknown or expired session token"))?;
     handle_auxiliary_stream(&state, &member_key, is_owner, send, recv).await
+}
+
+/// Handle a webhook delivery stream: validate + post the message, then write a
+/// 2-byte big-endian HTTP-ish status code back over the stream and close it.
+async fn run_relay_webhook(
+    state: Arc<ServerState>,
+    mut send: SendStream,
+    token: &str,
+    body: &[u8],
+) -> Result<()> {
+    let ack = crate::webhooks::deliver(&state, token, body).await;
+    let code: u16 = match ack {
+        WebhookAck::Ok => 204,
+        WebhookAck::Unauthorized => 401,
+        WebhookAck::BadRequest => 400,
+        WebhookAck::TooLarge => 413,
+    };
+    let _ = write_framed(&mut send, &code.to_be_bytes()).await;
+    let _ = send.finish();
+    Ok(())
 }
 
 #[cfg(test)]

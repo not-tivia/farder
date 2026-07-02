@@ -7,8 +7,9 @@ use farder_protocol::server::{MessageInfo, DELETED_USER_KEY};
 use crate::db::now;
 
 /// Shared SELECT column list for messages — must match `row_to_message_info` index order.
+/// author_name_override is appended last (index 8) so all prior indices stay stable.
 pub const MSG_SELECT: &str =
-    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned";
+    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned, author_name_override";
 
 pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo> {
     let id: i64 = row.get(0)?;
@@ -19,6 +20,7 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
     let edited_at: Option<i64> = row.get(5)?;
     let reply_to: Option<i64> = row.get(6)?;
     let pinned: i64 = row.get(7)?;
+    let author_name_override: Option<String> = row.get(8)?;
 
     let arr: [u8; 32] = author_bytes
         .try_into()
@@ -37,6 +39,7 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
         reactions: vec![],
         thread_id: None,
         thread_message_count: None,
+        author_name_override,
     })
 }
 
@@ -81,6 +84,36 @@ pub fn insert_message_with_ts(
         params![id as i64, content],
     )?;
 
+    Ok(id)
+}
+
+/// Like `insert_message` but also sets `author_name_override` (for webhook-posted messages).
+/// Pass `None` to leave the override NULL (same behaviour as `insert_message`).
+pub fn insert_message_with_author_name(
+    conn: &Connection,
+    channel_id: u64,
+    author: &PublicKey,
+    content: &str,
+    reply_to: Option<u64>,
+    author_name_override: Option<&str>,
+) -> Result<u64> {
+    conn.execute(
+        "INSERT INTO messages (channel_id, author, content, timestamp, reply_to, author_name_override) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            channel_id as i64,
+            author.as_bytes().as_slice(),
+            content,
+            now() as i64,
+            reply_to.map(|r| r as i64),
+            author_name_override,
+        ],
+    )?;
+    let id = conn.last_insert_rowid() as u64;
+    conn.execute(
+        "INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)",
+        params![id as i64, content],
+    )?;
     Ok(id)
 }
 
