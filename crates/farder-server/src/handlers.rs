@@ -1927,6 +1927,17 @@ pub fn handle_request(
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
                 return Ok(denied);
             }
+            let coin_id = coin_id.trim().to_lowercase();
+            if coin_id.is_empty()
+                || coin_id.len() > 64
+                || !coin_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                return err("invalid coin id (use a CoinGecko id: lowercase letters, digits, hyphens)");
+            }
+            let label = label.trim().to_string();
+            if label.is_empty() || label.len() > 64 {
+                return err("bot label must be 1-64 characters");
+            }
             let kp = farder_crypto::identity::Keypair::generate();
             let pk = kp.public_key();
             members::register_bot_member(conn, &pk, &label)?;
@@ -1951,6 +1962,18 @@ pub fn handle_request(
                 target: EventTarget::All,
                 event: ServerEvent::MemberLeft { public_key: bot_public_key },
             }])
+        }
+
+        ServerRequest::SetBotPollInterval { secs } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            crate::bots::set_poll_interval(conn, secs)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::GetBotPollInterval => {
+            ok(ServerResponse::BotPollInterval { secs: crate::bots::get_poll_interval(conn) })
         }
     }
 }

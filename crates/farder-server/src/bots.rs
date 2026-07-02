@@ -50,6 +50,30 @@ pub fn remove_bot(conn: &Connection, pk: &PublicKey) -> Result<()> {
 #[derive(Clone, Debug)]
 pub struct PriceInfo { pub usd: f64, pub change_24h: f64 }
 
+pub const POLL_INTERVAL_FLOOR: u64 = 30;
+pub const POLL_INTERVAL_DEFAULT: u64 = 60;
+
+/// The current per-server bot poll interval (seconds), floored at POLL_INTERVAL_FLOOR,
+/// defaulting to POLL_INTERVAL_DEFAULT when unset.
+pub fn get_poll_interval(conn: &Connection) -> u64 {
+    crate::db::get_setting(conn, "bot_poll_interval")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| v.max(POLL_INTERVAL_FLOOR))
+        .unwrap_or(POLL_INTERVAL_DEFAULT)
+}
+
+/// Set the poll interval (clamped to >= POLL_INTERVAL_FLOOR).
+pub fn set_poll_interval(conn: &Connection, secs: u64) -> anyhow::Result<()> {
+    crate::db::set_setting(conn, "bot_poll_interval", &secs.max(POLL_INTERVAL_FLOOR).to_string())
+}
+
+/// Presence for a bot whose coin CoinGecko did not return (bad/unknown id).
+pub fn unknown_coin_presence() -> Presence {
+    Presence { kind: PresenceKind::Ticker, details: "unknown coin".into(), state: None }
+}
+
 /// Compose a ticker presence: details = "$<price> <arrow><pct>%", state = "24h".
 pub fn ticker_presence(p: &PriceInfo) -> Presence {
     let arrow = if p.change_24h >= 0.0 { '\u{25B2}' } else { '\u{25BC}' }; // up / down
@@ -107,55 +131,58 @@ pub async fn fetch_prices(coin_ids: &[String]) -> anyhow::Result<std::collection
 }
 
 /// Spawns the bot-price poll task. Mirrors `retention::spawn_retention_task`.
-/// Ticks every `interval_secs` (min 15 s). On each tick:
+/// Polls immediately then sleeps the configured interval (live-read each cycle so
+/// changes apply without restart). On each poll cycle:
 ///   1. Snapshots the bot list — drops the DB lock BEFORE any await.
 ///   2. Coalesces distinct coin ids into a single CoinGecko fetch.
 ///   3. Per bot: stores the updated Presence and broadcasts MemberPresenceUpdated
 ///      to all connected clients via the existing `connection::broadcast_event` helper.
-pub fn spawn_bot_poll_task(state: Arc<ServerState>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+///      After a SUCCESSFUL fetch, a coin absent from the response is marked unknown.
+pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        tracing::info!(interval_secs = interval_secs.max(15), "bot price poller started");
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(15)));
+        tracing::info!("bot price poller started");
         loop {
-            interval.tick().await;
-            // 1. Snapshot bots — the Mutex<Connection> lock is released before any .await.
+            // --- poll cycle (immediate on first iteration) ---
             let bots = {
                 let conn = state.db.lock().unwrap();
                 list_bots(&conn).unwrap_or_default()
             };
-            if bots.is_empty() { continue; }
-            // 2. Coalesce distinct coin ids; one network call for all bots.
-            let mut ids: Vec<String> = bots.iter().map(|b| b.coin_id.clone()).collect();
-            ids.sort(); ids.dedup();
-            tracing::info!(bots = bots.len(), coins = ?ids, "bot poller: fetching prices");
-            let prices = match fetch_prices(&ids).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "bot price fetch failed; keeping last prices");
-                    continue;
-                }
-            };
-            tracing::info!(fetched = prices.len(), "bot poller: prices fetched, broadcasting");
-            // 3. Per bot: compose + store + broadcast (skip coins absent from the response).
-            for b in &bots {
-                if let Some(pi) = prices.get(&b.coin_id) {
-                    let presence = ticker_presence(pi);
-                    {
-                        state.presences.write().unwrap()
-                            .insert(*b.public_key.as_bytes(), presence.clone());
+            if !bots.is_empty() {
+                let mut ids: Vec<String> = bots.iter().map(|b| b.coin_id.clone()).collect();
+                ids.sort(); ids.dedup();
+                tracing::info!(bots = bots.len(), coins = ?ids, "bot poller: fetching prices");
+                match fetch_prices(&ids).await {
+                    Ok(prices) => {
+                        tracing::info!(fetched = prices.len(), "bot poller: prices fetched, broadcasting");
+                        for b in &bots {
+                            // A coin CoinGecko omitted (after a SUCCESSFUL fetch) is unknown/typo'd.
+                            let presence = match prices.get(&b.coin_id) {
+                                Some(pi) => ticker_presence(pi),
+                                None => unknown_coin_presence(),
+                            };
+                            {
+                                state.presences.write().unwrap()
+                                    .insert(*b.public_key.as_bytes(), presence.clone());
+                            }
+                            crate::connection::broadcast_event(
+                                &state,
+                                crate::events::EventTarget::All,
+                                ServerEvent::MemberPresenceUpdated {
+                                    public_key: b.public_key.clone(),
+                                    presence: Some(presence),
+                                },
+                            ).await;
+                        }
                     }
-                    // Reuse the existing public broadcast helper (DRY — no separate broadcast_all).
-                    crate::connection::broadcast_event(
-                        &state,
-                        crate::events::EventTarget::All,
-                        ServerEvent::MemberPresenceUpdated {
-                            public_key: b.public_key.clone(),
-                            presence: Some(presence),
-                        },
-                    ).await;
+                    Err(e) => tracing::warn!(error = %e, "bot price fetch failed; keeping last prices"),
                 }
             }
+            // --- sleep the current (live-read) interval ---
+            let secs = {
+                let conn = state.db.lock().unwrap();
+                get_poll_interval(&conn)
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         }
     })
 }
@@ -176,6 +203,16 @@ mod ticker_tests {
 mod tests {
     use super::*;
     use farder_crypto::identity::Keypair;
+
+    #[test]
+    fn poll_interval_defaults_and_clamps() {
+        let conn = crate::db::open_in_memory().unwrap();
+        assert_eq!(get_poll_interval(&conn), POLL_INTERVAL_DEFAULT); // unset -> default
+        set_poll_interval(&conn, 120).unwrap();
+        assert_eq!(get_poll_interval(&conn), 120);
+        set_poll_interval(&conn, 5).unwrap();                        // below floor -> clamped
+        assert_eq!(get_poll_interval(&conn), POLL_INTERVAL_FLOOR);
+    }
 
     #[test]
     fn register_list_remove_roundtrip() {

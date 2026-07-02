@@ -321,6 +321,10 @@ pub enum ServerRequest {
     AddBot { coin_id: String, label: String },
     /// Remove a server-managed bot by its public key (owner only).
     RemoveBot { bot_public_key: PublicKey },
+    /// Set the bot price poll interval in seconds (MANAGE_SERVER gated).
+    SetBotPollInterval { secs: u64 },
+    /// Query the current bot price poll interval in seconds.
+    GetBotPollInterval,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -370,6 +374,7 @@ pub enum ServerResponse {
     EventAccepted { event_hash: String, timestamp: u64 },
     MembershipStatus { status: String },
     PendingMembers { members: Vec<MemberInfo> },
+    BotPollInterval { secs: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

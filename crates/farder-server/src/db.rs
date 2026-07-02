@@ -187,6 +187,11 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (channel_id, user_key),
             FOREIGN KEY (channel_id) REFERENCES channels(id)
         );
+
+        CREATE TABLE IF NOT EXISTS server_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     ")?;
 
     // Migration: add thread_parent_message_id column to channels if missing.
@@ -417,6 +422,22 @@ pub fn open_file(path: &str) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     init_schema(&conn)?;
     Ok(conn)
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO server_settings (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn get_setting(conn: &Connection, key: &str) -> anyhow::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row("SELECT value FROM server_settings WHERE key = ?1", rusqlite::params![key], |r| r.get::<_, String>(0))
+        .optional()?)
 }
 
 #[cfg(test)]
