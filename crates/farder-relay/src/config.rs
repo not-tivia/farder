@@ -10,4 +10,6 @@ pub struct Config {
     pub max_connections: u32,
     #[arg(long, default_value = "./relay-data")]
     pub data_dir: std::path::PathBuf,
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    pub webhook_bind: SocketAddr,
 }

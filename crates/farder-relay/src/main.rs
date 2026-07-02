@@ -5,6 +5,7 @@ mod limits;
 mod listener;
 mod proxy;
 mod router;
+mod webhook;
 
 use anyhow::Result;
 use clap::Parser;
@@ -31,6 +32,13 @@ async fn main() -> Result<()> {
     let connections = router::new_state();
     let preview = router::new_preview_context()?;
     let embed = router::new_embed_context()?;
+    let webhook_state = connections.clone();
+    let webhook_limiter = std::sync::Arc::new(crate::limits::ConnectionLimiter::new(usize::MAX, 60, std::time::Duration::from_secs(60)));
+    tokio::spawn(async move {
+        if let Err(e) = webhook::serve(config.webhook_bind, webhook_state, webhook_limiter).await {
+            tracing::error!("webhook server exited: {}", e);
+        }
+    });
     router::serve(endpoint, connections, limiter, preview, embed).await?;
     Ok(())
 }

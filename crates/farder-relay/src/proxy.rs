@@ -148,10 +148,20 @@ async fn read_capped(recv: &mut RecvStream) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-async fn write_framed(send: &mut SendStream, data: &[u8]) -> Result<()> {
+pub(crate) async fn write_framed(send: &mut SendStream, data: &[u8]) -> Result<()> {
     send.write_all(&(data.len() as u32).to_be_bytes()).await?;
     send.write_all(data).await?;
     Ok(())
+}
+
+pub(crate) async fn read_framed(recv: &mut RecvStream) -> Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await?;
+    let n = u32::from_be_bytes(len_buf) as usize;
+    anyhow::ensure!(n <= 16 * 1024 * 1024, "relay frame too large: {} bytes", n);
+    let mut buf = vec![0u8; n];
+    recv.read_exact(&mut buf).await?;
+    Ok(buf)
 }
 
 /// Speak the preview exchange on an established (send, recv) pair the server
