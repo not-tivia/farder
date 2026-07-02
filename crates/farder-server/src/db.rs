@@ -394,6 +394,29 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE files ADD COLUMN redacted_by BLOB", [])?;
     }
 
+    // Bot alerts + subscriptions (price-alert engine, Task 2).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS bot_alerts (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_public_key BLOB    NOT NULL,
+            metric         TEXT    NOT NULL,
+            comparator     TEXT    NOT NULL,
+            threshold      REAL    NOT NULL,
+            armed          INTEGER NOT NULL DEFAULT 1,
+            created_at     INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS bot_subscriptions (
+            bot_public_key        BLOB NOT NULL,
+            subscriber_public_key BLOB NOT NULL,
+            created_at            INTEGER NOT NULL,
+            PRIMARY KEY (bot_public_key, subscriber_public_key)
+        )",
+        [],
+    )?;
+
     // FTS5 virtual table: check existence before creating (IF NOT EXISTS not
     // supported for virtual tables in older SQLite versions).
     let fts_exists: bool = conn.query_row(

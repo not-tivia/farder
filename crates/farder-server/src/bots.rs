@@ -131,6 +131,100 @@ pub async fn fetch_prices(coin_ids: &[String]) -> anyhow::Result<std::collection
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Alert engine
+// ---------------------------------------------------------------------------
+
+/// Fire-once with hysteresis: returns (fired, new_armed).
+/// - If armed and condition met  -> (true, false)  — fire and disarm.
+/// - If disarmed and condition cleared -> (false, true) — re-arm.
+/// - Otherwise -> (false, current armed state).
+pub fn evaluate_alert(value: f64, comparator: &str, threshold: f64, armed: bool) -> (bool, bool) {
+    let condition = match comparator {
+        "above" => value > threshold,
+        "below" => value < threshold,
+        _ => false,
+    };
+    if armed && condition { (true, false) }
+    else if !armed && !condition { (false, true) }
+    else { (false, armed) }
+}
+
+/// Map a metric name to a f64 value from a PriceInfo snapshot.
+pub fn metric_value(p: &PriceInfo, metric: &str) -> Option<f64> {
+    match metric {
+        "price_usd"  => Some(p.usd),
+        "change_24h" => Some(p.change_24h),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AlertRow {
+    pub id: i64,
+    pub bot_public_key: PublicKey,
+    pub metric: String,
+    pub comparator: String,
+    pub threshold: f64,
+    pub armed: bool,
+}
+
+pub fn list_alerts_for_bot(conn: &Connection, bot: &PublicKey) -> Result<Vec<AlertRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, metric, comparator, threshold, armed FROM bot_alerts WHERE bot_public_key = ?1"
+    )?;
+    let rows = stmt.query_map(params![bot.as_bytes().as_slice()], |r| Ok((
+        r.get::<_, i64>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+        r.get::<_, f64>(3)?,
+        r.get::<_, i64>(4)? != 0,
+    )))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, metric, comparator, threshold, armed) = row?;
+        out.push(AlertRow { id, bot_public_key: bot.clone(), metric, comparator, threshold, armed });
+    }
+    Ok(out)
+}
+
+pub fn set_alert_armed(conn: &Connection, id: i64, armed: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE bot_alerts SET armed = ?1 WHERE id = ?2",
+        params![armed as i64, id],
+    )?;
+    Ok(())
+}
+
+pub fn list_subscribers_for_bot(conn: &Connection, bot: &PublicKey) -> Result<Vec<PublicKey>> {
+    let mut stmt = conn.prepare(
+        "SELECT subscriber_public_key FROM bot_subscriptions WHERE bot_public_key = ?1"
+    )?;
+    let rows = stmt.query_map(params![bot.as_bytes().as_slice()], |r| r.get::<_, Vec<u8>>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let b = row?;
+        let arr: [u8; 32] = b.try_into().map_err(|_| anyhow::anyhow!("bad subscriber pk"))?;
+        out.push(PublicKey::from_bytes(arr));
+    }
+    Ok(out)
+}
+
+/// Human-readable alert message for a fired alert.
+pub fn format_alert_message(label: &str, metric: &str, comparator: &str, threshold: f64, p: &PriceInfo) -> String {
+    match metric {
+        "price_usd" => format!(
+            "\u{1F514} {label} crossed {} ${:.2} \u{2014} now ${:.2}",
+            if comparator == "above" { "above" } else { "below" }, threshold, p.usd
+        ),
+        "change_24h" => format!(
+            "\u{1F514} {label} 24h change {} {:.1}% \u{2014} now {:+.1}% (${:.2})",
+            if comparator == "above" { "above" } else { "below" }, threshold, p.change_24h, p.usd
+        ),
+        _ => format!("\u{1F514} {label} alert"),
+    }
+}
+
 /// Spawns the bot-price poll task. Mirrors `retention::spawn_retention_task`.
 /// Polls immediately then sleeps the configured interval (live-read each cycle so
 /// changes apply without restart). On each poll cycle:
@@ -157,7 +251,8 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<(
                         tracing::info!(fetched = prices.len(), "bot poller: prices fetched, broadcasting");
                         for b in &bots {
                             // A coin CoinGecko omitted (after a SUCCESSFUL fetch) is unknown/typo'd.
-                            let presence = match prices.get(&b.coin_id) {
+                            let pi = prices.get(&b.coin_id);
+                            let presence = match pi {
                                 Some(pi) => ticker_presence(pi),
                                 None => unknown_coin_presence(),
                             };
@@ -173,6 +268,41 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<(
                                     presence: Some(presence),
                                 },
                             ).await;
+
+                            // Alert evaluation: only for bots with a real PriceInfo.
+                            // DB work is scoped so the MutexGuard drops before any .await.
+                            if let Some(pi) = pi {
+                                // 1. Under the DB lock: evaluate alerts, persist armed changes, collect fires.
+                                let fires: Vec<(String, String, f64)> = {
+                                    let conn = state.db.lock().unwrap();
+                                    let alerts = list_alerts_for_bot(&conn, &b.public_key).unwrap_or_default();
+                                    let mut fired = Vec::new();
+                                    for a in &alerts {
+                                        if let Some(v) = metric_value(pi, &a.metric) {
+                                            let (did_fire, new_armed) = evaluate_alert(v, &a.comparator, a.threshold, a.armed);
+                                            if new_armed != a.armed { let _ = set_alert_armed(&conn, a.id, new_armed); }
+                                            if did_fire { fired.push((a.metric.clone(), a.comparator.clone(), a.threshold)); }
+                                        }
+                                    }
+                                    fired
+                                }; // MutexGuard dropped here
+                                if !fires.is_empty() {
+                                    // 2. Under a fresh DB lock: load subscribers (no lock held during awaits).
+                                    let subscribers = {
+                                        let conn = state.db.lock().unwrap();
+                                        list_subscribers_for_bot(&conn, &b.public_key).unwrap_or_default()
+                                    }; // MutexGuard dropped here
+                                    // 3. Now await DMs — no DB lock held.
+                                    for (metric, comparator, threshold) in &fires {
+                                        let text = format_alert_message(&b.label, metric, comparator, *threshold, pi);
+                                        for sub in &subscribers {
+                                            if let Err(e) = send_bot_dm(&state, &b.public_key, sub, &text).await {
+                                                tracing::warn!(error = %e, "bot alert DM failed");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => tracing::warn!(error = %e, "bot price fetch failed; keeping last prices"),
@@ -287,6 +417,30 @@ pub async fn send_bot_dm(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::*;
+
+    #[test]
+    fn evaluate_alert_fires_once_and_rearms() {
+        // above 70000, armed: fires when value exceeds, disarms; re-arms when back below.
+        assert_eq!(evaluate_alert(70001.0, "above", 70000.0, true),  (true, false));  // fire, disarm
+        assert_eq!(evaluate_alert(70050.0, "above", 70000.0, false), (false, false)); // still over, no re-fire
+        assert_eq!(evaluate_alert(69900.0, "above", 70000.0, false), (false, true));  // recovered -> re-arm
+        // below -5 (24h %), armed
+        assert_eq!(evaluate_alert(-6.0, "below", -5.0, true),  (true, false));
+        assert_eq!(evaluate_alert(-4.0, "below", -5.0, false), (false, true));
+    }
+
+    #[test]
+    fn metric_value_maps_keys() {
+        let p = PriceInfo { usd: 67432.0, change_24h: 2.1 };
+        assert_eq!(metric_value(&p, "price_usd"),  Some(67432.0));
+        assert_eq!(metric_value(&p, "change_24h"), Some(2.1));
+        assert_eq!(metric_value(&p, "bogus"),       None);
+    }
 }
 
 #[cfg(test)]
