@@ -207,6 +207,15 @@ pub struct OverrideInfo {
     pub deny: u64,
 }
 
+/// A price alert as returned to clients (read-only view; armed state is internal).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BotAlertInfo {
+    pub id: i64,
+    pub metric: String,
+    pub comparator: String,
+    pub threshold: f64,
+}
+
 /// First frame on every relay-bridged stream, identifying its role. Relay-mode
 /// only; direct connections do not use it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -325,6 +334,18 @@ pub enum ServerRequest {
     SetBotPollInterval { secs: u64 },
     /// Query the current bot price poll interval in seconds.
     GetBotPollInterval,
+    /// Add a price alert for a bot (MANAGE_SERVER gated).
+    AddBotAlert { bot_public_key: PublicKey, metric: String, comparator: String, threshold: f64 },
+    /// Remove a price alert by id (MANAGE_SERVER gated).
+    RemoveBotAlert { alert_id: i64 },
+    /// List all price alerts for a bot (MANAGE_SERVER gated).
+    ListBotAlerts { bot_public_key: PublicKey },
+    /// Subscribe the authenticated member to a bot's alerts (any member).
+    SubscribeBot { bot_public_key: PublicKey },
+    /// Unsubscribe the authenticated member from a bot's alerts (any member).
+    UnsubscribeBot { bot_public_key: PublicKey },
+    /// List all bots the authenticated member is subscribed to (any member).
+    ListMySubscriptions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -375,6 +396,10 @@ pub enum ServerResponse {
     MembershipStatus { status: String },
     PendingMembers { members: Vec<MemberInfo> },
     BotPollInterval { secs: u64 },
+    /// The list of price alerts for a bot.
+    BotAlerts { alerts: Vec<BotAlertInfo> },
+    /// The list of bot public keys the authenticated member is subscribed to.
+    MySubscriptions { bot_public_keys: Vec<PublicKey> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -705,6 +730,12 @@ mod tests {
             ServerRequest::JoinChannelMedia { channel_id: 7 },
             ServerRequest::LeaveChannelMedia { channel_id: 7 },
             ServerRequest::GetMediaState { channel_id: 7 },
+            ServerRequest::AddBotAlert { bot_public_key: kp.public_key(), metric: "price_usd".into(), comparator: "above".into(), threshold: 70000.0 },
+            ServerRequest::RemoveBotAlert { alert_id: 1 },
+            ServerRequest::ListBotAlerts { bot_public_key: kp.public_key() },
+            ServerRequest::SubscribeBot { bot_public_key: kp.public_key() },
+            ServerRequest::UnsubscribeBot { bot_public_key: kp.public_key() },
+            ServerRequest::ListMySubscriptions,
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };

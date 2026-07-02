@@ -43,8 +43,61 @@ pub fn list_bots(conn: &Connection) -> Result<Vec<BotRecord>> {
 }
 
 pub fn remove_bot(conn: &Connection, pk: &PublicKey) -> Result<()> {
+    // Cascade: remove all alerts and subscriptions for this bot before removing the bot row.
+    conn.execute("DELETE FROM bot_alerts WHERE bot_public_key = ?1", params![pk.as_bytes().as_slice()])?;
+    conn.execute("DELETE FROM bot_subscriptions WHERE bot_public_key = ?1", params![pk.as_bytes().as_slice()])?;
     conn.execute("DELETE FROM bots WHERE public_key = ?1", params![pk.as_bytes().as_slice()])?;
     Ok(())
+}
+
+/// Insert a new price alert for a bot. Returns the newly-created alert id.
+pub fn add_alert(conn: &Connection, bot: &PublicKey, metric: &str, comparator: &str, threshold: f64) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO bot_alerts (bot_public_key, metric, comparator, threshold, armed, created_at) \
+         VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+        params![bot.as_bytes().as_slice(), metric, comparator, threshold, crate::db::now() as i64],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Delete a price alert by id.
+pub fn remove_alert(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM bot_alerts WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Subscribe `subscriber` to alerts for `bot` (INSERT OR IGNORE — idempotent).
+pub fn subscribe(conn: &Connection, bot: &PublicKey, subscriber: &PublicKey) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO bot_subscriptions (bot_public_key, subscriber_public_key, created_at) \
+         VALUES (?1, ?2, ?3)",
+        params![bot.as_bytes().as_slice(), subscriber.as_bytes().as_slice(), crate::db::now() as i64],
+    )?;
+    Ok(())
+}
+
+/// Unsubscribe `subscriber` from alerts for `bot`.
+pub fn unsubscribe(conn: &Connection, bot: &PublicKey, subscriber: &PublicKey) -> Result<()> {
+    conn.execute(
+        "DELETE FROM bot_subscriptions WHERE bot_public_key = ?1 AND subscriber_public_key = ?2",
+        params![bot.as_bytes().as_slice(), subscriber.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+/// List all bot public keys that `subscriber` is subscribed to.
+pub fn list_subscriptions_for_user(conn: &Connection, subscriber: &PublicKey) -> Result<Vec<PublicKey>> {
+    let mut stmt = conn.prepare(
+        "SELECT bot_public_key FROM bot_subscriptions WHERE subscriber_public_key = ?1"
+    )?;
+    let rows = stmt.query_map(params![subscriber.as_bytes().as_slice()], |r| r.get::<_, Vec<u8>>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let b = row?;
+        let arr: [u8; 32] = b.try_into().map_err(|_| anyhow::anyhow!("bad bot pk in subscriptions"))?;
+        out.push(PublicKey::from_bytes(arr));
+    }
+    Ok(out)
 }
 
 /// Live price snapshot for a single coin.
@@ -502,5 +555,58 @@ mod tests {
         assert_eq!(bots[0].label, "BTC");
         remove_bot(&conn, &kp.public_key()).unwrap();
         assert!(list_bots(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn alert_subscription_cascade_roundtrip() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let bot_kp = Keypair::generate();
+        let bot_pk = bot_kp.public_key();
+        let subscriber_kp = Keypair::generate();
+        let subscriber_pk = subscriber_kp.public_key();
+
+        register_bot(&conn, &bot_pk, bot_kp.signing_key_bytes().as_slice(), "bitcoin", "BTC").unwrap();
+
+        // Add two alerts.
+        let id1 = add_alert(&conn, &bot_pk, "price_usd", "above", 70000.0).unwrap();
+        let id2 = add_alert(&conn, &bot_pk, "change_24h", "below", -5.0).unwrap();
+        let alerts = list_alerts_for_bot(&conn, &bot_pk).unwrap();
+        assert_eq!(alerts.len(), 2, "should have 2 alerts");
+        assert!(alerts.iter().any(|a| a.id == id1));
+        assert!(alerts.iter().any(|a| a.id == id2));
+
+        // Subscribe a user.
+        subscribe(&conn, &bot_pk, &subscriber_pk).unwrap();
+        // Idempotent: second subscribe should be a no-op.
+        subscribe(&conn, &bot_pk, &subscriber_pk).unwrap();
+        let subs = list_subscribers_for_bot(&conn, &bot_pk).unwrap();
+        assert_eq!(subs.len(), 1, "should have exactly 1 subscriber");
+        assert_eq!(subs[0], subscriber_pk);
+
+        // list_subscriptions_for_user returns the bot.
+        let user_subs = list_subscriptions_for_user(&conn, &subscriber_pk).unwrap();
+        assert_eq!(user_subs.len(), 1);
+        assert_eq!(user_subs[0], bot_pk);
+
+        // remove_alert removes a single alert.
+        remove_alert(&conn, id1).unwrap();
+        let alerts_after = list_alerts_for_bot(&conn, &bot_pk).unwrap();
+        assert_eq!(alerts_after.len(), 1, "should have 1 alert after individual remove");
+        assert_eq!(alerts_after[0].id, id2);
+
+        // Unsubscribe.
+        unsubscribe(&conn, &bot_pk, &subscriber_pk).unwrap();
+        assert!(list_subscribers_for_bot(&conn, &bot_pk).unwrap().is_empty(), "should have no subscribers after unsubscribe");
+
+        // Re-subscribe so we can verify cascade on bot removal.
+        subscribe(&conn, &bot_pk, &subscriber_pk).unwrap();
+        add_alert(&conn, &bot_pk, "price_usd", "below", 50000.0).unwrap();
+
+        // remove_bot must cascade: both bot_alerts and bot_subscriptions cleared.
+        remove_bot(&conn, &bot_pk).unwrap();
+        assert!(list_bots(&conn).unwrap().is_empty(), "bots table must be empty");
+        assert!(list_alerts_for_bot(&conn, &bot_pk).unwrap().is_empty(), "bot_alerts must be empty after cascade");
+        assert!(list_subscribers_for_bot(&conn, &bot_pk).unwrap().is_empty(), "bot_subscriptions must be empty after cascade");
+        assert!(list_subscriptions_for_user(&conn, &subscriber_pk).unwrap().is_empty(), "user subscriptions must be empty after cascade");
     }
 }

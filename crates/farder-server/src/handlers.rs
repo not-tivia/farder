@@ -1991,6 +1991,59 @@ pub fn handle_request(
         ServerRequest::GetBotPollInterval => {
             ok(ServerResponse::BotPollInterval { secs: crate::bots::get_poll_interval(conn) })
         }
+
+        ServerRequest::AddBotAlert { bot_public_key, metric, comparator, threshold } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            if metric != "price_usd" && metric != "change_24h" {
+                return err("invalid metric: must be 'price_usd' or 'change_24h'");
+            }
+            if comparator != "above" && comparator != "below" {
+                return err("invalid comparator: must be 'above' or 'below'");
+            }
+            let _id = crate::bots::add_alert(conn, &bot_public_key, &metric, &comparator, threshold)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::RemoveBotAlert { alert_id } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            crate::bots::remove_alert(conn, alert_id)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::ListBotAlerts { bot_public_key } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            let rows = crate::bots::list_alerts_for_bot(conn, &bot_public_key)?;
+            let alerts = rows.into_iter().map(|a| BotAlertInfo {
+                id: a.id,
+                metric: a.metric,
+                comparator: a.comparator,
+                threshold: a.threshold,
+            }).collect();
+            ok(ServerResponse::BotAlerts { alerts })
+        }
+
+        // SubscribeBot/UnsubscribeBot/ListMySubscriptions: any member, no permission gate.
+        // The subscriber is always the authenticated `member` — never a client-supplied key.
+        ServerRequest::SubscribeBot { bot_public_key } => {
+            crate::bots::subscribe(conn, &bot_public_key, member)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::UnsubscribeBot { bot_public_key } => {
+            crate::bots::unsubscribe(conn, &bot_public_key, member)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::ListMySubscriptions => {
+            let bot_public_keys = crate::bots::list_subscriptions_for_user(conn, member)?;
+            ok(ServerResponse::MySubscriptions { bot_public_keys })
+        }
     }
 }
 
@@ -5224,6 +5277,143 @@ mod tests {
             !members::list_members(&conn).unwrap().iter().any(|m| m.public_key == bot_pk),
             "bot should be gone from members table"
         );
+    }
+
+    #[test]
+    fn alert_subscription_handler_roundtrip() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let non_owner = add_member(&conn, "User");
+
+        // Add a bot first.
+        handle_request(
+            &conn, &owner, true,
+            ServerRequest::AddBot { coin_id: "bitcoin".into(), label: "BTC".into() },
+            "", &state,
+        ).unwrap();
+        let bots = crate::bots::list_bots(&conn).unwrap();
+        let bot_pk = bots[0].public_key.clone();
+
+        // Non-owner cannot add an alert.
+        let denied = handle_request(
+            &conn, &non_owner, false,
+            ServerRequest::AddBotAlert { bot_public_key: bot_pk.clone(), metric: "price_usd".into(), comparator: "above".into(), threshold: 70000.0 },
+            "", &state,
+        ).unwrap();
+        assert!(
+            matches!(denied.response, ServerResponse::Error { .. }),
+            "non-owner AddBotAlert must be denied"
+        );
+
+        // Invalid metric is rejected.
+        let bad = handle_request(
+            &conn, &owner, true,
+            ServerRequest::AddBotAlert { bot_public_key: bot_pk.clone(), metric: "bogus".into(), comparator: "above".into(), threshold: 1.0 },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(bad.response, ServerResponse::Error { .. }), "invalid metric must be rejected");
+
+        // Invalid comparator is rejected.
+        let bad2 = handle_request(
+            &conn, &owner, true,
+            ServerRequest::AddBotAlert { bot_public_key: bot_pk.clone(), metric: "price_usd".into(), comparator: "nope".into(), threshold: 1.0 },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(bad2.response, ServerResponse::Error { .. }), "invalid comparator must be rejected");
+
+        // Owner can add alerts.
+        let r1 = handle_request(
+            &conn, &owner, true,
+            ServerRequest::AddBotAlert { bot_public_key: bot_pk.clone(), metric: "price_usd".into(), comparator: "above".into(), threshold: 70000.0 },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(r1.response, ServerResponse::Ok), "AddBotAlert should return Ok");
+
+        handle_request(
+            &conn, &owner, true,
+            ServerRequest::AddBotAlert { bot_public_key: bot_pk.clone(), metric: "change_24h".into(), comparator: "below".into(), threshold: -5.0 },
+            "", &state,
+        ).unwrap();
+
+        // ListBotAlerts returns both alerts.
+        let list_res = handle_request(
+            &conn, &owner, true,
+            ServerRequest::ListBotAlerts { bot_public_key: bot_pk.clone() },
+            "", &state,
+        ).unwrap();
+        match &list_res.response {
+            ServerResponse::BotAlerts { alerts } => assert_eq!(alerts.len(), 2, "should list 2 alerts"),
+            other => panic!("expected BotAlerts, got {:?}", other),
+        }
+
+        // Non-owner cannot list alerts.
+        let denied_list = handle_request(
+            &conn, &non_owner, false,
+            ServerRequest::ListBotAlerts { bot_public_key: bot_pk.clone() },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(denied_list.response, ServerResponse::Error { .. }), "non-owner ListBotAlerts must be denied");
+
+        // Any member can subscribe (subscriber is always the authenticated caller).
+        let sub_res = handle_request(
+            &conn, &non_owner, false,
+            ServerRequest::SubscribeBot { bot_public_key: bot_pk.clone() },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(sub_res.response, ServerResponse::Ok), "SubscribeBot should return Ok");
+
+        // ListMySubscriptions returns the bot.
+        let subs_res = handle_request(
+            &conn, &non_owner, false,
+            ServerRequest::ListMySubscriptions,
+            "", &state,
+        ).unwrap();
+        match &subs_res.response {
+            ServerResponse::MySubscriptions { bot_public_keys } => {
+                assert_eq!(bot_public_keys.len(), 1);
+                assert_eq!(bot_public_keys[0], bot_pk);
+            }
+            other => panic!("expected MySubscriptions, got {:?}", other),
+        }
+
+        // Any member can unsubscribe.
+        let unsub_res = handle_request(
+            &conn, &non_owner, false,
+            ServerRequest::UnsubscribeBot { bot_public_key: bot_pk.clone() },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(unsub_res.response, ServerResponse::Ok), "UnsubscribeBot should return Ok");
+        let subs_after = handle_request(
+            &conn, &non_owner, false,
+            ServerRequest::ListMySubscriptions,
+            "", &state,
+        ).unwrap();
+        match &subs_after.response {
+            ServerResponse::MySubscriptions { bot_public_keys } => assert!(bot_public_keys.is_empty()),
+            other => panic!("expected MySubscriptions, got {:?}", other),
+        }
+
+        // RemoveBotAlert (owner-gated): remove first alert.
+        let alerts_before = crate::bots::list_alerts_for_bot(&conn, &bot_pk).unwrap();
+        assert_eq!(alerts_before.len(), 2);
+        let first_id = alerts_before[0].id;
+        handle_request(
+            &conn, &owner, true,
+            ServerRequest::RemoveBotAlert { alert_id: first_id },
+            "", &state,
+        ).unwrap();
+        let alerts_after = crate::bots::list_alerts_for_bot(&conn, &bot_pk).unwrap();
+        assert_eq!(alerts_after.len(), 1, "should have 1 alert after RemoveBotAlert");
+
+        // RemoveBot cascades: re-subscribe so we can verify cascade.
+        handle_request(&conn, &non_owner, false, ServerRequest::SubscribeBot { bot_public_key: bot_pk.clone() }, "", &state).unwrap();
+        handle_request(
+            &conn, &owner, true,
+            ServerRequest::RemoveBot { bot_public_key: bot_pk.clone() },
+            "", &state,
+        ).unwrap();
+        assert!(crate::bots::list_alerts_for_bot(&conn, &bot_pk).unwrap().is_empty(), "alerts must be gone after RemoveBot");
+        assert!(crate::bots::list_subscribers_for_bot(&conn, &bot_pk).unwrap().is_empty(), "subscriptions must be gone after RemoveBot");
     }
 
 }
