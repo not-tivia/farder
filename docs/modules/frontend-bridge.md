@@ -65,6 +65,17 @@ The UI renders a placeholder (`Removed by the uploader` / `Removed by a moderato
 
 Returned by `listBanned()`. `public_key` is again `{ bytes: number[] }`. `ban_reason` is optional (the member may have been banned without a reason). `banned_at` is Unix ms.
 
+### `BotAlertInfo` (types.ts)
+
+A price alert as returned by `listBotAlerts()`. The internal `armed` flag is not exposed.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `number` | Server-assigned alert id (use this for `removeBotAlert`). |
+| `metric` | `string` | `"price_usd"` or `"change_24h"`. |
+| `comparator` | `string` | `"above"` or `"below"`. |
+| `threshold` | `number` | Threshold value (f64 on the Rust side). |
+
 ### `ConnectResult`
 
 Returned by `connectServer()` and `getServerInfo()`. Contains the initial snapshot: `channels`, `categories`, `roles`, and `owner_public_key` (also `{ bytes }`, may be null for servers whose owner is unknown to the client).
@@ -393,7 +404,24 @@ These commands drive the `VoiceController` (the local Opus/QUIC audio subsystem)
 | `getMembershipStatus(serverId)` | `get_membership_status` | Returns `"member"` \| `"pending"` \| `"none"` for the caller's status on this server. Allowed for non-members so a pending joiner can poll. |
 | `getPendingMembers(serverId)` | `get_pending_members` | Returns `MemberInfo[]` of members awaiting approval. Gated server-side to approvers (KICK\_MEMBERS) and the owner. |
 | `addBot(serverId, coinId, label)` | `add_bot` | Registers a new crypto-ticker bot on the server. `coinId` is a CoinGecko coin id (e.g. `"bitcoin"`); `label` is the display name (e.g. `"BTC"`). Owner-gated server-side. The bot appears in the member roster with `is_bot: true` and starts showing a live `Presence { kind: "Ticker" }` within ~60 s. Returns `void`. |
-| `removeBot(serverId, botPublicKey)` | `remove_bot` | Removes a bot by its `"vk_<hex>"` public key (use `publicKeyToString(member.public_key)` from the roster). Owner-gated server-side. Returns `void`. |
+| `removeBot(serverId, botPublicKey)` | `remove_bot` | Removes a bot by its `"vk_<hex>"` public key (use `publicKeyToString(member.public_key)` from the roster). Owner-gated server-side. Cascades: all alerts and subscriptions for this bot are deleted. Returns `void`. |
+
+---
+
+### Bot price alerts and subscriptions
+
+These six functions are the TypeScript wrappers for the alert/subscription Tauri commands. All call `invoke("...")` through `client/src/lib/tauri-bridge.ts`. Alert management (`addBotAlert`, `removeBotAlert`, `listBotAlerts`) is MANAGE_SERVER-gated; subscription management (`subscribeBot`, `unsubscribeBot`, `listMySubscriptions`) is open to any authenticated member.
+
+| Function | Rust command | What it does |
+|---|---|---|
+| `addBotAlert(serverId, botPublicKey, metric, comparator, threshold)` | `add_bot_alert` | Adds a price alert for a bot. `metric` must be `"price_usd"` or `"change_24h"`; `comparator` must be `"above"` or `"below"`. Owner/MANAGE_SERVER-gated. Returns `Promise<void>`. |
+| `removeBotAlert(serverId, alertId)` | `remove_bot_alert` | Removes a single alert by its numeric `id` (as returned by `listBotAlerts`). Owner/MANAGE_SERVER-gated. Returns `Promise<void>`. |
+| `listBotAlerts(serverId, botPublicKey)` | `list_bot_alerts` | Returns `Promise<BotAlertInfo[]>` — all configured alerts for the given bot. The internal `armed` flag is not included. Owner/MANAGE_SERVER-gated. |
+| `subscribeBot(serverId, botPublicKey)` | `subscribe_bot` | Subscribes the authenticated user to alert DMs for the given bot. Idempotent. Any member. Returns `Promise<void>`. |
+| `unsubscribeBot(serverId, botPublicKey)` | `unsubscribe_bot` | Unsubscribes the authenticated user. No-op if not subscribed. Any member. Returns `Promise<void>`. |
+| `listMySubscriptions(serverId)` | `list_my_subscriptions` | Returns `Promise<string[]>` — the `"vk_<hex>"` public keys of all bots the authenticated user is subscribed to. Any member. |
+
+**Alert DM delivery:** when an alert fires during the poll cycle, the server calls `bots::send_bot_dm`, which delivers an E2EE DM from the bot to each subscriber via `EventTarget::Members([recipient])`. The recipient receives a `DmCreated` event (if new) followed by a `NewMessage` event — the same path as a human-to-human DM. The client decrypts it with the normal `dmDecrypt(botPublicKey, ciphertextHex)` path.
 
 ---
 

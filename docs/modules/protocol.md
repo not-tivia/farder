@@ -172,9 +172,15 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 | Variant | Fields | What it asks the server to do |
 |---|---|---|
 | `AddBot` | `coin_id: String`, `label: String` | Register a new server-managed crypto-ticker bot. **Owner-gated.** The server trims and lowercases `coin_id`, then validates it against `[a-z0-9-]` (≤64 chars); `label` is trimmed and must be 1–64 chars — both are rejected with `Error` on violation. On success, generates a fresh Ed25519 keypair, inserts a `bots` row (stores the secret key and CoinGecko coin id), and inserts a `members` row with `is_bot=1`; `label` becomes the bot's display name. Returns `Ok`. The bot appears in the member roster and the price-poller starts broadcasting its presence within one poll cycle. |
-| `RemoveBot` | `bot_public_key: PublicKey` | Remove a bot by its public key. **Owner-gated.** Deletes the `bots` and `members` rows, evicts the in-memory presence entry from `state.presences`, and broadcasts `MemberLeft`. Returns `Ok`. |
+| `RemoveBot` | `bot_public_key: PublicKey` | Remove a bot by its public key. **Owner-gated.** Deletes the `bots` and `members` rows, evicts the in-memory presence entry from `state.presences`, and broadcasts `MemberLeft`. Cascades: all `bot_alerts` and `bot_subscriptions` rows for this bot are deleted first. Returns `Ok`. |
 | `SetBotPollInterval` | `secs: u64` | Set the bot price-poll interval. **MANAGE_SERVER-gated.** Values below 30 are clamped to 30 server-side. Stored in the `server_settings` KV table under key `"bot_poll_interval"`. The poll loop reads this value live each cycle, so the change takes effect without a server restart. Returns `Ok`. |
 | `GetBotPollInterval` | — | Query the current bot price-poll interval. No permission gate (any member may call this). Returns `BotPollInterval { secs }` — the stored value floored at 30, or the default of 60 if unset. |
+| `AddBotAlert` | `bot_public_key: PublicKey`, `metric: String`, `comparator: String`, `threshold: f64` | Add a price alert for a bot. **MANAGE_SERVER-gated.** `metric` must be `"price_usd"` or `"change_24h"`; `comparator` must be `"above"` or `"below"` — both are rejected with `Error` on violation. Inserts a `bot_alerts` row with `armed=1`. Returns `Ok`. |
+| `RemoveBotAlert` | `alert_id: i64` | Delete a price alert by its id. **MANAGE_SERVER-gated.** No-op if the id does not exist. Returns `Ok`. |
+| `ListBotAlerts` | `bot_public_key: PublicKey` | List all price alerts for the given bot. **MANAGE_SERVER-gated.** Returns `BotAlerts { alerts: Vec<BotAlertInfo> }`. The `armed` field is internal and not exposed to clients. |
+| `SubscribeBot` | `bot_public_key: PublicKey` | Subscribe the authenticated member to alert DMs for the given bot. No permission gate — any connected member may subscribe. Idempotent (INSERT OR IGNORE). Returns `Ok`. |
+| `UnsubscribeBot` | `bot_public_key: PublicKey` | Unsubscribe the authenticated member from alert DMs for the given bot. No permission gate. No-op if not subscribed. Returns `Ok`. |
+| `ListMySubscriptions` | — | List the public keys of all bots the authenticated member is subscribed to. No permission gate. Returns `MySubscriptions { bot_public_keys: Vec<PublicKey> }`. |
 
 ### Voice / media
 
@@ -217,6 +223,8 @@ Every request receives exactly one response.
 | `StreamSessionStarted` | `session_id: [u8; 16]` | The 16-byte session identifier assigned to this stream in response to `JoinStream`. Used to correlate all subsequent `Stream*` events. |
 | `MediaStateResp` | `participants: Vec<VoiceMember>` | Current voice roster in response to `GetMediaState`. |
 | `BotPollInterval` | `secs: u64` | Current bot price-poll interval in response to `GetBotPollInterval`. Value is floored at 30 and defaults to 60 when unset. |
+| `BotAlerts` | `alerts: Vec<BotAlertInfo>` | List of price alerts for a bot, in response to `ListBotAlerts`. Each entry is a `BotAlertInfo` (see below). |
+| `MySubscriptions` | `bot_public_keys: Vec<PublicKey>` | The bot public keys the authenticated member is subscribed to, in response to `ListMySubscriptions`. |
 
 ---
 
@@ -482,6 +490,50 @@ One item in the `DmList` response.
 | `channel` | `ChannelInfo` | The DM channel (type will be `Dm`). |
 | `participant` | `MemberInfo` | The other party in the conversation. |
 | `last_message` | `Option<MessageInfo>` | The most recent message, or `None` for empty DMs. |
+
+### `BotAlertInfo`
+
+A price alert as returned to clients by `ListBotAlerts` / `BotAlerts`. The internal `armed` flag is not exposed.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `i64` | Server-assigned alert id (primary key in `bot_alerts`). Pass this back to `RemoveBotAlert`. |
+| `metric` | `String` | `"price_usd"` or `"change_24h"`. |
+| `comparator` | `String` | `"above"` or `"below"`. |
+| `threshold` | `f64` | The threshold value the metric is compared against. |
+
+**TypeScript equivalent** (in `client/src/lib/types.ts`):
+```ts
+interface BotAlertInfo { id: number; metric: string; comparator: string; threshold: number; }
+```
+
+### Alert DB tables (`bot_alerts`, `bot_subscriptions`)
+
+These tables live in the server's SQLite database and back the price-alert feature.
+
+**`bot_alerts`** — one row per configured alert:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY` | Auto-increment. Returned in `BotAlertInfo.id`. |
+| `bot_public_key` | `BLOB` | 32-byte Ed25519 public key of the bot that owns this alert. FK → `bots.public_key`. |
+| `metric` | `TEXT` | `"price_usd"` or `"change_24h"`. |
+| `comparator` | `TEXT` | `"above"` or `"below"`. |
+| `threshold` | `REAL` | Threshold value. |
+| `armed` | `INTEGER` | `1` = alert may fire; `0` = disarmed (fired; waiting for condition to clear before re-arming). |
+| `created_at` | `INTEGER` | Unix-ms insert timestamp. |
+
+**`bot_subscriptions`** — one row per member/bot subscription pair:
+
+| Column | Type | Notes |
+|---|---|---|
+| `bot_public_key` | `BLOB` | 32-byte public key of the bot. |
+| `subscriber_public_key` | `BLOB` | 32-byte public key of the subscribing member. |
+| `created_at` | `INTEGER` | Unix-ms insert timestamp. |
+
+Unique constraint: `(bot_public_key, subscriber_public_key)` — subscriptions are idempotent (`INSERT OR IGNORE`).
+
+**Cascade on bot removal:** `bots::remove_bot` deletes all `bot_alerts` and `bot_subscriptions` rows for the bot before deleting the `bots` row, so no orphan rows are left.
 
 ---
 

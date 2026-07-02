@@ -190,13 +190,42 @@ Ticker bots are **server-managed members**: a synthetic roster entry whose Ed255
 4. `bridge.rs` re-emits `server:member_presence_updated`; `useServerEvents.ts` dispatches `UPDATE_MEMBER_PRESENCE`; `ServerContext` updates `member.presence` for the bot's public key.
 5. The client renders the bot with a **BOT badge** (`is_bot: true`) and the inline ticker price (`member.presence.details`) in the member list.
 
-**Removal:** `invoke("remove_bot", { serverId, botPublicKey })` → `ServerRequest::RemoveBot` → deletes `bots` + `members` rows, evicts presence from `state.presences`, broadcasts `MemberLeft`.
+**Removal:** `invoke("remove_bot", { serverId, botPublicKey })` → `ServerRequest::RemoveBot` → deletes `bots` + `members` rows, evicts presence from `state.presences`, broadcasts `MemberLeft`. Cascade: `bots::remove_bot` first deletes all `bot_alerts` and `bot_subscriptions` rows for that bot.
 
 **Persistence:** bots survive server restarts; the poller re-fetches prices within one tick after startup.
 
 **SSRF guard:** the CoinGecko URL is pre-validated by `ssrf::resolves_to_global` before any network call; HTTP redirects are disabled on the reqwest client.
 
 **Mesh roster:** for log-mode servers, `GetMembers` filters the roster to `m.is_bot || ls.is_member(...)` so bots always appear alongside human log-space members.
+
+### Price alerts → E2EE bot DMs
+
+The alert feature lets server owners define conditions on a bot's price data and members opt in to receive a DM when a condition fires.
+
+**Setup (owner):** Server Settings → Bots → select bot → Alerts sub-section → Add alert (`metric`, `comparator`, `threshold`). Each alert is stored in `bot_alerts` (armed=1). `invoke("add_bot_alert", ...)` → `ServerRequest::AddBotAlert` → MANAGE_SERVER-gated.
+
+**Opt-in (any member):** Right-click a bot in the member list → Notify me (🔔 toggle). `invoke("subscribe_bot", ...)` → `ServerRequest::SubscribeBot` → INSERT OR IGNORE into `bot_subscriptions`. The authenticated caller's own key is always used as the subscriber; the client cannot specify another user.
+
+**Data path — alert fires → DM delivered:**
+
+1. Poll loop receives a successful `fetch_prices` response and processes each bot that has a real `PriceInfo`.
+2. **Under DB lock:** calls `bots::evaluate_alert(value, comparator, threshold, armed)` for each alert — fire-once with hysteresis:
+   - Armed + condition met → `(true, false)`: fire and disarm.
+   - Disarmed + condition cleared → `(false, true)`: re-arm only.
+   - Otherwise no change.
+   Persists armed-state changes via `bots::set_alert_armed`. Collects fired alerts into a `Vec<(metric, comparator, threshold)>`. Drops the DB lock.
+3. **Under a fresh DB lock:** loads subscribers from `bot_subscriptions`. Drops the lock.
+4. **No lock held (async):** for each fired alert × each subscriber, calls `bots::send_bot_dm`:
+   - Loads the bot's Ed25519 secret key (`bots::get_bot_secret`).
+   - Opens or reuses the DM channel (`channels::open_dm_channel`).
+   - Encrypts the alert text via `bots::encrypt_bot_dm` → `farder_crypto::key_exchange::derive_dm_shared_secret` (X25519 ECDH) + `farder_crypto::encryption::encrypt` (AES-256-GCM). The nonce is prepended: the ciphertext is `nonce(12)||ct+tag`, hex-encoded.
+   - Persists the ciphertext as a `messages` row.
+   - Broadcasts `DmCreated` (if new channel) and `NewMessage` **targeted at `EventTarget::Members([recipient])`** — only the recipient receives the events, not all connected clients.
+5. The recipient's client receives the `DmCreated` / `NewMessage` events via `bridge.rs` → `server:dm_created` / `server:new_message`. The UI calls `dmDecrypt(botPublicKey, ciphertextHex)` to decrypt — symmetric because the shared secret is the same from either direction.
+
+**Re-arm:** after the condition is disarmed, the alert re-arms only once the condition clears. A BTC "above $70 000" alert that fires at $71 000 will not re-fire on the next poll cycle; it re-arms when BTC drops below $70 000, then fires again if/when it crosses above again.
+
+**My subscriptions:** Settings → Alerts section lists all bots the user is subscribed to, populated by `invoke("list_my_subscriptions", ...)` → `ServerRequest::ListMySubscriptions` → `bot_subscriptions` read. The user can unsubscribe per-bot from this view.
 
 ---
 

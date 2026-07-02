@@ -2173,3 +2173,101 @@ Set the bot price-poll interval for the server. MANAGE_SERVER-gated (owner or me
 **Side effects:** sends `ServerRequest::SetBotPollInterval { secs }` → persists the (clamped) value in the `server_settings` KV table under key `"bot_poll_interval"`. The poll loop reads this value live each cycle, so the change takes effect on the next sleep (no restart required). Returns `ServerResponse::Ok`.
 
 **invoke name:** `"set_bot_poll_interval"` → `setBotPollInterval(serverId, secs)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `add_bot_alert(state, server_id, bot_public_key, metric, comparator, threshold) -> Result<(), String>`
+
+Add a price alert for a bot. MANAGE_SERVER-gated server-side.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `bot_public_key: String` — `"vk_<hex>"` string identifying the bot.
+- `metric: String` — `"price_usd"` or `"change_24h"`.
+- `comparator: String` — `"above"` or `"below"`.
+- `threshold: f64` — the threshold value.
+
+**Returns:** `()` on success; `Error` on permission denial or invalid metric/comparator.
+
+**Side effects:** sends `ServerRequest::AddBotAlert { bot_public_key, metric, comparator, threshold }`. The server inserts a `bot_alerts` row with `armed=1`.
+
+**invoke name:** `"add_bot_alert"` → `addBotAlert(serverId, botPublicKey, metric, comparator, threshold)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `remove_bot_alert(state, server_id, alert_id) -> Result<(), String>`
+
+Remove a price alert by id. MANAGE_SERVER-gated server-side.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `alert_id: i64` — the alert id as returned by `list_bot_alerts`.
+
+**Returns:** `()` on success; `Error` on permission denial.
+
+**Side effects:** sends `ServerRequest::RemoveBotAlert { alert_id }`. No-op server-side if the id does not exist.
+
+**invoke name:** `"remove_bot_alert"` → `removeBotAlert(serverId, alertId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `list_bot_alerts(state, server_id, bot_public_key) -> Result<Vec<BotAlertInfo>, String>`
+
+List all price alerts for a bot. MANAGE_SERVER-gated server-side.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `bot_public_key: String` — `"vk_<hex>"` string identifying the bot.
+
+**Returns:** `Vec<BotAlertInfo>` — zero or more alerts. Each entry: `{ id: i64, metric: String, comparator: String, threshold: f64 }`. The internal `armed` flag is not exposed.
+
+**Side effects:** sends `ServerRequest::ListBotAlerts { bot_public_key }` → reads `ServerResponse::BotAlerts { alerts }`.
+
+**invoke name:** `"list_bot_alerts"` → `listBotAlerts(serverId, botPublicKey)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `subscribe_bot(state, server_id, bot_public_key) -> Result<(), String>`
+
+Subscribe the authenticated user to alert DMs for a bot. No permission gate — any connected member may subscribe.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `bot_public_key: String` — `"vk_<hex>"` string identifying the bot.
+
+**Returns:** `()` on success. Idempotent — subscribing twice is a no-op.
+
+**Side effects:** sends `ServerRequest::SubscribeBot { bot_public_key }`. The server uses the authenticated caller's key as the subscriber (the client cannot specify a different subscriber).
+
+**invoke name:** `"subscribe_bot"` → `subscribeBot(serverId, botPublicKey)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `unsubscribe_bot(state, server_id, bot_public_key) -> Result<(), String>`
+
+Unsubscribe the authenticated user from alert DMs for a bot. No permission gate.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `bot_public_key: String` — `"vk_<hex>"` string identifying the bot.
+
+**Returns:** `()` on success. No-op if not subscribed.
+
+**Side effects:** sends `ServerRequest::UnsubscribeBot { bot_public_key }`.
+
+**invoke name:** `"unsubscribe_bot"` → `unsubscribeBot(serverId, botPublicKey)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `list_my_subscriptions(state, server_id) -> Result<Vec<String>, String>`
+
+List the public keys of all bots the authenticated user is subscribed to. No permission gate.
+
+**Parameters:**
+- `server_id: String` — connection address.
+
+**Returns:** `Vec<String>` — public key strings (`"vk_<hex>"`) of subscribed bots, converted from `PublicKey` by the command.
+
+**Side effects:** sends `ServerRequest::ListMySubscriptions` → reads `ServerResponse::MySubscriptions { bot_public_keys }`.
+
+**invoke name:** `"list_my_subscriptions"` → `listMySubscriptions(serverId)` in `client/src/lib/tauri-bridge.ts`.

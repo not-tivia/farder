@@ -73,6 +73,28 @@ operation is server-scoped rather than channel-scoped (e.g. checking
 
 ---
 
+### `build_member_info(conn, state, pk) -> Result<MemberInfo>`
+
+Constructs a `MemberInfo` for the given public key, suitable for embedding in
+`DmCreated`, `DmOpened`, and similar events. Reads the `members` row (via
+`members::get_member`), fetches role ids (`members::get_member_role_ids`),
+resolves any active timeout (`members::is_timed_out`), and reads the live
+`Presence` from `state.presences`.
+
+**Parameters:**
+- `conn` — open `rusqlite::Connection`.
+- `state` — `&ServerState` (read-only access to `state.presences`).
+- `pk` — the member's `PublicKey`.
+
+**Returns:** `Err` if no `members` row exists for `pk` (not just `None` — callers
+must ensure the member is present before calling).
+
+**Why extracted:** the `OpenDm` handler and `bots::send_bot_dm` both need a
+fully populated `MemberInfo` for the `DmCreated { participant }` event. Extracting
+removes duplication and guarantees consistent field population.
+
+---
+
 ## Dispatch model
 
 Every arm of the `match request { .. }` block follows the same four-step
@@ -235,9 +257,15 @@ WebRTC session.
 | `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
 |---|---|---|---|---|
 | `AddBot` | Trims and lowercases `coin_id`; validates charset `[a-z0-9-]` and length ≤64 (returns `Error` on violation). Trims `label`; validates 1–64 chars (returns `Error` on violation). Generates a fresh Ed25519 keypair; inserts a `bots` row (stores the coin id and secret key) and a `members` row with `is_bot=1`; `label` becomes the bot's `display_name`. The price-poller starts broadcasting its presence within the next poll cycle. | Owner only (`is_owner` gate; `MANAGE_SERVER` check reused) | `members::register_bot_member`, `bots::register_bot` | `MemberJoined { public_key, display_name: label }` → `All` |
-| `RemoveBot` | Deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
+| `RemoveBot` | Deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. Cascade: `bots::remove_bot` first deletes all `bot_alerts` and `bot_subscriptions` for this bot. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
 | `SetBotPollInterval` | Clamps `secs` to ≥30, then writes the value to `server_settings` via `bots::set_poll_interval`. The poll loop reads the interval live each cycle, so the change takes effect immediately after the current sleep expires (no restart). | MANAGE_SERVER (owner or role holders) | `bots::set_poll_interval` → `server_settings` KV (`key="bot_poll_interval"`) | — |
 | `GetBotPollInterval` | Reads the poll interval via `bots::get_poll_interval` and returns `BotPollInterval { secs }`. No permission gate — any connected member may query this. | None | `bots::get_poll_interval` (read-only) | — |
+| `AddBotAlert` | Validates `metric` (`"price_usd"` or `"change_24h"`) and `comparator` (`"above"` or `"below"`); rejects invalid values with `Error`. Inserts a `bot_alerts` row with `armed=1`. Returns `Ok`. | MANAGE_SERVER | `bots::add_alert` → `bot_alerts` | — |
+| `RemoveBotAlert` | Deletes the `bot_alerts` row by `alert_id`. No-op if id not found. Returns `Ok`. | MANAGE_SERVER | `bots::remove_alert` | — |
+| `ListBotAlerts` | Returns all alerts for `bot_public_key` as `BotAlerts { alerts: Vec<BotAlertInfo> }`. The internal `armed` flag is not included in `BotAlertInfo`. | MANAGE_SERVER | `bots::list_alerts_for_bot` (read-only) | — |
+| `SubscribeBot` | Idempotent subscribe: `INSERT OR IGNORE` into `bot_subscriptions` with the authenticated caller as subscriber (client cannot supply a different key). Returns `Ok`. | None (any authenticated member) | `bots::subscribe` → `bot_subscriptions` | — |
+| `UnsubscribeBot` | Removes the `(bot_public_key, caller)` row from `bot_subscriptions`. No-op if not subscribed. Returns `Ok`. | None (any authenticated member) | `bots::unsubscribe` | — |
+| `ListMySubscriptions` | Returns `MySubscriptions { bot_public_keys }` — the bot public keys the authenticated caller is subscribed to. | None (any authenticated member) | `bots::list_subscriptions_for_user` (read-only) | — |
 
 ---
 
@@ -354,9 +382,17 @@ Read via `db::get_setting`; written via `db::set_setting` (upsert semantics).
 |---|---|---|
 | `register_bot` | `(conn, pk, secret, coin_id, label) -> Result<()>` | Inserts a row into `bots`. |
 | `list_bots` | `(conn) -> Result<Vec<BotRecord>>` | Returns all `BotRecord { public_key, coin_id, label }` rows. |
-| `remove_bot` | `(conn, pk) -> Result<()>` | Deletes from `bots` by public key. The `members` row is deleted separately by `handlers.rs` via `members::remove_member_row`. |
+| `remove_bot` | `(conn, pk) -> Result<()>` | Deletes all `bot_alerts` and `bot_subscriptions` rows for `pk` (cascade), then deletes from `bots`. The `members` row is deleted separately by `handlers.rs` via `members::remove_member_row`. |
 | `get_poll_interval` | `(conn) -> u64` | Reads `"bot_poll_interval"` from `server_settings`; floors at `POLL_INTERVAL_FLOOR` (30); returns `POLL_INTERVAL_DEFAULT` (60) when unset. |
 | `set_poll_interval` | `(conn, secs: u64) -> Result<()>` | Writes `secs.max(POLL_INTERVAL_FLOOR)` to `server_settings` under `"bot_poll_interval"`. |
+| `add_alert` | `(conn, bot: &PublicKey, metric, comparator, threshold) -> Result<i64>` | Inserts a `bot_alerts` row with `armed=1`; returns the new row id. |
+| `remove_alert` | `(conn, id: i64) -> Result<()>` | Deletes a single `bot_alerts` row by id. |
+| `list_alerts_for_bot` | `(conn, bot: &PublicKey) -> Result<Vec<AlertRow>>` | Returns all `AlertRow` structs for a bot (`id`, `metric`, `comparator`, `threshold`, `armed`). |
+| `set_alert_armed` | `(conn, id: i64, armed: bool) -> Result<()>` | Updates the `armed` column for a single alert (called by the poll loop after a fire or re-arm). |
+| `subscribe` | `(conn, bot: &PublicKey, subscriber: &PublicKey) -> Result<()>` | `INSERT OR IGNORE` into `bot_subscriptions` — idempotent. |
+| `unsubscribe` | `(conn, bot: &PublicKey, subscriber: &PublicKey) -> Result<()>` | Deletes the `(bot, subscriber)` row; no-op if absent. |
+| `list_subscribers_for_bot` | `(conn, bot: &PublicKey) -> Result<Vec<PublicKey>>` | Returns all subscriber public keys for a bot; used by the poll loop to fan out alert DMs. |
+| `list_subscriptions_for_user` | `(conn, subscriber: &PublicKey) -> Result<Vec<PublicKey>>` | Returns all bot public keys a user is subscribed to; used by `ListMySubscriptions`. |
 
 ### `unknown_coin_presence() -> Presence`
 
@@ -385,6 +421,80 @@ On each poll cycle:
    - The updated `Presence` is stored in `state.presences` (RwLock) and broadcast as `ServerEvent::MemberPresenceUpdated` to all connected clients via `connection::broadcast_event`.
 
 **Roster whitelist for mesh servers:** when `GetMembers` is handled for a log-mode server, the member list is filtered to `m.is_bot || ls.is_member(&m.public_key)` so bots always appear alongside confirmed log-space members.
+
+### Alert engine
+
+#### `evaluate_alert(value: f64, comparator: &str, threshold: f64, armed: bool) -> (bool, bool)`
+
+Fire-once with hysteresis. Returns `(did_fire, new_armed)`:
+
+| State | Condition | Result |
+|---|---|---|
+| Armed | Met (`value > threshold` or `value < threshold`) | `(true, false)` — fire and disarm |
+| Disarmed | Not met (condition cleared) | `(false, true)` — re-arm |
+| Otherwise | — | `(false, armed)` — no change |
+
+This ensures each alert fires **exactly once** per crossing, then re-arms only after the condition clears. The poll loop calls `set_alert_armed` to persist the new state after evaluation.
+
+#### `metric_value(p: &PriceInfo, metric: &str) -> Option<f64>`
+
+Maps a metric name to a f64 value from a `PriceInfo` snapshot:
+
+| `metric` | Returns |
+|---|---|
+| `"price_usd"` | `Some(p.usd)` |
+| `"change_24h"` | `Some(p.change_24h)` |
+| Any other | `None` |
+
+#### `format_alert_message(label, metric, comparator, threshold, p) -> String`
+
+Formats a human-readable alert body for a fired alert. Examples:
+- `price_usd above 70000` at $71234: `"🔔 BTC crossed above $70000.00 — now $71234.00"`
+- `change_24h below -5` at -6.1%: `"🔔 BTC 24h change below -5.0% — now -6.1% ($65000.00)"`
+
+#### Alert evaluation inside the poll loop
+
+Alert evaluation runs **only inside the `Ok(prices)` branch** and **only for bots with a real `PriceInfo`** (bots whose `coin_id` returned a valid price). The per-bot sequence is:
+
+1. **Under the DB lock:** load alerts for the bot, call `evaluate_alert` for each, persist armed-state changes via `set_alert_armed`, collect fired alerts into a `Vec<(metric, comparator, threshold)>`. Drop the lock.
+2. **Under a fresh DB lock:** load subscribers for the bot. Drop the lock.
+3. **Without any DB lock held:** for each fired alert × each subscriber, call `send_bot_dm` (which is `async`). Failures are logged at `WARN` level and do not abort the remaining DMs.
+
+This three-step pattern ensures the `Mutex<Connection>` is never held across an `.await`.
+
+### E2EE DM delivery (bot → user)
+
+#### `get_bot_secret(conn: &Connection, pk: &PublicKey) -> Result<Option<[u8; 32]>>`
+
+Reads the raw 32-byte Ed25519 secret key for the given bot from `bots.secret_key`. Returns `Ok(None)` if the bot does not exist.
+
+#### `encrypt_bot_dm(bot_ed_sk: &[u8; 32], recipient_ed_pk: &[u8; 32], text: &str) -> Result<String>`
+
+Encrypts `text` as a DM from the bot to the recipient:
+1. Calls `farder_crypto::key_exchange::derive_dm_shared_secret(bot_ed_sk, recipient_ed_pk)` — symmetric X25519 ECDH, same shared secret the recipient derives from their own key + the bot's public key.
+2. Calls `farder_crypto::encryption::encrypt(&shared, text.as_bytes())` — AES-256-GCM with a random 12-byte nonce prepended.
+3. Returns the result as a lowercase hex string (`nonce(12) || ciphertext+tag`).
+
+The recipient decrypts with their normal `dm_decrypt` Tauri command (passing the bot's public key as `their_public_key`).
+
+#### `send_bot_dm(state: &Arc<ServerState>, bot_pk: &PublicKey, recipient_pk: &PublicKey, text: &str) -> Result<()>`
+
+Sends a full E2EE DM from a server-managed bot to a recipient member. All DB and crypto work is scoped inside a block that drops the `Mutex<Connection>` guard before any `.await`:
+
+1. **Under the DB lock:**
+   - `get_bot_secret` — load the bot's Ed25519 secret key.
+   - `channels::open_dm_channel` — find or create the DM channel between bot and recipient.
+   - `encrypt_bot_dm` — encrypt the text (X25519 + AES-256-GCM).
+   - `messages::insert_message` — persist the ciphertext as a message in the DM channel.
+   - `messages::get_message` — read the persisted `MessageInfo` (so the recipient gets a proper timestamp and id).
+   - `channels::get_channel` — read the `ChannelInfo` for the DM channel.
+   - `build_member_info` — build a `MemberInfo` for the bot (for `DmCreated`).
+   - Drop the lock.
+2. **Without any lock held (async):**
+   - If the DM channel was just created: `broadcast_event(EventTarget::Members([recipient]), DmCreated { channel, participant: bot_member })`.
+   - Always: `broadcast_event(EventTarget::Members([recipient]), NewMessage { message })`.
+
+`EventTarget::Members([recipient])` ensures the DM is delivered only to the intended recipient, not broadcast to all connected clients. The message persists in the DM channel so the recipient sees it even if they were offline during the poll cycle.
 
 ---
 
