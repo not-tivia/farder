@@ -7,6 +7,7 @@ use farder_protocol::server::{Presence, PresenceKind, ServerEvent};
 use rusqlite::{params, Connection};
 use std::sync::Arc;
 use crate::state::ServerState;
+use crate::events::EventTarget;
 
 pub struct BotRecord {
     pub public_key: PublicKey,
@@ -187,6 +188,107 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<(
     })
 }
 
+// ---------------------------------------------------------------------------
+// E2EE DM delivery (bot → user)
+// ---------------------------------------------------------------------------
+
+/// Retrieve the Ed25519 secret key stored for a bot (32 raw bytes), if the bot
+/// exists in the `bots` table.
+pub fn get_bot_secret(conn: &Connection, pk: &PublicKey) -> Result<Option<[u8; 32]>> {
+    use rusqlite::OptionalExtension;
+    let row: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT secret_key FROM bots WHERE public_key = ?1",
+            params![pk.as_bytes().as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match row {
+        Some(bytes) => {
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("bad bot secret length"))?;
+            Ok(Some(arr))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Encrypt `text` as a DM from the bot to the recipient, returning hex-encoded
+/// ciphertext in the format expected by the client `dm_decrypt` (nonce||ct+tag).
+pub fn encrypt_bot_dm(
+    bot_ed_sk: &[u8; 32],
+    recipient_ed_pk: &[u8; 32],
+    text: &str,
+) -> Result<String> {
+    let shared = farder_crypto::key_exchange::derive_dm_shared_secret(bot_ed_sk, recipient_ed_pk)
+        .map_err(|e| anyhow::anyhow!("dm key exchange failed: {e}"))?;
+    let ct = farder_crypto::encryption::encrypt(&shared, text.as_bytes())?;
+    Ok(hex::encode(ct))
+}
+
+/// Send an E2EE DM from a server-managed bot to a user, delivered targeted at
+/// the recipient (so it reaches them regardless of which channel they're viewing).
+///
+/// # No DB lock across `.await`
+/// All DB and crypto work is done inside a scoped block that drops the
+/// `MutexGuard` before the first `broadcast_event` call.
+pub async fn send_bot_dm(
+    state: &Arc<ServerState>,
+    bot_pk: &PublicKey,
+    recipient_pk: &PublicKey,
+    text: &str,
+) -> Result<()> {
+    // --- all DB + crypto work under the lock; collect what broadcasts need ---
+    let (channel_info, was_created, message, bot_member) = {
+        let conn = state.db.lock().unwrap();
+
+        let bot_sk = match get_bot_secret(&conn, bot_pk)? {
+            Some(s) => s,
+            None => return Ok(()), // bot not found; nothing to send
+        };
+
+        let (channel_id, was_created) =
+            crate::channels::open_dm_channel(&conn, bot_pk, recipient_pk)?;
+
+        let hex_ct = encrypt_bot_dm(&bot_sk, recipient_pk.as_bytes(), text)?;
+
+        let msg_id =
+            crate::messages::insert_message(&conn, channel_id, bot_pk, &hex_ct, None)?;
+
+        let message = crate::messages::get_message(&conn, msg_id, recipient_pk)?
+            .ok_or_else(|| anyhow::anyhow!("bot dm message vanished after insert"))?;
+
+        let channel_info = crate::channels::get_channel(&conn, channel_id)?
+            .ok_or_else(|| anyhow::anyhow!("dm channel vanished after open"))?;
+
+        // Build the bot's MemberInfo for DmCreated.participant (DRY with OpenDm handler).
+        let bot_member = crate::handlers::build_member_info(&conn, state, bot_pk)?;
+
+        (channel_info, was_created, message, bot_member)
+    }; // MutexGuard dropped here — safe to .await below
+
+    // --- targeted broadcasts (async), only to the recipient ---
+    if was_created {
+        crate::connection::broadcast_event(
+            state,
+            EventTarget::Members(vec![recipient_pk.clone()]),
+            ServerEvent::DmCreated {
+                channel: channel_info,
+                participant: bot_member,
+            },
+        )
+        .await;
+    }
+    crate::connection::broadcast_event(
+        state,
+        EventTarget::Members(vec![recipient_pk.clone()]),
+        ServerEvent::NewMessage { message },
+    )
+    .await;
+    Ok(())
+}
+
 #[cfg(test)]
 mod ticker_tests {
     use super::*;
@@ -203,6 +305,27 @@ mod ticker_tests {
 mod tests {
     use super::*;
     use farder_crypto::identity::Keypair;
+
+    #[test]
+    fn bot_dm_encrypts_so_recipient_decrypts() {
+        let bot = Keypair::generate();
+        let user = Keypair::generate();
+        let hex_ct = encrypt_bot_dm(
+            bot.signing_key_bytes(),
+            user.public_key().as_bytes(),
+            "hello from BTC bot",
+        )
+        .unwrap();
+        // recipient decrypts with (their sk, bot pk) — symmetric ECDH
+        let shared = farder_crypto::key_exchange::derive_dm_shared_secret(
+            user.signing_key_bytes(),
+            bot.public_key().as_bytes(),
+        )
+        .unwrap();
+        let ct = hex::decode(&hex_ct).unwrap();
+        let pt = farder_crypto::encryption::decrypt(&shared, &ct).unwrap();
+        assert_eq!(String::from_utf8(pt).unwrap(), "hello from BTC bot");
+    }
 
     #[test]
     fn poll_interval_defaults_and_clamps() {

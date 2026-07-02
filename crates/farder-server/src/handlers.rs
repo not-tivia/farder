@@ -56,6 +56,39 @@ fn current_unix_ms() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Shared MemberInfo builder
+// ---------------------------------------------------------------------------
+
+/// Build a `MemberInfo` for the given public key, suitable for inclusion in
+/// `DmCreated`, `DmOpened`, etc.  Reads the member record, role ids, timeout
+/// state, and live presence from `state`.  Returns an error if the member does
+/// not exist.
+pub fn build_member_info(
+    conn: &Connection,
+    state: &crate::state::ServerState,
+    pk: &PublicKey,
+) -> Result<MemberInfo> {
+    let record = members::get_member(conn, pk)?
+        .ok_or_else(|| anyhow::anyhow!("member not found: {:?}", pk))?;
+    let role_ids = members::get_member_role_ids(conn, pk)?;
+    let (timeout_until, timeout_reason) = match members::is_timed_out(conn, pk, current_unix_ms())? {
+        Some((until, reason)) => (Some(until), reason),
+        None => (None, None),
+    };
+    Ok(MemberInfo {
+        public_key: pk.clone(),
+        display_name: record.display_name,
+        joined_at: record.joined_at,
+        role_ids,
+        timeout_until,
+        timeout_reason,
+        profile_hash: record.profile_hash,
+        presence: state.presences.read().unwrap().get(pk.as_bytes()).cloned(),
+        is_bot: record.is_bot,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Permission resolution helper
 // ---------------------------------------------------------------------------
 
@@ -1319,25 +1352,8 @@ pub fn handle_request(
             let channel = channels::get_channel(conn, channel_id)?
                 .ok_or_else(|| anyhow::anyhow!("DM channel not found after creation"))?;
 
-            // Build MemberInfo for participant.
-            let target_record = members::get_member(conn, &target_key)?
-                .ok_or_else(|| anyhow::anyhow!("target member disappeared"))?;
-            let role_ids = members::get_member_role_ids(conn, &target_key)?;
-            let (timeout_until, timeout_reason) = match members::is_timed_out(conn, &target_key, current_unix_ms())? {
-                Some((until, reason)) => (Some(until), reason),
-                None => (None, None),
-            };
-            let participant = MemberInfo {
-                public_key: target_key.clone(),
-                display_name: target_record.display_name,
-                joined_at: target_record.joined_at,
-                role_ids,
-                timeout_until,
-                timeout_reason,
-                profile_hash: target_record.profile_hash.clone(),
-                presence: state.presences.read().unwrap().get(target_key.as_bytes()).cloned(),
-                is_bot: target_record.is_bot,
-            };
+            // Build MemberInfo for participant (shared helper; also used by bots::send_bot_dm).
+            let participant = build_member_info(conn, state, &target_key)?;
 
             let mut events = Vec::new();
             if was_created {
