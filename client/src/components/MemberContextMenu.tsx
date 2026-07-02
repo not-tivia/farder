@@ -208,7 +208,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const rows: Row[] = [];
 
   rows.push({ kind: "item", label: "View Profile", onClick: viewProfile });
-  if (!isSelf) {
+  if (!isSelf && !target.is_bot) {
     rows.push({ kind: "separator" });
     rows.push({ kind: "item", label: "Send Message", onClick: sendMessage });
   }
@@ -218,7 +218,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     rows.push({ kind: "separator" });
     rows.push({ kind: "submenu", label: "Assign Role…  ▶" });
   }
-  if (!isSelf && (canKick || canBan || canTimeout)) {
+  if (!isSelf && !target.is_bot && (canKick || canBan || canTimeout)) {
     rows.push({ kind: "separator" });
     if (canTimeout) {
       if (isTargetTimedOut) {
@@ -230,7 +230,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     if (canKick) rows.push({ kind: "item", label: "Kick", onClick: kickConfirm, danger: true });
     if (canBan) rows.push({ kind: "item", label: "Ban", onClick: () => setShowBanDialog(true), danger: true });
   }
-  if (!isSelf) {
+  if (!isSelf && !target.is_bot) {
     rows.push({ kind: "separator" });
     rows.push({ kind: "item", label: "Block", onClick: blockConfirm });
   }

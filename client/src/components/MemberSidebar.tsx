@@ -57,6 +57,7 @@ function MemberRow({ member, serverId, roles, showModBadges, onClick, onContextM
           ? <span className="member-presence" title={formatPresence(member.presence)}>{formatPresence(member.presence)}</span>
           : status && <span className="member-status" title={status}>{status}</span>}
       </span>
+      {member.is_bot && <span className="member-bot-badge">BOT</span>}
       {showModBadges && (
         <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
       )}

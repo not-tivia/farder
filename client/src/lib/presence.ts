@@ -7,6 +7,7 @@ import type { Presence } from "./types";
  *   {Game,"Valorant",null} -> "🎮 Playing Valorant"
  */
 export function formatPresence(p: Presence): string {
+  if (p.kind === "Ticker") return p.details;
   if (p.kind === "Music") {
     return p.state ? `🎵 Listening to ${p.details} – ${p.state}` : `🎵 Listening to ${p.details}`;
   }
