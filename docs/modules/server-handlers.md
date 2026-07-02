@@ -230,6 +230,15 @@ WebRTC session.
 | `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs`. |
 | `FetchUrl` | Returns an immediate `Error`; this variant must be intercepted and handled asynchronously by `connection.rs` before reaching this function. |
 
+### Bots
+
+| `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
+|---|---|---|---|---|
+| `AddBot` | Generates a fresh Ed25519 keypair; inserts a `bots` row (stores the coin id and secret key) and a `members` row with `is_bot=1`; `label` becomes the bot's `display_name`. The price-poller will start broadcasting its presence within the next tick. | Owner only (`is_owner` gate; `MANAGE_SERVER` check reused) | `members::register_bot_member`, `bots::register_bot` | `MemberJoined { public_key, display_name: label }` → `All` |
+| `RemoveBot` | Deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
+
+---
+
 ### Pre-auth: `GetInvitePreview` (relay fetch proxy)
 
 `GetInvitePreview` is **not** a `ServerRequest` — it is a `ClientFrame` handled
@@ -311,6 +320,49 @@ files are silently skipped. Called once at server startup after
 `reconcile_attachments`.
 
 **Returns:** the count of on-disk files actually deleted.
+
+---
+
+## `bots.rs` — ticker bot storage and poller
+
+> **File:** `crates/farder-server/src/bots.rs`
+
+### Data model
+
+A crypto-ticker bot is represented in two tables:
+
+- **`bots`**: `(public_key, secret_key, kind='crypto_ticker', coin_id, label, created_at)` — the server owns and holds the bot's Ed25519 secret key.
+- **`members`**: a normal members row with `is_bot=1`; `label` is the `display_name`; `joined_at` is set at registration time.
+
+The bot has no human operator and cannot authenticate a client connection — it exists only so it appears in the member roster (`GetMembers`) and can have a `Presence` broadcast on its behalf by the poller.
+
+### DB helpers
+
+| Function | Signature | What it does |
+|---|---|---|
+| `register_bot` | `(conn, pk, secret, coin_id, label) -> Result<()>` | Inserts a row into `bots`. |
+| `list_bots` | `(conn) -> Result<Vec<BotRecord>>` | Returns all `BotRecord { public_key, coin_id, label }` rows. |
+| `remove_bot` | `(conn, pk) -> Result<()>` | Deletes from `bots` by public key. The `members` row is deleted separately by `handlers.rs` via `members::remove_member_row`. |
+
+### `ticker_presence(p: &PriceInfo) -> Presence`
+
+Composes a `Presence { kind: Ticker, details: "$<price> <arrow><pct>%", state: Some("24h") }`. The arrow glyph is `\u{25B2}` (▲) for non-negative 24h change, `\u{25BC}` (▼) for negative. Used both by the poller and by unit tests.
+
+### `fetch_prices(coin_ids: &[String]) -> Result<HashMap<String, PriceInfo>>`
+
+Fetches USD price and 24h percentage change for all given CoinGecko ids in a single `GET /api/v3/simple/price` call. SSRF-guarded: the constructed URL is pre-validated by `ssrf::resolves_to_global` before any network I/O. 10-second timeout; redirects disabled. Returns only entries where a valid `usd` f64 was present in the JSON response.
+
+### `spawn_bot_poll_task(state: Arc<ServerState>, interval_secs: u64) -> JoinHandle<()>`
+
+Spawns a background `tokio::spawn` that ticks every `interval_secs` (min 15 s, typically 60 s). On each tick:
+
+1. **Snapshot** — reads the bot list from SQLite, releasing the `Mutex<Connection>` lock before any `.await`.
+2. **Coalesce** — deduplicates coin IDs and issues ONE `fetch_prices` network call for all bots.
+3. **Broadcast** — for each bot whose coin ID appeared in the response, calls `ticker_presence`, stores the result in `state.presences` (RwLock), and broadcasts `ServerEvent::MemberPresenceUpdated` to all connected clients via `connection::broadcast_event`.
+
+Bots whose coin ID is absent from the API response retain their last-known presence (no eviction on partial failures). A network error is logged at `WARN` level and the poller continues running on the next tick.
+
+**Roster whitelist for mesh servers:** when `GetMembers` is handled for a log-mode server, the member list is filtered to `m.is_bot || ls.is_member(&m.public_key)` so bots always appear alongside confirmed log-space members.
 
 ---
 

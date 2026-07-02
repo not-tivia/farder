@@ -167,6 +167,13 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 |---|---|---|
 | `UpdatePresence` | `presence: Option<Presence>` | Set or clear the sender's ephemeral activity presence. `None` clears it. The server stamps the **sender's own authenticated public key** — the client cannot supply a key. Rate-limited to 2 updates/sec per member (excess silently returns `Ok`, no broadcast). Responds with `Ok` on success; `Error` only on validation failure (a field over 128 chars). See `docs/modules/presence.md`. |
 
+### Bots
+
+| Variant | Fields | What it asks the server to do |
+|---|---|---|
+| `AddBot` | `coin_id: String`, `label: String` | Register a new server-managed crypto-ticker bot. **Owner-gated.** The server generates a fresh Ed25519 keypair, inserts a `bots` row (stores the secret key and CoinGecko coin id), and inserts a `members` row with `is_bot=1`; `label` becomes the bot's display name. Returns `Ok`. The bot then appears in the member roster and the price-poller will start broadcasting its presence within one tick (~60 s). |
+| `RemoveBot` | `bot_public_key: PublicKey` | Remove a bot by its public key. **Owner-gated.** Deletes the `bots` and `members` rows, evicts the in-memory presence entry from `state.presences`, and broadcasts `MemberLeft`. Returns `Ok`. |
+
 ### Voice / media
 
 | Variant | Fields | What it asks the server to do |
@@ -390,7 +397,8 @@ A server member, used in `Members` response and `MemberJoined` event.
 | `role_ids` | `Vec<u64>` | IDs of all roles currently held. |
 | `timeout_until` | `Option<u64>` | Unix-ms timeout expiry, or `None`. Defaults to `None` via `#[serde(default)]`. |
 | `timeout_reason` | `Option<String>` | Human-readable reason for the timeout. Defaults to `None` via `#[serde(default)]`. |
-| `presence` | `Option<Presence>` | The member's current ephemeral activity (music or game), or `None`. Defaults to `None` via `#[serde(default)]` — backward-compatible. Populated from `ServerState.presences` at the time `GetMembers` is handled so late joiners see the full picture. |
+| `presence` | `Option<Presence>` | The member's current ephemeral activity (music, game, or ticker price), or `None`. Defaults to `None` via `#[serde(default)]` — backward-compatible. Populated from `ServerState.presences` at the time `GetMembers` is handled so late joiners see the full picture. For bots with `kind=Ticker`, the price poller keeps this field live. |
+| `is_bot` | `bool` | `true` for server-managed crypto-ticker bots (rows with `is_bot=1` in the `members` table). Defaults to `false` via `#[serde(default)]`. The client uses this flag to render the BOT badge and to suppress human-only context-menu actions on bot members. |
 
 ### `BannedMember`
 
@@ -417,17 +425,17 @@ A voice presence entry, used in `MediaStateResp` and the `MediaJoined`/`MediaLef
 
 The ephemeral activity payload carried by `UpdatePresence`, `MemberPresenceUpdated`, and `MemberInfo.presence`. Defined in `crates/farder-protocol/src/server.rs`.
 
-**`PresenceKind`** (enum): `Music | Game`.
+**`PresenceKind`** (enum): `Music | Game | Ticker`.
 
 **`Presence`** (struct):
 
 | Field | Type | Notes |
 |---|---|---|
-| `kind` | `PresenceKind` | `Music` or `Game`. Determines the display format on the client. |
-| `details` | `String` | Primary text: track title (Music) or game name (Game). Max 128 chars. |
-| `state` | `Option<String>` | Secondary text: artist name (Music) or `None` (Game, for now). Max 128 chars. |
+| `kind` | `PresenceKind` | `Music`, `Game`, or `Ticker`. Determines the display format on the client. `Ticker` is used by server-managed crypto-price bots — the poller writes the formatted price into `details` and `"24h"` into `state` (see `bots.rs::ticker_presence`). |
+| `details` | `String` | Primary text: track title (Music) / game name (Game) / price string for Ticker (e.g. `"$67432.00 ▲2.10%"`). Max 128 chars. |
+| `state` | `Option<String>` | Secondary text: artist name (Music) / `None` (Game) / `"24h"` (Ticker, the change-window label). Max 128 chars. |
 
-Field-length limits (128 chars each) are enforced server-side; the server returns `ServerResponse::Error` on violation. `Presence` derives `PartialEq` and `Clone` (required by the client's per-server dedup logic).
+Field-length limits (128 chars each) are enforced server-side for user-supplied presence (`UpdatePresence`); bot presence written by the server's poller is not rate-limited by this path. `Presence` derives `PartialEq` and `Clone` (required by the client's per-server dedup logic).
 
 ### `AuditEvent`
 
@@ -618,7 +626,7 @@ leaks no information about why the relay refused.
 ## Known gotchas
 
 - **`PublicKey` wire form vs. display form:** on the wire (MessagePack / JSON) `PublicKey` is `{"bytes": [32 bytes]}`. When crossing the Tauri webview boundary it must be converted to its `Display` string (`"vk_<hex64>"`) via `.to_string()`. Mixing these two forms is a silent bug — the UI's string equality checks will always fail.
-- **`#[serde(default)]` fields:** several optional fields on wire types (`ban_reason`, `timeout_until`, `timeout_reason`, `file_id` on `ReactionGroup`/`ReactionAdded`/`ReactionRemoved`, `target` and `metadata` on `AuditEvent`, `owner_public_key` on `ServerInfo`, `presence` on `MemberInfo`) use `#[serde(default)]` so they can be omitted from older serialized frames. Adding a new required field without `#[serde(default)]` will break deserialization of any frames produced by an older server.
+- **`#[serde(default)]` fields:** several optional fields on wire types (`ban_reason`, `timeout_until`, `timeout_reason`, `file_id` on `ReactionGroup`/`ReactionAdded`/`ReactionRemoved`, `target` and `metadata` on `AuditEvent`, `owner_public_key` on `ServerInfo`, `presence` and `is_bot` on `MemberInfo`) use `#[serde(default)]` so they can be omitted from older serialized frames. Adding a new required field without `#[serde(default)]` will break deserialization of any frames produced by an older server.
 - **Session ID is `[u8; 16]`:** `session_id` in all `Stream*` events is a 16-byte opaque array, not a UUID string. The `VoiceController` keys its peer map on this value; always compare by byte equality, not string form.
 - **`Option<Option<T>>` in `UpdateChannel`:** `retention_secs` and `category_id` use `Option<Option<T>>` — the outer `None` means "do not change this field", the inner `None` means "clear it to null". This is intentional and necessary for partial-update semantics but is easy to conflate.
 - **`PermissionsChanged` carries no payload:** the event only signals that the client's permissions may have changed. The client must issue a fresh `GetServerInfo` to know what changed.

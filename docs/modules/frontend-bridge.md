@@ -36,7 +36,7 @@ A server role. `permissions` is a bitmask (the Rust `Permissions` bitfield seria
 
 ### `MemberInfo`
 
-A server member. `public_key` is a `{ bytes: number[] }` object — call `publicKeyToString()` before using it as a key or passing it to a command. `timeout_until` is a Unix-ms timestamp or null; non-null means the member is currently timed out.
+A server member. `public_key` is a `{ bytes: number[] }` object — call `publicKeyToString()` before using it as a key or passing it to a command. `timeout_until` is a Unix-ms timestamp or null; non-null means the member is currently timed out. `is_bot` is `true` for server-managed crypto-ticker bots and defaults to `false` (or `undefined` from older servers) for human members — gate the BOT badge and suppress human-only context-menu actions on it. `presence` now also carries `kind: "Ticker"` for bots (see `PresenceKind`).
 
 ### `MessageInfo`
 
@@ -392,6 +392,8 @@ These commands drive the `VoiceController` (the local Opus/QUIC audio subsystem)
 | `denyMember(serverId, logServerId, member)` | `deny_member` | Emit a signed `MemberRemoved` event to deny or remove a pending member. Same ID convention as `approveMember`. |
 | `getMembershipStatus(serverId)` | `get_membership_status` | Returns `"member"` \| `"pending"` \| `"none"` for the caller's status on this server. Allowed for non-members so a pending joiner can poll. |
 | `getPendingMembers(serverId)` | `get_pending_members` | Returns `MemberInfo[]` of members awaiting approval. Gated server-side to approvers (KICK\_MEMBERS) and the owner. |
+| `addBot(serverId, coinId, label)` | `add_bot` | Registers a new crypto-ticker bot on the server. `coinId` is a CoinGecko coin id (e.g. `"bitcoin"`); `label` is the display name (e.g. `"BTC"`). Owner-gated server-side. The bot appears in the member roster with `is_bot: true` and starts showing a live `Presence { kind: "Ticker" }` within ~60 s. Returns `void`. |
+| `removeBot(serverId, botPublicKey)` | `remove_bot` | Removes a bot by its `"vk_<hex>"` public key (use `publicKeyToString(member.public_key)` from the roster). Owner-gated server-side. Returns `void`. |
 
 ---
 

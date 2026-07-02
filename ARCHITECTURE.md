@@ -175,6 +175,31 @@ acts as a cache key: an unchanged hash means the local cache is still valid.
 
 ---
 
+## Crypto ticker bots
+
+Ticker bots are **server-managed members**: a synthetic roster entry whose Ed25519 keypair is generated and held by the server, not by any user. The server drives their presence autonomously.
+
+**Data path — owner adds a bot → live price appears in the member list:**
+
+1. Owner calls `invoke("add_bot", { serverId, coinId, label })` → `commands.rs::add_bot` → `ServerRequest::AddBot { coin_id, label }` over QUIC.
+2. `handlers.rs` (`AddBot` arm, owner-gated): generates a fresh Ed25519 keypair, inserts a `bots` row (stores secret key + CoinGecko coin id), inserts a `members` row with `is_bot=1`; `label` is the `display_name`. Broadcasts `ServerEvent::MemberJoined { public_key, display_name: label }` → all connected clients.
+3. The price-poller (`bots::spawn_bot_poll_task`, launched at server startup, ~60 s interval):
+   - Snapshots the bot list (drops DB lock before any `.await`).
+   - Deduplicates coin IDs and issues ONE SSRF-guarded CoinGecko `/simple/price` fetch for all bots.
+   - For each bot in the response: calls `bots::ticker_presence` (formats `"$<price> <arrow><pct>%"`), stores the `Presence` in `state.presences` (RwLock), and broadcasts `ServerEvent::MemberPresenceUpdated` via `connection::broadcast_event`.
+4. `bridge.rs` re-emits `server:member_presence_updated`; `useServerEvents.ts` dispatches `UPDATE_MEMBER_PRESENCE`; `ServerContext` updates `member.presence` for the bot's public key.
+5. The client renders the bot with a **BOT badge** (`is_bot: true`) and the inline ticker price (`member.presence.details`) in the member list.
+
+**Removal:** `invoke("remove_bot", { serverId, botPublicKey })` → `ServerRequest::RemoveBot` → deletes `bots` + `members` rows, evicts presence from `state.presences`, broadcasts `MemberLeft`.
+
+**Persistence:** bots survive server restarts; the poller re-fetches prices within one tick after startup.
+
+**SSRF guard:** the CoinGecko URL is pre-validated by `ssrf::resolves_to_global` before any network call; HTTP redirects are disabled on the reqwest client.
+
+**Mesh roster:** for log-mode servers, `GetMembers` filters the roster to `m.is_bot || ls.is_member(...)` so bots always appear alongside human log-space members.
+
+---
+
 ## Cross-cutting things that bite
 
 - **Identity at rest:** `client/src-tauri/src/identity.rs` (`IdentityStore`)

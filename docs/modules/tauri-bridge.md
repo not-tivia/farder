@@ -80,7 +80,7 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 **`server:member_presence_updated` payload fields:**
 - `server_id` — the server this event came from (added by `dispatch_event`, common to all `server:*` events).
 - `public_key` — `"vk_<hex64>"` string (the member whose presence changed). Always the authenticated sender's key; the server never accepts a client-supplied key.
-- `presence` — a `Presence` JSON object `{ kind: "Music"|"Game", details: string, state: string|null }`, or `null` to clear. `null` is sent on: explicit clear (`UpdatePresence{None}`), member disconnect, or settings toggled off.
+- `presence` — a `Presence` JSON object `{ kind: "Music"|"Game"|"Ticker", details: string, state: string|null }`, or `null` to clear. `null` is sent on: explicit clear (`UpdatePresence{None}`), member disconnect, or settings toggled off. For `kind: "Ticker"` (server-managed crypto bots), `details` is a formatted price string (e.g. `"$67432.00 ▲2.10%"`) and `state` is `"24h"`; the bot's member entry also has `is_bot: true`.
 
 ## Local events (not from the server — emitted directly by Tauri commands)
 
