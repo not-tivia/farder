@@ -55,7 +55,9 @@ function MemberRow({ member, serverId, roles, showModBadges, onClick, onContextM
         <span className="member-name" style={{ color: nameColor(member, roles) }}>{memberDisplayName(member.display_name)}</span>
         {member.presence
           ? <span className="member-presence" title={formatPresence(member.presence)}>{formatPresence(member.presence)}</span>
-          : status && <span className="member-status" title={status}>{status}</span>}
+          : member.is_bot
+            ? <span className="member-presence" style={{ opacity: 0.6 }}>fetching price&#x2026;</span>
+            : status && <span className="member-status" title={status}>{status}</span>}
       </span>
       {member.is_bot && <span className="member-bot-badge">BOT</span>}
       {showModBadges && (

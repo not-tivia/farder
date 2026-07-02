@@ -81,6 +81,9 @@ export default function BotsTab({ serverId }: Props) {
       {/* Add bot */}
       <div style={{ marginTop: 12, borderTop: "1px solid var(--xp-border)", paddingTop: 10 }}>
         <div className="connect-section-title" style={{ marginBottom: 6, fontSize: 12 }}>Add Ticker Bot</div>
+        <div style={{ color: "var(--xp-text-muted)", marginBottom: 8, fontSize: 12 }}>
+          A new bot shows &ldquo;fetching price&#x2026;&rdquo; until its first price update (up to ~60s). For a Custom coin, use the exact CoinGecko ID (lowercase, e.g. &ldquo;solana&rdquo;) &mdash; an unknown ID will stay blank.
+        </div>
         <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div>
             <label className="connect-label">Coin</label>

@@ -75,7 +75,23 @@ pub async fn fetch_prices(coin_ids: &[String]) -> anyhow::Result<std::collection
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let body = client.get(&url).header("accept", "application/json").send().await?.text().await?;
+    let resp = client
+        .get(&url)
+        .header("accept", "application/json")
+        .header("user-agent", "farder-bot/1.0")
+        .send()
+        .await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    // reqwest does NOT error on a non-2xx status — surface it explicitly so a
+    // rate-limit / block (429/403) becomes a logged failure, not a silent empty map.
+    if !status.is_success() {
+        anyhow::bail!(
+            "coingecko returned {}: {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
     let v: serde_json::Value = serde_json::from_str(&body)?;
     let mut out = HashMap::new();
     if let Some(obj) = v.as_object() {
@@ -98,6 +114,7 @@ pub async fn fetch_prices(coin_ids: &[String]) -> anyhow::Result<std::collection
 ///      to all connected clients via the existing `connection::broadcast_event` helper.
 pub fn spawn_bot_poll_task(state: Arc<ServerState>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        tracing::info!(interval_secs = interval_secs.max(15), "bot price poller started");
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(15)));
         loop {
@@ -111,6 +128,7 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>, interval_secs: u64) -> tokio
             // 2. Coalesce distinct coin ids; one network call for all bots.
             let mut ids: Vec<String> = bots.iter().map(|b| b.coin_id.clone()).collect();
             ids.sort(); ids.dedup();
+            tracing::info!(bots = bots.len(), coins = ?ids, "bot poller: fetching prices");
             let prices = match fetch_prices(&ids).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -118,6 +136,7 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>, interval_secs: u64) -> tokio
                     continue;
                 }
             };
+            tracing::info!(fetched = prices.len(), "bot poller: prices fetched, broadcasting");
             // 3. Per bot: compose + store + broadcast (skip coins absent from the response).
             for b in &bots {
                 if let Some(pi) = prices.get(&b.coin_id) {
