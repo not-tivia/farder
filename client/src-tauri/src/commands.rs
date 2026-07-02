@@ -5,7 +5,8 @@ use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
-    CategoryInfo, ChannelInfo, MemberInfo, MessageInfo, RoleInfo, ServerRequest, ServerResponse,
+    BotAlertInfo, CategoryInfo, ChannelInfo, MemberInfo, MessageInfo, RoleInfo, ServerRequest,
+    ServerResponse,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -2377,6 +2378,130 @@ pub async fn get_bot_poll_interval(state: State<'_, Arc<AppState>>, server_id: S
 pub async fn set_bot_poll_interval(state: State<'_, Arc<AppState>>, server_id: String, secs: u64) -> Result<(), String> {
     match bridge::send_request(&state, &server_id, ServerRequest::SetBotPollInterval { secs }).await.map_err(|e| e.to_string())? {
         ServerResponse::Ok => Ok(()),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bot alert commands (owner-gated on server; subscribe/list are any-member)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn add_bot_alert(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    bot_public_key: String,
+    metric: String,
+    comparator: String,
+    threshold: f64,
+) -> Result<(), String> {
+    let pk = parse_public_key(&bot_public_key)?;
+    match bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::AddBotAlert { bot_public_key: pk, metric, comparator, threshold },
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_bot_alert(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    alert_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::RemoveBotAlert { alert_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_bot_alerts(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    bot_public_key: String,
+) -> Result<Vec<BotAlertInfo>, String> {
+    let pk = parse_public_key(&bot_public_key)?;
+    match bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::ListBotAlerts { bot_public_key: pk },
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        ServerResponse::BotAlerts { alerts } => Ok(alerts),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn subscribe_bot(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    bot_public_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&bot_public_key)?;
+    match bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::SubscribeBot { bot_public_key: pk },
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn unsubscribe_bot(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    bot_public_key: String,
+) -> Result<(), String> {
+    let pk = parse_public_key(&bot_public_key)?;
+    match bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::UnsubscribeBot { bot_public_key: pk },
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_my_subscriptions(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<String>, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ListMySubscriptions)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::MySubscriptions { bot_public_keys } => {
+            Ok(bot_public_keys.iter().map(|pk| pk.to_string()).collect())
+        }
+        ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }
 }

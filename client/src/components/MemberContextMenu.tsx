@@ -71,6 +71,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
   const targetPk = publicKeyToString(target.public_key);
   const isSelf = ownPk === targetPk;
   const members = activeServer?.members ?? [];
@@ -117,6 +118,18 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
       }
     })();
   }, [targetPk]);
+
+  useEffect(() => {
+    if (!target.is_bot) return;
+    (async () => {
+      try {
+        const subs = await api.listMySubscriptions(serverId);
+        setIsSubscribed(subs.includes(targetPk));
+      } catch {
+        // silent: subscription state is best-effort
+      }
+    })();
+  }, [target.is_bot, serverId, targetPk]);
 
   function viewProfile() {
     setShowProfile(true);
@@ -200,6 +213,21 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     onClose();
   }
 
+  async function toggleBotSubscription() {
+    try {
+      if (isSubscribed) {
+        await api.unsubscribeBot(serverId, targetPk);
+        setIsSubscribed(false);
+      } else {
+        await api.subscribeBot(serverId, targetPk);
+        setIsSubscribed(true);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+    onClose();
+  }
+
   // Build the items conditionally to compute which separators are needed.
   type Row =
     | { kind: "item"; label: string; onClick: () => void; danger?: boolean }
@@ -208,6 +236,14 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const rows: Row[] = [];
 
   rows.push({ kind: "item", label: "View Profile", onClick: viewProfile });
+  if (target.is_bot) {
+    rows.push({ kind: "separator" });
+    rows.push({
+      kind: "item",
+      label: isSubscribed ? "\u{1F515} Unsubscribe" : "\u{1F514} Notify me",
+      onClick: () => void toggleBotSubscription(),
+    });
+  }
   if (!isSelf && !target.is_bot) {
     rows.push({ kind: "separator" });
     rows.push({ kind: "item", label: "Send Message", onClick: sendMessage });

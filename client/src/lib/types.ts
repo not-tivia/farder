@@ -136,3 +136,10 @@ export interface BannedMember {
   ban_reason?: string;
   banned_at: number;
 }
+
+export interface BotAlertInfo {
+  id: number;
+  metric: string;
+  comparator: string;
+  threshold: number;
+}

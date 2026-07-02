@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer } from "../context/ServerContext";
-import { publicKeyToString, memberDisplayName } from "../lib/types";
+import { publicKeyToString, memberDisplayName, type BotAlertInfo } from "../lib/types";
 
 interface Props {
   serverId: string;
@@ -27,9 +27,63 @@ export default function BotsTab({ serverId }: Props) {
   const [customLabel, setCustomLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [interval, setIntervalSecs] = useState<number>(60);
+
+  // Per-bot alerts state
+  const [alertsExpanded, setAlertsExpanded] = useState<Record<string, boolean>>({});
+  const [botAlerts, setBotAlerts] = useState<Record<string, BotAlertInfo[]>>({});
+  const [alertMetric, setAlertMetric] = useState<Record<string, string>>({});
+  const [alertComparator, setAlertComparator] = useState<Record<string, string>>({});
+  const [alertThreshold, setAlertThreshold] = useState<Record<string, string>>({});
+  const [alertError, setAlertError] = useState<Record<string, string | null>>({});
+
   useEffect(() => {
     api.getBotPollInterval(serverId).then(setIntervalSecs).catch(() => {});
   }, [serverId]);
+
+  async function loadAlerts(botPk: string) {
+    try {
+      const alerts = await api.listBotAlerts(serverId, botPk);
+      setBotAlerts((prev) => ({ ...prev, [botPk]: alerts }));
+    } catch (e) {
+      setAlertError((prev) => ({ ...prev, [botPk]: String(e) }));
+    }
+  }
+
+  function toggleAlertsExpanded(botPk: string) {
+    const next = !alertsExpanded[botPk];
+    setAlertsExpanded((prev) => ({ ...prev, [botPk]: next }));
+    if (next && !botAlerts[botPk]) {
+      void loadAlerts(botPk);
+    }
+  }
+
+  async function handleRemoveAlert(botPk: string, alertId: number) {
+    setAlertError((prev) => ({ ...prev, [botPk]: null }));
+    try {
+      await api.removeBotAlert(serverId, alertId);
+      await loadAlerts(botPk);
+    } catch (e) {
+      setAlertError((prev) => ({ ...prev, [botPk]: String(e) }));
+    }
+  }
+
+  async function handleAddAlert(botPk: string) {
+    const metric = alertMetric[botPk] ?? "price_usd";
+    const comparator = alertComparator[botPk] ?? "above";
+    const threshold = parseFloat(alertThreshold[botPk] ?? "");
+    if (isNaN(threshold)) {
+      setAlertError((prev) => ({ ...prev, [botPk]: "Enter a valid number for threshold" }));
+      return;
+    }
+    setAlertError((prev) => ({ ...prev, [botPk]: null }));
+    try {
+      await api.addBotAlert(serverId, botPk, metric, comparator, threshold);
+      setAlertThreshold((prev) => ({ ...prev, [botPk]: "" }));
+      await loadAlerts(botPk);
+    } catch (e) {
+      setAlertError((prev) => ({ ...prev, [botPk]: String(e) }));
+    }
+  }
 
   const coinId = isCustom ? customCoinId.trim() : selectedMajor;
   const label = isCustom
@@ -87,20 +141,108 @@ export default function BotsTab({ serverId }: Props) {
           No bots on this server yet.
         </div>
       )}
-      {bots.map((bot) => (
-        <div key={publicKeyToString(bot.public_key)} className="organizer-row">
-          <span className="organizer-name">{memberDisplayName(bot.display_name)}</span>
-          <div className="organizer-actions">
-            <button
-              className="organizer-btn organizer-delete"
-              title="Remove bot"
-              onClick={() => handleRemove(publicKeyToString(bot.public_key))}
-            >
-              x
-            </button>
+      {bots.map((bot) => {
+        const botPk = publicKeyToString(bot.public_key);
+        const expanded = alertsExpanded[botPk] ?? false;
+        const alerts = botAlerts[botPk] ?? [];
+        const botAlertErr = alertError[botPk] ?? null;
+        return (
+          <div key={botPk} className="organizer-row" style={{ flexDirection: "column", alignItems: "stretch" }}>
+            <div style={{ display: "flex", alignItems: "center" }}>
+              <span className="organizer-name">{memberDisplayName(bot.display_name)}</span>
+              <div className="organizer-actions">
+                <button
+                  className="organizer-btn"
+                  title={expanded ? "Hide alerts" : "Alerts"}
+                  onClick={() => toggleAlertsExpanded(botPk)}
+                  style={{ marginRight: 4 }}
+                >
+                  {expanded ? "▲ Alerts" : "▼ Alerts"}
+                </button>
+                <button
+                  className="organizer-btn organizer-delete"
+                  title="Remove bot"
+                  onClick={() => handleRemove(botPk)}
+                >
+                  x
+                </button>
+              </div>
+            </div>
+
+            {expanded && (
+              <div style={{ paddingLeft: 8, paddingTop: 6, paddingBottom: 4 }}>
+                {botAlertErr && (
+                  <div className="error-text" style={{ marginBottom: 4 }}>{botAlertErr}</div>
+                )}
+                {alerts.length === 0 && (
+                  <div style={{ color: "var(--xp-text-muted)", fontSize: 12, marginBottom: 6 }}>
+                    No alerts set for this bot.
+                  </div>
+                )}
+                {alerts.map((alert) => (
+                  <div key={alert.id} className="organizer-row" style={{ marginBottom: 4 }}>
+                    <span className="organizer-name" style={{ fontSize: 12 }}>
+                      {alert.metric} {alert.comparator} {alert.threshold}
+                    </span>
+                    <div className="organizer-actions">
+                      <button
+                        className="organizer-btn organizer-delete"
+                        title="Remove alert"
+                        onClick={() => void handleRemoveAlert(botPk, alert.id)}
+                      >
+                        x
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                {/* Add alert row */}
+                <div style={{ display: "flex", gap: 4, alignItems: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
+                  <div>
+                    <label className="connect-label" style={{ fontSize: 11 }}>Metric</label>
+                    <select
+                      className="connect-input"
+                      value={alertMetric[botPk] ?? "price_usd"}
+                      onChange={(e) => setAlertMetric((prev) => ({ ...prev, [botPk]: e.target.value }))}
+                    >
+                      <option value="price_usd">Price</option>
+                      <option value="change_24h">24h change</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="connect-label" style={{ fontSize: 11 }}>Condition</label>
+                    <select
+                      className="connect-input"
+                      value={alertComparator[botPk] ?? "above"}
+                      onChange={(e) => setAlertComparator((prev) => ({ ...prev, [botPk]: e.target.value }))}
+                    >
+                      <option value="above">above</option>
+                      <option value="below">below</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="connect-label" style={{ fontSize: 11 }}>Value</label>
+                    <input
+                      className="connect-input"
+                      type="number"
+                      placeholder="e.g. 70000"
+                      value={alertThreshold[botPk] ?? ""}
+                      onChange={(e) => setAlertThreshold((prev) => ({ ...prev, [botPk]: e.target.value }))}
+                      style={{ width: 90 }}
+                    />
+                  </div>
+                  <button
+                    className="organizer-btn"
+                    onClick={() => void handleAddAlert(botPk)}
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      ))}
+        );
+      })}
 
       {/* Add bot */}
       <div style={{ marginTop: 12, borderTop: "1px solid var(--xp-border)", paddingTop: 10 }}>

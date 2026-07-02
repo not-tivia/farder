@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -364,6 +364,30 @@ export async function getBotPollInterval(serverId: string): Promise<number> {
 }
 export async function setBotPollInterval(serverId: string, secs: number): Promise<void> {
   return invoke("set_bot_poll_interval", { serverId, secs });
+}
+
+export async function addBotAlert(serverId: string, botPublicKey: string, metric: string, comparator: string, threshold: number): Promise<void> {
+  return invoke("add_bot_alert", { serverId, botPublicKey, metric, comparator, threshold });
+}
+
+export async function removeBotAlert(serverId: string, alertId: number): Promise<void> {
+  return invoke("remove_bot_alert", { serverId, alertId });
+}
+
+export async function listBotAlerts(serverId: string, botPublicKey: string): Promise<BotAlertInfo[]> {
+  return invoke<BotAlertInfo[]>("list_bot_alerts", { serverId, botPublicKey });
+}
+
+export async function subscribeBot(serverId: string, botPublicKey: string): Promise<void> {
+  return invoke("subscribe_bot", { serverId, botPublicKey });
+}
+
+export async function unsubscribeBot(serverId: string, botPublicKey: string): Promise<void> {
+  return invoke("unsubscribe_bot", { serverId, botPublicKey });
+}
+
+export async function listMySubscriptions(serverId: string): Promise<string[]> {
+  return invoke<string[]>("list_my_subscriptions", { serverId });
 }
 
 export async function updateRole(serverId: string, roleId: number, patch: { name?: string; permissions?: number; color?: string; position?: number; hoist?: boolean }): Promise<void> {
