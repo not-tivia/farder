@@ -171,8 +171,10 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 
 | Variant | Fields | What it asks the server to do |
 |---|---|---|
-| `AddBot` | `coin_id: String`, `label: String` | Register a new server-managed crypto-ticker bot. **Owner-gated.** The server generates a fresh Ed25519 keypair, inserts a `bots` row (stores the secret key and CoinGecko coin id), and inserts a `members` row with `is_bot=1`; `label` becomes the bot's display name. Returns `Ok`. The bot then appears in the member roster and the price-poller will start broadcasting its presence within one tick (~60 s). |
+| `AddBot` | `coin_id: String`, `label: String` | Register a new server-managed crypto-ticker bot. **Owner-gated.** The server trims and lowercases `coin_id`, then validates it against `[a-z0-9-]` (≤64 chars); `label` is trimmed and must be 1–64 chars — both are rejected with `Error` on violation. On success, generates a fresh Ed25519 keypair, inserts a `bots` row (stores the secret key and CoinGecko coin id), and inserts a `members` row with `is_bot=1`; `label` becomes the bot's display name. Returns `Ok`. The bot appears in the member roster and the price-poller starts broadcasting its presence within one poll cycle. |
 | `RemoveBot` | `bot_public_key: PublicKey` | Remove a bot by its public key. **Owner-gated.** Deletes the `bots` and `members` rows, evicts the in-memory presence entry from `state.presences`, and broadcasts `MemberLeft`. Returns `Ok`. |
+| `SetBotPollInterval` | `secs: u64` | Set the bot price-poll interval. **MANAGE_SERVER-gated.** Values below 30 are clamped to 30 server-side. Stored in the `server_settings` KV table under key `"bot_poll_interval"`. The poll loop reads this value live each cycle, so the change takes effect without a server restart. Returns `Ok`. |
+| `GetBotPollInterval` | — | Query the current bot price-poll interval. No permission gate (any member may call this). Returns `BotPollInterval { secs }` — the stored value floored at 30, or the default of 60 if unset. |
 
 ### Voice / media
 
@@ -214,6 +216,7 @@ Every request receives exactly one response.
 | `DmList` | `dms: Vec<DmEntry>` | All DM entries in response to `ListDms`. |
 | `StreamSessionStarted` | `session_id: [u8; 16]` | The 16-byte session identifier assigned to this stream in response to `JoinStream`. Used to correlate all subsequent `Stream*` events. |
 | `MediaStateResp` | `participants: Vec<VoiceMember>` | Current voice roster in response to `GetMediaState`. |
+| `BotPollInterval` | `secs: u64` | Current bot price-poll interval in response to `GetBotPollInterval`. Value is floored at 30 and defaults to 60 when unset. |
 
 ---
 

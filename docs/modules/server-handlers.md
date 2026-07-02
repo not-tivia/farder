@@ -234,8 +234,10 @@ WebRTC session.
 
 | `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
 |---|---|---|---|---|
-| `AddBot` | Generates a fresh Ed25519 keypair; inserts a `bots` row (stores the coin id and secret key) and a `members` row with `is_bot=1`; `label` becomes the bot's `display_name`. The price-poller will start broadcasting its presence within the next tick. | Owner only (`is_owner` gate; `MANAGE_SERVER` check reused) | `members::register_bot_member`, `bots::register_bot` | `MemberJoined { public_key, display_name: label }` → `All` |
+| `AddBot` | Trims and lowercases `coin_id`; validates charset `[a-z0-9-]` and length ≤64 (returns `Error` on violation). Trims `label`; validates 1–64 chars (returns `Error` on violation). Generates a fresh Ed25519 keypair; inserts a `bots` row (stores the coin id and secret key) and a `members` row with `is_bot=1`; `label` becomes the bot's `display_name`. The price-poller starts broadcasting its presence within the next poll cycle. | Owner only (`is_owner` gate; `MANAGE_SERVER` check reused) | `members::register_bot_member`, `bots::register_bot` | `MemberJoined { public_key, display_name: label }` → `All` |
 | `RemoveBot` | Deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
+| `SetBotPollInterval` | Clamps `secs` to ≥30, then writes the value to `server_settings` via `bots::set_poll_interval`. The poll loop reads the interval live each cycle, so the change takes effect immediately after the current sleep expires (no restart). | MANAGE_SERVER (owner or role holders) | `bots::set_poll_interval` → `server_settings` KV (`key="bot_poll_interval"`) | — |
+| `GetBotPollInterval` | Reads the poll interval via `bots::get_poll_interval` and returns `BotPollInterval { secs }`. No permission gate — any connected member may query this. | None | `bots::get_poll_interval` (read-only) | — |
 
 ---
 
@@ -336,6 +338,16 @@ A crypto-ticker bot is represented in two tables:
 
 The bot has no human operator and cannot authenticate a client connection — it exists only so it appears in the member roster (`GetMembers`) and can have a `Presence` broadcast on its behalf by the poller.
 
+### Data storage: `server_settings` KV table
+
+Bot configuration is stored in the `server_settings` table (schema: `key TEXT PRIMARY KEY, value TEXT NOT NULL`). Currently the only bot-related key is:
+
+| Key | Value | Default |
+|---|---|---|
+| `"bot_poll_interval"` | Poll interval in seconds (stored as a decimal string). Always ≥30 when read back. | 60 (used when the key is absent) |
+
+Read via `db::get_setting`; written via `db::set_setting` (upsert semantics).
+
 ### DB helpers
 
 | Function | Signature | What it does |
@@ -343,6 +355,12 @@ The bot has no human operator and cannot authenticate a client connection — it
 | `register_bot` | `(conn, pk, secret, coin_id, label) -> Result<()>` | Inserts a row into `bots`. |
 | `list_bots` | `(conn) -> Result<Vec<BotRecord>>` | Returns all `BotRecord { public_key, coin_id, label }` rows. |
 | `remove_bot` | `(conn, pk) -> Result<()>` | Deletes from `bots` by public key. The `members` row is deleted separately by `handlers.rs` via `members::remove_member_row`. |
+| `get_poll_interval` | `(conn) -> u64` | Reads `"bot_poll_interval"` from `server_settings`; floors at `POLL_INTERVAL_FLOOR` (30); returns `POLL_INTERVAL_DEFAULT` (60) when unset. |
+| `set_poll_interval` | `(conn, secs: u64) -> Result<()>` | Writes `secs.max(POLL_INTERVAL_FLOOR)` to `server_settings` under `"bot_poll_interval"`. |
+
+### `unknown_coin_presence() -> Presence`
+
+Returns `Presence { kind: Ticker, details: "unknown coin", state: None }`. The poller calls this for any bot whose `coin_id` was absent from a **successful** CoinGecko response — indicating a bad or misspelled id rather than a transient network failure. The `"unknown coin"` string is rendered by the client's `formatPresence` path (same path as a normal ticker) so no client-side change was needed.
 
 ### `ticker_presence(p: &PriceInfo) -> Presence`
 
@@ -350,17 +368,21 @@ Composes a `Presence { kind: Ticker, details: "$<price> <arrow><pct>%", state: S
 
 ### `fetch_prices(coin_ids: &[String]) -> Result<HashMap<String, PriceInfo>>`
 
-Fetches USD price and 24h percentage change for all given CoinGecko ids in a single `GET /api/v3/simple/price` call. SSRF-guarded: the constructed URL is pre-validated by `ssrf::resolves_to_global` before any network I/O. 10-second timeout; redirects disabled. Returns only entries where a valid `usd` f64 was present in the JSON response.
+Fetches USD price and 24h percentage change for all given CoinGecko ids in a single `GET /api/v3/simple/price` call. SSRF-guarded: the constructed URL is pre-validated by `ssrf::resolves_to_global` before any network I/O. 10-second timeout; redirects disabled. Returns only entries where a valid `usd` f64 was present in the JSON response. Non-2xx HTTP status is surfaced as an error (so rate-limits/blocks are not silently treated as empty responses).
 
-### `spawn_bot_poll_task(state: Arc<ServerState>, interval_secs: u64) -> JoinHandle<()>`
+### `spawn_bot_poll_task(state: Arc<ServerState>) -> JoinHandle<()>`
 
-Spawns a background `tokio::spawn` that ticks every `interval_secs` (min 15 s, typically 60 s). On each tick:
+Spawns a background `tokio::spawn`. The loop is **poll-then-sleep**: it executes one poll cycle immediately on startup, then reads the current interval from `server_settings` and sleeps for that duration before the next cycle. Because the interval is re-read at the start of each sleep, changes made via `SetBotPollInterval` take effect after the current sleep expires — no server restart is needed.
+
+On each poll cycle:
 
 1. **Snapshot** — reads the bot list from SQLite, releasing the `Mutex<Connection>` lock before any `.await`.
 2. **Coalesce** — deduplicates coin IDs and issues ONE `fetch_prices` network call for all bots.
-3. **Broadcast** — for each bot whose coin ID appeared in the response, calls `ticker_presence`, stores the result in `state.presences` (RwLock), and broadcasts `ServerEvent::MemberPresenceUpdated` to all connected clients via `connection::broadcast_event`.
-
-Bots whose coin ID is absent from the API response retain their last-known presence (no eviction on partial failures). A network error is logged at `WARN` level and the poller continues running on the next tick.
+3. **Broadcast** — for each bot:
+   - If the coin ID appeared in the response, calls `ticker_presence` and broadcasts the price.
+   - If the coin ID was absent from a **successful** fetch, calls `unknown_coin_presence()` and broadcasts `"unknown coin"` — signaling a bad or typo'd coin id.
+   - On a **network error** (entire fetch failed), all bots retain their last-known presence; nothing is broadcast. The error is logged at `WARN` level.
+   - The updated `Presence` is stored in `state.presences` (RwLock) and broadcast as `ServerEvent::MemberPresenceUpdated` to all connected clients via `connection::broadcast_event`.
 
 **Roster whitelist for mesh servers:** when `GetMembers` is handled for a log-mode server, the member list is filtered to `m.is_bot || ls.is_member(&m.public_key)` so bots always appear alongside confirmed log-space members.
 

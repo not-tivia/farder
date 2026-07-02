@@ -2118,12 +2118,12 @@ Register a new ticker bot on the server. Owner-gated server-side.
 
 **Parameters:**
 - `server_id: String` — connection address.
-- `coin_id: String` — CoinGecko coin id (e.g. `"bitcoin"`, `"ethereum"`).
-- `label: String` — display label for the bot (e.g. `"BTC"`).
+- `coin_id: String` — CoinGecko coin id (e.g. `"bitcoin"`, `"ethereum"`). The server trims whitespace and lowercases the value before storage; it must match `[a-z0-9-]` and be ≤64 characters after normalization.
+- `label: String` — display label for the bot (e.g. `"BTC"`). Trimmed server-side; must be 1–64 characters after trimming.
 
-**Returns:** `()` on success.
+**Returns:** `()` on success; `Error` if either field fails the validation above.
 
-**Side effects:** sends `ServerRequest::AddBot`. The bot appears in the member roster with `is_bot=true` and `presence.kind="Ticker"`.
+**Side effects:** sends `ServerRequest::AddBot`. The bot appears in the member roster with `is_bot=true` and `presence.kind="Ticker"`. The price poller starts broadcasting its presence within one tick (≤ the configured poll interval, default 60 s).
 
 **invoke name:** `"add_bot"` → `addBot()` in `client/src/lib/tauri-bridge.ts`.
 
@@ -2142,3 +2142,34 @@ Remove a ticker bot from the server. Owner-gated server-side.
 **Side effects:** sends `ServerRequest::RemoveBot`. The bot is removed from the member roster.
 
 **invoke name:** `"remove_bot"` → `removeBot()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `get_bot_poll_interval(state, server_id) -> Result<u64, String>`
+
+Return the current bot price-poll interval for the server in seconds.
+
+**Parameters:**
+- `server_id: String` — connection address.
+
+**Returns:** the current interval in seconds. Defaults to 60 if unset; never below 30 (the server floors any stored value at 30 when reading).
+
+**Side effects:** sends `ServerRequest::GetBotPollInterval` → reads `ServerResponse::BotPollInterval { secs }`. No authentication gate — any connected member may call this.
+
+**invoke name:** `"get_bot_poll_interval"` → `getBotPollInterval(serverId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `set_bot_poll_interval(state, server_id, secs) -> Result<(), String>`
+
+Set the bot price-poll interval for the server. MANAGE_SERVER-gated (owner or members with that permission).
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `secs: u64` — desired interval in seconds. Values below 30 are silently clamped to 30 server-side (stored as 30, not as the raw value).
+
+**Returns:** `()` on success; `Error` on permission denial.
+
+**Side effects:** sends `ServerRequest::SetBotPollInterval { secs }` → persists the (clamped) value in the `server_settings` KV table under key `"bot_poll_interval"`. The poll loop reads this value live each cycle, so the change takes effect on the next sleep (no restart required). Returns `ServerResponse::Ok`.
+
+**invoke name:** `"set_bot_poll_interval"` → `setBotPollInterval(serverId, secs)` in `client/src/lib/tauri-bridge.ts`.
