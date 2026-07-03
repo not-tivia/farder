@@ -508,6 +508,91 @@ mod ticker_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Custom monitor bot helpers
+// ---------------------------------------------------------------------------
+
+/// Walk a dot-path into a JSON value; the leaf must be a number (or numeric string) -> f64.
+pub fn extract_dot_path(v: &serde_json::Value, path: &str) -> Option<f64> {
+    if path.is_empty() { return None; }
+    let mut cur = v;
+    for seg in path.split('.') {
+        if seg.is_empty() { return None; }
+        cur = cur.get(seg)?;
+    }
+    match cur {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn format_thousands(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        let n = v as i64;
+        let s = n.unsigned_abs().to_string();
+        let mut out = String::new();
+        for (i, ch) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i) % 3 == 0 { out.push(','); }
+            out.push(ch);
+        }
+        if n < 0 { format!("-{out}") } else { out }
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// Inline display for a custom monitor bot: "<value> <unit>".
+pub fn custom_value_presence(value: f64, unit: Option<&str>) -> Presence {
+    let num = format_thousands(value);
+    let details = match unit { Some(u) if !u.is_empty() => format!("{num} {u}"), _ => num };
+    Presence { kind: PresenceKind::Ticker, details, state: None }
+}
+
+/// Fetch + parse an owner-supplied API URL as JSON. Server-side, SSRF-guarded.
+/// Note: the 256 KiB cap is applied post-read (soft cap); acceptable for v1 since
+/// only server owners can configure custom monitor URLs.
+pub async fn fetch_json(url: &str) -> anyhow::Result<serde_json::Value> {
+    if !crate::ssrf::resolves_to_global(url).await {
+        anyhow::bail!("url did not resolve to a global address");
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let resp = client.get(url)
+        .header("accept", "application/json")
+        .header("user-agent", "farder-bot/1.0")
+        .send().await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() { anyhow::bail!("fetch returned {}", status); }
+    if body.len() > 256 * 1024 { anyhow::bail!("response too large"); }
+    Ok(serde_json::from_str(&body)?)
+}
+
+#[cfg(test)]
+mod custom_bot_tests {
+    use super::*;
+
+    #[test]
+    fn extract_dot_path_walks_and_coerces() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"data":{"online":{"count":102433}},"n":"42","x":{"y":true}}"#).unwrap();
+        assert_eq!(extract_dot_path(&v, "data.online.count"), Some(102433.0));
+        assert_eq!(extract_dot_path(&v, "n"), Some(42.0));            // numeric string coerces
+        assert_eq!(extract_dot_path(&v, "missing"), None);
+        assert_eq!(extract_dot_path(&v, "data.nope.count"), None);    // missing mid-path
+        assert_eq!(extract_dot_path(&v, "x.y"), None);                // non-numeric leaf
+        assert_eq!(extract_dot_path(&v, ""), None);
+    }
+    #[test]
+    fn custom_value_presence_formats() {
+        assert_eq!(custom_value_presence(102433.0, Some("players")).details, "102,433 players");
+        assert_eq!(custom_value_presence(1234.5, None).details, "1234.50");
+        assert_eq!(custom_value_presence(42.0, Some("")).details, "42");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
