@@ -355,6 +355,10 @@ export async function addBot(serverId: string, coinId: string, label: string): P
   return invoke("add_bot", { serverId, coinId, label });
 }
 
+export async function addCustomBot(serverId: string, name: string, sourceUrl: string, valuePath: string, unit: string | null): Promise<void> {
+  return invoke("add_custom_bot", { serverId, name, sourceUrl, valuePath, unit: unit ?? null });
+}
+
 export async function removeBot(serverId: string, botPublicKey: string): Promise<void> {
   return invoke("remove_bot", { serverId, botPublicKey });
 }

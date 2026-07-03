@@ -2097,6 +2097,26 @@ pub fn handle_request(
             }).collect();
             ok(ServerResponse::Webhooks { webhooks })
         }
+
+        ServerRequest::AddCustomBot { name, source_url, value_path, unit } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            let name = name.trim().to_string();
+            let source_url = source_url.trim().to_string();
+            let value_path = value_path.trim().to_string();
+            if name.is_empty() || name.len() > 64 { return err("bot name must be 1-64 characters"); }
+            if !(source_url.starts_with("http://") || source_url.starts_with("https://")) || source_url.len() > 2048 {
+                return err("source url must be http(s) and <= 2048 chars");
+            }
+            if value_path.is_empty() || value_path.len() > 256 { return err("value path required (<=256 chars)"); }
+            let unit = unit.map(|u| u.trim().chars().take(24).collect::<String>()).filter(|u| !u.is_empty());
+            let kp = farder_crypto::identity::Keypair::generate();
+            let pk = kp.public_key();
+            crate::members::register_bot_member(conn, &pk, &name)?;
+            crate::bots::register_custom_bot(conn, &pk, kp.signing_key_bytes().as_slice(), &name, &source_url, &value_path, unit.as_deref())?;
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent { target: EventTarget::All, event: ServerEvent::MemberJoined { public_key: pk, display_name: name } }])
+        }
     }
 }
 

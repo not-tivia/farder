@@ -2350,6 +2350,25 @@ pub async fn add_bot(
 }
 
 #[tauri::command]
+pub async fn add_custom_bot(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    name: String,
+    source_url: String,
+    value_path: String,
+    unit: Option<String>,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::AddCustomBot { name, source_url, value_path, unit })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+#[tauri::command]
 pub async fn remove_bot(
     state: State<'_, Arc<AppState>>,
     server_id: String,

@@ -2129,6 +2129,25 @@ Register a new ticker bot on the server. Owner-gated server-side.
 
 ---
 
+### `add_custom_bot(state, server_id, name, source_url, value_path, unit) -> Result<(), String>`
+
+Register a new custom-monitor bot on the server. MANAGE_SERVER-gated server-side.
+
+**Parameters:**
+- `server_id: String` — connection address.
+- `name: String` — display name for the bot (1–64 characters after trimming).
+- `source_url: String` — JSON API endpoint; must start with `http://` or `https://` and be ≤2048 characters.
+- `value_path: String` — dot-separated key chain into the JSON response (e.g. `data.players`); 1–256 characters.
+- `unit: Option<String>` — optional unit label appended to the value in presence (e.g. `"players"`); trimmed and capped at 24 characters. Pass `null` to omit.
+
+**Returns:** `()` on success; `Error` if validation fails or permission denied.
+
+**Side effects:** sends `ServerRequest::AddCustomBot`. The bot appears in the member roster with `is_bot=true` and broadcasts the polled value as its presence within one tick (≤ the configured poll interval).
+
+**invoke name:** `"add_custom_bot"` → `addCustomBot()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
 ### `remove_bot(state, server_id, bot_public_key) -> Result<(), String>`
 
 Remove a ticker bot from the server. Owner-gated server-side.

@@ -28,6 +28,13 @@ export default function BotsTab({ serverId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [interval, setIntervalSecs] = useState<number>(60);
 
+  // Custom monitor form state
+  const [cmName, setCmName] = useState("");
+  const [cmUrl, setCmUrl] = useState("");
+  const [cmPath, setCmPath] = useState("");
+  const [cmUnit, setCmUnit] = useState("");
+  const [cmError, setCmError] = useState<string | null>(null);
+
   // Per-bot alerts state
   const [alertsExpanded, setAlertsExpanded] = useState<Record<string, boolean>>({});
   const [botAlerts, setBotAlerts] = useState<Record<string, BotAlertInfo[]>>({});
@@ -106,6 +113,19 @@ export default function BotsTab({ serverId }: Props) {
       await api.removeBot(serverId, botPublicKey);
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function handleAddCustomBot() {
+    setCmError(null);
+    try {
+      await api.addCustomBot(serverId, cmName.trim(), cmUrl.trim(), cmPath.trim(), cmUnit.trim() || null);
+      setCmName("");
+      setCmUrl("");
+      setCmPath("");
+      setCmUnit("");
+    } catch (e) {
+      setCmError(String(e));
     }
   }
 
@@ -297,6 +317,61 @@ export default function BotsTab({ serverId }: Props) {
             className="xp-button"
             onClick={handleAdd}
             disabled={!coinId}
+          >
+            Add
+          </button>
+        </div>
+      </div>
+
+      {/* Add Custom Monitor */}
+      <div style={{ marginTop: 12, borderTop: "1px solid var(--xp-border)", paddingTop: 10 }}>
+        <div className="connect-section-title" style={{ marginBottom: 6, fontSize: 12 }}>Add Custom Monitor</div>
+        <div style={{ color: "var(--xp-text-muted)", marginBottom: 8, fontSize: 12 }}>
+          Polls any JSON API and broadcasts the extracted value as the bot&apos;s presence. The value path is a dot-separated key chain (e.g. <code>data.players</code>).
+        </div>
+        {cmError && <div className="error-text" style={{ marginBottom: 6 }}>{cmError}</div>}
+        <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div>
+            <label className="connect-label">Name</label>
+            <input
+              className="connect-input"
+              value={cmName}
+              onChange={(e) => setCmName(e.target.value)}
+              placeholder="e.g. Players Online"
+            />
+          </div>
+          <div>
+            <label className="connect-label">API URL</label>
+            <input
+              className="connect-input"
+              value={cmUrl}
+              onChange={(e) => setCmUrl(e.target.value)}
+              placeholder="https://api.example.com/stats"
+            />
+          </div>
+          <div>
+            <label className="connect-label">Value path</label>
+            <input
+              className="connect-input"
+              value={cmPath}
+              onChange={(e) => setCmPath(e.target.value)}
+              placeholder="data.players"
+            />
+          </div>
+          <div>
+            <label className="connect-label">Unit (optional)</label>
+            <input
+              className="connect-input"
+              value={cmUnit}
+              onChange={(e) => setCmUnit(e.target.value)}
+              placeholder="e.g. players"
+              style={{ width: 90 }}
+            />
+          </div>
+          <button
+            className="xp-button"
+            onClick={handleAddCustomBot}
+            disabled={!cmName.trim() || !cmUrl.trim() || !cmPath.trim()}
           >
             Add
           </button>

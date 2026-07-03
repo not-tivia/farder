@@ -370,6 +370,8 @@ pub enum ServerRequest {
     DeleteWebhook { id: i64 },
     /// Rotate the secret token for a webhook (MANAGE_SERVER gated).
     RegenerateWebhookToken { id: i64 },
+    /// Register a new custom-monitor bot that polls an arbitrary JSON API (MANAGE_SERVER gated).
+    AddCustomBot { name: String, source_url: String, value_path: String, unit: Option<String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
