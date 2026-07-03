@@ -13,6 +13,10 @@ pub struct BotRecord {
     pub public_key: PublicKey,
     pub coin_id: String,
     pub label: String,
+    pub kind: String,
+    pub source_url: Option<String>,
+    pub value_path: Option<String>,
+    pub unit: Option<String>,
 }
 
 pub fn register_bot(conn: &Connection, pk: &PublicKey, secret: &[u8], coin_id: &str, label: &str) -> Result<()> {
@@ -24,20 +28,39 @@ pub fn register_bot(conn: &Connection, pk: &PublicKey, secret: &[u8], coin_id: &
     Ok(())
 }
 
+pub fn register_custom_bot(conn: &Connection, pk: &PublicKey, secret: &[u8], name: &str, source_url: &str, value_path: &str, unit: Option<&str>) -> Result<()> {
+    conn.execute(
+        "INSERT INTO bots (public_key, secret_key, kind, coin_id, label, source_url, value_path, unit, created_at) \
+         VALUES (?1, ?2, 'custom_api', '', ?3, ?4, ?5, ?6, ?7)",
+        params![pk.as_bytes().as_slice(), secret, name, source_url, value_path, unit, crate::db::now() as i64],
+    )?;
+    Ok(())
+}
+
 pub fn list_bots(conn: &Connection) -> Result<Vec<BotRecord>> {
-    let mut stmt = conn.prepare("SELECT public_key, coin_id, label FROM bots")?;
+    let mut stmt = conn.prepare(
+        "SELECT public_key, coin_id, label, kind, source_url, value_path, unit FROM bots"
+    )?;
     let rows = stmt.query_map([], |r| {
         let pk_bytes: Vec<u8> = r.get(0)?;
-        Ok((pk_bytes, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        Ok((
+            pk_bytes,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, Option<String>>(6)?,
+        ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (pk_bytes, coin_id, label) = row?;
+        let (pk_bytes, coin_id, label, kind, source_url, value_path, unit) = row?;
         let arr: [u8; 32] = pk_bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("bad bot pk: wrong length"))?;
         let pk = PublicKey::from_bytes(arr);
-        out.push(BotRecord { public_key: pk, coin_id, label });
+        out.push(BotRecord { public_key: pk, coin_id, label, kind, source_url, value_path, unit });
     }
     Ok(out)
 }
@@ -278,14 +301,61 @@ pub fn format_alert_message(label: &str, metric: &str, comparator: &str, thresho
     }
 }
 
+/// Shared alert-eval + DM helper used by both crypto and custom-api branches.
+/// All DB work is scoped so no MutexGuard is held across any `.await`.
+/// `make_message(metric, comparator, threshold) -> text`
+async fn eval_and_notify_alerts(
+    state: &Arc<ServerState>,
+    bot: &BotRecord,
+    metrics: &[(&str, f64)],
+    make_message: impl Fn(&str, &str, f64) -> String,
+) {
+    let fires: Vec<(String, String, f64)> = {
+        let conn = state.db.lock().unwrap();
+        let alerts = list_alerts_for_bot(&conn, &bot.public_key).unwrap_or_default();
+        let mut fired = Vec::new();
+        for a in &alerts {
+            if let Some((_, v)) = metrics.iter().find(|(m, _)| *m == a.metric) {
+                let (did_fire, new_armed) = evaluate_alert(*v, &a.comparator, a.threshold, a.armed);
+                if new_armed != a.armed { let _ = set_alert_armed(&conn, a.id, new_armed); }
+                if did_fire { fired.push((a.metric.clone(), a.comparator.clone(), a.threshold)); }
+            }
+        }
+        fired
+    }; // MutexGuard dropped here
+    if fires.is_empty() { return; }
+    let subscribers = {
+        let conn = state.db.lock().unwrap();
+        list_subscribers_for_bot(&conn, &bot.public_key).unwrap_or_default()
+    }; // MutexGuard dropped here
+    for (metric, comparator, threshold) in &fires {
+        let text = make_message(metric, comparator, *threshold);
+        for sub in &subscribers {
+            if let Err(e) = send_bot_dm(state, &bot.public_key, sub, &text).await {
+                tracing::warn!(error = %e, "bot alert DM failed");
+            }
+        }
+    }
+}
+
+/// Broadcast a bot's updated Presence to all connected clients.
+async fn broadcast_presence(state: Arc<ServerState>, bot: &BotRecord, presence: Presence) {
+    { state.presences.write().unwrap().insert(*bot.public_key.as_bytes(), presence.clone()); }
+    crate::connection::broadcast_event(
+        &state,
+        EventTarget::All,
+        ServerEvent::MemberPresenceUpdated { public_key: bot.public_key.clone(), presence: Some(presence) },
+    ).await;
+}
+
 /// Spawns the bot-price poll task. Mirrors `retention::spawn_retention_task`.
 /// Polls immediately then sleeps the configured interval (live-read each cycle so
 /// changes apply without restart). On each poll cycle:
 ///   1. Snapshots the bot list — drops the DB lock BEFORE any await.
-///   2. Coalesces distinct coin ids into a single CoinGecko fetch.
-///   3. Per bot: stores the updated Presence and broadcasts MemberPresenceUpdated
-///      to all connected clients via the existing `connection::broadcast_event` helper.
-///      After a SUCCESSFUL fetch, a coin absent from the response is marked unknown.
+///   2. Coalesces distinct coin ids (crypto bots only) into a single CoinGecko fetch.
+///   3. Per bot: branches by kind (custom_api / crypto_ticker), stores the updated
+///      Presence, broadcasts MemberPresenceUpdated, and evaluates alerts via the
+///      shared eval_and_notify_alerts helper.
 pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("bot price poller started");
@@ -296,69 +366,63 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<(
                 list_bots(&conn).unwrap_or_default()
             };
             if !bots.is_empty() {
-                let mut ids: Vec<String> = bots.iter().map(|b| b.coin_id.clone()).collect();
-                ids.sort(); ids.dedup();
-                tracing::info!(bots = bots.len(), coins = ?ids, "bot poller: fetching prices");
-                match fetch_prices(&ids).await {
-                    Ok(prices) => {
-                        tracing::info!(fetched = prices.len(), "bot poller: prices fetched, broadcasting");
-                        for b in &bots {
-                            // A coin CoinGecko omitted (after a SUCCESSFUL fetch) is unknown/typo'd.
-                            let pi = prices.get(&b.coin_id);
-                            let presence = match pi {
-                                Some(pi) => ticker_presence(pi),
-                                None => unknown_coin_presence(),
-                            };
-                            {
-                                state.presences.write().unwrap()
-                                    .insert(*b.public_key.as_bytes(), presence.clone());
-                            }
-                            crate::connection::broadcast_event(
-                                &state,
-                                crate::events::EventTarget::All,
-                                ServerEvent::MemberPresenceUpdated {
-                                    public_key: b.public_key.clone(),
-                                    presence: Some(presence),
-                                },
-                            ).await;
-
-                            // Alert evaluation: only for bots with a real PriceInfo.
-                            // DB work is scoped so the MutexGuard drops before any .await.
-                            if let Some(pi) = pi {
-                                // 1. Under the DB lock: evaluate alerts, persist armed changes, collect fires.
-                                let fires: Vec<(String, String, f64)> = {
-                                    let conn = state.db.lock().unwrap();
-                                    let alerts = list_alerts_for_bot(&conn, &b.public_key).unwrap_or_default();
-                                    let mut fired = Vec::new();
-                                    for a in &alerts {
-                                        if let Some(v) = metric_value(pi, &a.metric) {
-                                            let (did_fire, new_armed) = evaluate_alert(v, &a.comparator, a.threshold, a.armed);
-                                            if new_armed != a.armed { let _ = set_alert_armed(&conn, a.id, new_armed); }
-                                            if did_fire { fired.push((a.metric.clone(), a.comparator.clone(), a.threshold)); }
-                                        }
-                                    }
-                                    fired
-                                }; // MutexGuard dropped here
-                                if !fires.is_empty() {
-                                    // 2. Under a fresh DB lock: load subscribers (no lock held during awaits).
-                                    let subscribers = {
-                                        let conn = state.db.lock().unwrap();
-                                        list_subscribers_for_bot(&conn, &b.public_key).unwrap_or_default()
-                                    }; // MutexGuard dropped here
-                                    // 3. Now await DMs — no DB lock held.
-                                    for (metric, comparator, threshold) in &fires {
-                                        let text = format_alert_message(&b.label, metric, comparator, *threshold, pi);
-                                        for sub in &subscribers {
-                                            if let Err(e) = send_bot_dm(&state, &b.public_key, sub, &text).await {
-                                                tracing::warn!(error = %e, "bot alert DM failed");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                // Coalesce crypto coin ids only.
+                let crypto_ids: Vec<String> = bots.iter()
+                    .filter(|b| b.kind == "crypto_ticker")
+                    .map(|b| b.coin_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let prices = if crypto_ids.is_empty() {
+                    std::collections::HashMap::new()
+                } else {
+                    match fetch_prices(&crypto_ids).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error=%e, "crypto fetch failed; keeping last");
+                            std::collections::HashMap::new()
                         }
                     }
-                    Err(e) => tracing::warn!(error = %e, "bot price fetch failed; keeping last prices"),
+                };
+
+                for b in &bots {
+                    let presence: Presence;
+                    if b.kind == "custom_api" {
+                        // custom_api: fetch JSON, extract dot-path value, then alert-eval.
+                        let value: Option<f64> = match (&b.source_url, &b.value_path) {
+                            (Some(url), Some(path)) => match fetch_json(url).await {
+                                Ok(v) => extract_dot_path(&v, path),
+                                Err(e) => { tracing::warn!(error=%e, bot=%b.label, "custom bot fetch failed"); None }
+                            },
+                            _ => None,
+                        };
+                        presence = match value {
+                            Some(v) => custom_value_presence(v, b.unit.as_deref()),
+                            None => unknown_coin_presence(), // "unavailable" — same style as unknown coin
+                        };
+                        broadcast_presence(state.clone(), b, presence.clone()).await;
+                        if let Some(v) = value {
+                            let unit = b.unit.clone();
+                            eval_and_notify_alerts(&state, b, &[("value", v)],
+                                |_, comp, thr| format_custom_alert_message(&b.label, comp, thr, v, unit.as_deref())).await;
+                        }
+                    } else {
+                        // crypto_ticker — UNCHANGED behavior: ticker/unknown-coin presence,
+                        // price_usd/change_24h alerts, fire-once/re-arm, DM subscribers.
+                        let pi = prices.get(&b.coin_id);
+                        presence = match pi { Some(pi) => ticker_presence(pi), None => unknown_coin_presence() };
+                        broadcast_presence(state.clone(), b, presence.clone()).await;
+                        if let Some(pi) = pi {
+                            // Bind f64 values before the closure to avoid capturing &PriceInfo across await.
+                            let usd = pi.usd;
+                            let chg = pi.change_24h;
+                            eval_and_notify_alerts(&state, b, &[("price_usd", usd), ("change_24h", chg)],
+                                |m, comp, thr| {
+                                    let pi_snap = PriceInfo { usd, change_24h: chg };
+                                    format_alert_message(&b.label, m, comp, thr, &pi_snap)
+                                }).await;
+                        }
+                    }
                 }
             }
             // --- sleep the current (live-read) interval ---
@@ -549,6 +613,14 @@ pub fn custom_value_presence(value: f64, unit: Option<&str>) -> Presence {
     Presence { kind: PresenceKind::Ticker, details, state: None }
 }
 
+/// Human-readable alert message for a fired custom-api alert.
+pub fn format_custom_alert_message(label: &str, comparator: &str, threshold: f64, value: f64, unit: Option<&str>) -> String {
+    let u = unit.filter(|s| !s.is_empty()).map(|s| format!(" {s}")).unwrap_or_default();
+    format!("\u{1F514} {label} {} {}{u} \u{2014} now {}{u}",
+        if comparator == "above" { "crossed above" } else { "crossed below" },
+        format_thousands(threshold), format_thousands(value))
+}
+
 /// Fetch + parse an owner-supplied API URL as JSON. Server-side, SSRF-guarded.
 /// Note: the 256 KiB cap is applied post-read (soft cap); acceptable for v1 since
 /// only server owners can configure custom monitor URLs.
@@ -590,6 +662,12 @@ mod custom_bot_tests {
         assert_eq!(custom_value_presence(102433.0, Some("players")).details, "102,433 players");
         assert_eq!(custom_value_presence(1234.5, None).details, "1234.50");
         assert_eq!(custom_value_presence(42.0, Some("")).details, "42");
+    }
+
+    #[test]
+    fn custom_alert_message_formats() {
+        let m = format_custom_alert_message("RuneScape", "above", 100000.0, 102433.0, Some("players"));
+        assert!(m.contains("RuneScape") && m.contains("above") && m.contains("102,433") && m.contains("players"));
     }
 }
 
@@ -638,8 +716,26 @@ mod tests {
         assert_eq!(bots.len(), 1);
         assert_eq!(bots[0].coin_id, "bitcoin");
         assert_eq!(bots[0].label, "BTC");
+        assert_eq!(bots[0].kind, "crypto_ticker");
+        assert!(bots[0].source_url.is_none());
         remove_bot(&conn, &kp.public_key()).unwrap();
         assert!(list_bots(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn register_custom_bot_roundtrip() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let kp = Keypair::generate();
+        register_custom_bot(&conn, &kp.public_key(), kp.signing_key_bytes().as_slice(),
+            "RuneScape Online", "https://api.example.com/stats", "players.online", Some("players")).unwrap();
+        let bots = list_bots(&conn).unwrap();
+        assert_eq!(bots.len(), 1);
+        assert_eq!(bots[0].kind, "custom_api");
+        assert_eq!(bots[0].coin_id, "");
+        assert_eq!(bots[0].label, "RuneScape Online");
+        assert_eq!(bots[0].source_url.as_deref(), Some("https://api.example.com/stats"));
+        assert_eq!(bots[0].value_path.as_deref(), Some("players.online"));
+        assert_eq!(bots[0].unit.as_deref(), Some("players"));
     }
 
     #[test]

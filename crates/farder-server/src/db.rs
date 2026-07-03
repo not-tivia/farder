@@ -334,6 +334,16 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // Bots: add source_url, value_path, unit columns for custom_api bots.
+    for col in ["source_url", "value_path", "unit"] {
+        let has = {
+            let mut stmt = conn.prepare("PRAGMA table_info(bots)")?;
+            let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).collect();
+            cols.iter().any(|c| c == col)
+        };
+        if !has { conn.execute(&format!("ALTER TABLE bots ADD COLUMN {col} TEXT"), [])?; }
+    }
+
     // Roles: add hoist column (display role members as a named group in the member list).
     let has_role_hoist = {
         let mut stmt = conn.prepare("PRAGMA table_info(roles)")?;
