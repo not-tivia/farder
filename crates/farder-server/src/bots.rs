@@ -151,6 +151,11 @@ pub fn unknown_coin_presence() -> Presence {
     Presence { kind: PresenceKind::Ticker, details: "unknown coin".into(), state: None }
 }
 
+/// Presence for a custom-monitor bot whose fetch/extract failed (domain-neutral).
+pub fn unavailable_presence() -> Presence {
+    Presence { kind: PresenceKind::Ticker, details: "unavailable".into(), state: None }
+}
+
 /// Compose a ticker presence: details = "$<price> <arrow><pct>%", state = "24h".
 pub fn ticker_presence(p: &PriceInfo) -> Presence {
     let arrow = if p.change_24h >= 0.0 { '\u{25B2}' } else { '\u{25BC}' }; // up / down
@@ -373,14 +378,16 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<(
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
-                let prices = if crypto_ids.is_empty() {
-                    std::collections::HashMap::new()
+                // None = the crypto fetch FAILED this cycle → keep last (skip crypto bots),
+                // distinct from Some(empty)/Some(map) which is a successful fetch.
+                let prices: Option<std::collections::HashMap<String, PriceInfo>> = if crypto_ids.is_empty() {
+                    Some(std::collections::HashMap::new())
                 } else {
                     match fetch_prices(&crypto_ids).await {
-                        Ok(p) => p,
+                        Ok(p) => Some(p),
                         Err(e) => {
-                            tracing::warn!(error=%e, "crypto fetch failed; keeping last");
-                            std::collections::HashMap::new()
+                            tracing::warn!(error=%e, "crypto fetch failed; keeping last prices");
+                            None
                         }
                     }
                 };
@@ -398,7 +405,7 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<(
                         };
                         presence = match value {
                             Some(v) => custom_value_presence(v, b.unit.as_deref()),
-                            None => unknown_coin_presence(), // "unavailable" — same style as unknown coin
+                            None => unavailable_presence(),
                         };
                         broadcast_presence(state.clone(), b, presence.clone()).await;
                         if let Some(v) = value {
@@ -407,8 +414,9 @@ pub fn spawn_bot_poll_task(state: Arc<ServerState>) -> tokio::task::JoinHandle<(
                                 |_, comp, thr| format_custom_alert_message(&b.label, comp, thr, v, unit.as_deref())).await;
                         }
                     } else {
-                        // crypto_ticker — UNCHANGED behavior: ticker/unknown-coin presence,
-                        // price_usd/change_24h alerts, fire-once/re-arm, DM subscribers.
+                        // crypto_ticker — UNCHANGED: on a fetch FAILURE (prices None) keep last
+                        // (skip this bot); on success, present coin -> ticker, omitted -> unknown_coin.
+                        let Some(prices) = prices.as_ref() else { continue; };
                         let pi = prices.get(&b.coin_id);
                         presence = match pi { Some(pi) => ticker_presence(pi), None => unknown_coin_presence() };
                         broadcast_presence(state.clone(), b, presence.clone()).await;
