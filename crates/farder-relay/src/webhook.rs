@@ -22,6 +22,9 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/webhook/:server_id/:token", post(handle))
+        // Stop reading the body past 64 KiB BEFORE it is buffered into memory
+        // (public endpoint — the handler's len() check alone would still allocate).
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state((state, limiter));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("webhook HTTP listening on {}", bind);
@@ -35,6 +38,7 @@ async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     body: axum::body::Bytes,
 ) -> StatusCode {
+    // guard dropped immediately — we only want the per-IP rate-window hit, not a connection slot.
     if limiter.try_admit(peer.ip(), std::time::Instant::now()).is_none() {
         return StatusCode::TOO_MANY_REQUESTS;
     }
