@@ -144,6 +144,9 @@ async fn main() -> Result<()> {
 
     if let Some(relay_addr) = args.relay {
         let server_id = farder_server::relay::load_or_generate_server_id(&args.data_dir)?;
+        // Record the relay routing id (hex) so webhook URLs use the value the relay
+        // routes by (NOT the mesh genesis).
+        *state.relay_server_id.lock().unwrap() = Some(hex::encode(server_id));
         info!("Relay-only mode: registering with relay {}", relay_addr);
         farder_server::relay::serve_via_relay(state, relay_addr, server_id).await?;
         return Ok(());

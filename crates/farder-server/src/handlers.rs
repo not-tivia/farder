@@ -2060,7 +2060,7 @@ pub fn handle_request(
                 return err("webhook name must be 1-64 characters");
             }
             let (id, token) = crate::webhooks::create(conn, channel_id, &name)?;
-            let server_id_hex = state.genesis.lock().unwrap().as_ref().map(|g| g.server_id());
+            let server_id_hex = state.relay_server_id.lock().unwrap().clone();
             ok(ServerResponse::WebhookToken { id, token, server_id_hex })
         }
 
@@ -2070,7 +2070,7 @@ pub fn handle_request(
             }
             match crate::webhooks::regenerate_token(conn, id)? {
                 Some(token) => {
-                    let server_id_hex = state.genesis.lock().unwrap().as_ref().map(|g| g.server_id());
+                    let server_id_hex = state.relay_server_id.lock().unwrap().clone();
                     ok(ServerResponse::WebhookToken { id, token, server_id_hex })
                 }
                 None => err("webhook not found"),

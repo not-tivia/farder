@@ -92,6 +92,10 @@ pub struct ServerState {
     pub media: media_stream::MediaStateMap,
     pub genesis: std::sync::Mutex<Option<farder_crypto::event_log::Genesis>>,
     pub log_state: std::sync::Mutex<Option<farder_crypto::event_log_state::LogState>>,
+    /// Hex of the server's stable RELAY registration id (the value the relay routes
+    /// by, distinct from the mesh genesis). Set at startup in relay mode; used to
+    /// build webhook URLs. None for direct (non-relay) servers.
+    pub relay_server_id: std::sync::Mutex<Option<String>>,
 }
 
 impl ServerState {
@@ -115,6 +119,7 @@ impl ServerState {
             media: media_stream::MediaStateMap::new(),
             genesis: std::sync::Mutex::new(None),
             log_state: std::sync::Mutex::new(None),
+            relay_server_id: std::sync::Mutex::new(None),
         }
     }
 
