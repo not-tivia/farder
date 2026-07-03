@@ -220,6 +220,15 @@ pub struct BotAlertInfo {
     pub threshold: f64,
 }
 
+/// A webhook summary returned by `ListWebhooks` (no token field — tokens are
+/// write-only after creation/rotation).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebhookInfo {
+    pub id: i64,
+    pub channel_id: u64,
+    pub name: String,
+}
+
 /// First frame on every relay-bridged stream, identifying its role. Relay-mode
 /// only; direct connections do not use it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -353,6 +362,14 @@ pub enum ServerRequest {
     UnsubscribeBot { bot_public_key: PublicKey },
     /// List all bots the authenticated member is subscribed to (any member).
     ListMySubscriptions,
+    /// Create an incoming webhook for a channel (MANAGE_SERVER gated).
+    CreateWebhook { channel_id: u64, name: String },
+    /// List webhooks for a channel (MANAGE_SERVER gated; tokens not returned).
+    ListWebhooks { channel_id: u64 },
+    /// Delete a webhook by id (MANAGE_SERVER gated).
+    DeleteWebhook { id: i64 },
+    /// Rotate the secret token for a webhook (MANAGE_SERVER gated).
+    RegenerateWebhookToken { id: i64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -407,6 +424,12 @@ pub enum ServerResponse {
     BotAlerts { alerts: Vec<BotAlertInfo> },
     /// The list of bot public keys the authenticated member is subscribed to.
     MySubscriptions { bot_public_keys: Vec<PublicKey> },
+    /// The id and secret token for a newly created or rotated webhook.
+    /// `server_id_hex` is present on relay-enabled servers so the client can
+    /// assemble the delivery URL; `None` on legacy direct-only servers.
+    WebhookToken { id: i64, token: String, server_id_hex: Option<String> },
+    /// The webhooks registered for a channel (no tokens).
+    Webhooks { webhooks: Vec<WebhookInfo> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

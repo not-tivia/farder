@@ -2044,6 +2044,59 @@ pub fn handle_request(
             let bot_public_keys = crate::bots::list_subscriptions_for_user(conn, member)?;
             ok(ServerResponse::MySubscriptions { bot_public_keys })
         }
+
+        // ----------------------------------------------------------------
+        // Webhook management (MANAGE_SERVER gated)
+        // ----------------------------------------------------------------
+        ServerRequest::CreateWebhook { channel_id, name } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            if channels::get_channel(conn, channel_id)?.is_none() {
+                return err("channel not found");
+            }
+            let name = name.trim().to_string();
+            if name.is_empty() || name.len() > 64 {
+                return err("webhook name must be 1-64 characters");
+            }
+            let (id, token) = crate::webhooks::create(conn, channel_id, &name)?;
+            let server_id_hex = state.genesis.lock().unwrap().as_ref().map(|g| g.server_id());
+            ok(ServerResponse::WebhookToken { id, token, server_id_hex })
+        }
+
+        ServerRequest::RegenerateWebhookToken { id } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            match crate::webhooks::regenerate_token(conn, id)? {
+                Some(token) => {
+                    let server_id_hex = state.genesis.lock().unwrap().as_ref().map(|g| g.server_id());
+                    ok(ServerResponse::WebhookToken { id, token, server_id_hex })
+                }
+                None => err("webhook not found"),
+            }
+        }
+
+        ServerRequest::DeleteWebhook { id } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            crate::webhooks::delete(conn, id)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::ListWebhooks { channel_id } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            let rows = crate::webhooks::list_for_channel(conn, channel_id)?;
+            let webhooks = rows.into_iter().map(|r| WebhookInfo {
+                id: r.id,
+                channel_id: r.channel_id,
+                name: r.name,
+            }).collect();
+            ok(ServerResponse::Webhooks { webhooks })
+        }
     }
 }
 
@@ -5414,6 +5467,92 @@ mod tests {
         ).unwrap();
         assert!(crate::bots::list_alerts_for_bot(&conn, &bot_pk).unwrap().is_empty(), "alerts must be gone after RemoveBot");
         assert!(crate::bots::list_subscribers_for_bot(&conn, &bot_pk).unwrap().is_empty(), "subscriptions must be gone after RemoveBot");
+    }
+
+    #[test]
+    fn webhook_crud_handler_arms() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let channel_id = make_channel(&conn);
+        let non_owner = add_member(&conn, "NonOwner");
+
+        // Non-owner must be denied.
+        let denied = handle_request(
+            &conn, &non_owner, false,
+            ServerRequest::CreateWebhook { channel_id, name: "CI".into() },
+            "", &state,
+        ).unwrap();
+        assert!(
+            matches!(&denied.response, ServerResponse::Error { reason } if reason.contains("MANAGE_SERVER")),
+            "non-owner CreateWebhook must be denied"
+        );
+
+        // Owner creates a webhook.
+        let res = handle_request(
+            &conn, &owner, true,
+            ServerRequest::CreateWebhook { channel_id, name: "CI".into() },
+            "", &state,
+        ).unwrap();
+        let (wh_id, _token) = match res.response {
+            ServerResponse::WebhookToken { id, token, .. } => (id, token),
+            other => panic!("expected WebhookToken, got {:?}", other),
+        };
+
+        // ListWebhooks returns it (no token).
+        let list_res = handle_request(
+            &conn, &owner, true,
+            ServerRequest::ListWebhooks { channel_id },
+            "", &state,
+        ).unwrap();
+        match list_res.response {
+            ServerResponse::Webhooks { webhooks } => {
+                assert_eq!(webhooks.len(), 1);
+                assert_eq!(webhooks[0].id, wh_id);
+                assert_eq!(webhooks[0].name, "CI");
+            }
+            other => panic!("expected Webhooks, got {:?}", other),
+        }
+
+        // RegenerateWebhookToken rotates the token.
+        let regen_res = handle_request(
+            &conn, &owner, true,
+            ServerRequest::RegenerateWebhookToken { id: wh_id },
+            "", &state,
+        ).unwrap();
+        assert!(
+            matches!(regen_res.response, ServerResponse::WebhookToken { .. }),
+            "RegenerateWebhookToken must return WebhookToken"
+        );
+
+        // Non-existent webhook returns an error.
+        let bad_res = handle_request(
+            &conn, &owner, true,
+            ServerRequest::RegenerateWebhookToken { id: 9999 },
+            "", &state,
+        ).unwrap();
+        assert!(
+            matches!(&bad_res.response, ServerResponse::Error { reason } if reason.contains("not found")),
+            "missing webhook must return error"
+        );
+
+        // DeleteWebhook removes it.
+        let del_res = handle_request(
+            &conn, &owner, true,
+            ServerRequest::DeleteWebhook { id: wh_id },
+            "", &state,
+        ).unwrap();
+        assert!(matches!(del_res.response, ServerResponse::Ok), "DeleteWebhook must return Ok");
+
+        // ListWebhooks now empty.
+        let list2 = handle_request(
+            &conn, &owner, true,
+            ServerRequest::ListWebhooks { channel_id },
+            "", &state,
+        ).unwrap();
+        match list2.response {
+            ServerResponse::Webhooks { webhooks } => assert!(webhooks.is_empty(), "list must be empty after delete"),
+            other => panic!("expected Webhooks, got {:?}", other),
+        }
     }
 
 }

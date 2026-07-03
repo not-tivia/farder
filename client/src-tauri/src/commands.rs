@@ -6,7 +6,7 @@ use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
     BotAlertInfo, CategoryInfo, ChannelInfo, MemberInfo, MessageInfo, RoleInfo, ServerRequest,
-    ServerResponse,
+    ServerResponse, WebhookInfo,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -2501,6 +2501,80 @@ pub async fn list_my_subscriptions(
         ServerResponse::MySubscriptions { bot_public_keys } => {
             Ok(bot_public_keys.iter().map(|pk| pk.to_string()).collect())
         }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Webhook management commands (MANAGE_SERVER gated on server)
+// ---------------------------------------------------------------------------
+
+/// Create an incoming webhook for a channel. Returns (id, token) — the token
+/// is shown once and never retrievable again.
+#[tauri::command]
+pub async fn create_webhook(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    name: String,
+) -> Result<(i64, String), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::CreateWebhook { channel_id, name })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::WebhookToken { id, token, .. } => Ok((id, token)),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// List all webhooks for a channel (no tokens returned).
+#[tauri::command]
+pub async fn list_webhooks(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+) -> Result<Vec<WebhookInfo>, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ListWebhooks { channel_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Webhooks { webhooks } => Ok(webhooks),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Delete a webhook by id.
+#[tauri::command]
+pub async fn delete_webhook(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::DeleteWebhook { id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Rotate the secret token for a webhook. Returns (id, new_token).
+#[tauri::command]
+pub async fn regenerate_webhook_token(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    id: i64,
+) -> Result<(i64, String), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::RegenerateWebhookToken { id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::WebhookToken { id, token, .. } => Ok((id, token)),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }

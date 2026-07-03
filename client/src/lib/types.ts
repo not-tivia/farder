@@ -74,6 +74,8 @@ export interface MessageInfo {
   reactions: ReactionGroup[];
   thread_id: number | null;
   thread_message_count: number;
+  /** Display-name override for webhook-posted messages; null for normal member messages. */
+  author_name_override?: string | null;
 }
 
 export interface DmEntry {
@@ -142,4 +144,10 @@ export interface BotAlertInfo {
   metric: string;
   comparator: string;
   threshold: number;
+}
+
+export interface WebhookInfo {
+  id: number;
+  channel_id: number;
+  name: string;
 }

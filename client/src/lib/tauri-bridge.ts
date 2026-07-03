@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -901,4 +901,26 @@ export async function getMembershipStatus(serverId: string): Promise<string> {
 /** Return the list of members currently awaiting approval on this server (approver-gated). */
 export async function getPendingMembers(serverId: string): Promise<MemberInfo[]> {
   return invoke("get_pending_members", { serverId });
+}
+
+// ── Webhook management (MANAGE_SERVER gated) ──────────────────────────────────
+
+/** Create an incoming webhook for a channel. Returns [id, token] — the token is shown once. */
+export async function createWebhook(serverId: string, channelId: number, name: string): Promise<[number, string]> {
+  return invoke<[number, string]>("create_webhook", { serverId, channelId, name });
+}
+
+/** List all webhooks for a channel (no tokens returned). */
+export async function listWebhooks(serverId: string, channelId: number): Promise<WebhookInfo[]> {
+  return invoke<WebhookInfo[]>("list_webhooks", { serverId, channelId });
+}
+
+/** Delete a webhook by id. */
+export async function deleteWebhook(serverId: string, id: number): Promise<void> {
+  return invoke<void>("delete_webhook", { serverId, id });
+}
+
+/** Rotate the secret token for a webhook. Returns [id, newToken]. */
+export async function regenerateWebhookToken(serverId: string, id: number): Promise<[number, string]> {
+  return invoke<[number, string]>("regenerate_webhook_token", { serverId, id });
 }
