@@ -2510,20 +2510,30 @@ pub async fn list_my_subscriptions(
 // Webhook management commands (MANAGE_SERVER gated on server)
 // ---------------------------------------------------------------------------
 
-/// Create an incoming webhook for a channel. Returns (id, token) — the token
-/// is shown once and never retrievable again.
+/// IPC return type for create_webhook / regenerate_webhook_token.
+/// Includes the relay server_id_hex so the client can build the ingest URL.
+/// Shown once; the token is never retrievable after this response.
+#[derive(serde::Serialize)]
+pub struct WebhookTokenResult {
+    pub id: i64,
+    pub token: String,
+    pub server_id_hex: Option<String>,
+}
+
+/// Create an incoming webhook for a channel. Returns id, token, and
+/// server_id_hex (relay server hex id for URL building; None on direct servers).
 #[tauri::command]
 pub async fn create_webhook(
     state: State<'_, Arc<AppState>>,
     server_id: String,
     channel_id: u64,
     name: String,
-) -> Result<(i64, String), String> {
+) -> Result<WebhookTokenResult, String> {
     match bridge::send_request(&state, &server_id, ServerRequest::CreateWebhook { channel_id, name })
         .await
         .map_err(|e| e.to_string())?
     {
-        ServerResponse::WebhookToken { id, token, .. } => Ok((id, token)),
+        ServerResponse::WebhookToken { id, token, server_id_hex } => Ok(WebhookTokenResult { id, token, server_id_hex }),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }
@@ -2563,18 +2573,19 @@ pub async fn delete_webhook(
     }
 }
 
-/// Rotate the secret token for a webhook. Returns (id, new_token).
+/// Rotate the secret token for a webhook. Returns id, new_token, and
+/// server_id_hex for URL building. Token shown once; never retrievable.
 #[tauri::command]
 pub async fn regenerate_webhook_token(
     state: State<'_, Arc<AppState>>,
     server_id: String,
     id: i64,
-) -> Result<(i64, String), String> {
+) -> Result<WebhookTokenResult, String> {
     match bridge::send_request(&state, &server_id, ServerRequest::RegenerateWebhookToken { id })
         .await
         .map_err(|e| e.to_string())?
     {
-        ServerResponse::WebhookToken { id, token, .. } => Ok((id, token)),
+        ServerResponse::WebhookToken { id, token, server_id_hex } => Ok(WebhookTokenResult { id, token, server_id_hex }),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }

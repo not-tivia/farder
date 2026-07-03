@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -905,9 +905,10 @@ export async function getPendingMembers(serverId: string): Promise<MemberInfo[]>
 
 // ── Webhook management (MANAGE_SERVER gated) ──────────────────────────────────
 
-/** Create an incoming webhook for a channel. Returns [id, token] — the token is shown once. */
-export async function createWebhook(serverId: string, channelId: number, name: string): Promise<[number, string]> {
-  return invoke<[number, string]>("create_webhook", { serverId, channelId, name });
+/** Create an incoming webhook for a channel. Returns id, token, and server_id_hex
+ *  (relay server hex for URL building). Token is shown once; never retrievable. */
+export async function createWebhook(serverId: string, channelId: number, name: string): Promise<WebhookTokenResult> {
+  return invoke<WebhookTokenResult>("create_webhook", { serverId, channelId, name });
 }
 
 /** List all webhooks for a channel (no tokens returned). */
@@ -920,7 +921,8 @@ export async function deleteWebhook(serverId: string, id: number): Promise<void>
   return invoke<void>("delete_webhook", { serverId, id });
 }
 
-/** Rotate the secret token for a webhook. Returns [id, newToken]. */
-export async function regenerateWebhookToken(serverId: string, id: number): Promise<[number, string]> {
-  return invoke<[number, string]>("regenerate_webhook_token", { serverId, id });
+/** Rotate the secret token for a webhook. Returns id, new token, and server_id_hex.
+ *  Token is shown once; never retrievable. */
+export async function regenerateWebhookToken(serverId: string, id: number): Promise<WebhookTokenResult> {
+  return invoke<WebhookTokenResult>("regenerate_webhook_token", { serverId, id });
 }

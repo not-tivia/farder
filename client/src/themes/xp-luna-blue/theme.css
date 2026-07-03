@@ -2719,6 +2719,17 @@ body {
   text-transform: uppercase;
   flex-shrink: 0;
 }
+.message-webhook-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 4px;
+  margin-left: 4px;
+  border-radius: 3px;
+  background: var(--xp-green, #2a8a2a);
+  color: #fff;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
 .profile-presence {
   font-size: 0.85em;
   color: var(--xp-text-normal, var(--xp-text-secondary));

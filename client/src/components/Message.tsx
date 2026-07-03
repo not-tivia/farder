@@ -213,9 +213,11 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   const deleted = isDeletedUser(message.author);
   const pkStr = publicKeyToString(message.author);
-  const displayName = deleted
-    ? "Deleted User"
-    : (memberNames[pkStr] != null ? memberDisplayName(memberNames[pkStr]) : pkStr.slice(0, 16) + "…");
+  const displayName = message.author_name_override
+    ? message.author_name_override
+    : deleted
+      ? "Deleted User"
+      : (memberNames[pkStr] != null ? memberDisplayName(memberNames[pkStr]) : pkStr.slice(0, 16) + "…");
   const color = deleted ? "#999" : authorColor(pkStr);
   const member = deleted ? null : (activeServer?.members.find((m) => publicKeyToString(m.public_key) === pkStr) ?? null);
   const roles = activeServer?.roles ?? [];
@@ -387,6 +389,9 @@ export default function Message({ message, memberNames, grouped = false, serverI
           >
             {displayName}
           </span>
+          {message.author_name_override && (
+            <span className="message-webhook-badge">WEBHOOK</span>
+          )}
           {showModBadges && member && (
             <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
           )}

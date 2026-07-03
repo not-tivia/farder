@@ -1,7 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
-import type { ChannelInfo, RoleInfo } from "../lib/types";
+import type { ChannelInfo, RoleInfo, WebhookInfo, WebhookTokenResult } from "../lib/types";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
+
+// ---------------------------------------------------------------------------
+// Relay webhook ingest base URL (v1: single known relay; change here when
+// TLS / a reverse proxy is added or the relay host changes).
+// ---------------------------------------------------------------------------
+const RELAY_WEBHOOK_BASE = "http://45.77.70.199:8080";
 
 interface Props {
   channel: ChannelInfo;
@@ -21,7 +27,17 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [activeTab, setActiveTab] = useState<"general" | "permissions">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "permissions" | "webhooks">("general");
+
+  // ── Webhooks tab state ────────────────────────────────────────────────────
+  const [webhooks, setWebhooks] = useState<WebhookInfo[]>([]);
+  const [webhooksLoaded, setWebhooksLoaded] = useState(false);
+  const [webhookLoading, setWebhookLoading] = useState(false);
+  const [webhookError, setWebhookError] = useState<string | null>(null);
+  const [newWebhookName, setNewWebhookName] = useState("");
+  const [creating, setCreating] = useState(false);
+  /** Token result shown once after create or regenerate; null otherwise. */
+  const [shownToken, setShownToken] = useState<WebhookTokenResult | null>(null);
 
   const roles = activeServer?.roles ?? [];
 
@@ -52,6 +68,58 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
     }
   }
 
+  // ── Webhook handlers ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (activeTab !== "webhooks" || webhooksLoaded || !serverId) return;
+    setWebhookLoading(true);
+    setWebhookError(null);
+    api.listWebhooks(serverId, channel.id)
+      .then((list) => { setWebhooks(list); setWebhooksLoaded(true); })
+      .catch((e) => setWebhookError(String(e)))
+      .finally(() => setWebhookLoading(false));
+  }, [activeTab, webhooksLoaded, serverId, channel.id]);
+
+  async function handleCreateWebhook() {
+    if (!serverId || !newWebhookName.trim()) return;
+    setCreating(true);
+    setWebhookError(null);
+    setShownToken(null);
+    try {
+      const result = await api.createWebhook(serverId, channel.id, newWebhookName.trim());
+      setWebhooks((prev) => [...prev, { id: result.id, channel_id: channel.id, name: newWebhookName.trim() }]);
+      setShownToken(result);
+      setNewWebhookName("");
+    } catch (e) {
+      setWebhookError(String(e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleDeleteWebhook(id: number) {
+    if (!serverId) return;
+    setWebhookError(null);
+    try {
+      await api.deleteWebhook(serverId, id);
+      setWebhooks((prev) => prev.filter((w) => w.id !== id));
+      if (shownToken?.id === id) setShownToken(null);
+    } catch (e) {
+      setWebhookError(String(e));
+    }
+  }
+
+  async function handleRegenerateToken(id: number) {
+    if (!serverId) return;
+    setWebhookError(null);
+    setShownToken(null);
+    try {
+      const result = await api.regenerateWebhookToken(serverId, id);
+      setShownToken(result);
+    } catch (e) {
+      setWebhookError(String(e));
+    }
+  }
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-dialog" onClick={(e) => e.stopPropagation()} style={{ minWidth: 400 }}>
@@ -63,6 +131,7 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
           <div className="settings-tabs">
             <button className={`settings-tab${activeTab === "general" ? " active" : ""}`} onClick={() => setActiveTab("general")}>General</button>
             <button className={`settings-tab${activeTab === "permissions" ? " active" : ""}`} onClick={() => setActiveTab("permissions")}>Permissions</button>
+            <button className={`settings-tab${activeTab === "webhooks" ? " active" : ""}`} onClick={() => setActiveTab("webhooks")}>Webhooks</button>
           </div>
 
           {activeTab === "general" && (
@@ -98,6 +167,95 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
                   onSet={handleSetOverride}
                 />
               ))}
+            </div>
+          )}
+
+          {activeTab === "webhooks" && (
+            <div className="settings-tab-content">
+              <div className="connect-section-title" style={{ marginBottom: 8 }}>Incoming Webhooks</div>
+              <p style={{ fontSize: 11, color: "var(--xp-text-muted)", marginBottom: 10 }}>
+                Webhooks let external services post messages to this channel. Copy the URL after creating one — the token is shown only once.
+              </p>
+
+              {webhookError && <div className="error-text" style={{ marginBottom: 8 }}>{webhookError}</div>}
+
+              {/* Token shown once after create or regenerate */}
+              {shownToken && (
+                <div className="connect-section" style={{ marginBottom: 12 }}>
+                  <label className="connect-label">
+                    {shownToken.server_id_hex
+                      ? "Webhook URL (copy now — token shown once)"
+                      : "Token (copy now — shown once)"}
+                  </label>
+                  {shownToken.server_id_hex ? (
+                    <input
+                      className="connect-input"
+                      readOnly
+                      value={`${RELAY_WEBHOOK_BASE}/webhook/${shownToken.server_id_hex}/${shownToken.token}`}
+                      onFocus={(e) => e.currentTarget.select()}
+                    />
+                  ) : (
+                    <div style={{ fontSize: 11, color: "var(--xp-text-muted)", marginTop: 4 }}>
+                      This server is not relay-connected — webhooks require the relay to receive inbound HTTP posts.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Existing webhooks list */}
+              {webhookLoading && (
+                <div style={{ color: "var(--xp-text-muted)", fontSize: 12, marginBottom: 8 }}>Loading...</div>
+              )}
+              {!webhookLoading && webhooks.length === 0 && webhooksLoaded && (
+                <div style={{ color: "var(--xp-text-muted)", fontSize: 13, marginBottom: 8 }}>
+                  No webhooks yet.
+                </div>
+              )}
+              {webhooks.map((wh) => (
+                <div key={wh.id} className="organizer-row">
+                  <span className="organizer-name">{wh.name}</span>
+                  <div className="organizer-actions">
+                    <button
+                      className="organizer-btn"
+                      title="Regenerate token"
+                      onClick={() => void handleRegenerateToken(wh.id)}
+                    >
+                      Regenerate
+                    </button>
+                    <button
+                      className="organizer-btn organizer-delete"
+                      title="Delete webhook"
+                      onClick={() => void handleDeleteWebhook(wh.id)}
+                    >
+                      x
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              {/* Create new webhook */}
+              <div style={{ marginTop: 12, borderTop: "1px solid var(--xp-border)", paddingTop: 10 }}>
+                <div className="connect-section-title" style={{ marginBottom: 6, fontSize: 12 }}>Create Webhook</div>
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-end" }}>
+                  <div style={{ flex: 1 }}>
+                    <label className="connect-label">Name</label>
+                    <input
+                      className="connect-input"
+                      placeholder="e.g. CI alerts"
+                      value={newWebhookName}
+                      onChange={(e) => setNewWebhookName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") void handleCreateWebhook(); }}
+                    />
+                  </div>
+                  <button
+                    className="xp-button"
+                    onClick={() => void handleCreateWebhook()}
+                    disabled={creating || !newWebhookName.trim()}
+                  >
+                    {creating ? "Creating..." : "Create"}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>

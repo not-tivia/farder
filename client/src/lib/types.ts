@@ -151,3 +151,11 @@ export interface WebhookInfo {
   channel_id: number;
   name: string;
 }
+
+/** Return value for createWebhook / regenerateWebhookToken — includes the relay
+ *  server_id_hex needed to build the ingest URL. Shown once; never retrievable. */
+export interface WebhookTokenResult {
+  id: number;
+  token: string;
+  server_id_hex: string | null;
+}
