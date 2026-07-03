@@ -498,6 +498,70 @@ Sends a full E2EE DM from a server-managed bot to a recipient member. All DB and
 
 ---
 
+## `webhooks.rs` — incoming webhook delivery
+
+> **File:** `crates/farder-server/src/webhooks.rs`
+
+Implements the full lifecycle of incoming webhooks: CRUD (create / list / delete / regenerate token), payload parsing, and message delivery.
+
+### Data model
+
+Two schema additions (see `db.rs`):
+
+- **`webhooks` table** — `(id, channel_id, token, name, public_key, created_at)`. `token` is a 64-hex (256-bit) random string, UNIQUE. `public_key` is a fresh Ed25519 key generated at creation time (the webhook's author identity — never a roster member). Tokens are never returned by list/read operations.
+- **`messages.author_name_override` column** — `TEXT`, nullable. Stores the display name for webhook-posted messages (per-delivery `username` overrides the registered webhook `name`). `NULL` for all normal member messages.
+
+### `parse_webhook_payload(body: &[u8]) -> Result<WebhookPayload>`
+
+Parses a Discord-compatible JSON body. Accepts `{"content": "...", "username": "..."}` and ignores all other fields (embeds, avatar_url, etc.). Rules:
+- `content` must be present, non-empty after trim. Missing or whitespace-only → error.
+- `username` is optional; capped at 80 chars (Discord's limit).
+- Non-JSON input → error.
+
+Returns `WebhookPayload { content: String, username: Option<String> }`.
+
+### CRUD helpers
+
+| Function | Signature | What it does |
+|---|---|---|
+| `create` | `(conn, channel_id, name) -> Result<(i64, String)>` | Inserts a webhook row. Returns `(id, token)` — token shown once. |
+| `regenerate_token` | `(conn, id) -> Result<Option<String>>` | Updates `token` to a fresh random value. Returns `Some(new_token)` or `None` if id not found. |
+| `delete` | `(conn, id) -> Result<()>` | Deletes the webhook row. |
+| `list_for_channel` | `(conn, channel_id) -> Result<Vec<WebhookRow>>` | Lists all webhooks for the channel (no `token` field in `WebhookRow`). |
+| `find_by_token` | `(conn, token) -> Result<Option<WebhookRow>>` | Used during delivery to look up the webhook by its secret token. |
+
+### `deliver(state, token, body) -> WebhookAck`
+
+Called by `serve_via_relay`'s `Webhook` dispatch arm when the relay forwards an inbound HTTP POST. Full delivery sequence:
+
+1. Body size guard: returns `WebhookAck::TooLarge` if `body.len() > 64 KiB` (secondary guard; the relay-side HTTP layer enforces the same limit earlier).
+2. **Under the DB lock** (synchronous block so no `Mutex<Connection>` guard crosses an `.await`):
+   a. `find_by_token` — if token not found, returns `WebhookAck::Unauthorized`.
+   b. `parse_webhook_payload` — if content is missing/empty/invalid JSON, returns `WebhookAck::BadRequest`.
+   c. Content is capped at 8 000 chars (Discord's message limit).
+   d. Display name: `payload.username` (per-delivery override) takes priority over the webhook's registered `name`.
+   e. `messages::insert_message_with_author_name(conn, channel_id, &wh.public_key, &content, None, Some(&display))` — inserts the message with the webhook's synthetic public key as author and the display name in `author_name_override`.
+   f. `messages::get_message` — reads the full `MessageInfo` (with populated `author_name_override`).
+   g. DB lock is released.
+3. **Without any lock held** (async): `broadcast_event(EventTarget::Subscribers(channel_id), ServerEvent::NewMessage { message })`.
+
+Returns `WebhookAck::Ok` on success. The ack is mapped to HTTP status by `run_relay_webhook` in `relay.rs`: Ok → 204, Unauthorized → 401, BadRequest → 400, TooLarge → 413.
+
+### `ServerState.relay_server_id`
+
+`Mutex<Option<String>>` set at startup when the server registers with a relay. Contains the hex id the relay uses to route webhook POSTs. `handlers.rs` reads this when returning `ServerResponse::WebhookToken` so the client can build the ingest URL. `None` for direct (non-relay) servers.
+
+### Webhook handler arms in `handlers.rs`
+
+| `ServerRequest` | Permission | Action |
+|---|---|---|
+| `CreateWebhook { channel_id, name }` | `MANAGE_SERVER` | Validates channel exists; trims `name` (1–64 chars); calls `webhooks::create`; reads `relay_server_id`; returns `WebhookToken { id, token, server_id_hex }`. |
+| `RegenerateWebhookToken { id }` | `MANAGE_SERVER` | Calls `webhooks::regenerate_token`; returns `WebhookToken { id, new_token, server_id_hex }` or `Error` if not found. |
+| `DeleteWebhook { id }` | `MANAGE_SERVER` | Calls `webhooks::delete`; returns `Ok`. |
+| `ListWebhooks { channel_id }` | `MANAGE_SERVER` | Calls `webhooks::list_for_channel`; maps to `WebhookInfo` structs; returns `Webhooks { webhooks }`. |
+
+---
+
 ## Security model
 
 ### Who can call what

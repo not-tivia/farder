@@ -2,7 +2,7 @@
 
 > **File(s):** `crates/farder-protocol/src/server.rs`, `crates/farder-protocol/src/messages.rs`, `crates/farder-protocol/src/codec.rs`
 > **Layer:** Protocol
-> **Last reviewed:** 2026-06-04
+> **Last reviewed:** 2026-07-03
 
 ## Purpose
 
@@ -167,6 +167,15 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 |---|---|---|
 | `UpdatePresence` | `presence: Option<Presence>` | Set or clear the sender's ephemeral activity presence. `None` clears it. The server stamps the **sender's own authenticated public key** — the client cannot supply a key. Rate-limited to 2 updates/sec per member (excess silently returns `Ok`, no broadcast). Responds with `Ok` on success; `Error` only on validation failure (a field over 128 chars). See `docs/modules/presence.md`. |
 
+### Incoming webhooks
+
+| Variant | Fields | What it asks the server to do |
+|---|---|---|
+| `CreateWebhook` | `channel_id: u64`, `name: String` | Create an incoming webhook for a channel. **MANAGE_SERVER-gated.** `name` is trimmed and must be 1–64 chars. Generates a 64-hex (256-bit) random token and a per-webhook Ed25519 public key (the webhook's author identity, not a roster member). Returns `WebhookToken`. |
+| `ListWebhooks` | `channel_id: u64` | List all webhooks for the channel. Tokens are never returned. Returns `Webhooks`. **MANAGE_SERVER-gated.** |
+| `DeleteWebhook` | `id: i64` | Delete a webhook by id. Subsequent POST calls to the ingest URL immediately return 401. Returns `Ok`. **MANAGE_SERVER-gated.** |
+| `RegenerateWebhookToken` | `id: i64` | Rotate the secret token for a webhook. The old token is immediately invalidated. Returns `WebhookToken` with the new token. **MANAGE_SERVER-gated.** |
+
 ### Bots
 
 | Variant | Fields | What it asks the server to do |
@@ -225,6 +234,8 @@ Every request receives exactly one response.
 | `BotPollInterval` | `secs: u64` | Current bot price-poll interval in response to `GetBotPollInterval`. Value is floored at 30 and defaults to 60 when unset. |
 | `BotAlerts` | `alerts: Vec<BotAlertInfo>` | List of price alerts for a bot, in response to `ListBotAlerts`. Each entry is a `BotAlertInfo` (see below). |
 | `MySubscriptions` | `bot_public_keys: Vec<PublicKey>` | The bot public keys the authenticated member is subscribed to, in response to `ListMySubscriptions`. |
+| `WebhookToken` | `id: i64`, `token: String`, `server_id_hex: Option<String>` | The new/rotated webhook token in response to `CreateWebhook` or `RegenerateWebhookToken`. `server_id_hex` is the relay's routing id (used to build the ingest URL `POST /webhook/<server_id_hex>/<token>`); `None` for direct (non-relay) servers. **Shown once** — the token is write-only in the DB after this response. |
+| `Webhooks` | `webhooks: Vec<WebhookInfo>` | The webhook list in response to `ListWebhooks`. No tokens. |
 
 ---
 
@@ -333,6 +344,17 @@ The canonical representation of a message, used in `NewMessage`, `History`,
 | `reactions` | `Vec<ReactionGroup>` | Aggregated reactions; see `ReactionGroup`. |
 | `thread_id` | `Option<u64>` | The channel ID of the thread spawned from this message, if any. |
 | `thread_message_count` | `Option<u32>` | Cached reply count for the thread, if any. |
+| `author_name_override` | `Option<String>` | Display-name override for webhook-posted messages. `None` for all normal member messages. Decorated with `#[serde(default)]` so it deserializes as `None` from older frames. When present, clients must use this name instead of a roster lookup — the author public key is a per-webhook synthetic key, not a roster member. |
+
+### `WebhookInfo`
+
+A webhook summary as returned by `ListWebhooks`. Tokens are never included.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `i64` | Server-assigned webhook id. |
+| `channel_id` | `u64` | The channel this webhook posts into. |
+| `name` | `String` | Display name registered at creation time (1–64 chars). |
 
 ### `AttachmentInfo`
 
@@ -564,6 +586,20 @@ The client sends an `UploadRequest` to declare the file, then streams the bytes.
 
 ---
 
+## `RelayStreamRole` (relay-mode stream classifier)
+
+`RelayStreamRole` is the **first frame on every QUIC bi-stream opened by the relay to the server** (relay-mode only; direct connections never use it). It identifies what kind of stream this is. The relay prefixes each stream with a 4-byte big-endian routing handle before this frame.
+
+| Variant | Fields | Meaning |
+|---|---|---|
+| `Primary` | — | A new client session; the server runs the auth handshake. |
+| `Session` | `token: Vec<u8>` | A file-transfer stream for an already-authenticated session (identified by the 32-byte session token). |
+| `Webhook` | `token: String`, `body: Vec<u8>` | An incoming webhook delivery: the relay passes the raw HTTP body and the webhook secret token. The server validates, parses (Discord-compatible `{content, username?}` JSON), and posts the message. After processing the server writes a 2-byte big-endian HTTP-ish status code (204 ok, 400 bad request, 401 unauthorized, 413 too large) and closes the stream. The relay forwards this code as the HTTP response status to the external caller. |
+
+The relay always uses handle `0` for relay-originated streams (invite previews and webhook deliveries); client streams get handles ≥ 1.
+
+---
+
 ## Relay / DM signaling protocol (`messages.rs`)
 
 `Message` is a separate enum used between two clients via the relay node —
@@ -677,6 +713,16 @@ leaks no information about why the relay refused.
 - **`farder-server`** (server crate) — the authoritative sender of `ServerResponse` and `ServerEvent`; the authoritative receiver of `ServerRequest`.
 - **`useServerEvents.ts`** — the frontend listener for the `server:*` Tauri events that `bridge.rs` emits in response to `ServerEvent` payloads.
 - **`farder-crypto`** — provides `PublicKey` and `Keypair`; the protocol crate depends on it only for type definitions.
+
+## DB schema additions (webhooks)
+
+Two additions to the server's SQLite schema relate to this protocol:
+
+- **`webhooks` table** — `CREATE TABLE IF NOT EXISTS webhooks (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, token TEXT NOT NULL UNIQUE, name TEXT NOT NULL, public_key BLOB NOT NULL, created_at INTEGER NOT NULL)`. `token` is the 64-hex secret (write-only after creation/rotation). `public_key` is the webhook author's synthetic Ed25519 key (never a roster member). There is no `token` field in `WebhookInfo` — tokens are intentionally excluded from list/read responses.
+
+- **`messages.author_name_override` column** — `ALTER TABLE messages ADD COLUMN author_name_override TEXT` (applied as a migration; defaults to `NULL`). Stores the per-delivery `username` or the webhook's registered `name` for webhook-posted messages. All normal member messages have `NULL` here.
+
+---
 
 ## Known gotchas
 

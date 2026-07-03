@@ -40,7 +40,7 @@ A server member. `public_key` is a `{ bytes: number[] }` object — call `public
 
 ### `MessageInfo`
 
-A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any. `attachments` is an `AttachmentInfo[]`.
+A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any. `attachments` is an `AttachmentInfo[]`. For webhook-posted messages, `author_name_override` carries the webhook display name (the per-delivery `username` or the webhook's registered name); it is `null` or absent on all normal member messages. The `Message` component uses this field to display the author name and render a `WEBHOOK` badge instead of a member avatar lookup.
 
 ### `AttachmentInfo` (types.ts)
 
@@ -146,6 +146,26 @@ Input shape for the `attachments` parameter of `submitEvent()`. One entry per st
 | `size` | `number` |
 
 (`uploader` is NOT included here — `submit_event` in `commands.rs` stamps it from the caller's identity.)
+
+### `WebhookInfo` (types.ts)
+
+A webhook record returned by `listWebhooks()`. Tokens are never returned here — they are write-only after creation/rotation.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `number` | Server-assigned webhook id. Use this for `deleteWebhook` and `regenerateWebhookToken`. |
+| `channel_id` | `number` | The channel this webhook posts into. |
+| `name` | `string` | Display name registered at creation time. |
+
+### `WebhookTokenResult` (types.ts)
+
+Returned by `createWebhook()` and `regenerateWebhookToken()`. The `token` field is shown **once** (write-only in the DB after this response); store it immediately.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `number` | Webhook row id. |
+| `token` | `string` | 64-hex (256-bit) secret. Used to build the ingest URL; never returned by the API again. |
+| `server_id_hex` | `string \| null` | Relay routing id. Build the ingest URL as `<RELAY_WEBHOOK_BASE>/webhook/<server_id_hex>/<token>`. `null` for direct (non-relay) servers. |
 
 ### `EmbedKind` / `EmbedMedia` / `LinkEmbed` / `EmbedOutcome` (`lib/linkEmbed.ts`)
 
@@ -422,6 +442,21 @@ These six functions are the TypeScript wrappers for the alert/subscription Tauri
 | `listMySubscriptions(serverId)` | `list_my_subscriptions` | Returns `Promise<string[]>` — the `"vk_<hex>"` public keys of all bots the authenticated user is subscribed to. Any member. |
 
 **Alert DM delivery:** when an alert fires during the poll cycle, the server calls `bots::send_bot_dm`, which delivers an E2EE DM from the bot to each subscriber via `EventTarget::Members([recipient])`. The recipient receives a `DmCreated` event (if new) followed by a `NewMessage` event — the same path as a human-to-human DM. The client decrypts it with the normal `dmDecrypt(botPublicKey, ciphertextHex)` path.
+
+---
+
+### Incoming webhooks
+
+Four wrappers for managing incoming channel webhooks. All are MANAGE_SERVER-gated on the server side. The ingest URL for a relay-backed server is constructed client-side from the constant `RELAY_WEBHOOK_BASE` (defined in `ChannelSettingsDialog.tsx` as `"http://45.77.70.199:8080"`) plus the path `/webhook/<server_id_hex>/<token>`.
+
+| Function | Rust command | What it does |
+|---|---|---|
+| `createWebhook(serverId, channelId, name)` | `create_webhook` | Creates a webhook for the given channel. Returns `Promise<WebhookTokenResult>` — the token is shown once. |
+| `listWebhooks(serverId, channelId)` | `list_webhooks` | Returns `Promise<WebhookInfo[]>` for the channel; no tokens. |
+| `deleteWebhook(serverId, id)` | `delete_webhook` | Deletes a webhook by id. Returns `Promise<void>`. |
+| `regenerateWebhookToken(serverId, id)` | `regenerate_webhook_token` | Rotates the token. Returns `Promise<WebhookTokenResult>` with the new token. |
+
+**Webhook messages in the UI:** `MessageInfo.author_name_override` is non-null on messages posted by a webhook. `Message.tsx` uses it as the display name and renders a `WEBHOOK` badge (`className="message-webhook-badge"`). No member-roster lookup is performed for the author public key (it is a per-webhook synthetic key, not a roster member).
 
 ---
 

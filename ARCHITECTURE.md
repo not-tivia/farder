@@ -131,6 +131,23 @@ whole screens; the sharer gets a **self-preview** of their own stream (`voice://
 and the viewer moved from cramped sidebar tiles to a **main-area `ScreenShareStage`** with a
 sidebar **Join** flow (single-watch), replacing the retired `PeerVideoTiles`.
 
+## Incoming webhooks
+
+Webhooks let an external caller (CI system, bot, script) POST a message into a Farder channel without a Farder identity. The data path spans three processes.
+
+**Full path — external POST → message in channel:**
+
+1. **Relay HTTP ingress** — the relay runs an HTTP server (`webhook.rs`) on `webhook_bind` (default `0.0.0.0:8080`). An external caller sends `POST /webhook/<server_id_hex>/<token>` with a JSON body (`{"content": "...", "username": "..."}`, Discord-compatible). The relay: (a) rate-limits by IP, (b) enforces a 64 KiB `DefaultBodyLimit`, (c) looks up the server by `server_id_hex` in its QUIC registry. The relay stores **no tokens** — it never reads the token value.
+2. **QUIC forward** — on a hit, the relay opens a QUIC bi-stream on the server's existing control connection, prefixes it with handle `0u32` (relay-originated sentinel), and writes `RelayStreamRole::Webhook { token, body }`. The relay then reads a 2-byte big-endian status code from the server and returns it as the HTTP response.
+3. **Server delivery** (`webhooks::deliver`) — the server's `serve_via_relay` dispatches the `Webhook` arm to `run_relay_webhook`, which calls `webhooks::deliver`. Delivery: (a) looks up the webhook by token (`find_by_token`) — 401 if not found; (b) parses the body (`parse_webhook_payload`) — 400 on bad JSON or empty content; (c) inserts the message via `insert_message_with_author_name` with the webhook's synthetic Ed25519 public key as author and `author_name_override` carrying the display name; (d) broadcasts `ServerEvent::NewMessage` to channel subscribers; (e) returns 204.
+4. **Client render** — `bridge.rs` receives `NewMessage`; `MessageInfo.author_name_override` is non-null; `Message.tsx` renders the display name and a `WEBHOOK` badge instead of a member-roster lookup.
+
+**Management:** channel admins (MANAGE_SERVER) create/list/delete/rotate webhooks via the Webhooks tab in Channel Settings. `create_webhook` and `regenerate_webhook_token` return the token once (write-only in the DB after that) along with `server_id_hex` so the client can build the ingest URL: `<RELAY_WEBHOOK_BASE>/webhook/<server_id_hex>/<token>`.
+
+**Security invariants:** the webhook author is a per-webhook synthetic Ed25519 key that is never a roster member; `author_name_override` cannot be set by any member request (only by `deliver`). Deleting a webhook instantly invalidates its token (next POST returns 401). The relay never reads or stores tokens.
+
+---
+
 ## Relay as fetch proxy (invite previews + rich embeds)
 
 The relay doubles as a **privacy fetch proxy**. All outbound HTTP(S) traffic

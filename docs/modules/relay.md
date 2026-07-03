@@ -83,6 +83,26 @@ A server/client that predates Phase 5a keeps working: the relay's control stream
 just an unexpected stream the server logs and drops per-task; forwarded datagrams it
 never reads are dropped by QUIC. No relayed text/file traffic is affected.
 
+## Incoming webhook HTTP ingress (`webhook.rs`)
+
+The relay exposes a second network listener — **an HTTP server** — on the `webhook_bind` address (default `0.0.0.0:8080`, set via `--webhook-bind`). This allows external callers to POST messages into a Farder channel without knowing the server's QUIC address or credentials.
+
+**Route:** `POST /webhook/:server_id/:token`
+
+**Request processing:**
+
+1. The per-IP rate-limiter (`ConnectionLimiter`) is checked first — excess requests return 429.
+2. The body is capped by `axum::extract::DefaultBodyLimit::max(64 * 1024)` (64 KiB) at the middleware level, before the body is buffered into memory. If the body exceeds 64 KiB the layer returns 413 before the handler runs; the handler also checks `body.len() > 64 * 1024` as a secondary guard.
+3. `server_id` (hex string) is decoded to bytes and looked up in `SharedState::servers`. Unknown or offline servers return 404. The relay stores **no tokens** — it never validates or reads the token field.
+4. On a known server the relay opens a new QUIC bi-stream on the server's existing connection and writes:
+   - A 4-byte big-endian handle `0u32` (relay-originated sentinel).
+   - A framed `RelayStreamRole::Webhook { token, body }` frame.
+5. The relay reads a 2-byte big-endian response from the server and returns it as the HTTP status code (204 success, 400 bad request, 401 unauthorized, 413 too large; bad gateway on any connection error).
+
+**Config:** `--webhook-bind <addr>` (CLI flag, `Config::webhook_bind`). Default `0.0.0.0:8080`. Must be reachable from external callers. Expose this port in your Docker / firewall configuration alongside the QUIC `--bind` port.
+
+**The relay stores NO tokens.** Token validation happens entirely on the server side. The relay is a dumb forwarder that routes by `server_id` only.
+
 ## Protocol messages (`farder-protocol`)
 
 `RelayRegister`/`RelayRegistered`, `RelayConnect`/`RelayConnected`/`RelayError`.

@@ -2,7 +2,7 @@
 
 > **File(s):** `client/src-tauri/src/commands.rs`, `client/src-tauri/src/themes.rs`, `client/src-tauri/src/tenor.rs`, `client/src-tauri/src/translation.rs`, `client/src-tauri/src/book.rs`
 > **Layer:** Tauri command
-> **Last reviewed:** 2026-06-14
+> **Last reviewed:** 2026-07-03
 
 ## Purpose
 
@@ -2271,3 +2271,74 @@ List the public keys of all bots the authenticated user is subscribed to. No per
 **Side effects:** sends `ServerRequest::ListMySubscriptions` → reads `ServerResponse::MySubscriptions { bot_public_keys }`.
 
 **invoke name:** `"list_my_subscriptions"` → `listMySubscriptions(serverId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+## Group 16 — Incoming webhooks
+
+Four commands for managing incoming webhooks on a channel. All are **MANAGE_SERVER-gated** on the server. A webhook is an HTTP endpoint that any external caller can POST to in order to post a message into a specific channel. The token is a secret; it is shown only at creation/rotation time and never retrievable after that.
+
+---
+
+### `create_webhook(state, server_id, channel_id, name) -> Result<WebhookTokenResult, String>`
+
+Create an incoming webhook for a channel.
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `channel_id: u64` — the target channel. Must exist.
+- `name: String` — display name for the webhook (1–64 chars after trimming).
+
+**Returns:** `WebhookTokenResult { id: i64, token: String, server_id_hex: Option<String> }`. The `token` is a 64-hex (256-bit) secret shown **once**; it is write-only in the database after this call. `server_id_hex` is the relay's routing id (used to build the ingest URL `POST /webhook/<server_id_hex>/<token>`) — `null` for direct (non-relay) servers.
+
+**Side effects:** inserts a row into `webhooks`; generates a fresh Ed25519 keypair per webhook (the public key is the webhook's author identity, never a roster member). Sends `ServerRequest::CreateWebhook { channel_id, name }` → reads `ServerResponse::WebhookToken { id, token, server_id_hex }`.
+
+**invoke name:** `"create_webhook"` → `createWebhook(serverId, channelId, name)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `list_webhooks(state, server_id, channel_id) -> Result<Vec<WebhookInfo>, String>`
+
+List all webhooks for a channel. Tokens are NOT returned — they are write-only after creation.
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `channel_id: u64` — the channel to list webhooks for.
+
+**Returns:** `Vec<WebhookInfo>` where each entry is `{ id: i64, channel_id: u64, name: String }`.
+
+**Side effects:** sends `ServerRequest::ListWebhooks { channel_id }` → reads `ServerResponse::Webhooks { webhooks }`.
+
+**invoke name:** `"list_webhooks"` → `listWebhooks(serverId, channelId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `delete_webhook(state, server_id, id) -> Result<(), String>`
+
+Delete a webhook by id. After deletion the webhook URL immediately returns 401 on any POST.
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `id: i64` — the webhook's row id (from `WebhookInfo.id` or `WebhookTokenResult.id`).
+
+**Returns:** `()` on success; no-op if the id does not exist.
+
+**Side effects:** sends `ServerRequest::DeleteWebhook { id }` → reads `ServerResponse::Ok`.
+
+**invoke name:** `"delete_webhook"` → `deleteWebhook(serverId, id)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `regenerate_webhook_token(state, server_id, id) -> Result<WebhookTokenResult, String>`
+
+Rotate the secret token for an existing webhook. The old token is immediately invalidated; the new token is shown once and never retrievable.
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `id: i64` — the webhook's row id.
+
+**Returns:** `WebhookTokenResult { id: i64, token: String, server_id_hex: Option<String> }` with the new token. `server_id_hex` is the relay routing id (same as create).
+
+**Side effects:** sends `ServerRequest::RegenerateWebhookToken { id }` → reads `ServerResponse::WebhookToken { id, token, server_id_hex }`.
+
+**invoke name:** `"regenerate_webhook_token"` → `regenerateWebhookToken(serverId, id)` in `client/src/lib/tauri-bridge.ts`.
