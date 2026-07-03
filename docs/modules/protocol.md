@@ -181,6 +181,7 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 | Variant | Fields | What it asks the server to do |
 |---|---|---|
 | `AddBot` | `coin_id: String`, `label: String` | Register a new server-managed crypto-ticker bot. **Owner-gated.** The server trims and lowercases `coin_id`, then validates it against `[a-z0-9-]` (≤64 chars); `label` is trimmed and must be 1–64 chars — both are rejected with `Error` on violation. On success, generates a fresh Ed25519 keypair, inserts a `bots` row (stores the secret key and CoinGecko coin id), and inserts a `members` row with `is_bot=1`; `label` becomes the bot's display name. Returns `Ok`. The bot appears in the member roster and the price-poller starts broadcasting its presence within one poll cycle. |
+| `AddCustomBot` | `name: String`, `source_url: String`, `value_path: String`, `unit: Option<String>` | Register a new custom-monitor bot that polls an arbitrary JSON API endpoint and broadcasts the extracted numeric value as its presence. **MANAGE_SERVER-gated.** `name` is trimmed and must be 1–64 chars; `source_url` must start with `http://` or `https://` and be ≤2048 chars; `value_path` is 1–256 chars. `unit` is optional — trimmed and capped at 24 chars server-side; `None`/empty means no unit label. On success, generates a fresh Ed25519 keypair, inserts a `bots` row (`kind='custom_api'`, `coin_id=''`, `source_url`/`value_path`/`unit` populated), and inserts a `members` row with `is_bot=1`; `name` becomes the bot's `display_name`. Returns `Ok`. The bot appears in the member roster; the price-poller fetches the API and broadcasts the extracted value as presence within one poll cycle. On fetch or extract failure the presence shows `"unavailable"`. |
 | `RemoveBot` | `bot_public_key: PublicKey` | Remove a bot by its public key. **Owner-gated.** Deletes the `bots` and `members` rows, evicts the in-memory presence entry from `state.presences`, and broadcasts `MemberLeft`. Cascades: all `bot_alerts` and `bot_subscriptions` rows for this bot are deleted first. Returns `Ok`. |
 | `SetBotPollInterval` | `secs: u64` | Set the bot price-poll interval. **MANAGE_SERVER-gated.** Values below 30 are clamped to 30 server-side. Stored in the `server_settings` KV table under key `"bot_poll_interval"`. The poll loop reads this value live each cycle, so the change takes effect without a server restart. Returns `Ok`. |
 | `GetBotPollInterval` | — | Query the current bot price-poll interval. No permission gate (any member may call this). Returns `BotPollInterval { secs }` — the stored value floored at 30, or the default of 60 if unset. |
@@ -464,9 +465,9 @@ The ephemeral activity payload carried by `UpdatePresence`, `MemberPresenceUpdat
 
 | Field | Type | Notes |
 |---|---|---|
-| `kind` | `PresenceKind` | `Music`, `Game`, or `Ticker`. Determines the display format on the client. `Ticker` is used by server-managed crypto-price bots — the poller writes the formatted price into `details` and `"24h"` into `state` (see `bots.rs::ticker_presence`). |
-| `details` | `String` | Primary text: track title (Music) / game name (Game) / price string for Ticker (e.g. `"$67432.00 ▲2.10%"`). Max 128 chars. |
-| `state` | `Option<String>` | Secondary text: artist name (Music) / `None` (Game) / `"24h"` (Ticker, the change-window label). Max 128 chars. |
+| `kind` | `PresenceKind` | `Music`, `Game`, or `Ticker`. Determines the display format on the client. `Ticker` is used by both bot kinds: crypto-ticker bots write a formatted price string into `details` with `state="24h"`; custom-monitor bots write the extracted value (with optional unit) into `details` with `state=None`. |
+| `details` | `String` | Primary text: track title (Music) / game name (Game) / for `crypto_ticker` bots: `"$<price> <arrow><pct>%"` (e.g. `"$67432.00 ▲2.10%"`); for `custom_api` bots: `"<value> <unit>"` (e.g. `"102,433 players"`) or just `"<value>"` when no unit. `"unavailable"` when a custom bot's fetch or extract fails. Max 128 chars for user-supplied presence; bot presence is not rate-limited by this path. |
+| `state` | `Option<String>` | Secondary text: artist name (Music) / `None` (Game) / `"24h"` (crypto-ticker bots only — the change-window label) / `None` (custom-monitor bots). Max 128 chars. |
 
 Field-length limits (128 chars each) are enforced server-side for user-supplied presence (`UpdatePresence`); bot presence written by the server's poller is not rate-limited by this path. `Presence` derives `PartialEq` and `Clone` (required by the client's per-server dedup logic).
 
@@ -528,6 +529,24 @@ A price alert as returned to clients by `ListBotAlerts` / `BotAlerts`. The inter
 ```ts
 interface BotAlertInfo { id: number; metric: string; comparator: string; threshold: number; }
 ```
+
+### `bots` table
+
+The `bots` table stores server-managed bot keypairs and configuration. It is in the server's SQLite database.
+
+| Column | Type | Notes |
+|---|---|---|
+| `public_key` | `BLOB PRIMARY KEY` | 32-byte Ed25519 public key generated by the server. |
+| `secret_key` | `BLOB NOT NULL` | 32-byte Ed25519 secret key held by the server (never sent to clients). |
+| `kind` | `TEXT NOT NULL` | `'crypto_ticker'` for CoinGecko-price bots; `'custom_api'` for custom-monitor bots. |
+| `coin_id` | `TEXT NOT NULL` | CoinGecko coin id for `crypto_ticker` bots (e.g. `"bitcoin"`). Empty string `""` for `custom_api` bots. |
+| `label` | `TEXT NOT NULL` | Display name — matches the `members.display_name` set at registration time. |
+| `source_url` | `TEXT` | For `custom_api` only: the JSON API endpoint URL. `NULL` for `crypto_ticker` bots. |
+| `value_path` | `TEXT` | For `custom_api` only: dot-separated key path into the JSON response (e.g. `"data.players"`). `NULL` for `crypto_ticker` bots. |
+| `unit` | `TEXT` | For `custom_api` only: optional unit label appended to the displayed value (e.g. `"players"`). `NULL` for `crypto_ticker` bots or when no unit was supplied. |
+| `created_at` | `INTEGER NOT NULL` | Unix-ms insert timestamp. |
+
+The `source_url`, `value_path`, and `unit` columns are added as nullable `ALTER TABLE` migrations so existing `bots` tables from before `custom_api` support are upgraded transparently.
 
 ### Alert DB tables (`bot_alerts`, `bot_subscriptions`)
 

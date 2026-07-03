@@ -257,6 +257,7 @@ WebRTC session.
 | `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
 |---|---|---|---|---|
 | `AddBot` | Trims and lowercases `coin_id`; validates charset `[a-z0-9-]` and length ≤64 (returns `Error` on violation). Trims `label`; validates 1–64 chars (returns `Error` on violation). Generates a fresh Ed25519 keypair; inserts a `bots` row (stores the coin id and secret key) and a `members` row with `is_bot=1`; `label` becomes the bot's `display_name`. The price-poller starts broadcasting its presence within the next poll cycle. | Owner only (`is_owner` gate; `MANAGE_SERVER` check reused) | `members::register_bot_member`, `bots::register_bot` | `MemberJoined { public_key, display_name: label }` → `All` |
+| `AddCustomBot` | Trims `name` (1–64 chars), `source_url` (must start with `http://` or `https://`, ≤2048 chars), `value_path` (1–256 chars). Trims and caps `unit` at 24 chars; `None`/empty is stored as `NULL`. Validates each field and returns `Error` on violation. Generates a fresh Ed25519 keypair; calls `members::register_bot_member` and `bots::register_custom_bot`. `name` becomes the bot's `display_name`. The poll loop begins fetching the API on the next cycle. | MANAGE_SERVER | `members::register_bot_member`, `bots::register_custom_bot` | `MemberJoined { public_key, display_name: name }` → `All` |
 | `RemoveBot` | Deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. Cascade: `bots::remove_bot` first deletes all `bot_alerts` and `bot_subscriptions` for this bot. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
 | `SetBotPollInterval` | Clamps `secs` to ≥30, then writes the value to `server_settings` via `bots::set_poll_interval`. The poll loop reads the interval live each cycle, so the change takes effect immediately after the current sleep expires (no restart). | MANAGE_SERVER (owner or role holders) | `bots::set_poll_interval` → `server_settings` KV (`key="bot_poll_interval"`) | — |
 | `GetBotPollInterval` | Reads the poll interval via `bots::get_poll_interval` and returns `BotPollInterval { secs }`. No permission gate — any connected member may query this. | None | `bots::get_poll_interval` (read-only) | — |
@@ -359,10 +360,10 @@ files are silently skipped. Called once at server startup after
 
 ### Data model
 
-A crypto-ticker bot is represented in two tables:
+A server-managed bot is represented in two tables:
 
-- **`bots`**: `(public_key, secret_key, kind='crypto_ticker', coin_id, label, created_at)` — the server owns and holds the bot's Ed25519 secret key.
-- **`members`**: a normal members row with `is_bot=1`; `label` is the `display_name`; `joined_at` is set at registration time.
+- **`bots`**: `(public_key, secret_key, kind, coin_id, label, source_url, value_path, unit, created_at)` — the server owns and holds the bot's Ed25519 secret key. `kind` is `'crypto_ticker'` for CoinGecko-price bots and `'custom_api'` for custom-monitor bots. `source_url`, `value_path`, and `unit` are `NULL` for `crypto_ticker` bots and populated for `custom_api` bots.
+- **`members`**: a normal members row with `is_bot=1`; the display name (label or name) is the `display_name`; `joined_at` is set at registration time.
 
 The bot has no human operator and cannot authenticate a client connection — it exists only so it appears in the member roster (`GetMembers`) and can have a `Presence` broadcast on its behalf by the poller.
 
@@ -380,8 +381,9 @@ Read via `db::get_setting`; written via `db::set_setting` (upsert semantics).
 
 | Function | Signature | What it does |
 |---|---|---|
-| `register_bot` | `(conn, pk, secret, coin_id, label) -> Result<()>` | Inserts a row into `bots`. |
-| `list_bots` | `(conn) -> Result<Vec<BotRecord>>` | Returns all `BotRecord { public_key, coin_id, label }` rows. |
+| `register_bot` | `(conn, pk, secret, coin_id, label) -> Result<()>` | Inserts a `crypto_ticker` row into `bots` (`source_url`/`value_path`/`unit` left `NULL`). |
+| `register_custom_bot` | `(conn, pk, secret, name, source_url, value_path, unit: Option<&str>) -> Result<()>` | Inserts a `custom_api` row into `bots` with `coin_id=''` and the custom-monitor fields populated. |
+| `list_bots` | `(conn) -> Result<Vec<BotRecord>>` | Returns all `BotRecord { public_key, coin_id, label, kind, source_url, value_path, unit }` rows. |
 | `remove_bot` | `(conn, pk) -> Result<()>` | Deletes all `bot_alerts` and `bot_subscriptions` rows for `pk` (cascade), then deletes from `bots`. The `members` row is deleted separately by `handlers.rs` via `members::remove_member_row`. |
 | `get_poll_interval` | `(conn) -> u64` | Reads `"bot_poll_interval"` from `server_settings`; floors at `POLL_INTERVAL_FLOOR` (30); returns `POLL_INTERVAL_DEFAULT` (60) when unset. |
 | `set_poll_interval` | `(conn, secs: u64) -> Result<()>` | Writes `secs.max(POLL_INTERVAL_FLOOR)` to `server_settings` under `"bot_poll_interval"`. |
@@ -398,6 +400,10 @@ Read via `db::get_setting`; written via `db::set_setting` (upsert semantics).
 
 Returns `Presence { kind: Ticker, details: "unknown coin", state: None }`. The poller calls this for any bot whose `coin_id` was absent from a **successful** CoinGecko response — indicating a bad or misspelled id rather than a transient network failure. The `"unknown coin"` string is rendered by the client's `formatPresence` path (same path as a normal ticker) so no client-side change was needed.
 
+### `unavailable_presence() -> Presence`
+
+Returns `Presence { kind: Ticker, details: "unavailable", state: None }`. The poller calls this for any `custom_api` bot whose JSON fetch failed or whose dot-path extraction returned `None` (missing key, non-numeric leaf). The bot continues showing `"unavailable"` until the next successful poll cycle.
+
 ### `ticker_presence(p: &PriceInfo) -> Presence`
 
 Composes a `Presence { kind: Ticker, details: "$<price> <arrow><pct>%", state: Some("24h") }`. The arrow glyph is `\u{25B2}` (▲) for non-negative 24h change, `\u{25BC}` (▼) for negative. Used both by the poller and by unit tests.
@@ -413,12 +419,22 @@ Spawns a background `tokio::spawn`. The loop is **poll-then-sleep**: it executes
 On each poll cycle:
 
 1. **Snapshot** — reads the bot list from SQLite, releasing the `Mutex<Connection>` lock before any `.await`.
-2. **Coalesce** — deduplicates coin IDs and issues ONE `fetch_prices` network call for all bots.
-3. **Broadcast** — for each bot:
-   - If the coin ID appeared in the response, calls `ticker_presence` and broadcasts the price.
-   - If the coin ID was absent from a **successful** fetch, calls `unknown_coin_presence()` and broadcasts `"unknown coin"` — signaling a bad or typo'd coin id.
-   - On a **network error** (entire fetch failed), all bots retain their last-known presence; nothing is broadcast. The error is logged at `WARN` level.
-   - The updated `Presence` is stored in `state.presences` (RwLock) and broadcast as `ServerEvent::MemberPresenceUpdated` to all connected clients via `connection::broadcast_event`.
+2. **Coalesce** — deduplicates `coin_id` values for `crypto_ticker` bots only and issues ONE `fetch_prices` network call for all of them.
+3. **Branch by kind** — for each bot:
+
+   **`custom_api` bots:**
+   - Calls `fetch_json(source_url)` (SSRF-guarded, 10 s timeout, 256 KiB cap, redirects disabled).
+   - Calls `extract_dot_path(&json, value_path)` to walk the dot-separated key chain and coerce the leaf to `f64`.
+   - On success: calls `custom_value_presence(value, unit)` (formats `"<value> <unit>"` or just `"<value>"`), stores + broadcasts the `Presence` via `broadcast_presence`, then calls `eval_and_notify_alerts` with `metrics=[("value", value)]`.
+   - On any fetch or extract failure: calls `unavailable_presence()` and broadcasts it. No alert evaluation.
+
+   **`crypto_ticker` bots:**
+   - On a **network error** for the batch fetch (prices = `None`): all crypto bots **skip this cycle**, retaining their last-known presence. Nothing is broadcast. The error is logged at `WARN` level.
+   - On a **successful** batch fetch: for each bot, if the coin ID appeared in the response calls `ticker_presence`; if absent (unknown/misspelled id) calls `unknown_coin_presence()`. Stores + broadcasts via `broadcast_presence`, then calls `eval_and_notify_alerts` with `metrics=[("price_usd", usd), ("change_24h", change_24h)]`.
+
+   The updated `Presence` is stored in `state.presences` (RwLock) and broadcast as `ServerEvent::MemberPresenceUpdated` to all connected clients via `connection::broadcast_event`.
+
+**Note on fetch-failure behavior:** crypto bots keep their last presence on a network error (no `"unknown coin"` flip); `"unknown coin"` only appears when the batch call succeeded but a specific coin id was absent from the response. Custom bots show `"unavailable"` on any per-bot fetch or extract failure.
 
 **Roster whitelist for mesh servers:** when `GetMembers` is handled for a log-mode server, the member list is filtered to `m.is_bot || ls.is_member(&m.public_key)` so bots always appear alongside confirmed log-space members.
 
@@ -454,13 +470,43 @@ Formats a human-readable alert body for a fired alert. Examples:
 
 #### Alert evaluation inside the poll loop
 
-Alert evaluation runs **only inside the `Ok(prices)` branch** and **only for bots with a real `PriceInfo`** (bots whose `coin_id` returned a valid price). The per-bot sequence is:
+Alert evaluation is performed by the shared `eval_and_notify_alerts` helper for both `crypto_ticker` and `custom_api` bots. The per-bot sequence is:
 
-1. **Under the DB lock:** load alerts for the bot, call `evaluate_alert` for each, persist armed-state changes via `set_alert_armed`, collect fired alerts into a `Vec<(metric, comparator, threshold)>`. Drop the lock.
+1. **Under the DB lock:** load alerts for the bot, call `evaluate_alert` for each metric that matches an alert's `metric` string, persist armed-state changes via `set_alert_armed`, collect fired alerts. Drop the lock.
 2. **Under a fresh DB lock:** load subscribers for the bot. Drop the lock.
 3. **Without any DB lock held:** for each fired alert × each subscriber, call `send_bot_dm` (which is `async`). Failures are logged at `WARN` level and do not abort the remaining DMs.
 
 This three-step pattern ensures the `Mutex<Connection>` is never held across an `.await`.
+
+**Metric names by bot kind:** `crypto_ticker` bots pass `metrics=[("price_usd", usd), ("change_24h", chg)]`; `custom_api` bots pass `metrics=[("value", v)]`. The current `AddBotAlert` handler only accepts `"price_usd"` or `"change_24h"` from clients — `"value"` alerts cannot be configured through the existing API (v1 limitation). Alert evaluation for custom bots will only fire if a `bot_alerts` row with `metric="value"` was inserted directly.
+
+#### `eval_and_notify_alerts(state, bot, metrics, make_message) -> (async)`
+
+Shared helper called by both the `crypto_ticker` and `custom_api` branches after presence is broadcast. Evaluates all armed alerts for `bot` against the supplied `metrics` slice (a `&[(&str, f64)]` of `(metric_name, value)` pairs), persists armed-state changes, collects fires, then for each fire × each subscriber calls `send_bot_dm` with the message produced by `make_message(metric, comparator, threshold) -> String`. The `MutexGuard<Connection>` is dropped before any `.await` (two separate lock scopes for alerts + subscribers).
+
+#### `broadcast_presence(state, bot, presence) -> (async)`
+
+Shared helper: inserts `presence` into `state.presences` (RwLock) and broadcasts `ServerEvent::MemberPresenceUpdated { public_key: bot.public_key, presence: Some(presence) }` to all connected clients via `connection::broadcast_event`. Called by both `crypto_ticker` and `custom_api` branches.
+
+### Custom monitor bot helpers
+
+#### `fetch_json(url: &str) -> Result<serde_json::Value>` (async)
+
+Fetches the given URL as JSON. SSRF-guarded: the URL is pre-validated by `ssrf::resolves_to_global` before any network I/O — requests resolving to private/loopback/link-local addresses are rejected (returns `Err`). Request settings: 10-second timeout, redirects disabled, `User-Agent: farder-bot/1.0`. Non-2xx responses return `Err`. Responses larger than 256 KiB return `Err` (soft cap applied post-read). On any error the caller treats the bot as `"unavailable"` for this cycle.
+
+Note: only server owners (MANAGE_SERVER-gated `AddCustomBot`) can configure the URL, so the security perimeter is owner trust, not arbitrary-user trust.
+
+#### `extract_dot_path(v: &serde_json::Value, path: &str) -> Option<f64>`
+
+Walks a dot-separated key path into a JSON value and coerces the leaf to `f64`. Returns `None` on any of: empty path, missing key at any segment, non-numeric and non-numeric-string leaf. String leaves are coerced via `str::parse::<f64>()`. Examples: `"data.online.count"` on `{"data":{"online":{"count":102433}}}` → `Some(102433.0)`; `"data.online.count"` on `{"data":{"online":{"name":"foo"}}}` → `None`.
+
+#### `custom_value_presence(value: f64, unit: Option<&str>) -> Presence`
+
+Formats the inline display for a custom monitor bot: `"<value> <unit>"` or just `"<value>"` when `unit` is `None` or empty. Integer values (zero fractional part, absolute value < 1e15) are formatted with thousands separators (e.g. `"102,433"`); non-integer values are formatted as `"{v:.2}"`. Returns `Presence { kind: Ticker, details, state: None }`.
+
+#### `format_custom_alert_message(label, comparator, threshold, value, unit) -> String`
+
+Formats a human-readable alert body for a fired custom-api alert. Example: `"🔔 RuneScape crossed above 100,000 players — now 102,433 players"`. Both the threshold and current value are formatted by the same thousands-separator logic as `custom_value_presence`.
 
 ### E2EE DM delivery (bot → user)
 

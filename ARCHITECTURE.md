@@ -246,6 +246,27 @@ The alert feature lets server owners define conditions on a bot's price data and
 
 ---
 
+## Custom monitor bots
+
+Custom monitor bots let an owner point a bot at any public JSON API; the server polls it and broadcasts the extracted numeric value (with an optional unit label) as the bot's presence.
+
+**Data path — owner adds a custom monitor → value appears in the member list:**
+
+1. Owner opens Server Settings → Bots → Add Custom Monitor. Fills in name, API URL, dot-path (e.g. `data.players`), and optional unit. The UI calls `invoke("add_custom_bot", { serverId, name, sourceUrl, valuePath, unit })` → `commands.rs::add_custom_bot` → `ServerRequest::AddCustomBot { name, source_url, value_path, unit }` over QUIC.
+2. `handlers.rs` (`AddCustomBot` arm, MANAGE_SERVER-gated): validates all fields, generates a fresh Ed25519 keypair, calls `bots::register_custom_bot` (inserts a `bots` row with `kind='custom_api'`, `coin_id=''`, `source_url`, `value_path`, `unit`) and `members::register_bot_member` (inserts a `members` row with `is_bot=1`, `name` as `display_name`). Broadcasts `ServerEvent::MemberJoined { public_key, display_name: name }` → all connected clients.
+3. The price-poller (`bots::spawn_bot_poll_task`) branches on `bot.kind`:
+   - **`custom_api`:** calls `bots::fetch_json(source_url)` — SSRF-guarded (pre-validated by `ssrf::resolves_to_global`; rejects private/loopback addresses), 10 s timeout, redirects disabled, 256 KiB body cap. On success, calls `bots::extract_dot_path(&json, value_path)` to walk the dot-separated key chain and coerce the leaf to `f64`. On success: `bots::custom_value_presence(value, unit)` formats `"<value> <unit>"` (integers get thousands separators); `bots::broadcast_presence` stores the result in `state.presences` and broadcasts `ServerEvent::MemberPresenceUpdated`. On any fetch or extract failure: `bots::unavailable_presence()` broadcasts `"unavailable"`.
+4. `bridge.rs` re-emits `server:member_presence_updated`; `useServerEvents.ts` dispatches `UPDATE_MEMBER_PRESENCE`; `ServerContext` updates `member.presence` for the bot.
+5. The client renders the bot with a **BOT badge** and the inline value+unit string as presence.
+
+**Alert reuse:** after broadcasting presence for a successful fetch, the poller calls `bots::eval_and_notify_alerts` with `metrics=[("value", v)]`, using the same fire-once-with-hysteresis engine, E2EE DM delivery, and subscription model as crypto ticker bots. See the "Price alerts → E2EE bot DMs" section above. The current `AddBotAlert` handler only accepts metrics `"price_usd"` and `"change_24h"` from clients, so custom bot `"value"` alerts are not yet configurable through the client API (v1 limitation).
+
+**SSRF guard:** `fetch_json` rejects any URL whose resolved IP is private, loopback, or link-local. Only the server owner can configure the URL (MANAGE_SERVER gate), so the attack surface is limited to owner-trusted actors. Redirects are disabled on the reqwest client.
+
+**Degrade-to-unavailable:** custom bot fetch failures (SSRF rejection, timeout, non-2xx response, body too large, parse failure, missing key, non-numeric leaf) all result in `"unavailable"` presence for that cycle. The previous presence is overwritten — there is no "keep last" behavior for custom bots (unlike crypto ticker bots on a batch fetch failure).
+
+---
+
 ## Cross-cutting things that bite
 
 - **Identity at rest:** `client/src-tauri/src/identity.rs` (`IdentityStore`)

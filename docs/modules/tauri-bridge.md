@@ -80,7 +80,9 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 **`server:member_presence_updated` payload fields:**
 - `server_id` — the server this event came from (added by `dispatch_event`, common to all `server:*` events).
 - `public_key` — `"vk_<hex64>"` string (the member whose presence changed). Always the authenticated sender's key; the server never accepts a client-supplied key.
-- `presence` — a `Presence` JSON object `{ kind: "Music"|"Game"|"Ticker", details: string, state: string|null }`, or `null` to clear. `null` is sent on: explicit clear (`UpdatePresence{None}`), member disconnect, or settings toggled off. For `kind: "Ticker"` (server-managed crypto bots), `details` is a formatted price string (e.g. `"$67432.00 ▲2.10%"`) and `state` is `"24h"`; the bot's member entry also has `is_bot: true`.
+- `presence` — a `Presence` JSON object `{ kind: "Music"|"Game"|"Ticker", details: string, state: string|null }`, or `null` to clear. `null` is sent on: explicit clear (`UpdatePresence{None}`), member disconnect, or settings toggled off. For `kind: "Ticker"` (server-managed bots), the bot's member entry also has `is_bot: true`. Two sub-formats:
+  - **`crypto_ticker` bots:** `details` is a formatted price string (e.g. `"$67432.00 ▲2.10%"`); `state` is `"24h"` (the change-window label).
+  - **`custom_api` bots:** `details` is the extracted value with optional unit (e.g. `"102,433 players"` or `"42.00"`); `state` is `null`. When the bot's fetch or extraction fails, `details` is `"unavailable"`.
 
 ## Local events (not from the server — emitted directly by Tauri commands)
 
