@@ -29,7 +29,8 @@ There is no way to invoke a bot on demand. We want Discord-style slash commands:
 
 - **Ephemeral responses** (only-invoker-sees) — public only; ephemeral is a later cross-cutting feature (a message shown to one user, unpersisted for others).
 - **Action/interactive types** (`/poll`, `/giveaway`) — separate sub-projects; this spec only ensures the type enum + dispatch can host them.
-- **Permission-gated commands, multiple/typed args, arg-value autocomplete, per-command cooldowns** — a single free-text arg; a global per-user command rate limit.
+- **Per-command permissions** — in v1 **any member can run any command** (only *configuring* commands is owner-gated). Restricting a command to a role/permission ("admin-only", "role X only") is a deliberate v1 deferral, not an oversight — see Carry-forward for how it drops in.
+- **Multiple/typed args, arg-value autocomplete, per-command cooldowns** — a single free-text arg; a global per-user command rate limit.
 - **Editing a command** — v1 is create + delete (recreate to change).
 
 ## Design
@@ -90,5 +91,6 @@ Bots → Add Command: (1) a **text** command `rules` → body text; type `/rules
 ## Carry-forward / known limitations
 
 - Dot-path can't index a dynamic key or an array (v1 monitor-bot limitation carried over) — api commands need an endpoint with a static value path.
-- Single free-text arg; no typed/multiple args; no per-command permissions or cooldowns.
+- Single free-text arg; no typed/multiple args; no cooldowns.
+- **Per-command permissions (planned):** v1 lets any member run any command. Gating a command to a role/permission drops in as a nullable `min_permission` (or `allowed_role_id`) column on `commands` + a single `require_base_perm`-style check at the top of the `RunCommand` dispatch + a picker in the Add Command form — purely additive, no change to parsing/registry/`RunCommand` shape. `ListCommands` would then also filter to commands the caller may run (so autocomplete only shows runnable ones). This is the expected home for restricted/moderation commands.
 - Ephemeral responses, editing a command, and the interactive types (`/poll`, `/giveaway`) are follow-ons; the `kind` enum + `RunCommand` dispatch are built to host them.
