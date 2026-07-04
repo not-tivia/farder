@@ -185,7 +185,7 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 | `RemoveBot` | `bot_public_key: PublicKey` | Remove a bot by its public key. **Owner-gated.** Deletes the `bots` and `members` rows, evicts the in-memory presence entry from `state.presences`, and broadcasts `MemberLeft`. Cascades: all `bot_alerts` and `bot_subscriptions` rows for this bot are deleted first. Returns `Ok`. |
 | `SetBotPollInterval` | `secs: u64` | Set the bot price-poll interval. **MANAGE_SERVER-gated.** Values below 30 are clamped to 30 server-side. Stored in the `server_settings` KV table under key `"bot_poll_interval"`. The poll loop reads this value live each cycle, so the change takes effect without a server restart. Returns `Ok`. |
 | `GetBotPollInterval` | — | Query the current bot price-poll interval. No permission gate (any member may call this). Returns `BotPollInterval { secs }` — the stored value floored at 30, or the default of 60 if unset. |
-| `AddBotAlert` | `bot_public_key: PublicKey`, `metric: String`, `comparator: String`, `threshold: f64` | Add a price alert for a bot. **MANAGE_SERVER-gated.** `metric` must be `"price_usd"` or `"change_24h"`; `comparator` must be `"above"` or `"below"` — both are rejected with `Error` on violation. Inserts a `bot_alerts` row with `armed=1`. Returns `Ok`. |
+| `AddBotAlert` | `bot_public_key: PublicKey`, `metric: String`, `comparator: String`, `threshold: f64` | Add an alert for a bot. **MANAGE_SERVER-gated.** `metric` must be `"price_usd"`, `"change_24h"` (crypto ticker bots), or `"value"` (custom monitor bots); `comparator` must be `"above"` or `"below"` — both are rejected with `Error` on violation. Inserts a `bot_alerts` row with `armed=1`. Returns `Ok`. |
 | `RemoveBotAlert` | `alert_id: i64` | Delete a price alert by its id. **MANAGE_SERVER-gated.** No-op if the id does not exist. Returns `Ok`. |
 | `ListBotAlerts` | `bot_public_key: PublicKey` | List all price alerts for the given bot. **MANAGE_SERVER-gated.** Returns `BotAlerts { alerts: Vec<BotAlertInfo> }`. The `armed` field is internal and not exposed to clients. |
 | `SubscribeBot` | `bot_public_key: PublicKey` | Subscribe the authenticated member to alert DMs for the given bot. No permission gate — any connected member may subscribe. Idempotent (INSERT OR IGNORE). Returns `Ok`. |
@@ -521,7 +521,7 @@ A price alert as returned to clients by `ListBotAlerts` / `BotAlerts`. The inter
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `i64` | Server-assigned alert id (primary key in `bot_alerts`). Pass this back to `RemoveBotAlert`. |
-| `metric` | `String` | `"price_usd"` or `"change_24h"`. |
+| `metric` | `String` | `"price_usd"`, `"change_24h"`, or `"value"` (custom monitor bots). |
 | `comparator` | `String` | `"above"` or `"below"`. |
 | `threshold` | `f64` | The threshold value the metric is compared against. |
 
@@ -558,7 +558,7 @@ These tables live in the server's SQLite database and back the price-alert featu
 |---|---|---|
 | `id` | `INTEGER PRIMARY KEY` | Auto-increment. Returned in `BotAlertInfo.id`. |
 | `bot_public_key` | `BLOB` | 32-byte Ed25519 public key of the bot that owns this alert. FK → `bots.public_key`. |
-| `metric` | `TEXT` | `"price_usd"` or `"change_24h"`. |
+| `metric` | `TEXT` | `"price_usd"`, `"change_24h"`, or `"value"` (custom monitor bots). |
 | `comparator` | `TEXT` | `"above"` or `"below"`. |
 | `threshold` | `REAL` | Threshold value. |
 | `armed` | `INTEGER` | `1` = alert may fire; `0` = disarmed (fired; waiting for condition to clear before re-arming). |
