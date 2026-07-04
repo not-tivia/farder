@@ -1996,8 +1996,8 @@ pub fn handle_request(
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
                 return Ok(denied);
             }
-            if metric != "price_usd" && metric != "change_24h" {
-                return err("invalid metric: must be 'price_usd' or 'change_24h'");
+            if metric != "price_usd" && metric != "change_24h" && metric != "value" {
+                return err("invalid metric: must be 'price_usd', 'change_24h', or 'value'");
             }
             if comparator != "above" && comparator != "below" {
                 return err("invalid comparator: must be 'above' or 'below'");

@@ -261,7 +261,7 @@ WebRTC session.
 | `RemoveBot` | Deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. Cascade: `bots::remove_bot` first deletes all `bot_alerts` and `bot_subscriptions` for this bot. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
 | `SetBotPollInterval` | Clamps `secs` to ≥30, then writes the value to `server_settings` via `bots::set_poll_interval`. The poll loop reads the interval live each cycle, so the change takes effect immediately after the current sleep expires (no restart). | MANAGE_SERVER (owner or role holders) | `bots::set_poll_interval` → `server_settings` KV (`key="bot_poll_interval"`) | — |
 | `GetBotPollInterval` | Reads the poll interval via `bots::get_poll_interval` and returns `BotPollInterval { secs }`. No permission gate — any connected member may query this. | None | `bots::get_poll_interval` (read-only) | — |
-| `AddBotAlert` | Validates `metric` (`"price_usd"` or `"change_24h"`) and `comparator` (`"above"` or `"below"`); rejects invalid values with `Error`. Inserts a `bot_alerts` row with `armed=1`. Returns `Ok`. | MANAGE_SERVER | `bots::add_alert` → `bot_alerts` | — |
+| `AddBotAlert` | Validates `metric` (`"price_usd"`, `"change_24h"`, or `"value"`) and `comparator` (`"above"` or `"below"`); rejects invalid values with `Error`. Inserts a `bot_alerts` row with `armed=1`. Returns `Ok`. | MANAGE_SERVER | `bots::add_alert` → `bot_alerts` | — |
 | `RemoveBotAlert` | Deletes the `bot_alerts` row by `alert_id`. No-op if id not found. Returns `Ok`. | MANAGE_SERVER | `bots::remove_alert` | — |
 | `ListBotAlerts` | Returns all alerts for `bot_public_key` as `BotAlerts { alerts: Vec<BotAlertInfo> }`. The internal `armed` flag is not included in `BotAlertInfo`. | MANAGE_SERVER | `bots::list_alerts_for_bot` (read-only) | — |
 | `SubscribeBot` | Idempotent subscribe: `INSERT OR IGNORE` into `bot_subscriptions` with the authenticated caller as subscriber (client cannot supply a different key). Returns `Ok`. | None (any authenticated member) | `bots::subscribe` → `bot_subscriptions` | — |
@@ -478,7 +478,7 @@ Alert evaluation is performed by the shared `eval_and_notify_alerts` helper for 
 
 This three-step pattern ensures the `Mutex<Connection>` is never held across an `.await`.
 
-**Metric names by bot kind:** `crypto_ticker` bots pass `metrics=[("price_usd", usd), ("change_24h", chg)]`; `custom_api` bots pass `metrics=[("value", v)]`. The current `AddBotAlert` handler only accepts `"price_usd"` or `"change_24h"` from clients — `"value"` alerts cannot be configured through the existing API (v1 limitation). Alert evaluation for custom bots will only fire if a `bot_alerts` row with `metric="value"` was inserted directly.
+**Metric names by bot kind:** `crypto_ticker` bots pass `metrics=[("price_usd", usd), ("change_24h", chg)]`; `custom_api` bots pass `metrics=[("value", v)]`. `AddBotAlert` accepts `"value"` (alongside `"price_usd"`/`"change_24h"`), and the client alert form exposes a **Value (custom bots)** option, so custom-bot alerts are configurable end-to-end. (The metric dropdown shows all three options regardless of bot kind; the owner picks the one matching the bot — a per-kind filtered dropdown is a possible refinement.)
 
 #### `eval_and_notify_alerts(state, bot, metrics, make_message) -> (async)`
 

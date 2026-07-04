@@ -227,6 +227,7 @@ export default function BotsTab({ serverId }: Props) {
                     >
                       <option value="price_usd">Price</option>
                       <option value="change_24h">24h change</option>
+                      <option value="value">Value (custom bots)</option>
                     </select>
                   </div>
                   <div>

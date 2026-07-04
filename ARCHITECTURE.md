@@ -259,7 +259,7 @@ Custom monitor bots let an owner point a bot at any public JSON API; the server 
 4. `bridge.rs` re-emits `server:member_presence_updated`; `useServerEvents.ts` dispatches `UPDATE_MEMBER_PRESENCE`; `ServerContext` updates `member.presence` for the bot.
 5. The client renders the bot with a **BOT badge** and the inline value+unit string as presence.
 
-**Alert reuse:** after broadcasting presence for a successful fetch, the poller calls `bots::eval_and_notify_alerts` with `metrics=[("value", v)]`, using the same fire-once-with-hysteresis engine, E2EE DM delivery, and subscription model as crypto ticker bots. See the "Price alerts → E2EE bot DMs" section above. The current `AddBotAlert` handler only accepts metrics `"price_usd"` and `"change_24h"` from clients, so custom bot `"value"` alerts are not yet configurable through the client API (v1 limitation).
+**Alert reuse:** after broadcasting presence for a successful fetch, the poller calls `bots::eval_and_notify_alerts` with `metrics=[("value", v)]`, using the same fire-once-with-hysteresis engine, E2EE DM delivery, and subscription model as crypto ticker bots. See the "Price alerts → E2EE bot DMs" section above. `AddBotAlert` accepts metric `"value"` (alongside `"price_usd"`/`"change_24h"`), and the client alert form exposes a **Value (custom bots)** metric option, so custom-bot alerts are fully configurable end-to-end.
 
 **SSRF guard:** `fetch_json` rejects any URL whose resolved IP is private, loopback, or link-local. Only the server owner can configure the URL (MANAGE_SERVER gate), so the attack surface is limited to owner-trusted actors. Redirects are disabled on the reqwest client.
 
