@@ -390,7 +390,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
             {displayName}
           </span>
           {message.author_name_override && (
-            <span className="message-webhook-badge">WEBHOOK</span>
+            <span className="message-webhook-badge">{message.author_badge ?? "WEBHOOK"}</span>
           )}
           {showModBadges && member && (
             <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />

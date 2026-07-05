@@ -5,8 +5,8 @@ use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
-    BotAlertInfo, CategoryInfo, ChannelInfo, MemberInfo, MessageInfo, RoleInfo, ServerRequest,
-    ServerResponse, WebhookInfo,
+    BotAlertInfo, CategoryInfo, ChannelInfo, CommandInfo, MemberInfo, MessageInfo, RoleInfo,
+    ServerRequest, ServerResponse, WebhookInfo,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -2605,6 +2605,105 @@ pub async fn regenerate_webhook_token(
         .map_err(|e| e.to_string())?
     {
         ServerResponse::WebhookToken { id, token, server_id_hex } => Ok(WebhookTokenResult { id, token, server_id_hex }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slash command management (MANAGE_SERVER gated for add/delete; all members
+// can list and run).
+// ---------------------------------------------------------------------------
+
+/// List all slash commands registered on this server.
+#[tauri::command]
+pub async fn list_commands(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<CommandInfo>, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ListCommands {})
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Commands { commands } => Ok(commands),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Register a new slash command. `kind` is "text" or "api"; the remaining
+/// fields are kind-specific and optional.
+#[tauri::command]
+pub async fn add_command(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    name: String,
+    trigger: String,
+    description: String,
+    kind: String,
+    body_text: Option<String>,
+    url_template: Option<String>,
+    value_path: Option<String>,
+    response_template: Option<String>,
+    unit: Option<String>,
+) -> Result<(), String> {
+    match bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::AddCommand {
+            name,
+            trigger,
+            description,
+            kind,
+            body_text,
+            url_template,
+            value_path,
+            response_template,
+            unit,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Delete a slash command by id (MANAGE_SERVER gated).
+#[tauri::command]
+pub async fn delete_command(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::DeleteCommand { id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Invoke a slash command. On success the server broadcasts the bot response
+/// to the channel; returns Ok. On failure (unknown trigger, rate-limit, etc.)
+/// returns Err so the invoker can display the reason without posting to the channel.
+#[tauri::command]
+pub async fn run_command(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    trigger: String,
+    channel_id: u64,
+    args: String,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::RunCommand { trigger, channel_id, args })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }

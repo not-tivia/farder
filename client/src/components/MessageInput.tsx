@@ -3,7 +3,7 @@ import * as api from "../lib/tauri-bridge";
 import type { AttachmentCapInput } from "../lib/tauri-bridge";
 import * as bookApi from "../lib/book/client";
 import * as gifApi from "../lib/gifSearch";
-import type { MemberInfo } from "../lib/types";
+import type { MemberInfo, CommandInfo } from "../lib/types";
 import type { BookItem } from "../lib/book/types";
 import { publicKeyToString } from "../lib/types";
 import { useActiveServer } from "../context/ServerContext";
@@ -42,12 +42,17 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [bookIndex, setBookIndex] = useState<BookItem[]>([]);
   const [autocompleteQuery, setAutocompleteQuery] = useState<string | null>(null);
   const [autocompletePos, setAutocompletePos] = useState<{ x: number; y: number } | null>(null);
+  const [commands, setCommands] = useState<CommandInfo[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const textareaWrapperRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     bookApi.bookListItems().then(setBookIndex).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    api.listCommands(serverId).then(setCommands).catch(() => {});
+  }, [serverId]);
 
   const activeServer = useActiveServer();
   const members = activeServer?.members ?? [];
@@ -206,6 +211,22 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   async function handleSend() {
     const text = content.trim();
     if ((!text && !attachedFileId) || sending) return;
+
+    if (text.startsWith("/")) {
+      const [word, ...rest] = text.slice(1).split(/\s+/);
+      const cmd = commands.find(c => c.trigger === word.toLowerCase());
+      if (cmd) {
+        setSending(true); setError(null);
+        try {
+          await api.runCommand(serverId, cmd.trigger, channelId, rest.join(" "));
+          setContent("");
+        } catch (e) { setError(String(e)); }        // RunCommand Error shown to invoker; no channel post
+        finally { setSending(false); }
+        return;
+      }
+      // unknown /word -> fall through and send as a normal message
+    }
+
     setSending(true);
     setError(null);
     try {

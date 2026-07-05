@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -929,4 +929,51 @@ export async function deleteWebhook(serverId: string, id: number): Promise<void>
  *  Token is shown once; never retrievable. */
 export async function regenerateWebhookToken(serverId: string, id: number): Promise<WebhookTokenResult> {
   return invoke<WebhookTokenResult>("regenerate_webhook_token", { serverId, id });
+}
+
+// ── Slash command management ──────────────────────────────────────────────────
+
+/** List all slash commands registered on a server. Available to all members. */
+export async function listCommands(serverId: string): Promise<CommandInfo[]> {
+  return invoke<CommandInfo[]>("list_commands", { serverId });
+}
+
+/** Register a new slash command (MANAGE_SERVER gated). Kind is "text" or "api";
+ *  the remaining fields are kind-specific and optional. */
+export async function addCommand(
+  serverId: string,
+  name: string,
+  trigger: string,
+  description: string,
+  kind: string,
+  bodyText?: string | null,
+  urlTemplate?: string | null,
+  valuePath?: string | null,
+  responseTemplate?: string | null,
+  unit?: string | null,
+): Promise<void> {
+  return invoke<void>("add_command", {
+    serverId,
+    name,
+    trigger,
+    description,
+    kind,
+    bodyText: bodyText ?? null,
+    urlTemplate: urlTemplate ?? null,
+    valuePath: valuePath ?? null,
+    responseTemplate: responseTemplate ?? null,
+    unit: unit ?? null,
+  });
+}
+
+/** Delete a slash command by id (MANAGE_SERVER gated). */
+export async function deleteCommand(serverId: string, id: number): Promise<void> {
+  return invoke<void>("delete_command", { serverId, id });
+}
+
+/** Invoke a slash command. Throws with the server's reason string if the
+ *  command fails (unknown trigger, rate-limit, etc.) so the caller can show
+ *  it locally without posting anything to the channel. */
+export async function runCommand(serverId: string, trigger: string, channelId: number, args: string): Promise<void> {
+  return invoke<void>("run_command", { serverId, trigger, channelId, args });
 }

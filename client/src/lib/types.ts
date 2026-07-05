@@ -76,6 +76,15 @@ export interface MessageInfo {
   thread_message_count: number;
   /** Display-name override for webhook-posted messages; null for normal member messages. */
   author_name_override?: string | null;
+  /** Badge label shown next to the author name for bot/webhook posts ("WEBHOOK", "BOT", etc.). */
+  author_badge?: string | null;
+}
+
+export interface CommandInfo {
+  id: number;
+  trigger: string;
+  description: string;
+  takes_arg: boolean;
 }
 
 export interface DmEntry {
