@@ -125,9 +125,15 @@ pub fn check_run_command_channel_auth(
         .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
 
     if channel.channel_type == ChannelType::Dm {
-        // DM: caller must be a participant.
+        // DM: caller must be a participant and not blocked by the other party (mirrors SendMessage).
         if !channels::is_dm_participant(conn, channel_id, member)? {
             return Ok(Some("not a participant in this DM".to_string()));
+        }
+        let others = channels::list_dm_channels(conn, member)?;
+        if let Some((_, other_key)) = others.iter().find(|(ch, _)| ch.id == channel_id) {
+            if members::is_blocked(conn, member, other_key)? {
+                return Ok(Some("this user is blocked".to_string()));
+            }
         }
     } else {
         // Normal channel: caller must have SEND_MESSAGES.
