@@ -2133,6 +2133,12 @@ pub fn handle_request(
             ok(ServerResponse::Ok)
         }
 
+        // RunCommand is async (may fetch a remote JSON API) and must be handled at the
+        // connection level (like FetchUrl). This arm is here solely for exhaustive match.
+        ServerRequest::RunCommand { .. } => {
+            err("RunCommand must be handled at the connection level")
+        }
+
         ServerRequest::AddCommand { name, trigger, description, kind, body_text, url_template, value_path, response_template, unit } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
                 return Ok(denied);

@@ -932,6 +932,149 @@ pub(crate) async fn main_loop(
                                     }
                                 }
                             }
+                            ServerRequest::RunCommand { trigger, channel_id, args } => {
+                                // Per-user rate limit (5 runs / 10s). No DB lock held across await.
+                                let caller_bytes = *member_key.as_bytes();
+                                if !state.command_limiter.allow(&caller_bytes) {
+                                    let response = ServerFrame::Response {
+                                        request_id: id,
+                                        body: ServerResponse::Error {
+                                            reason: "slow down — too many commands".to_string(),
+                                        },
+                                    };
+                                    send_server_frame(send, &response).await?;
+                                    continue;
+                                }
+                                // Look up the command (lock scoped off any await).
+                                let cmd = {
+                                    let conn = state.db.lock().unwrap();
+                                    crate::commands::find_by_trigger(&conn, &trigger.trim().to_lowercase())
+                                };
+                                let cmd = match cmd {
+                                    Err(e) => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error {
+                                                reason: format!("internal error: {e}"),
+                                            },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                    Ok(None) => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error {
+                                                reason: format!("unknown command /{}", trigger.trim()),
+                                            },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                    Ok(Some(c)) => c,
+                                };
+                                // Build the message content. For `api` commands this involves
+                                // an async HTTP fetch — no DB lock is held here.
+                                let content: Option<String> = match cmd.kind.as_str() {
+                                    "text" => Some(cmd.body_text.clone().unwrap_or_default()),
+                                    "api" => {
+                                        let url = crate::commands::build_command_url(
+                                            cmd.url_template.as_deref().unwrap_or(""),
+                                            &args,
+                                        );
+                                        match crate::bots::fetch_json(&url).await {
+                                            Err(_) => None,
+                                            Ok(json) => {
+                                                match crate::bots::extract_dot_path(
+                                                    &json,
+                                                    cmd.value_path.as_deref().unwrap_or(""),
+                                                ) {
+                                                    Some(v) => Some(crate::commands::format_response(
+                                                        cmd.response_template.as_deref(),
+                                                        &args,
+                                                        v,
+                                                        cmd.unit.as_deref(),
+                                                    )),
+                                                    None => None,
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error {
+                                                reason: "command misconfigured".to_string(),
+                                            },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                };
+                                let content = match content {
+                                    Some(c) => c,
+                                    None => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error {
+                                                reason: format!("couldn't run /{}", cmd.trigger),
+                                            },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                };
+                                // Insert the message authored by the command's bot key.
+                                // Lock scoped off the broadcast await.
+                                let message = {
+                                    let conn = state.db.lock().unwrap();
+                                    let mid = crate::messages::insert_message_with_author_name(
+                                        &conn,
+                                        channel_id,
+                                        &cmd.public_key,
+                                        &content,
+                                        None,
+                                        Some(&cmd.name),
+                                        Some("BOT"),
+                                    );
+                                    mid.and_then(|mid| crate::messages::get_message(&conn, mid, &cmd.public_key))
+                                };
+                                match message {
+                                    Err(e) => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error {
+                                                reason: format!("internal error: {e}"),
+                                            },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                    Ok(Some(msg)) => {
+                                        // Broadcast to channel subscribers (no DB lock held).
+                                        broadcast_event(
+                                            &state,
+                                            EventTarget::Subscribers(channel_id),
+                                            ServerEvent::NewMessage { message: msg },
+                                        ).await;
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Ok,
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                    }
+                                    Ok(None) => {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error {
+                                                reason: "command response message vanished after insert".to_string(),
+                                            },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                }
+                            }
                             request => {
                                 // Rate-limit AddReaction before dispatching to handler
                                 if matches!(request, ServerRequest::AddReaction { .. }) {

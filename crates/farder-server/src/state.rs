@@ -89,6 +89,7 @@ pub struct ServerState {
     pub reaction_limiter: RateLimiter,  // 60/min per user
     pub presences: StdRwLock<HashMap<[u8; 32], Presence>>,
     pub presence_limiter: RateLimiter,  // 2/sec per user
+    pub command_limiter: RateLimiter,   // 5/10s per user
     pub media: media_stream::MediaStateMap,
     pub genesis: std::sync::Mutex<Option<farder_crypto::event_log::Genesis>>,
     pub log_state: std::sync::Mutex<Option<farder_crypto::event_log_state::LogState>>,
@@ -116,6 +117,7 @@ impl ServerState {
             reaction_limiter: RateLimiter::new(60, 60),
             presences: StdRwLock::new(HashMap::new()),
             presence_limiter: RateLimiter::new(2, 1),
+            command_limiter: RateLimiter::new(5, 10),
             media: media_stream::MediaStateMap::new(),
             genesis: std::sync::Mutex::new(None),
             log_state: std::sync::Mutex::new(None),

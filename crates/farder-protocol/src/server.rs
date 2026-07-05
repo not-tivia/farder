@@ -403,6 +403,9 @@ pub enum ServerRequest {
     },
     /// Delete a slash command by id (MANAGE_SERVER gated).
     DeleteCommand { id: i64 },
+    /// Invoke a slash command by trigger. Available to all members; per-user rate-limited.
+    /// For `api` commands the `args` string is percent-encoded before URL substitution.
+    RunCommand { trigger: String, channel_id: u64, args: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

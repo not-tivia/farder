@@ -9,6 +9,40 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use farder_crypto::identity::{Keypair, PublicKey};
 use farder_protocol::server::CommandInfo;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
+// ---------------------------------------------------------------------------
+// URL encoding
+// ---------------------------------------------------------------------------
+
+// Encode URL-structure-breaking chars (space, query/fragment/auth, %, control)
+// but keep path-friendly chars (/, -, ., _, ~, alphanumerics) so `owner/repo`
+// path args work AND `a b&c` cannot inject a query param.
+const ARG_ENCODE: &AsciiSet = &CONTROLS
+    .add(b' ').add(b'"').add(b'#').add(b'%').add(b'<').add(b'>')
+    .add(b'?').add(b'&').add(b'=').add(b'@').add(b'{').add(b'}')
+    .add(b'|').add(b'\\').add(b'^').add(b'`');
+
+/// Build the final URL by percent-encoding `args` and substituting into
+/// `{arg}` in the template. Path chars (`/`, `-`, `.`, `_`, `~`) are
+/// preserved so `owner/repo` args work; URL-structure chars are encoded.
+pub fn build_command_url(template: &str, args: &str) -> String {
+    let encoded = utf8_percent_encode(args.trim(), ARG_ENCODE).to_string();
+    template.replace("{arg}", &encoded)
+}
+
+/// Format the bot response. If `template` is non-empty, substitute `{arg}`
+/// and `{value}` (thousands-formatted). Otherwise fall back to `value [+ unit]`.
+pub fn format_response(template: Option<&str>, args: &str, value: f64, unit: Option<&str>) -> String {
+    let num = crate::bots::format_thousands(value);
+    match template.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => t.replace("{arg}", args.trim()).replace("{value}", &num),
+        None => match unit.filter(|u| !u.is_empty()) {
+            Some(u) => format!("{num} {u}"),
+            None => num,
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -142,6 +176,34 @@ fn row_to_command(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_command_url_encodes_arg_preserving_path() {
+        assert_eq!(
+            build_command_url("https://api.github.com/repos/{arg}", "rust-lang/rust"),
+            "https://api.github.com/repos/rust-lang/rust"
+        ); // path chars preserved
+        assert_eq!(
+            build_command_url("https://x/s?q={arg}", "a b&c"),
+            "https://x/s?q=a%20b%26c"
+        ); // space/& encoded -- can't inject a param
+        assert_eq!(
+            build_command_url("https://x/static", "ignored"),
+            "https://x/static"
+        ); // no {arg} -> unchanged
+    }
+
+    #[test]
+    fn format_response_fills_placeholders() {
+        assert_eq!(
+            format_response(Some("{arg}: {value} stars"), "rust", 12345.0, None),
+            "rust: 12,345 stars"
+        );
+        assert_eq!(
+            format_response(None, "rust", 42.0, Some("stars")),
+            "42 stars"
+        ); // default: value [+ unit]
+    }
 
     #[test]
     fn create_list_find_delete_roundtrip() {

@@ -599,7 +599,7 @@ pub fn extract_dot_path(v: &serde_json::Value, path: &str) -> Option<f64> {
     }
 }
 
-fn format_thousands(v: f64) -> String {
+pub(crate) fn format_thousands(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         let n = v as i64;
         let s = n.unsigned_abs().to_string();
