@@ -933,6 +933,16 @@ pub(crate) async fn main_loop(
                                 }
                             }
                             ServerRequest::RunCommand { trigger, channel_id, args } => {
+                                // Same content gate as FetchUrl/SendMessage: a pending-approval or
+                                // non-log member must not post bot messages via a command.
+                                if let Some(reason) = handlers::content_block_reason(&state, &member_key) {
+                                    let response = ServerFrame::Response {
+                                        request_id: id,
+                                        body: ServerResponse::Error { reason },
+                                    };
+                                    send_server_frame(send, &response).await?;
+                                    continue;
+                                }
                                 // Per-user rate limit (5 runs / 10s). No DB lock held across await.
                                 let caller_bytes = *member_key.as_bytes();
                                 if !state.command_limiter.allow(&caller_bytes) {
