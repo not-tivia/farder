@@ -148,6 +148,32 @@ Webhooks let an external caller (CI system, bot, script) POST a message into a F
 
 ---
 
+## Slash commands
+
+Slash commands let a server owner configure `/trigger` shortcuts that post a bot-authored message in a channel. Commands are **not roster members** — each command has a synthetic Ed25519 keypair generated at creation time (stored in the `commands` table, never in `members`). Their messages carry `author_badge = "BOT"` and `author_name_override = cmd.name`.
+
+Two command kinds exist: **text** (posts a fixed body string) and **api** (fetches a remote JSON endpoint and formats a numeric value). The `kind` string is the extension point for future interactive types — adding `/poll` or `/giveaway` means adding a new dispatch arm in `connection.rs` without any schema change.
+
+**Data path — user types `/rules` → bot message appears:**
+
+1. On server connect, `MessageInput` calls `invoke("list_commands", { serverId })` → `commands.rs::list_commands` → `ServerRequest::ListCommands {}`. The server calls `commands::list_infos(conn)` and returns `ServerResponse::Commands { commands: Vec<CommandInfo> }`. The result is stored in component state. Only safe fields (`id`, `trigger`, `description`, `takes_arg`) are returned; `url_template` and `body_text` are never sent to clients.
+2. The user types `/` in the message input. `MessageInput` filters the command list by prefix and renders an autocomplete dropdown.
+3. The user sends the message. `handleSend` matches the trigger against the known command list. If matched, calls `invoke("run_command", { serverId, trigger, channelId, args })` → `commands.rs::run_command` → `ServerRequest::RunCommand { trigger, channel_id, args }`. If the trigger is **not** in the local list, the message is sent as a normal user message — no round-trip to the server.
+4. `connection.rs` handles `RunCommand` asynchronously (same pattern as `FetchUrl` — not dispatched through `handlers.rs`):
+   - **Content gate:** `content_block_reason` blocks pending-approval or non-log members.
+   - **Rate limit:** `command_limiter` (5 runs / 10 s per user).
+   - **Lookup:** `commands::find_by_trigger` (DB lock released before any `.await`).
+   - **Content resolution:** for `"text"` commands, uses `body_text` directly. For `"api"` commands, calls `commands::build_command_url` (percent-encodes `args`, substitutes into `{arg}` in `url_template`), then `bots::fetch_json` (SSRF-guarded), then `bots::extract_dot_path` (dot-path into the JSON), then `commands::format_response` (formats with optional template, unit, thousands separator).
+   - **Failure → Error, no post:** any fetch error, non-2xx, dot-path miss, or unknown `kind` returns `ServerResponse::Error { reason }` and does NOT post a message to the channel. The client shows the reason string locally.
+5. On success: `messages::insert_message_with_author_name(conn, channel_id, &cmd.public_key, &content, None, Some(&cmd.name), Some("BOT"))` inserts the message; `broadcast_event(EventTarget::Subscribers(channel_id), NewMessage { message })` fans it out. `ServerResponse::Ok` is returned to the invoker.
+6. `bridge.rs` re-emits `server:new_message`; `useServerEvents.ts` dispatches `NEW_MESSAGE`; `ServerContext` prepends the message. The `Message` component renders the `author_badge` field as a `"BOT"` label next to the author name (falling back to `"WEBHOOK"` for webhook-posted messages — the badge is data-driven from the DB field, not from any client-side type check).
+
+**Management:** server owners (MANAGE_SERVER) create and delete commands via the Bots tab → Slash Commands section. `addCommand` / `deleteCommand` → `ServerRequest::AddCommand` / `DeleteCommand`. The Add Command form in `BotsTab.tsx` accepts all fields (name, trigger, description, kind, and kind-specific fields).
+
+**SSRF guard:** `"api"` command URL templates are fetched by `bots::fetch_json`, which calls `ssrf::resolves_to_global` before opening any connection. Private, loopback, and link-local IPs are rejected. The `url_template` is never logged or returned to clients.
+
+---
+
 ## Relay as fetch proxy (invite previews + rich embeds)
 
 The relay doubles as a **privacy fetch proxy**. All outbound HTTP(S) traffic

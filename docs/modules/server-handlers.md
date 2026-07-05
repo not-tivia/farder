@@ -2,7 +2,7 @@
 
 > **File(s):** `crates/farder-server/src/handlers.rs`
 > **Layer:** Server crate
-> **Last reviewed:** 2026-06-04
+> **Last reviewed:** 2026-07-04
 
 ## Purpose
 
@@ -605,6 +605,62 @@ Returns `WebhookAck::Ok` on success. The ack is mapped to HTTP status by `run_re
 | `RegenerateWebhookToken { id }` | `MANAGE_SERVER` | Calls `webhooks::regenerate_token`; returns `WebhookToken { id, new_token, server_id_hex }` or `Error` if not found. |
 | `DeleteWebhook { id }` | `MANAGE_SERVER` | Calls `webhooks::delete`; returns `Ok`. |
 | `ListWebhooks { channel_id }` | `MANAGE_SERVER` | Calls `webhooks::list_for_channel`; maps to `WebhookInfo` structs; returns `Webhooks { webhooks }`. |
+
+---
+
+## `commands.rs` — slash-command CRUD and utilities
+
+> **File:** `crates/farder-server/src/commands.rs`
+
+Implements CRUD for server-configured `/trigger` slash commands plus the utility functions used by the async `RunCommand` dispatch in `connection.rs`.
+
+### Data model
+
+- **`commands` table** — `(id, trigger, name, description, kind, body_text, url_template, value_path, response_template, unit, public_key, created_at)`. `trigger` is UNIQUE and stored lowercase. `public_key` is a fresh Ed25519 key generated at creation time — the command's author identity, **never a roster member**. `url_template` and `body_text` are server-only; they are never sent to clients.
+- **`CommandRow`** (internal) — full DB row including secrets. Used by `find_by_trigger` in the `RunCommand` dispatch.
+- **`CommandInfo`** (protocol) — safe-fields-only view (`id`, `trigger`, `description`, `takes_arg`). Returned by `list_infos` and sent to clients.
+
+### CRUD helpers
+
+| Function | Signature | What it does |
+|---|---|---|
+| `create` | `(conn, name, trigger, description, kind, body_text, url_template, value_path, response_template, unit) -> Result<i64>` | Inserts a command row. Generates a fresh Ed25519 keypair; stores the public key as the command's author identity. Returns the new row id. |
+| `delete` | `(conn, id) -> Result<()>` | Deletes a command row by id. |
+| `list_rows` | `(conn) -> Result<Vec<CommandRow>>` | Full rows ordered by trigger. Includes secrets — server-internal only. |
+| `list_infos` | `(conn) -> Result<Vec<CommandInfo>>` | Safe-fields-only list for clients. `takes_arg` is `true` iff `kind == "api"`. |
+| `find_by_trigger` | `(conn, trigger) -> Result<Option<CommandRow>>` | Look up a command by its trigger string. `None` if not found. Used by the `RunCommand` dispatch in `connection.rs`. |
+
+### Dispatch utilities
+
+| Function | Signature | What it does |
+|---|---|---|
+| `build_command_url` | `(template: &str, args: &str) -> String` | Percent-encodes `args` (preserving path chars `/`, `-`, `.`, `_`, `~`; encoding space, `&`, `?`, `=`, `#`, `%`, etc.) and substitutes into `{arg}` in `template`. Path args like `owner/repo` pass through unchanged; injection attempts like `a b&c=x` are encoded. If `template` contains no `{arg}`, returns it unchanged. |
+| `format_response` | `(template: Option<&str>, args: &str, value: f64, unit: Option<&str>) -> String` | Formats the bot reply. If `template` is non-empty, substitutes `{arg}` and `{value}` (thousands-formatted via `bots::format_thousands`). Falls back to `"<value> <unit>"` or just `"<value>"` if template and unit are absent. |
+
+### Slash command handler arms in `handlers.rs`
+
+CRUD arms run synchronously inside the standard `handle_request` dispatch. `RunCommand` is deliberately absent from that dispatch (it returns an `Error` stub) because it requires an async HTTP fetch.
+
+| `ServerRequest` | Permission | Action |
+|---|---|---|
+| `ListCommands {}` | none (any member) | Calls `commands::list_infos(conn)`; returns `Commands { commands }`. |
+| `AddCommand { ... }` | `MANAGE_SERVER` | Validates all fields; checks trigger uniqueness via `find_by_trigger`; calls `commands::create`; returns `Ok`. |
+| `DeleteCommand { id }` | `MANAGE_SERVER` | Calls `commands::delete(conn, id)`; returns `Ok`. |
+| `RunCommand { .. }` | — | Stub arm — returns `Error("RunCommand must be handled at the connection level")`. See the `RunCommand` dispatch note below. |
+
+### `RunCommand` dispatch in `connection.rs`
+
+`RunCommand` is handled asynchronously in the connection read-loop (mirroring `FetchUrl`) because `"api"` commands require an outbound HTTP fetch. The dispatch sequence:
+
+1. **Content gate** — `handlers::content_block_reason(&state, &member_key)` returns `Some(reason)` if the member is pending approval or not in the member log; returns `Error { reason }` immediately.
+2. **Rate limit** — `state.command_limiter.allow(&caller_bytes)` (5 runs / 10 s per user); returns `Error { reason: "slow down..." }` on excess.
+3. **Command lookup** — `commands::find_by_trigger(&conn, &trigger.trim().to_lowercase())` under a scoped DB lock (released before any `.await`). Returns `Error` if not found.
+4. **Content resolution** (no lock held):
+   - `"text"` commands: use `cmd.body_text` directly.
+   - `"api"` commands: call `commands::build_command_url(url_template, args)`, then `bots::fetch_json(&url)` (SSRF-guarded via `ssrf::resolves_to_global`; rejects private/loopback IPs, 10 s timeout, redirects disabled, 256 KiB cap); on success call `bots::extract_dot_path(&json, value_path)` to get the numeric leaf, then `commands::format_response(response_template, args, value, unit)`.
+   - Unknown `kind`: returns `Error { reason: "command misconfigured" }`.
+   - Any fetch/extract failure: returns `Error { reason: "couldn't run /..." }`. No message is posted.
+5. **Message insert and broadcast** (DB lock scoped off the broadcast `.await`): calls `messages::insert_message_with_author_name(conn, channel_id, &cmd.public_key, &content, None, Some(&cmd.name), Some("BOT"))` — `author_name_override = cmd.name`, `author_badge = "BOT"`. Broadcasts `ServerEvent::NewMessage { message }` to `EventTarget::Subscribers(channel_id)`. Returns `Ok`.
 
 ---
 

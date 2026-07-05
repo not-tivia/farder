@@ -2,7 +2,7 @@
 
 > **File(s):** `client/src/lib/tauri-bridge.ts`, `client/src/lib/types.ts`
 > **Layer:** Tauri bridge
-> **Last reviewed:** 2026-06-04
+> **Last reviewed:** 2026-07-04
 
 ## Purpose
 
@@ -40,7 +40,18 @@ A server member. `public_key` is a `{ bytes: number[] }` object — call `public
 
 ### `MessageInfo`
 
-A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any. `attachments` is an `AttachmentInfo[]`. For webhook-posted messages, `author_name_override` carries the webhook display name (the per-delivery `username` or the webhook's registered name); it is `null` or absent on all normal member messages. The `Message` component uses this field to display the author name and render a `WEBHOOK` badge instead of a member avatar lookup.
+A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any. `attachments` is an `AttachmentInfo[]`. For webhook-posted messages, `author_name_override` carries the webhook display name (the per-delivery `username` or the webhook's registered name); it is `null` or absent on all normal member messages. The `Message` component uses this field to display the author name. `author_badge` is a data-driven label displayed next to the author name for non-member posts: `"WEBHOOK"` for messages posted by an incoming webhook, `"BOT"` for messages posted by a slash command. `null` or absent on all normal member messages. The `Message` component should render the badge text when present.
+
+### `CommandInfo`
+
+A slash-command summary as returned by `listCommands()`. **Safe fields only** — `url_template` and `body_text` are never sent to clients.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `number` | Server-assigned command id (use for `deleteCommand`). |
+| `trigger` | `string` | The trigger word (without `/`). Always lowercase. |
+| `description` | `string` | Short human-readable description shown in the autocomplete menu. |
+| `takes_arg` | `boolean` | `true` for `"api"` commands (the user must supply an argument that is substituted into the URL); `false` for `"text"` commands. Used by the autocomplete UI to indicate whether trailing input is expected. |
 
 ### `AttachmentInfo` (types.ts)
 
@@ -442,6 +453,21 @@ These six functions are the TypeScript wrappers for the alert/subscription Tauri
 | `listMySubscriptions(serverId)` | `list_my_subscriptions` | Returns `Promise<string[]>` — the `"vk_<hex>"` public keys of all bots the authenticated user is subscribed to. Any member. |
 
 **Alert DM delivery:** when an alert fires during the poll cycle, the server calls `bots::send_bot_dm`, which delivers an E2EE DM from the bot to each subscriber via `EventTarget::Members([recipient])`. The recipient receives a `DmCreated` event (if new) followed by a `NewMessage` event — the same path as a human-to-human DM. The client decrypts it with the normal `dmDecrypt(botPublicKey, ciphertextHex)` path.
+
+---
+
+### Slash commands
+
+Four wrappers for managing and invoking server-configured slash commands. `listCommands` and `runCommand` are available to any member; `addCommand` and `deleteCommand` are MANAGE_SERVER-gated on the server side.
+
+| Function | Rust command | What it does |
+|---|---|---|
+| `listCommands(serverId)` | `list_commands` | Returns `Promise<CommandInfo[]>` — the safe-field list of all commands on the server (no `url_template` or `body_text`). |
+| `addCommand(serverId, name, trigger, description, kind, bodyText?, urlTemplate?, valuePath?, responseTemplate?, unit?)` | `add_command` | Registers a new slash command. `kind` is `"text"` or `"api"`; `bodyText` required for text commands, `urlTemplate`+`valuePath` required for api commands. Returns `Promise<void>`. |
+| `deleteCommand(serverId, id)` | `delete_command` | Deletes a command by id. Returns `Promise<void>`. |
+| `runCommand(serverId, trigger, channelId, args)` | `run_command` | Invokes a command. On success the server posts the bot message (with `author_badge = "BOT"`) to `channelId` via `NewMessage`. On failure throws with the server's reason string — the caller shows this locally; no channel post occurs. Returns `Promise<void>`. |
+
+**Slash command flow in `MessageInput`:** when the user types `/`, `listCommands` has already been called on server connect and the result stored in component state. Filtering by the typed prefix populates the `mention-autocomplete` dropdown. On send, if the text matches a known trigger the client calls `runCommand`; if the trigger is unknown the message is sent as a normal message. Errors from `runCommand` are shown in a local error string, never posted to the channel.
 
 ---
 

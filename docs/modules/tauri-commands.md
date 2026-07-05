@@ -2361,3 +2361,82 @@ Rotate the secret token for an existing webhook. The old token is immediately in
 **Side effects:** sends `ServerRequest::RegenerateWebhookToken { id }` → reads `ServerResponse::WebhookToken { id, token, server_id_hex }`.
 
 **invoke name:** `"regenerate_webhook_token"` → `regenerateWebhookToken(serverId, id)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+## Group 25 — Slash commands
+
+Four commands for managing and invoking server-configured slash commands. `list_commands` and `run_command` are available to any connected member; `add_command` and `delete_command` are **MANAGE_SERVER-gated** on the server. Commands are **not** roster members — they have a synthetic per-command Ed25519 key (never listed in `GetMembers`) used only to author their response messages.
+
+---
+
+### `list_commands(state, server_id) -> Result<Vec<CommandInfo>, String>`
+
+Fetch the list of slash commands registered on a server.
+
+**Parameters:**
+- `server_id: String` — connection address string.
+
+**Returns:** `Vec<CommandInfo>` where each entry is `{ id: i64, trigger: String, description: String, takes_arg: bool }`. Safe-field-only view: `url_template` and `body_text` are deliberately excluded by the server so API keys are never exposed to members.
+
+**Side effects:** sends `ServerRequest::ListCommands {}` → reads `ServerResponse::Commands { commands }`. No permission gate.
+
+**invoke name:** `"list_commands"` → `listCommands(serverId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `add_command(state, server_id, name, trigger, description, kind, body_text, url_template, value_path, response_template, unit) -> Result<(), String>`
+
+Register a new slash command on the server. **MANAGE_SERVER-gated.**
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `name: String` — display name shown in the autocomplete menu (1–48 chars after trimming).
+- `trigger: String` — the trigger word (1–32 chars, `a-z 0-9 _ -` only; stored lowercase). Invoked as `/trigger` in channels.
+- `description: String` — short description (≤160 chars).
+- `kind: String` — `"text"` for a fixed-body reply, `"api"` for a JSON API fetch-and-format reply.
+- `body_text: Option<String>` — required when `kind = "text"`, ignored for `"api"`.
+- `url_template: Option<String>` — required when `kind = "api"`. Must be `http(s)://` and ≤2048 chars. Use `{arg}` as placeholder for the user argument.
+- `value_path: Option<String>` — required when `kind = "api"`. Dot-separated path into the JSON response to extract a numeric leaf (e.g. `stargazers_count`).
+- `response_template: Option<String>` — optional format string with `{arg}` and `{value}` (thousands-formatted). Falls back to `"<value> <unit>"` if absent.
+- `unit: Option<String>` — optional unit label appended to `<value>` when no template is set.
+
+**Returns:** `()` on success; `Err(String)` if the trigger already exists, fields are invalid, or caller lacks MANAGE_SERVER. Each command gets a fresh Ed25519 keypair server-side; that key is the bot author for messages posted by this command.
+
+**Side effects:** sends `ServerRequest::AddCommand { ... }` → reads `ServerResponse::Ok`.
+
+**invoke name:** `"add_command"` → `addCommand(serverId, name, trigger, description, kind, bodyText?, urlTemplate?, valuePath?, responseTemplate?, unit?)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `delete_command(state, server_id, id) -> Result<(), String>`
+
+Delete a slash command by id. **MANAGE_SERVER-gated.**
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `id: i64` — the command's row id (from `CommandInfo.id`).
+
+**Returns:** `()` on success; no-op if the id does not exist.
+
+**Side effects:** sends `ServerRequest::DeleteCommand { id }` → reads `ServerResponse::Ok`.
+
+**invoke name:** `"delete_command"` → `deleteCommand(serverId, id)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `run_command(state, server_id, trigger, channel_id, args) -> Result<(), String>`
+
+Invoke a slash command in a channel. Available to all members; per-user rate-limited (5 runs / 10 s) server-side.
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `trigger: String` — the command's trigger word (without the leading `/`).
+- `channel_id: u64` — the channel in which to post the bot response message.
+- `args: String` — argument string (everything after the trigger, possibly empty). For `"api"` commands, percent-encoded by the server before URL substitution.
+
+**Returns:** `()` on success — the server posted the bot message and broadcast `ServerEvent::NewMessage`. `Err(String)` if the trigger is unknown, the rate limit fires, the API fetch fails, or the member is content-blocked; the caller shows the reason locally and does **not** post to the channel.
+
+**Side effects:** sends `ServerRequest::RunCommand { trigger, channel_id, args }`. On success the server inserts a message authored by the command's synthetic Ed25519 key with `author_badge = "BOT"` and broadcasts `ServerEvent::NewMessage { message }` to channel subscribers; then responds `ServerResponse::Ok`. On any failure the server responds `ServerResponse::Error { reason }` and does NOT post a message.
+
+**invoke name:** `"run_command"` → `runCommand(serverId, trigger, channelId, args)` in `client/src/lib/tauri-bridge.ts`.

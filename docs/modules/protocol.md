@@ -192,6 +192,15 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 | `UnsubscribeBot` | `bot_public_key: PublicKey` | Unsubscribe the authenticated member from alert DMs for the given bot. No permission gate. No-op if not subscribed. Returns `Ok`. |
 | `ListMySubscriptions` | — | List the public keys of all bots the authenticated member is subscribed to. No permission gate. Returns `MySubscriptions { bot_public_keys: Vec<PublicKey> }`. |
 
+### Slash commands
+
+| Variant | Fields | What it asks the server to do |
+|---|---|---|
+| `ListCommands {}` | — | List all slash commands registered on the server. **No permission gate** — any connected member may call this. Returns `Commands { commands: Vec<CommandInfo> }`. Only safe fields are returned (`id`, `trigger`, `description`, `takes_arg`); `url_template` and `body_text` are never exposed. |
+| `AddCommand` | `name: String`, `trigger: String`, `description: String`, `kind: String`, `body_text: Option<String>`, `url_template: Option<String>`, `value_path: Option<String>`, `response_template: Option<String>`, `unit: Option<String>` | Register a new slash command. **MANAGE_SERVER-gated.** `name` trimmed, 1–48 chars; `trigger` trimmed/lowercased, 1–32 chars of `[a-z0-9_-]`, must be unique; `description` ≤160 chars. `kind` must be `"text"` (requires `body_text`) or `"api"` (requires `url_template` starting with `http(s)://` and ≤2048 chars, and non-empty `value_path`). A fresh Ed25519 keypair is generated per command — that key is never a roster member; it is only used to author the command's response messages with `author_badge = "BOT"`. Returns `Ok`. |
+| `DeleteCommand` | `id: i64` | Delete a slash command by id. **MANAGE_SERVER-gated.** No-op if the id does not exist. Returns `Ok`. |
+| `RunCommand` | `trigger: String`, `channel_id: u64`, `args: String` | Invoke a slash command. **No create-gate** — any connected member may call this; subject to content-block check (`content_block_reason`) and a per-user rate limit of 5 runs / 10 s (`command_limiter`). Handled asynchronously at the connection level (not in `handlers.rs`) because `"api"` commands require an HTTP fetch. On success: inserts a message authored by the command's synthetic public key with `author_name_override = cmd.name` and `author_badge = "BOT"`, broadcasts `ServerEvent::NewMessage` to channel subscribers, returns `Ok`. On any failure (unknown trigger, rate-limited, `"api"` fetch error, non-2xx response, dot-path miss): returns `Error { reason }` and does NOT post a message to the channel. |
+
 ### Voice / media
 
 | Variant | Fields | What it asks the server to do |
@@ -237,6 +246,7 @@ Every request receives exactly one response.
 | `MySubscriptions` | `bot_public_keys: Vec<PublicKey>` | The bot public keys the authenticated member is subscribed to, in response to `ListMySubscriptions`. |
 | `WebhookToken` | `id: i64`, `token: String`, `server_id_hex: Option<String>` | The new/rotated webhook token in response to `CreateWebhook` or `RegenerateWebhookToken`. `server_id_hex` is the relay's routing id (used to build the ingest URL `POST /webhook/<server_id_hex>/<token>`); `None` for direct (non-relay) servers. **Shown once** — the token is write-only in the DB after this response. |
 | `Webhooks` | `webhooks: Vec<WebhookInfo>` | The webhook list in response to `ListWebhooks`. No tokens. |
+| `Commands` | `commands: Vec<CommandInfo>` | The slash-command list in response to `ListCommands`. Safe fields only — no `url_template` or `body_text`. |
 
 ---
 
@@ -346,6 +356,7 @@ The canonical representation of a message, used in `NewMessage`, `History`,
 | `thread_id` | `Option<u64>` | The channel ID of the thread spawned from this message, if any. |
 | `thread_message_count` | `Option<u32>` | Cached reply count for the thread, if any. |
 | `author_name_override` | `Option<String>` | Display-name override for webhook-posted messages. `None` for all normal member messages. Decorated with `#[serde(default)]` so it deserializes as `None` from older frames. When present, clients must use this name instead of a roster lookup — the author public key is a per-webhook synthetic key, not a roster member. |
+| `author_badge` | `Option<String>` | Badge label shown next to the author name for non-member posts. `"WEBHOOK"` for messages posted by an incoming webhook; `"BOT"` for messages posted by a slash command. `None` / absent on all normal member messages. Decorated with `#[serde(default)]` for schema evolution. The badge is data-driven: it is stored in `messages.author_badge` and returned verbatim; adding new values here (e.g. `"POLL"`) does not require a client code change. |
 
 ### `WebhookInfo`
 
@@ -356,6 +367,17 @@ A webhook summary as returned by `ListWebhooks`. Tokens are never included.
 | `id` | `i64` | Server-assigned webhook id. |
 | `channel_id` | `u64` | The channel this webhook posts into. |
 | `name` | `String` | Display name registered at creation time (1–64 chars). |
+
+### `CommandInfo`
+
+A slash-command summary as returned by `ListCommands`. **Safe-fields-only view** — `url_template` and `body_text` are never included, so API keys are never exposed to members. Defined in `farder-protocol/src/server.rs`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `i64` | Server-assigned command id. Use for `DeleteCommand`. |
+| `trigger` | `String` | The trigger word (without `/`). Always stored and returned lowercase. |
+| `description` | `String` | Short human-readable description (≤160 chars). |
+| `takes_arg` | `bool` | `true` for `"api"` commands (argument is percent-encoded and substituted into `url_template`); `false` for `"text"` commands. The client UI uses this to hint that trailing input is expected. |
 
 ### `AttachmentInfo`
 
@@ -740,6 +762,14 @@ Two additions to the server's SQLite schema relate to this protocol:
 - **`webhooks` table** — `CREATE TABLE IF NOT EXISTS webhooks (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, token TEXT NOT NULL UNIQUE, name TEXT NOT NULL, public_key BLOB NOT NULL, created_at INTEGER NOT NULL)`. `token` is the 64-hex secret (write-only after creation/rotation). `public_key` is the webhook author's synthetic Ed25519 key (never a roster member). There is no `token` field in `WebhookInfo` — tokens are intentionally excluded from list/read responses.
 
 - **`messages.author_name_override` column** — `ALTER TABLE messages ADD COLUMN author_name_override TEXT` (applied as a migration; defaults to `NULL`). Stores the per-delivery `username` or the webhook's registered `name` for webhook-posted messages. All normal member messages have `NULL` here.
+
+## DB schema additions (slash commands)
+
+Two additions to the server's SQLite schema relate to slash commands:
+
+- **`commands` table** — `CREATE TABLE IF NOT EXISTS commands (id INTEGER PRIMARY KEY AUTOINCREMENT, trigger TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL, kind TEXT NOT NULL, body_text TEXT, url_template TEXT, value_path TEXT, response_template TEXT, unit TEXT, public_key BLOB NOT NULL, created_at INTEGER NOT NULL)`. `trigger` is unique and stored lowercase. `public_key` is a fresh Ed25519 key generated at creation time (the command's author identity — **never a roster member**). `url_template` and `body_text` are server-only secrets; they are intentionally excluded from the `CommandInfo` wire type. `kind` is the extension point: currently `"text"` or `"api"`; future interactive types (e.g. `"poll"`, `"giveaway"`) add new dispatch arms in `connection.rs` without changing the schema.
+
+- **`messages.author_badge` column** — `ALTER TABLE messages ADD COLUMN author_badge TEXT` (applied as a migration; defaults to `NULL`). Data-driven badge label stored verbatim and returned in `MessageInfo`. Current values: `"WEBHOOK"` (set by `webhooks::deliver`) and `"BOT"` (set by `RunCommand` dispatch in `connection.rs`). Extending the badge vocabulary requires no schema change — add a new string value in the relevant dispatch site.
 
 ---
 
