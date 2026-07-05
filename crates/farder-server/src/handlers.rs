@@ -101,6 +101,45 @@ pub fn resolve_member_perms_pub(
     resolve_member_perms(conn, member, channel_id, is_owner)
 }
 
+/// Channel-level authorization check for RunCommand dispatch.
+///
+/// Returns `Ok(None)` if the caller is allowed to post to `channel_id`, or
+/// `Ok(Some(reason))` if they are not.  Mirrors the `SendMessage` handler:
+/// - Rejects timed-out members.
+/// - For DM channels: the caller must be a participant.
+/// - For all other channels: the caller must have `SEND_MESSAGES`.
+pub fn check_run_command_channel_auth(
+    conn: &Connection,
+    member: &PublicKey,
+    is_owner: bool,
+    channel_id: u64,
+) -> Result<Option<String>> {
+    // 1. Timeout check (same helper that SendMessage uses internally).
+    if let Some((until_ms, reason)) = members::is_timed_out(conn, member, current_unix_ms())? {
+        let reason_part = reason.map(|r| format!(": {r}")).unwrap_or_default();
+        return Ok(Some(format!("timed out until {until_ms}{reason_part}")));
+    }
+
+    // 2. Channel-level check (mirrors SendMessage).
+    let channel = channels::get_channel(conn, channel_id)?
+        .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+
+    if channel.channel_type == ChannelType::Dm {
+        // DM: caller must be a participant.
+        if !channels::is_dm_participant(conn, channel_id, member)? {
+            return Ok(Some("not a participant in this DM".to_string()));
+        }
+    } else {
+        // Normal channel: caller must have SEND_MESSAGES.
+        let perms = resolve_member_perms_pub(conn, member, channel_id, is_owner)?;
+        if !permissions::has(perms, permissions::SEND_MESSAGES) {
+            return Ok(Some("missing SEND_MESSAGES permission".to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Server-level permissions only (no channel/category overrides).
 pub fn resolve_member_server_perms(
     conn: &Connection,
@@ -5640,4 +5679,71 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // RunCommand channel-authorization tests
+    // Tests for check_run_command_channel_auth — the function called by the
+    // RunCommand dispatch arm in connection.rs before any outbound work.
+    // -----------------------------------------------------------------------
+
+    /// A member who lacks SEND_MESSAGES on the target channel must be refused.
+    /// Also verifies that no message is inserted (the check happens before insert).
+    #[test]
+    fn test_run_command_auth_no_send_messages() {
+        let (conn, _owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+
+        // Strip SEND_MESSAGES from @everyone.
+        conn.execute(
+            "UPDATE roles SET permissions = ?1 WHERE name = '@everyone' AND builtin = 1",
+            rusqlite::params![permissions::VIEW_CHANNEL as i64 | permissions::READ_MESSAGES as i64],
+        )
+        .unwrap();
+
+        let restricted = add_member(&conn, "ReadOnly");
+
+        let result = check_run_command_channel_auth(&conn, &restricted, false, channel_id).unwrap();
+        match result {
+            Some(reason) => assert!(
+                reason.contains("SEND_MESSAGES"),
+                "expected SEND_MESSAGES denial, got: {reason}"
+            ),
+            None => panic!("expected auth denial, got Ok(None)"),
+        }
+
+        // Confirm nothing was inserted (auth check fires before any insert).
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages WHERE channel_id = ?1", [channel_id as i64], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "no message must be inserted when auth fails");
+    }
+
+    /// A timed-out member must be refused regardless of their channel permissions.
+    #[test]
+    fn test_run_command_auth_timed_out() {
+        let (conn, _owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+
+        let actor = add_member(&conn, "SpammerActual");
+        // Apply a 60-second timeout.
+        members::set_timeout(&conn, &actor, current_unix_ms() + 60_000, Some("testing")).unwrap();
+
+        let result = check_run_command_channel_auth(&conn, &actor, false, channel_id).unwrap();
+        match result {
+            Some(reason) => assert!(
+                reason.contains("timed out"),
+                "expected timed-out denial, got: {reason}"
+            ),
+            None => panic!("expected timed-out denial, got Ok(None)"),
+        }
+    }
+
+    /// Owner is never blocked by the permission check (owners get ALL_PERMISSIONS).
+    #[test]
+    fn test_run_command_auth_owner_allowed() {
+        let (conn, owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+
+        let result = check_run_command_channel_auth(&conn, &owner_pk, true, channel_id).unwrap();
+        assert!(result.is_none(), "owner must pass auth, got: {result:?}");
+    }
 }

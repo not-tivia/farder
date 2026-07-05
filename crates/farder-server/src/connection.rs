@@ -955,6 +955,40 @@ pub(crate) async fn main_loop(
                                     send_server_frame(send, &response).await?;
                                     continue;
                                 }
+                                // Channel authorization: enforce SEND_MESSAGES, not-timed-out,
+                                // and DM participation before any outbound work (mirrors
+                                // handle_fetch_url + SendMessage).  Lock is released before the
+                                // command lookup or any .await.
+                                {
+                                    let auth_err = {
+                                        let conn = state.db.lock().unwrap();
+                                        handlers::check_run_command_channel_auth(
+                                            &conn, &member_key, is_owner, channel_id,
+                                        )
+                                    };
+                                    match auth_err {
+                                        Err(e) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error {
+                                                    reason: format!("internal error: {e}"),
+                                                },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                            continue;
+                                        }
+                                        Ok(Some(reason)) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error { reason },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                            continue;
+                                        }
+                                        Ok(None) => {}
+                                    }
+                                }
+
                                 // Look up the command (lock scoped off any await).
                                 let cmd = {
                                     let conn = state.db.lock().unwrap();
@@ -1086,6 +1120,11 @@ pub(crate) async fn main_loop(
                                 }
                             }
                             request => {
+                                // NOTE: RunCommand is intercepted in the arm above and MUST stay
+                                // there.  Routing it through handle_request would hit the
+                                // unreachable stub in commands.rs and bypass the channel-authz
+                                // block added here.
+
                                 // Rate-limit AddReaction before dispatching to handler
                                 if matches!(request, ServerRequest::AddReaction { .. }) {
                                     let pk_bytes = *member_key.as_bytes();
