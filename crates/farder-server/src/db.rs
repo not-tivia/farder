@@ -430,6 +430,38 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE messages ADD COLUMN author_name_override TEXT", [])?;
     }
 
+    // Migration: author_badge for system/bot/webhook message badges (e.g. "WEBHOOK", "BOT").
+    let has_author_badge: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "author_badge")
+    };
+    if !has_author_badge {
+        conn.execute("ALTER TABLE messages ADD COLUMN author_badge TEXT", [])?;
+    }
+
+    // Slash commands: owner-configurable /trigger commands.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS commands (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger           TEXT    NOT NULL UNIQUE,
+            name              TEXT    NOT NULL,
+            description       TEXT    NOT NULL,
+            kind              TEXT    NOT NULL,
+            body_text         TEXT,
+            url_template      TEXT,
+            value_path        TEXT,
+            response_template TEXT,
+            unit              TEXT,
+            public_key        BLOB    NOT NULL,
+            created_at        INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     // Bot alerts + subscriptions (price-alert engine, Task 2).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS bot_alerts (

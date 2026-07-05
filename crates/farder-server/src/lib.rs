@@ -1,4 +1,5 @@
 pub mod attachments;
+pub mod commands;
 pub mod webhooks;
 pub mod bots;
 pub mod event_ingest;

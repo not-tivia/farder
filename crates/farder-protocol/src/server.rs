@@ -130,6 +130,10 @@ pub struct MessageInfo {
     /// None for all regular member messages.
     #[serde(default)]
     pub author_name_override: Option<String>,
+    /// Visual badge shown next to the message author (e.g. "WEBHOOK", "BOT").
+    /// None for all regular member messages.
+    #[serde(default)]
+    pub author_badge: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -227,6 +231,17 @@ pub struct WebhookInfo {
     pub id: i64,
     pub channel_id: u64,
     pub name: String,
+}
+
+/// A slash-command summary returned by `ListCommands`. Deliberately omits
+/// `url_template` and `body_text` — those fields may hold API keys and must
+/// never be exposed to members via this response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommandInfo {
+    pub id: i64,
+    pub trigger: String,
+    pub description: String,
+    pub takes_arg: bool,
 }
 
 /// First frame on every relay-bridged stream, identifying its role. Relay-mode
@@ -372,6 +387,22 @@ pub enum ServerRequest {
     RegenerateWebhookToken { id: i64 },
     /// Register a new custom-monitor bot that polls an arbitrary JSON API (MANAGE_SERVER gated).
     AddCustomBot { name: String, source_url: String, value_path: String, unit: Option<String> },
+    /// List all slash commands (available to all members).
+    ListCommands {},
+    /// Create a new slash command (MANAGE_SERVER gated).
+    AddCommand {
+        name: String,
+        trigger: String,
+        description: String,
+        kind: String,
+        body_text: Option<String>,
+        url_template: Option<String>,
+        value_path: Option<String>,
+        response_template: Option<String>,
+        unit: Option<String>,
+    },
+    /// Delete a slash command by id (MANAGE_SERVER gated).
+    DeleteCommand { id: i64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -432,6 +463,8 @@ pub enum ServerResponse {
     WebhookToken { id: i64, token: String, server_id_hex: Option<String> },
     /// The webhooks registered for a channel (no tokens).
     Webhooks { webhooks: Vec<WebhookInfo> },
+    /// The slash commands registered for the server (safe fields only — no secrets).
+    Commands { commands: Vec<CommandInfo> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -648,6 +681,7 @@ mod tests {
             thread_id: None,
             thread_message_count: None,
             author_name_override: None,
+            author_badge: None,
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -688,6 +722,7 @@ mod tests {
                 thread_id: None,
                 thread_message_count: None,
                 author_name_override: None,
+                author_badge: None,
             },
         };
         let frame = ServerFrame::Event(event);
@@ -1024,6 +1059,7 @@ mod tests {
             thread_id: None,
             thread_message_count: None,
             author_name_override: None,
+            author_badge: None,
         };
         let bytes = codec::encode(&msg).unwrap();
         let decoded: MessageInfo = codec::decode(&bytes).unwrap();

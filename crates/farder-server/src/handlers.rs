@@ -2117,6 +2117,65 @@ pub fn handle_request(
             crate::bots::register_custom_bot(conn, &pk, kp.signing_key_bytes().as_slice(), &name, &source_url, &value_path, unit.as_deref())?;
             ok_with(ServerResponse::Ok, vec![BroadcastEvent { target: EventTarget::All, event: ServerEvent::MemberJoined { public_key: pk, display_name: name } }])
         }
+
+        // ----------------------------------------------------------------
+        // Slash commands
+        // ----------------------------------------------------------------
+        ServerRequest::ListCommands {} => {
+            ok(ServerResponse::Commands { commands: crate::commands::list_infos(conn)? })
+        }
+
+        ServerRequest::DeleteCommand { id } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            crate::commands::delete(conn, id)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::AddCommand { name, trigger, description, kind, body_text, url_template, value_path, response_template, unit } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            let name = name.trim().to_string();
+            let trigger = trigger.trim().to_lowercase();
+            if name.is_empty() || name.len() > 48 { return err("command name must be 1-48 chars"); }
+            if trigger.is_empty() || trigger.len() > 32 || !trigger.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return err("trigger must be 1-32 chars of a-z 0-9 _ -");
+            }
+            if description.len() > 160 { return err("description too long"); }
+            if crate::commands::find_by_trigger(conn, &trigger)?.is_some() { return err("a command with that trigger already exists"); }
+            match kind.as_str() {
+                "text" => {
+                    if body_text.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+                        return err("text command needs body text");
+                    }
+                }
+                "api" => {
+                    let u = url_template.as_deref().unwrap_or("");
+                    if !(u.starts_with("http://") || u.starts_with("https://")) || u.len() > 2048 {
+                        return err("api command needs an http(s) url template (<=2048)");
+                    }
+                    if value_path.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+                        return err("api command needs a value path");
+                    }
+                }
+                _ => return err("kind must be 'text' or 'api'"),
+            }
+            crate::commands::create(
+                conn,
+                &name,
+                &trigger,
+                description.trim(),
+                &kind,
+                body_text.as_deref(),
+                url_template.as_deref(),
+                value_path.as_deref(),
+                response_template.as_deref(),
+                unit.as_deref(),
+            )?;
+            ok(ServerResponse::Ok)
+        }
     }
 }
 

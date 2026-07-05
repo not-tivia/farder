@@ -189,6 +189,7 @@ pub async fn deliver(
             &content,
             None,
             Some(&display),
+            Some("WEBHOOK"),
         ) {
             Ok(m) => m,
             Err(_) => return WebhookAck::BadRequest,
