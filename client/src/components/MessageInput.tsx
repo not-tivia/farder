@@ -43,6 +43,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [autocompleteQuery, setAutocompleteQuery] = useState<string | null>(null);
   const [autocompletePos, setAutocompletePos] = useState<{ x: number; y: number } | null>(null);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
+  const [commandIndex, setCommandIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const textareaWrapperRef = useRef<HTMLDivElement | null>(null);
 
@@ -291,6 +292,23 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     }
   }
 
+  // Derived: slash command autocomplete prefix and filtered list.
+  // Active when content starts with "/" and contains no space yet.
+  const commandPrefix =
+    content.startsWith("/") && !content.includes(" ")
+      ? content.slice(1).toLowerCase()
+      : null;
+  const filteredCommands =
+    commandPrefix !== null
+      ? commands.filter((c) => c.trigger.startsWith(commandPrefix))
+      : [];
+
+  function insertCommand(cmd: CommandInfo) {
+    setContent("/" + cmd.trigger + " ");
+    setCommandIndex(0);
+    setTimeout(() => { textareaRef.current?.focus(); }, 0);
+  }
+
   function insertMention(member: MemberInfo) {
     const cursorPos = textareaRef.current?.selectionStart ?? content.length;
     const textBeforeCursor = content.slice(0, cursorPos);
@@ -304,6 +322,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const val = e.target.value;
     setContent(val);
+    setCommandIndex(0);
 
     // Detect @mention
     const cursorPos = e.target.selectionStart ?? val.length;
@@ -339,6 +358,23 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (filteredCommands.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setCommandIndex((prev) => Math.min(prev + 1, filteredCommands.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCommandIndex((prev) => Math.max(prev - 1, 0));
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        insertCommand(filteredCommands[Math.min(commandIndex, filteredCommands.length - 1)]);
+        return;
+      }
+    }
     if (showMentions && filteredMembers.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -459,6 +495,20 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
               Mic
             </button>
             <div ref={textareaWrapperRef} style={{ position: "relative", flex: 1 }}>
+              {filteredCommands.length > 0 && (
+                <div className="mention-autocomplete">
+                  {filteredCommands.map((cmd, i) => (
+                    <div
+                      key={cmd.id}
+                      className={`mention-autocomplete-item${i === Math.min(commandIndex, filteredCommands.length - 1) ? " active" : ""}`}
+                      onMouseDown={(e) => { e.preventDefault(); insertCommand(cmd); }}
+                    >
+                      <span style={{ fontWeight: 600 }}>/{cmd.trigger}</span>
+                      <span style={{ color: "var(--xp-text-muted)", marginLeft: 6 }}>{cmd.description}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 ref={textareaRef}
                 className="message-input"

@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer } from "../context/ServerContext";
-import { publicKeyToString, memberDisplayName, type BotAlertInfo } from "../lib/types";
+import { publicKeyToString, memberDisplayName, type BotAlertInfo, type CommandInfo } from "../lib/types";
+import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 
 interface Props {
   serverId: string;
@@ -35,6 +36,20 @@ export default function BotsTab({ serverId }: Props) {
   const [cmUnit, setCmUnit] = useState("");
   const [cmError, setCmError] = useState<string | null>(null);
 
+  // Commands state
+  const [ownPk, setOwnPk] = useState<string | null>(null);
+  const [commands, setCommands] = useState<CommandInfo[]>([]);
+  const [cmdName, setCmdName] = useState("");
+  const [cmdTrigger, setCmdTrigger] = useState("");
+  const [cmdDescription, setCmdDescription] = useState("");
+  const [cmdKind, setCmdKind] = useState<"text" | "api">("text");
+  const [cmdBody, setCmdBody] = useState("");
+  const [cmdUrl, setCmdUrl] = useState("");
+  const [cmdPath, setCmdPath] = useState("");
+  const [cmdRespTemplate, setCmdRespTemplate] = useState("");
+  const [cmdUnit, setCmdUnit] = useState("");
+  const [cmdError, setCmdError] = useState<string | null>(null);
+
   // Per-bot alerts state
   const [alertsExpanded, setAlertsExpanded] = useState<Record<string, boolean>>({});
   const [botAlerts, setBotAlerts] = useState<Record<string, BotAlertInfo[]>>({});
@@ -46,6 +61,23 @@ export default function BotsTab({ serverId }: Props) {
   useEffect(() => {
     api.getBotPollInterval(serverId).then(setIntervalSecs).catch(() => {});
   }, [serverId]);
+
+  useEffect(() => {
+    api.getPublicKey().then(setOwnPk).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.listCommands(serverId).then(setCommands).catch(() => {});
+  }, [serverId]);
+
+  async function loadCommands() {
+    try {
+      const list = await api.listCommands(serverId);
+      setCommands(list);
+    } catch {
+      // silent
+    }
+  }
 
   async function loadAlerts(botPk: string) {
     try {
@@ -89,6 +121,52 @@ export default function BotsTab({ serverId }: Props) {
       await loadAlerts(botPk);
     } catch (e) {
       setAlertError((prev) => ({ ...prev, [botPk]: String(e) }));
+    }
+  }
+
+  const members = activeServer?.members ?? [];
+  const roles = activeServer?.roles ?? [];
+  const bits = ownPk
+    ? getActorPermissions(members, roles, ownPk, activeServer?.ownerPublicKey ?? null).bits
+    : 0n;
+  const canManageServer = hasPermission(bits, PERMISSIONS.MANAGE_SERVER);
+
+  async function handleAddCommand() {
+    setCmdError(null);
+    try {
+      await api.addCommand(
+        serverId,
+        cmdName.trim(),
+        cmdTrigger.trim().toLowerCase(),
+        cmdDescription.trim(),
+        cmdKind,
+        cmdKind === "text" ? cmdBody.trim() : null,
+        cmdKind === "api" ? cmdUrl.trim() : null,
+        cmdKind === "api" ? cmdPath.trim() : null,
+        cmdRespTemplate.trim() || null,
+        cmdUnit.trim() || null,
+      );
+      setCmdName("");
+      setCmdTrigger("");
+      setCmdDescription("");
+      setCmdBody("");
+      setCmdUrl("");
+      setCmdPath("");
+      setCmdRespTemplate("");
+      setCmdUnit("");
+      await loadCommands();
+    } catch (e) {
+      setCmdError(String(e));
+    }
+  }
+
+  async function handleDeleteCommand(id: number) {
+    setCmdError(null);
+    try {
+      await api.deleteCommand(serverId, id);
+      await loadCommands();
+    } catch (e) {
+      setCmdError(String(e));
     }
   }
 
@@ -377,6 +455,160 @@ export default function BotsTab({ serverId }: Props) {
             Add
           </button>
         </div>
+      </div>
+      {/* Slash Commands */}
+      <div style={{ marginTop: 12, borderTop: "1px solid var(--xp-border)", paddingTop: 10 }}>
+        <div className="connect-section-title" style={{ marginBottom: 6, fontSize: 12 }}>Slash Commands</div>
+        <div style={{ color: "var(--xp-text-muted)", marginBottom: 8, fontSize: 12 }}>
+          Commands are invoked with <code>/trigger</code> (or <code>/trigger arg</code>) in any channel.
+        </div>
+
+        {cmdError && <div className="error-text" style={{ marginBottom: 6 }}>{cmdError}</div>}
+
+        {/* Existing commands */}
+        {commands.length === 0 && (
+          <div style={{ color: "var(--xp-text-muted)", marginBottom: 8, fontSize: 13 }}>
+            No commands on this server yet.
+          </div>
+        )}
+        {commands.map((cmd) => (
+          <div key={cmd.id} className="organizer-row">
+            <span className="organizer-name" style={{ fontSize: 13 }}>
+              <code>/{cmd.trigger}</code>
+              {cmd.description ? ` — ${cmd.description}` : ""}
+            </span>
+            {canManageServer && (
+              <div className="organizer-actions">
+                <button
+                  className="organizer-btn organizer-delete"
+                  title="Delete command"
+                  onClick={() => void handleDeleteCommand(cmd.id)}
+                >
+                  x
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+
+        {/* Add Command form (MANAGE_SERVER gated) */}
+        {canManageServer && (
+          <>
+            <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 8 }}>
+              <div>
+                <label className="connect-label">Name</label>
+                <input
+                  className="connect-input"
+                  value={cmdName}
+                  onChange={(e) => setCmdName(e.target.value)}
+                  placeholder="e.g. Weather"
+                />
+              </div>
+              <div>
+                <label className="connect-label">Trigger</label>
+                <input
+                  className="connect-input"
+                  value={cmdTrigger}
+                  onChange={(e) => setCmdTrigger(e.target.value)}
+                  placeholder="weather"
+                  style={{ width: 90 }}
+                />
+              </div>
+              <div>
+                <label className="connect-label">Description</label>
+                <input
+                  className="connect-input"
+                  value={cmdDescription}
+                  onChange={(e) => setCmdDescription(e.target.value)}
+                  placeholder="Gets the weather"
+                />
+              </div>
+              <div>
+                <label className="connect-label">Kind</label>
+                <select
+                  className="connect-input"
+                  value={cmdKind}
+                  onChange={(e) => setCmdKind(e.target.value as "text" | "api")}
+                >
+                  <option value="text">text</option>
+                  <option value="api">api</option>
+                </select>
+              </div>
+            </div>
+
+            {cmdKind === "text" && (
+              <div style={{ marginTop: 6 }}>
+                <label className="connect-label">Response text</label>
+                <textarea
+                  className="connect-input"
+                  value={cmdBody}
+                  onChange={(e) => setCmdBody(e.target.value)}
+                  placeholder="Hello, {arg}!"
+                  rows={3}
+                  style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+                />
+              </div>
+            )}
+
+            {cmdKind === "api" && (
+              <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 6 }}>
+                <div>
+                  <label className="connect-label">URL template</label>
+                  <input
+                    className="connect-input"
+                    value={cmdUrl}
+                    onChange={(e) => setCmdUrl(e.target.value)}
+                    placeholder="https://api.example.com/{arg}"
+                    style={{ width: 220 }}
+                  />
+                </div>
+                <div>
+                  <label className="connect-label">Value path</label>
+                  <input
+                    className="connect-input"
+                    value={cmdPath}
+                    onChange={(e) => setCmdPath(e.target.value)}
+                    placeholder="data.value"
+                  />
+                </div>
+                <div>
+                  <label className="connect-label">Response template (optional)</label>
+                  <input
+                    className="connect-input"
+                    value={cmdRespTemplate}
+                    onChange={(e) => setCmdRespTemplate(e.target.value)}
+                    placeholder="{arg}: {value}"
+                  />
+                </div>
+                <div>
+                  <label className="connect-label">Unit (optional)</label>
+                  <input
+                    className="connect-input"
+                    value={cmdUnit}
+                    onChange={(e) => setCmdUnit(e.target.value)}
+                    placeholder="e.g. °F"
+                    style={{ width: 80 }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginTop: 6 }}>
+              <button
+                className="xp-button"
+                onClick={handleAddCommand}
+                disabled={
+                  !cmdName.trim() ||
+                  !cmdTrigger.trim() ||
+                  !cmdDescription.trim() ||
+                  (cmdKind === "text" ? !cmdBody.trim() : !cmdUrl.trim() || !cmdPath.trim())
+                }
+              >
+                Add Command
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
