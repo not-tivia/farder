@@ -476,6 +476,33 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // Polls: interactive poll widgets (widget messages point here via
+    // messages.widget = {"type":"poll","id":N}). Timestamps are unix seconds.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS polls (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id  INTEGER NOT NULL,
+            message_id  INTEGER NOT NULL,
+            creator     BLOB    NOT NULL,
+            question    TEXT    NOT NULL,
+            options     TEXT    NOT NULL,
+            created_at  INTEGER NOT NULL,
+            closes_at   INTEGER,
+            closed_at   INTEGER
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS poll_votes (
+            poll_id      INTEGER NOT NULL,
+            voter        BLOB    NOT NULL,
+            option_index INTEGER NOT NULL,
+            voted_at     INTEGER NOT NULL,
+            PRIMARY KEY (poll_id, voter)
+        )",
+        [],
+    )?;
+
     // Bot alerts + subscriptions (price-alert engine, Task 2).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS bot_alerts (

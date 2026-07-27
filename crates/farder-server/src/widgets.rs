@@ -15,10 +15,62 @@ pub struct PendingBroadcast {
     pub event: farder_protocol::server::ServerEvent,
 }
 
-/// Sync tick body servicing BOTH widget halves (polls: close due; giveaways: draw due).
-/// Extracted so tests run it without tokio. Skeleton: nothing due, ever.
-pub fn sweep_once(_conn: &rusqlite::Connection, _now: u64) -> Vec<PendingBroadcast> {
-    Vec::new()
+/// Sync tick body servicing BOTH widget halves (polls: close due; giveaways: draw due —
+/// lands with the giveaway feature). Extracted so tests run it without tokio.
+/// State is persisted inside each half BEFORE this returns (i.e. under the caller's
+/// lock, before any broadcast) — persist-then-broadcast by construction.
+pub fn sweep_once(conn: &rusqlite::Connection, now: u64) -> Vec<PendingBroadcast> {
+    let mut out = Vec::new();
+    // Poll half: close every due timed poll; fold the terminal state into PollUpdated.
+    match crate::polls::close_due(conn, now as i64) {
+        Ok(infos) => {
+            for info in infos {
+                out.push(PendingBroadcast {
+                    target: crate::events::EventTarget::Subscribers(info.channel_id),
+                    event: farder_protocol::server::ServerEvent::PollUpdated { poll: info },
+                });
+            }
+        }
+        Err(e) => tracing::warn!("widget sweeper: poll close_due failed: {e}"),
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_once_closes_due_poll_once() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let channel_id = crate::channels::create_channel(
+            &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
+        )
+        .unwrap();
+        let pk = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &pk, "Alice").unwrap();
+        let opts = vec!["a".to_string(), "b".to_string()];
+        let now = 1_000_000u64;
+        let poll_id = crate::polls::create(
+            &conn, channel_id as i64, 1, &pk, "due?", &opts, Some(now as i64 - 10),
+        )
+        .unwrap();
+
+        let pending = sweep_once(&conn, now);
+        assert_eq!(pending.len(), 1, "one due poll → one PendingBroadcast");
+        match &pending[0].event {
+            farder_protocol::server::ServerEvent::PollUpdated { poll } => {
+                assert_eq!(poll.id, poll_id);
+                assert!(poll.closed);
+            }
+            other => panic!("expected PollUpdated, got {other:?}"),
+        }
+        assert!(matches!(pending[0].target, crate::events::EventTarget::Subscribers(c) if c == channel_id));
+        // Persisted: closed even though the broadcasts are merely collected.
+        assert!(crate::polls::get(&conn, poll_id).unwrap().unwrap().closed_at.is_some());
+        // Idempotent: a second sweep returns nothing (never re-closes).
+        assert!(sweep_once(&conn, now).is_empty());
+    }
 }
 
 /// Spawns the widget sweeper. Sweeps immediately, then every `WIDGET_SWEEP_SECS`

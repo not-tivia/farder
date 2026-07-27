@@ -360,6 +360,28 @@ fn require_member_hierarchy(
     Ok(None)
 }
 
+/// Widget visibility: can `member` see `channel_id`? DM channels ⇒ participant;
+/// all others ⇒ VIEW_CHANNEL. Callers MUST map `false` (and a missing channel)
+/// to the same opaque "... not found" error as a missing widget row, so widget
+/// ids are not an existence oracle for invisible channels.
+fn widget_channel_visible(
+    conn: &Connection,
+    member: &PublicKey,
+    channel_id: u64,
+    is_owner: bool,
+) -> Result<bool> {
+    let channel = match channels::get_channel(conn, channel_id)? {
+        Some(c) => c,
+        None => return Ok(false),
+    };
+    if channel.channel_type == ChannelType::Dm {
+        channels::is_dm_participant(conn, channel_id, member)
+    } else {
+        let perms = resolve_member_perms_pub(conn, member, channel_id, is_owner)?;
+        Ok(permissions::has(perms, permissions::VIEW_CHANNEL))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mesh content gate
 // ---------------------------------------------------------------------------
@@ -535,16 +557,38 @@ pub fn handle_request(
             }
 
             let orphans = messages::delete_message(conn, message_id)?;
-            let event = BroadcastEvent {
+            let mut events = vec![BroadcastEvent {
                 target: EventTarget::Subscribers(channel_id),
                 event: ServerEvent::MessageDeleted {
                     message_id,
                     channel_id,
                 },
-            };
+            }];
+            // Widget hook: deleting a poll card closes its poll (rows retained
+            // for audit; no zombie open polls). Persisted before the broadcast.
+            if let Some(widget_json) = msg.widget.as_deref() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(widget_json) {
+                    if v.get("type").and_then(|t| t.as_str()) == Some("poll") {
+                        if let Some(poll_id) = v.get("id").and_then(|i| i.as_i64()) {
+                            if let Some(row) = crate::polls::get(conn, poll_id)? {
+                                if row.closed_at.is_none() {
+                                    crate::polls::close(conn, poll_id, crate::db::now() as i64)?;
+                                    let closed_row = crate::polls::get(conn, poll_id)?
+                                        .ok_or_else(|| anyhow::anyhow!("poll row vanished during close"))?;
+                                    let info = crate::polls::build_info(conn, &closed_row)?;
+                                    events.push(BroadcastEvent {
+                                        target: EventTarget::Subscribers(channel_id),
+                                        event: ServerEvent::PollUpdated { poll: info },
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(HandleResult {
                 response: ServerResponse::Ok,
-                events: vec![event],
+                events,
                 orphaned_file_ids: orphans,
             })
         }
@@ -2211,7 +2255,10 @@ pub fn handle_request(
                         return err("api command needs a value path");
                     }
                 }
-                _ => return err("kind must be 'text' or 'api'"),
+                // Interactive widget kinds need no kind-specific fields — the arg
+                // string is parsed at dispatch (giveaway arm lands with its feature).
+                "poll" => {}
+                _ => return err("kind must be 'text', 'api', 'poll' or 'giveaway'"),
             }
             crate::commands::create(
                 conn,
@@ -2226,6 +2273,125 @@ pub fn handle_request(
                 unit.as_deref(),
             )?;
             ok(ServerResponse::Ok)
+        }
+
+        // ----------------------------------------------------------------
+        // Polls (widget interactions — actor is ALWAYS the authenticated
+        // connection key; membership-gated by default-deny above; visibility
+        // failures return the same opaque "poll not found" as a missing row)
+        // ----------------------------------------------------------------
+        ServerRequest::GetPoll { poll_id } => {
+            // Read: no timeout gate (reads are allowed while timed out).
+            let row = match crate::polls::get(conn, poll_id)? {
+                Some(r) => r,
+                None => return err("poll not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("poll not found");
+            }
+            let info = crate::polls::build_info(conn, &row)?;
+            let mine = crate::polls::my_vote(conn, poll_id, member)?;
+            ok(ServerResponse::Poll { poll: info, my_vote: mine })
+        }
+
+        ServerRequest::VotePoll { poll_id, option_index } => {
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match crate::polls::get(conn, poll_id)? {
+                Some(r) => r,
+                None => return err("poll not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("poll not found");
+            }
+            // Closed check is exact even before the sweeper ticks: past closes_at counts.
+            let now = crate::db::now() as i64;
+            if row.closed_at.is_some() || row.closes_at.map_or(false, |t| now >= t) {
+                return err("poll is closed");
+            }
+            if (option_index as usize) >= row.options.len() {
+                return err("invalid option");
+            }
+            crate::polls::vote(conn, poll_id, member, option_index)?;
+            let info = crate::polls::build_info(conn, &row)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::PollUpdated { poll: info },
+                }],
+            )
+        }
+
+        ServerRequest::RetractVote { poll_id } => {
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match crate::polls::get(conn, poll_id)? {
+                Some(r) => r,
+                None => return err("poll not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("poll not found");
+            }
+            let now = crate::db::now() as i64;
+            if row.closed_at.is_some() || row.closes_at.map_or(false, |t| now >= t) {
+                return err("poll is closed");
+            }
+            if !crate::polls::retract(conn, poll_id, member)? {
+                // Idempotent: no vote existed → plain Ok, no broadcast noise.
+                return ok(ServerResponse::Ok);
+            }
+            let info = crate::polls::build_info(conn, &row)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::PollUpdated { poll: info },
+                }],
+            )
+        }
+
+        ServerRequest::ClosePoll { poll_id } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match crate::polls::get(conn, poll_id)? {
+                Some(r) => r,
+                None => return err("poll not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("poll not found");
+            }
+            if row.closed_at.is_some() {
+                return err("poll already closed");
+            }
+            // Authz: creator OR MANAGE_SERVER.
+            if row.creator != *member {
+                if let Some(denied) =
+                    require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")?
+                {
+                    return Ok(denied);
+                }
+            }
+            crate::polls::close(conn, poll_id, crate::db::now() as i64)?;
+            let closed_row = crate::polls::get(conn, poll_id)?
+                .ok_or_else(|| anyhow::anyhow!("poll row vanished during close"))?;
+            let info = crate::polls::build_info(conn, &closed_row)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::PollUpdated { poll: info },
+                }],
+            )
         }
     }
 }
@@ -5751,5 +5917,302 @@ mod tests {
 
         let result = check_run_command_channel_auth(&conn, &owner_pk, true, channel_id).unwrap();
         assert!(result.is_none(), "owner must pass auth, got: {result:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Polls
+    // -----------------------------------------------------------------------
+
+    fn make_poll(conn: &Connection, channel_id: u64, creator: &PublicKey, closes_at: Option<i64>) -> i64 {
+        crate::polls::create(
+            conn,
+            channel_id as i64,
+            1,
+            creator,
+            "Q?",
+            &["a".to_string(), "b".to_string()],
+            closes_at,
+        )
+        .unwrap()
+    }
+
+    fn expect_err(result: &HandleResult, needle: &str) {
+        match &result.response {
+            ServerResponse::Error { reason } => {
+                assert!(reason.contains(needle), "expected '{needle}' error, got: {reason}")
+            }
+            other => panic!("expected Error containing '{needle}', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_vote_poll_happy_emits_poll_updated_to_subscribers() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let voter = add_member(&conn, "Voter");
+        let poll_id = make_poll(&conn, channel_id, &creator, None);
+
+        let result = handle_request(
+            &conn, &voter, false,
+            ServerRequest::VotePoll { poll_id, option_index: 1 },
+            "", &fake_state(),
+        ).unwrap();
+        assert!(matches!(result.response, ServerResponse::Ok));
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            BroadcastEvent { target: EventTarget::Subscribers(cid), event: ServerEvent::PollUpdated { poll } } => {
+                assert_eq!(*cid, channel_id);
+                assert_eq!(poll.counts, vec![0, 1]);
+                assert_eq!(poll.total_votes, 1);
+                assert!(!poll.closed);
+            }
+            other => panic!("expected PollUpdated to Subscribers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_vote_poll_closed_and_bad_index_errors() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let voter = add_member(&conn, "Voter");
+        let state = fake_state();
+
+        // Manually-closed poll → err.
+        let closed = make_poll(&conn, channel_id, &creator, None);
+        crate::polls::close(&conn, closed, 1_000).unwrap();
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::VotePoll { poll_id: closed, option_index: 0 }, "", &state).unwrap();
+        expect_err(&r, "poll is closed");
+
+        // Past-closes_at but not yet swept → still err (closed check is exact).
+        let unswept = make_poll(&conn, channel_id, &creator, Some(1)); // long past
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::VotePoll { poll_id: unswept, option_index: 0 }, "", &state).unwrap();
+        expect_err(&r, "poll is closed");
+
+        // Bad option index → err, no vote row.
+        let open = make_poll(&conn, channel_id, &creator, None);
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::VotePoll { poll_id: open, option_index: 2 }, "", &state).unwrap();
+        expect_err(&r, "invalid option");
+        assert_eq!(crate::polls::my_vote(&conn, open, &voter).unwrap(), None);
+    }
+
+    #[test]
+    fn test_poll_hidden_without_view_channel_is_opaque_not_found() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let poll_id = make_poll(&conn, channel_id, &creator, None);
+        // Strip VIEW_CHANNEL from @everyone.
+        conn.execute(
+            "UPDATE roles SET permissions = ?1 WHERE name = '@everyone' AND builtin = 1",
+            rusqlite::params![(permissions::READ_MESSAGES | permissions::SEND_MESSAGES) as i64],
+        )
+        .unwrap();
+        let outsider = add_member(&conn, "Outsider");
+        let state = fake_state();
+
+        for req in [
+            ServerRequest::GetPoll { poll_id },
+            ServerRequest::VotePoll { poll_id, option_index: 0 },
+            ServerRequest::RetractVote { poll_id },
+            ServerRequest::ClosePoll { poll_id },
+        ] {
+            let r = handle_request(&conn, &outsider, false, req, "", &state).unwrap();
+            expect_err(&r, "poll not found"); // opaque — no existence oracle
+        }
+    }
+
+    #[test]
+    fn test_vote_and_retract_denied_while_timed_out_but_get_allowed() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let muted = add_member(&conn, "Muted");
+        let poll_id = make_poll(&conn, channel_id, &creator, None);
+        members::set_timeout(&conn, &muted, current_unix_ms() + 60_000, None).unwrap();
+        let state = fake_state();
+
+        let r = handle_request(&conn, &muted, false,
+            ServerRequest::VotePoll { poll_id, option_index: 0 }, "", &state).unwrap();
+        expect_err(&r, "timed out");
+        let r = handle_request(&conn, &muted, false,
+            ServerRequest::RetractVote { poll_id }, "", &state).unwrap();
+        expect_err(&r, "timed out");
+        // Reads stay allowed while timed out.
+        let r = handle_request(&conn, &muted, false,
+            ServerRequest::GetPoll { poll_id }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Poll { .. }));
+    }
+
+    #[test]
+    fn test_retract_vote_idempotent_no_event_without_vote() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let voter = add_member(&conn, "Voter");
+        let poll_id = make_poll(&conn, channel_id, &creator, None);
+        let state = fake_state();
+
+        // No vote yet → plain Ok, NO event.
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::RetractVote { poll_id }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(r.events.is_empty(), "idempotent retract must not broadcast");
+
+        // With a vote → Ok + PollUpdated with the vote gone.
+        crate::polls::vote(&conn, poll_id, &voter, 0).unwrap();
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::RetractVote { poll_id }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(r.events.len(), 1);
+        match &r.events[0].event {
+            ServerEvent::PollUpdated { poll } => assert_eq!(poll.total_votes, 0),
+            other => panic!("expected PollUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_close_poll_authz_matrix() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let rando = add_member(&conn, "Rando");
+        let moderator = add_member(&conn, "Mod");
+        let mod_role = members::create_role(&conn, "Mods", permissions::MANAGE_SERVER, None, 1, false, false).unwrap();
+        members::assign_role(&conn, &moderator, mod_role).unwrap();
+        let state = fake_state();
+
+        // Non-creator non-mod → denied.
+        let p1 = make_poll(&conn, channel_id, &creator, None);
+        let r = handle_request(&conn, &rando, false,
+            ServerRequest::ClosePoll { poll_id: p1 }, "", &state).unwrap();
+        expect_err(&r, "MANAGE_SERVER");
+        assert!(crate::polls::get(&conn, p1).unwrap().unwrap().closed_at.is_none());
+
+        // Creator closes their own poll; event carries closed: true.
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::ClosePoll { poll_id: p1 }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        match &r.events[0].event {
+            ServerEvent::PollUpdated { poll } => assert!(poll.closed),
+            other => panic!("expected PollUpdated, got {other:?}"),
+        }
+
+        // Double-close → err.
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::ClosePoll { poll_id: p1 }, "", &state).unwrap();
+        expect_err(&r, "poll already closed");
+
+        // MANAGE_SERVER holder closes someone else's poll.
+        let p2 = make_poll(&conn, channel_id, &creator, None);
+        let r = handle_request(&conn, &moderator, false,
+            ServerRequest::ClosePoll { poll_id: p2 }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(crate::polls::get(&conn, p2).unwrap().unwrap().closed_at.is_some());
+    }
+
+    #[test]
+    fn test_get_poll_my_vote_per_requester() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+        let poll_id = make_poll(&conn, channel_id, &creator, None);
+        crate::polls::vote(&conn, poll_id, &alice, 0).unwrap();
+        crate::polls::vote(&conn, poll_id, &bob, 1).unwrap();
+        let state = fake_state();
+
+        for (who, expected) in [(&alice, Some(0u32)), (&bob, Some(1u32)), (&creator, None)] {
+            let r = handle_request(&conn, who, false,
+                ServerRequest::GetPoll { poll_id }, "", &state).unwrap();
+            match r.response {
+                ServerResponse::Poll { poll, my_vote } => {
+                    assert_eq!(my_vote, expected, "my_vote is requester-specific");
+                    assert_eq!(poll.total_votes, 2);
+                }
+                other => panic!("expected Poll, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_delete_message_closes_open_poll() {
+        let (mut conn, owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+        let parsed = crate::polls::parse_poll_args("Q? | a | b").unwrap();
+        let (msg, info) =
+            crate::polls::create_poll_card(&mut conn, channel_id, &owner_pk, &parsed, crate::db::now()).unwrap();
+
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::DeleteMessage { message_id: msg.id }, "", &fake_state()).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(r.events.iter().any(|e| matches!(e.event, ServerEvent::MessageDeleted { .. })));
+        let closed_event = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::PollUpdated { poll } => Some(poll),
+            _ => None,
+        });
+        assert!(closed_event.expect("PollUpdated alongside MessageDeleted").closed);
+        // Poll + vote rows retained, but closed.
+        assert!(crate::polls::get(&conn, info.id).unwrap().unwrap().closed_at.is_some());
+    }
+
+    #[test]
+    fn test_vote_poll_rate_limited_by_widget_limiter() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let voter = add_member(&conn, "Voter");
+        let poll_id = make_poll(&conn, channel_id, &creator, None);
+        let state = fake_state(); // one state → limiter persists across calls
+
+        // 10 interactions in the window pass; the 11th is rate limited.
+        for i in 0..10 {
+            let r = handle_request(&conn, &voter, false,
+                ServerRequest::VotePoll { poll_id, option_index: i % 2 }, "", &state).unwrap();
+            assert!(matches!(r.response, ServerResponse::Ok), "vote {i} should pass");
+        }
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::VotePoll { poll_id, option_index: 0 }, "", &state).unwrap();
+        expect_err(&r, "slow down");
+        // GetPoll is unlimited (read).
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::GetPoll { poll_id }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Poll { .. }));
+    }
+
+    #[test]
+    fn test_add_command_poll_kind_no_extra_fields_and_takes_arg() {
+        let (conn, owner_pk) = setup();
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::AddCommand {
+                name: "Poll".into(),
+                trigger: "poll".into(),
+                description: "start a poll".into(),
+                kind: "poll".into(),
+                body_text: None,
+                url_template: None,
+                value_path: None,
+                response_template: None,
+                unit: None,
+            },
+            "", &fake_state()).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok), "poll kind needs no extra fields: {:?}", r.response);
+        let infos = crate::commands::list_infos(&conn).unwrap();
+        let cmd = infos.iter().find(|c| c.trigger == "poll").unwrap();
+        assert!(cmd.takes_arg, "poll commands take an arg (autocomplete trailing space)");
+
+        // Unknown kind → widened error text.
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::AddCommand {
+                name: "X".into(), trigger: "x".into(), description: "d".into(), kind: "bogus".into(),
+                body_text: None, url_template: None, value_path: None, response_template: None, unit: None,
+            },
+            "", &fake_state()).unwrap();
+        expect_err(&r, "kind must be 'text', 'api', 'poll' or 'giveaway'");
     }
 }

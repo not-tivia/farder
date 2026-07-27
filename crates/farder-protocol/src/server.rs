@@ -237,6 +237,26 @@ pub struct WebhookInfo {
     pub name: String,
 }
 
+/// Live poll state, broadcast whole on every change (`PollUpdated`) and returned
+/// by `GetPoll`. Carries shared state only — the requester-specific `my_vote`
+/// rides solely in `ServerResponse::Poll`. Winner is client-derived
+/// (argmax(counts) when `closed && total_votes > 0`), not a server field.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PollInfo {
+    pub id: i64,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub creator: PublicKey,
+    pub question: String,
+    pub options: Vec<String>,
+    /// Vote counts aligned index-for-index with `options`.
+    pub counts: Vec<u32>,
+    pub total_votes: u32,
+    pub created_at: u64, // unix secs
+    pub closes_at: Option<u64>,
+    pub closed: bool,
+}
+
 /// A slash-command summary returned by `ListCommands`. Deliberately omits
 /// `url_template` and `body_text` — those fields may hold API keys and must
 /// never be exposed to members via this response.
@@ -410,6 +430,14 @@ pub enum ServerRequest {
     /// Invoke a slash command by trigger. Available to all members; per-user rate-limited.
     /// For `api` commands the `args` string is percent-encoded before URL substitution.
     RunCommand { trigger: String, channel_id: u64, args: String },
+    /// Read full poll state (membership-gated; visibility-checked; allowed while timed out).
+    GetPoll { poll_id: i64 },
+    /// Cast or replace the caller's vote (one vote per member; upsert = re-vote).
+    VotePoll { poll_id: i64, option_index: u32 },
+    /// Retract the caller's vote (idempotent — no event when there was no vote).
+    RetractVote { poll_id: i64 },
+    /// Close a poll early (creator or MANAGE_SERVER).
+    ClosePoll { poll_id: i64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -472,6 +500,9 @@ pub enum ServerResponse {
     Webhooks { webhooks: Vec<WebhookInfo> },
     /// The slash commands registered for the server (safe fields only — no secrets).
     Commands { commands: Vec<CommandInfo> },
+    /// Full poll state for `GetPoll`. `my_vote` is requester-specific (self-only —
+    /// per-voter data never leaves the server in v1).
+    Poll { poll: PollInfo, my_vote: Option<u32> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -576,6 +607,9 @@ pub enum ServerEvent {
     MembershipChanged { public_key: PublicKey },
     /// An attachment was taken down (bytes gone). Clients flip its placeholder.
     AttachmentRedacted { content_hash: String, by_moderator: bool },
+    /// Poll state changed (vote cast/retracted, or the poll closed — terminal close
+    /// folds into this same shape with `closed: true`; there is no separate PollClosed).
+    PollUpdated { poll: PollInfo },
 }
 
 #[cfg(test)]

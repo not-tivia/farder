@@ -16,6 +16,7 @@ pub mod media_stream;
 pub mod members;
 pub mod messages;
 pub mod permissions;
+pub mod polls;
 pub mod reactions;
 pub mod relay;
 pub mod retention;

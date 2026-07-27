@@ -123,7 +123,9 @@ pub fn list_rows(conn: &Connection) -> Result<Vec<CommandRow>> {
 }
 
 /// List all commands as `CommandInfo` (safe fields only — no secrets).
-/// `takes_arg` is `true` for `"api"` commands (the arg is interpolated into the url).
+/// `takes_arg` is `true` for kinds that consume an argument string (`api`: the
+/// arg is interpolated into the url; `poll`/`giveaway`: the arg is parsed by
+/// the widget dispatch) — autocomplete inserts a trailing space for these.
 pub fn list_infos(conn: &Connection) -> Result<Vec<CommandInfo>> {
     Ok(list_rows(conn)?
         .into_iter()
@@ -131,7 +133,7 @@ pub fn list_infos(conn: &Connection) -> Result<Vec<CommandInfo>> {
             id: r.id,
             trigger: r.trigger,
             description: r.description,
-            takes_arg: r.kind == "api",
+            takes_arg: matches!(r.kind.as_str(), "api" | "poll" | "giveaway"),
         })
         .collect())
 }
