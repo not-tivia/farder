@@ -205,6 +205,14 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:membership_changed", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string() })),
         ServerEvent::PermissionsChanged =>
             app.emit("server:permissions_changed", serde_json::json!({ "server_id": sid })),
+        // Widget events: the info structs serialize via plain serde (PublicKey
+        // `creator` as `{ bytes }`, same shape as MessageInfo.author); the
+        // giveaway's optional `winner` is mapped to its "vk_<hex>" string form
+        // by commands::giveaway_json, shared with the get_giveaway command.
+        ServerEvent::PollUpdated { poll } =>
+            app.emit("server:poll_updated", serde_json::json!({ "server_id": sid, "poll": poll })),
+        ServerEvent::GiveawayUpdated { giveaway } =>
+            app.emit("server:giveaway_updated", serde_json::json!({ "server_id": sid, "giveaway": crate::commands::giveaway_json(&giveaway) })),
         _ => Ok(()),
     };
 }

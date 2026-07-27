@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 
 export interface PerServerState {
@@ -24,6 +24,10 @@ export interface PerServerState {
   logServerId: string | null;
   highlightMessageId: number | null;
   membershipStatus: "member" | "pending" | "none";
+  /** Poll widget state keyed by poll id (per-server, so ids never collide across servers). */
+  polls: Record<number, { poll: PollInfo; myVote: number | null }>;
+  /** Giveaway widget state keyed by giveaway id. */
+  giveaways: Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>;
 }
 
 export interface AppState {
@@ -60,6 +64,8 @@ const initialPerServerState: PerServerState = {
   logServerId: null,
   highlightMessageId: null,
   membershipStatus: "member",
+  polls: {},
+  giveaways: {},
 };
 
 const initialAppState: AppState = {
@@ -128,7 +134,13 @@ export type AppAction =
   | { type: "CLEAR_KICKED_BANNED" }
   | { type: "OPEN_JOIN_CONFIRM"; link: string }
   | { type: "CLOSE_JOIN_CONFIRM" }
-  | { type: "SET_MEMBERSHIP_STATUS"; serverId: string; status: "member" | "pending" | "none" };
+  | { type: "SET_MEMBERSHIP_STATUS"; serverId: string; status: "member" | "pending" | "none" }
+  | { type: "POLL_UPDATED"; serverId: string; payload: PollInfo }
+  | { type: "POLL_STATE"; serverId: string; payload: { poll: PollInfo; myVote: number | null } }
+  | { type: "POLL_MY_VOTE"; serverId: string; payload: { pollId: number; myVote: number | null } }
+  | { type: "GIVEAWAY_UPDATED"; serverId: string; payload: GiveawayInfo }
+  | { type: "GIVEAWAY_STATE"; serverId: string; payload: { giveaway: GiveawayInfo; myEntered: boolean } }
+  | { type: "GIVEAWAY_MY_ENTERED"; serverId: string; payload: { giveawayId: number; myEntered: boolean } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -385,6 +397,38 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       return { ...state, currentVoiceChannelId: action.payload };
     case "LEAVE_VOICE_CHANNEL":
       return { ...state, currentVoiceChannelId: null };
+    case "POLL_UPDATED": {
+      // Broadcast events carry shared state only — preserve my existing vote.
+      const poll = action.payload;
+      const myVote = state.polls[poll.id]?.myVote ?? null;
+      return { ...state, polls: { ...state.polls, [poll.id]: { poll, myVote } } };
+    }
+    case "POLL_STATE": {
+      const { poll, myVote } = action.payload;
+      return { ...state, polls: { ...state.polls, [poll.id]: { poll, myVote } } };
+    }
+    case "POLL_MY_VOTE": {
+      const { pollId, myVote } = action.payload;
+      const existing = state.polls[pollId];
+      if (!existing) return state;
+      return { ...state, polls: { ...state.polls, [pollId]: { ...existing, myVote } } };
+    }
+    case "GIVEAWAY_UPDATED": {
+      // Broadcast events carry shared state only — preserve whether I entered.
+      const giveaway = action.payload;
+      const myEntered = state.giveaways[giveaway.id]?.myEntered ?? false;
+      return { ...state, giveaways: { ...state.giveaways, [giveaway.id]: { giveaway, myEntered } } };
+    }
+    case "GIVEAWAY_STATE": {
+      const { giveaway, myEntered } = action.payload;
+      return { ...state, giveaways: { ...state.giveaways, [giveaway.id]: { giveaway, myEntered } } };
+    }
+    case "GIVEAWAY_MY_ENTERED": {
+      const { giveawayId, myEntered } = action.payload;
+      const existing = state.giveaways[giveawayId];
+      if (!existing) return state;
+      return { ...state, giveaways: { ...state.giveaways, [giveawayId]: { ...existing, myEntered } } };
+    }
     default:
       return state;
   }

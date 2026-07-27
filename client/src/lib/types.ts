@@ -78,6 +78,48 @@ export interface MessageInfo {
   author_name_override?: string | null;
   /** Badge label shown next to the author name for bot/webhook posts ("WEBHOOK", "BOT", etc.). */
   author_badge?: string | null;
+  /** Server-written widget marker JSON (e.g. `{"type":"poll","id":7}`); null/absent
+   *  for normal messages. Treat as untrusted: try/catch parse, numeric id check. */
+  widget?: string | null;
+}
+
+/** Live poll state, broadcast whole on every change (`server:poll_updated`) and
+ *  returned by `getPoll`. Shared state only — my own vote rides separately as
+ *  `my_vote` in the `getPoll` response. */
+export interface PollInfo {
+  id: number;
+  channel_id: number;
+  message_id: number;
+  /** Serde-serialized PublicKey (same shape as MessageInfo.author); use publicKeyToString(). */
+  creator: { bytes: number[] };
+  question: string;
+  options: string[];
+  /** Vote counts aligned index-for-index with `options`. */
+  counts: number[];
+  total_votes: number;
+  created_at: number;
+  closes_at: number | null;
+  closed: boolean;
+}
+
+/** Live giveaway state, broadcast whole on every change (`server:giveaway_updated`)
+ *  and returned by `getGiveaway`. Shared state only — whether I entered rides
+ *  separately as `my_entered` in the `getGiveaway` response. */
+export interface GiveawayInfo {
+  id: number;
+  channel_id: number;
+  message_id: number;
+  /** Serde-serialized PublicKey (same shape as MessageInfo.author); use publicKeyToString(). */
+  creator: { bytes: number[] };
+  prize: string;
+  ends_at: number;
+  status: "open" | "ended" | "cancelled";
+  /** Live entry count; entrant identities never leave the server. */
+  entry_count: number;
+  /** Winner public key as its "vk_<hex>" string form (mapped in the Tauri layer); null until drawn / when no entries. */
+  winner: string | null;
+  /** Server-resolved display name when ended with a winner still on the roster; fall back to the short key form. */
+  winner_name: string | null;
 }
 
 export interface CommandInfo {

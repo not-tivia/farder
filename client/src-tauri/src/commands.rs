@@ -5,8 +5,8 @@ use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
-    BotAlertInfo, CategoryInfo, ChannelInfo, CommandInfo, MemberInfo, MessageInfo, RoleInfo,
-    ServerRequest, ServerResponse, WebhookInfo,
+    BotAlertInfo, CategoryInfo, ChannelInfo, CommandInfo, GiveawayInfo, MemberInfo, MessageInfo,
+    PollInfo, RoleInfo, ServerRequest, ServerResponse, WebhookInfo,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -4625,6 +4625,207 @@ pub async fn get_pending_members(
         .map_err(|e| e.to_string())?
     {
         ServerResponse::PendingMembers { members } => Ok(members),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Poll & giveaway widget interactions
+// ---------------------------------------------------------------------------
+
+/// Full poll state for the widget: the shared `PollInfo` plus the requester's
+/// own vote (self-only — never another member's).
+#[derive(serde::Serialize)]
+pub struct PollState {
+    pub poll: PollInfo,
+    pub my_vote: Option<u32>,
+}
+
+/// Fetch a poll's current state (counts, closed flag) plus my own vote.
+/// The widget's state-recovery path on mount/reconnect/server switch.
+#[tauri::command]
+pub async fn get_poll(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    poll_id: i64,
+) -> Result<PollState, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetPoll { poll_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Poll { poll, my_vote } => Ok(PollState { poll, my_vote }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Cast (or change) my vote on a poll option. The server broadcasts the
+/// updated counts as `server:poll_updated`.
+#[tauri::command]
+pub async fn vote_poll(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    poll_id: i64,
+    option_index: u32,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::VotePoll { poll_id, option_index })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Retract my vote on an open poll.
+#[tauri::command]
+pub async fn retract_vote(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    poll_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::RetractVote { poll_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Close a poll early (creator or MANAGE_SERVER — enforced server-side).
+#[tauri::command]
+pub async fn close_poll(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    poll_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ClosePoll { poll_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Map a `GiveawayInfo` to its frontend JSON shape: `winner` becomes the
+/// "vk_<hex>" string form (the spec'd TS type — matching the pk-to-string
+/// convention for standalone keys in bridge.rs) instead of serde's `{ bytes }`
+/// object; every other field keeps its plain serde encoding (`creator` stays
+/// `{ bytes }`, same shape as `MessageInfo.author`). Used by both the
+/// `get_giveaway` command and the `server:giveaway_updated` event in bridge.rs
+/// so the two paths can never drift.
+pub(crate) fn giveaway_json(g: &GiveawayInfo) -> serde_json::Value {
+    let mut v = serde_json::to_value(g).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "winner".to_string(),
+            match &g.winner {
+                Some(pk) => serde_json::Value::String(pk.to_string()),
+                None => serde_json::Value::Null,
+            },
+        );
+    }
+    v
+}
+
+/// Full giveaway state for the widget: the shared giveaway state (frontend
+/// JSON shape via `giveaway_json`) plus whether I have entered (self-only).
+#[derive(serde::Serialize)]
+pub struct GiveawayState {
+    pub giveaway: serde_json::Value,
+    pub my_entered: bool,
+}
+
+/// Fetch a giveaway's current state plus whether I have entered.
+/// The widget's state-recovery path on mount/reconnect/server switch.
+#[tauri::command]
+pub async fn get_giveaway(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    giveaway_id: i64,
+) -> Result<GiveawayState, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetGiveaway { giveaway_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Giveaway { giveaway, my_entered } => {
+            Ok(GiveawayState { giveaway: giveaway_json(&giveaway), my_entered })
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Enter an open giveaway (idempotent — already-entered is Ok).
+#[tauri::command]
+pub async fn enter_giveaway(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    giveaway_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::EnterGiveaway { giveaway_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Leave an open giveaway (idempotent).
+#[tauri::command]
+pub async fn leave_giveaway(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    giveaway_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::LeaveGiveaway { giveaway_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Cancel an open giveaway (creator or MANAGE_SERVER — enforced server-side).
+#[tauri::command]
+pub async fn cancel_giveaway(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    giveaway_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::CancelGiveaway { giveaway_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Redraw a finished giveaway's winner (creator or MANAGE_SERVER — enforced
+/// server-side).
+#[tauri::command]
+pub async fn reroll_giveaway(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    giveaway_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::RerollGiveaway { giveaway_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }

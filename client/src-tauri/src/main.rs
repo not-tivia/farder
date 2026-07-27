@@ -281,6 +281,15 @@ fn main() {
             commands::deny_member,
             commands::get_membership_status,
             commands::get_pending_members,
+            commands::get_poll,
+            commands::vote_poll,
+            commands::retract_vote,
+            commands::close_poll,
+            commands::get_giveaway,
+            commands::enter_giveaway,
+            commands::leave_giveaway,
+            commands::cancel_giveaway,
+            commands::reroll_giveaway,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

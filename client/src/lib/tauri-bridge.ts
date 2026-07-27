@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo, PollInfo, GiveawayInfo } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -976,4 +976,65 @@ export async function deleteCommand(serverId: string, id: number): Promise<void>
  *  it locally without posting anything to the channel. */
 export async function runCommand(serverId: string, trigger: string, channelId: number, args: string): Promise<void> {
   return invoke<void>("run_command", { serverId, trigger, channelId, args });
+}
+
+// ── Poll & giveaway widgets ───────────────────────────────────────────────────
+
+/** Full poll state: shared PollInfo plus my own vote (self-only). */
+export interface PollState {
+  poll: PollInfo;
+  my_vote: number | null;
+}
+
+/** Fetch a poll's current state plus my own vote — the widget's state-recovery
+ *  path on mount/reconnect/server switch. */
+export async function getPoll(serverId: string, pollId: number): Promise<PollState> {
+  return invoke<PollState>("get_poll", { serverId, pollId });
+}
+
+/** Cast (or change) my vote on a poll option. Counts arrive via server:poll_updated. */
+export async function votePoll(serverId: string, pollId: number, optionIndex: number): Promise<void> {
+  return invoke<void>("vote_poll", { serverId, pollId, optionIndex });
+}
+
+/** Retract my vote on an open poll. */
+export async function retractVote(serverId: string, pollId: number): Promise<void> {
+  return invoke<void>("retract_vote", { serverId, pollId });
+}
+
+/** Close a poll early (creator or MANAGE_SERVER — enforced server-side). */
+export async function closePoll(serverId: string, pollId: number): Promise<void> {
+  return invoke<void>("close_poll", { serverId, pollId });
+}
+
+/** Full giveaway state: shared GiveawayInfo plus whether I entered (self-only). */
+export interface GiveawayState {
+  giveaway: GiveawayInfo;
+  my_entered: boolean;
+}
+
+/** Fetch a giveaway's current state plus whether I entered — the widget's
+ *  state-recovery path on mount/reconnect/server switch. */
+export async function getGiveaway(serverId: string, giveawayId: number): Promise<GiveawayState> {
+  return invoke<GiveawayState>("get_giveaway", { serverId, giveawayId });
+}
+
+/** Enter an open giveaway (idempotent — already-entered is Ok). */
+export async function enterGiveaway(serverId: string, giveawayId: number): Promise<void> {
+  return invoke<void>("enter_giveaway", { serverId, giveawayId });
+}
+
+/** Leave an open giveaway (idempotent). */
+export async function leaveGiveaway(serverId: string, giveawayId: number): Promise<void> {
+  return invoke<void>("leave_giveaway", { serverId, giveawayId });
+}
+
+/** Cancel an open giveaway (creator or MANAGE_SERVER — enforced server-side). */
+export async function cancelGiveaway(serverId: string, giveawayId: number): Promise<void> {
+  return invoke<void>("cancel_giveaway", { serverId, giveawayId });
+}
+
+/** Redraw a finished giveaway's winner (creator or MANAGE_SERVER — enforced server-side). */
+export async function rerollGiveaway(serverId: string, giveawayId: number): Promise<void> {
+  return invoke<void>("reroll_giveaway", { serverId, giveawayId });
 }

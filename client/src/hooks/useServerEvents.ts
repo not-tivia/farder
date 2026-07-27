@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
-import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence } from "../lib/types";
+import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
@@ -447,6 +447,22 @@ export function useServerEvents(): void {
       setTimeout(() => {
         dispatch({ type: "TYPING_EXPIRED", serverId, payload: { channelId, publicKey } });
       }, 8000);
+    }).then(safePush);
+
+    // Widget events — dropped for background servers like other message-adjacent
+    // events; widgets re-hydrate via getPoll/getGiveaway on next mount.
+    listen("server:poll_updated", (e) => {
+      const data = e.payload as { server_id: string; poll: PollInfo };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "POLL_UPDATED", serverId, payload: data.poll });
+    }).then(safePush);
+
+    listen("server:giveaway_updated", (e) => {
+      const data = e.payload as { server_id: string; giveaway: GiveawayInfo };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "GIVEAWAY_UPDATED", serverId, payload: data.giveaway });
     }).then(safePush);
 
     // Voice events — dispatched for ALL servers so voice activity is visible across servers
