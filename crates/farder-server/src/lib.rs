@@ -22,3 +22,4 @@ pub mod retention;
 pub mod ssrf;
 pub mod state;
 pub mod templates;
+pub mod widgets;

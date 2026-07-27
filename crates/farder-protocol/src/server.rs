@@ -134,6 +134,10 @@ pub struct MessageInfo {
     /// None for all regular member messages.
     #[serde(default)]
     pub author_badge: Option<String>,
+    /// Interactive-widget JSON pointer (e.g. `{"type":"poll","id":3}`), server-written
+    /// only. None for all plain messages; clients parse it as untrusted input.
+    #[serde(default)]
+    pub widget: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -685,6 +689,7 @@ mod tests {
             thread_message_count: None,
             author_name_override: None,
             author_badge: None,
+            widget: None,
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -726,6 +731,7 @@ mod tests {
                 thread_message_count: None,
                 author_name_override: None,
                 author_badge: None,
+                widget: None,
             },
         };
         let frame = ServerFrame::Event(event);
@@ -1063,6 +1069,7 @@ mod tests {
             thread_message_count: None,
             author_name_override: None,
             author_badge: None,
+            widget: None,
         };
         let bytes = codec::encode(&msg).unwrap();
         let decoded: MessageInfo = codec::decode(&bytes).unwrap();

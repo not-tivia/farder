@@ -443,6 +443,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE messages ADD COLUMN author_badge TEXT", [])?;
     }
 
+    // Migration: widget JSON pointer for interactive widget messages (polls/giveaways),
+    // e.g. {"type":"poll","id":3}. Server-written only; NULL for all plain messages.
+    let has_widget: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "widget")
+    };
+    if !has_widget {
+        conn.execute("ALTER TABLE messages ADD COLUMN widget TEXT", [])?;
+    }
+
     // Slash commands: owner-configurable /trigger commands.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS commands (

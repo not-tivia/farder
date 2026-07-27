@@ -7,10 +7,10 @@ use farder_protocol::server::{MessageInfo, DELETED_USER_KEY};
 use crate::db::now;
 
 /// Shared SELECT column list for messages — must match `row_to_message_info` index order.
-/// author_name_override is at index 8; author_badge is appended last (index 9) so all prior
-/// indices stay stable.
+/// author_name_override is at index 8; author_badge at index 9; widget is appended last
+/// (index 10) so all prior indices stay stable.
 pub const MSG_SELECT: &str =
-    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned, author_name_override, author_badge";
+    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned, author_name_override, author_badge, widget";
 
 pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo> {
     let id: i64 = row.get(0)?;
@@ -23,6 +23,7 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
     let pinned: i64 = row.get(7)?;
     let author_name_override: Option<String> = row.get(8)?;
     let author_badge: Option<String> = row.get(9)?;
+    let widget: Option<String> = row.get(10)?;
 
     let arr: [u8; 32] = author_bytes
         .try_into()
@@ -43,6 +44,7 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
         thread_message_count: None,
         author_name_override,
         author_badge,
+        widget,
     })
 }
 
@@ -120,6 +122,16 @@ pub fn insert_message_with_author_name(
         params![id as i64, content],
     )?;
     Ok(id)
+}
+
+/// Stamps the widget JSON on an already-inserted message (insert-then-set-widget idiom:
+/// resolves the message-id <-> feature-row-id circularity without touching insert signatures).
+pub fn set_widget(conn: &Connection, message_id: u64, widget_json: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE messages SET widget = ?1 WHERE id = ?2",
+        params![widget_json, message_id as i64],
+    )?;
+    Ok(())
 }
 
 pub fn get_message(conn: &Connection, id: u64, requester: &PublicKey) -> Result<Option<MessageInfo>> {
@@ -459,6 +471,38 @@ mod tests {
         let pk = Keypair::generate().public_key();
         register_member(&conn, &pk, "Alice").unwrap();
         (conn, channel_id, pk)
+    }
+
+    #[test]
+    fn test_set_widget_roundtrip() {
+        let (conn, channel_id, pk) = setup();
+        let id = insert_message(&conn, channel_id, &pk, "poll fallback", None).unwrap();
+        // Plain insert reads widget: None.
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
+        assert_eq!(msg.widget, None);
+        // set_widget then get_message reads it back.
+        let json = r#"{"type":"poll","id":7}"#;
+        set_widget(&conn, id, json).unwrap();
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
+        assert_eq!(msg.widget, Some(json.to_string()));
+        // Other messages untouched.
+        let other = insert_message(&conn, channel_id, &pk, "plain", None).unwrap();
+        assert_eq!(get_message(&conn, other, &pk).unwrap().unwrap().widget, None);
+    }
+
+    #[test]
+    fn test_message_info_decodes_without_widget_field() {
+        // A MessageInfo encoded WITHOUT `widget` (old peer) must decode with
+        // widget: None — the #[serde(default)] guard.
+        let (conn, channel_id, pk) = setup();
+        let id = insert_message(&conn, channel_id, &pk, "old frame", None).unwrap();
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
+        // Simulate an old encoder: serialize to a JSON map and strip the field.
+        let mut v = serde_json::to_value(&msg).unwrap();
+        v.as_object_mut().unwrap().remove("widget").expect("widget field present");
+        let decoded: MessageInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(decoded.widget, None);
+        assert_eq!(decoded.content, "old frame");
     }
 
     #[test]
