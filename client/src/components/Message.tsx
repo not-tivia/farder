@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import type { MessageInfo, AttachmentInfo } from "../lib/types";
 import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
@@ -21,6 +21,7 @@ import InviteEmbed from "./InviteEmbed";
 import { parseInviteLink } from "../lib/invite";
 import LinkEmbed from "./LinkEmbed";
 import { detectEmbedUrls } from "../lib/linkEmbed";
+import PollWidget from "./PollWidget";
 import MemberAvatar from "./MemberAvatar";
 import { useDataSaver } from "../context/DataSaverContext";
 import { imageIsGated } from "../lib/dataSaver";
@@ -167,6 +168,9 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [memberMenu, setMemberMenu] = useState<{ x: number; y: number } | null>(null);
   const [editing, setEditing] = useState(false);
+  // Widget fallback signal: when the widget's data can't be fetched (deleted/
+  // unknown), the card degrades to its plain-text content.
+  const [widgetUnavailable, setWidgetUnavailable] = useState(false);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const contextMenuPos = useClickAnchoredPosition(contextMenuRef, contextMenu ?? { x: 0, y: 0 }, { anchor: "auto" });
   const [editContent, setEditContent] = useState("");
@@ -287,6 +291,41 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const showModBadges = isModerator(viewerBits);
   const canTakeDown = hasPermission(viewerBits, PERMISSIONS.KICK_MEMBERS);
   const logServerId = activeServer?.logServerId ?? null;
+
+  // Server-written widget marker ({"type":"poll","id":7}); treated as untrusted:
+  // try/catch parse, id must be a number. Unknown types fall back to plain content.
+  const parsedWidget = useMemo((): { type: string; id: number } | null => {
+    if (!message.widget) return null;
+    try {
+      const p = JSON.parse(message.widget);
+      if (p && typeof p.type === "string" && typeof p.id === "number") {
+        return { type: p.type, id: p.id };
+      }
+    } catch {
+      // malformed widget JSON → plain content
+    }
+    return null;
+  }, [message.widget]);
+
+  // Widget dispatch: known types render an interactive card IN PLACE OF the
+  // .message-content text body (the content string is the old-client fallback).
+  const widgetNode = (() => {
+    if (!parsedWidget || deleted || widgetUnavailable) return null;
+    switch (parsedWidget.type) {
+      case "poll":
+        return (
+          <PollWidget
+            serverId={serverId}
+            pollId={parsedWidget.id}
+            onUnavailable={() => setWidgetUnavailable(true)}
+          />
+        );
+      default:
+        return null;
+    }
+  })();
+  // Keep the editor reachable: editing always shows the plain-content branch.
+  const showWidget = widgetNode !== null && !editing;
 
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
@@ -425,7 +464,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
       )}
       {/* Attachment-only messages (voice notes, captionless images) have empty
           content — the body must still render so the attachments do. */}
-      {(deleted || displayContent || message.attachments.length > 0) && (
+      {(deleted || displayContent || message.attachments.length > 0) && !showWidget && (
         <div className={`message-content${deleted ? " deleted-content" : ""}`}>
           {deleted ? (
             <em>This message has been deleted.</em>
@@ -475,6 +514,8 @@ export default function Message({ message, memberNames, grouped = false, serverI
           )}
         </div>
       )}
+
+      {showWidget && widgetNode}
 
       {!deleted && (() => {
         const rawMatches = message.content.match(INVITE_REGEX) ?? [];
