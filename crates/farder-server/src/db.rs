@@ -503,6 +503,34 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // Giveaways: interactive giveaway widgets (widget messages point here via
+    // messages.widget = {"type":"giveaway","id":N}). Timestamps are unix seconds.
+    // No FK to messages: deleting the card cancels an open giveaway via the
+    // DeleteMessage hook, rows retained (audit) — no cascade delete.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS giveaways (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            creator    BLOB    NOT NULL,
+            prize      TEXT    NOT NULL,
+            ends_at    INTEGER NOT NULL,
+            status     TEXT    NOT NULL DEFAULT 'open',
+            winner     BLOB,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS giveaway_entries (
+            giveaway_id INTEGER NOT NULL,
+            member      BLOB    NOT NULL,
+            entered_at  INTEGER NOT NULL,
+            PRIMARY KEY (giveaway_id, member)
+        )",
+        [],
+    )?;
+
     // Bot alerts + subscriptions (price-alert engine, Task 2).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS bot_alerts (

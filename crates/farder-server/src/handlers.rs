@@ -564,25 +564,48 @@ pub fn handle_request(
                     channel_id,
                 },
             }];
-            // Widget hook: deleting a poll card closes its poll (rows retained
-            // for audit; no zombie open polls). Persisted before the broadcast.
+            // Widget hook: deleting a poll card closes its poll; deleting a
+            // giveaway card CANCELS an open giveaway (no draw ever happens, no
+            // announcement). Rows retained for audit in both cases; no zombie
+            // open widgets. Persisted before the broadcast.
             if let Some(widget_json) = msg.widget.as_deref() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(widget_json) {
-                    if v.get("type").and_then(|t| t.as_str()) == Some("poll") {
-                        if let Some(poll_id) = v.get("id").and_then(|i| i.as_i64()) {
-                            if let Some(row) = crate::polls::get(conn, poll_id)? {
-                                if row.closed_at.is_none() {
-                                    crate::polls::close(conn, poll_id, crate::db::now() as i64)?;
-                                    let closed_row = crate::polls::get(conn, poll_id)?
-                                        .ok_or_else(|| anyhow::anyhow!("poll row vanished during close"))?;
-                                    let info = crate::polls::build_info(conn, &closed_row)?;
-                                    events.push(BroadcastEvent {
-                                        target: EventTarget::Subscribers(channel_id),
-                                        event: ServerEvent::PollUpdated { poll: info },
-                                    });
+                    match v.get("type").and_then(|t| t.as_str()) {
+                        Some("poll") => {
+                            if let Some(poll_id) = v.get("id").and_then(|i| i.as_i64()) {
+                                if let Some(row) = crate::polls::get(conn, poll_id)? {
+                                    if row.closed_at.is_none() {
+                                        crate::polls::close(conn, poll_id, crate::db::now() as i64)?;
+                                        let closed_row = crate::polls::get(conn, poll_id)?
+                                            .ok_or_else(|| anyhow::anyhow!("poll row vanished during close"))?;
+                                        let info = crate::polls::build_info(conn, &closed_row)?;
+                                        events.push(BroadcastEvent {
+                                            target: EventTarget::Subscribers(channel_id),
+                                            event: ServerEvent::PollUpdated { poll: info },
+                                        });
+                                    }
                                 }
                             }
                         }
+                        Some("giveaway") => {
+                            if let Some(giveaway_id) = v.get("id").and_then(|i| i.as_i64()) {
+                                if let Some(row) = crate::giveaways::get(conn, giveaway_id)? {
+                                    // Only an OPEN giveaway cancels; an ended/cancelled
+                                    // card delete changes nothing (winner stands).
+                                    if row.status == "open" {
+                                        crate::giveaways::cancel(conn, giveaway_id)?;
+                                        let updated = crate::giveaways::get(conn, giveaway_id)?
+                                            .ok_or_else(|| anyhow::anyhow!("giveaway row vanished during cancel"))?;
+                                        let info = crate::giveaways::build_info(conn, &updated)?;
+                                        events.push(BroadcastEvent {
+                                            target: EventTarget::Subscribers(channel_id),
+                                            event: ServerEvent::GiveawayUpdated { giveaway: info },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2256,8 +2279,8 @@ pub fn handle_request(
                     }
                 }
                 // Interactive widget kinds need no kind-specific fields — the arg
-                // string is parsed at dispatch (giveaway arm lands with its feature).
-                "poll" => {}
+                // string is parsed at dispatch.
+                "poll" | "giveaway" => {}
                 _ => return err("kind must be 'text', 'api', 'poll' or 'giveaway'"),
             }
             crate::commands::create(
@@ -2392,6 +2415,173 @@ pub fn handle_request(
                     event: ServerEvent::PollUpdated { poll: info },
                 }],
             )
+        }
+
+        // ----------------------------------------------------------------
+        // Giveaways (widget interactions — same rules as polls: actor is
+        // ALWAYS the authenticated connection key; membership-gated by the
+        // default-deny above; visibility failures return the same opaque
+        // "giveaway not found" as a missing row)
+        // ----------------------------------------------------------------
+        ServerRequest::GetGiveaway { giveaway_id } => {
+            // Read: no timeout gate (reads are allowed while timed out).
+            let row = match crate::giveaways::get(conn, giveaway_id)? {
+                Some(r) => r,
+                None => return err("giveaway not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("giveaway not found");
+            }
+            let info = crate::giveaways::build_info(conn, &row)?;
+            let mine = crate::giveaways::my_entered(conn, giveaway_id, member)?;
+            ok(ServerResponse::Giveaway { giveaway: info, my_entered: mine })
+        }
+
+        ServerRequest::EnterGiveaway { giveaway_id } => {
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match crate::giveaways::get(conn, giveaway_id)? {
+                Some(r) => r,
+                None => return err("giveaway not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("giveaway not found");
+            }
+            if row.status == "cancelled" {
+                return err("this giveaway was cancelled");
+            }
+            // Belt-and-braces against sweeper tick lag: past ends_at counts as
+            // ended even before the draw, so no late entries can land.
+            let now = crate::db::now() as i64;
+            if row.status != "open" || now >= row.ends_at {
+                return err("this giveaway has ended");
+            }
+            if !crate::giveaways::enter(conn, giveaway_id, member, now)? {
+                // Idempotent: already entered → plain Ok, no broadcast noise.
+                return ok(ServerResponse::Ok);
+            }
+            let info = crate::giveaways::build_info(conn, &row)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::GiveawayUpdated { giveaway: info },
+                }],
+            )
+        }
+
+        ServerRequest::LeaveGiveaway { giveaway_id } => {
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match crate::giveaways::get(conn, giveaway_id)? {
+                Some(r) => r,
+                None => return err("giveaway not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("giveaway not found");
+            }
+            if row.status == "cancelled" {
+                return err("this giveaway was cancelled");
+            }
+            // Entries are frozen once ended — leaving after the draw is meaningless.
+            if row.status != "open" {
+                return err("this giveaway has ended");
+            }
+            if !crate::giveaways::leave(conn, giveaway_id, member)? {
+                // Idempotent: no entry existed → plain Ok, no event.
+                return ok(ServerResponse::Ok);
+            }
+            let info = crate::giveaways::build_info(conn, &row)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::GiveawayUpdated { giveaway: info },
+                }],
+            )
+        }
+
+        ServerRequest::CancelGiveaway { giveaway_id } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match crate::giveaways::get(conn, giveaway_id)? {
+                Some(r) => r,
+                None => return err("giveaway not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("giveaway not found");
+            }
+            // Authz: creator OR MANAGE_SERVER.
+            if row.creator != *member {
+                let perms = resolve_member_server_perms(conn, member, is_owner)?;
+                if !permissions::has(perms, permissions::MANAGE_SERVER) {
+                    return err("only the creator or a moderator can cancel");
+                }
+            }
+            if row.status != "open" {
+                return err("giveaway already ended");
+            }
+            crate::giveaways::cancel(conn, giveaway_id)?;
+            let updated = crate::giveaways::get(conn, giveaway_id)?
+                .ok_or_else(|| anyhow::anyhow!("giveaway row vanished during cancel"))?;
+            let info = crate::giveaways::build_info(conn, &updated)?;
+            // No announcement — the card flip is the record.
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::GiveawayUpdated { giveaway: info },
+                }],
+            )
+        }
+
+        ServerRequest::RerollGiveaway { giveaway_id } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match crate::giveaways::get(conn, giveaway_id)? {
+                Some(r) => r,
+                None => return err("giveaway not found"),
+            };
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+                return err("giveaway not found");
+            }
+            // Authz: creator OR MANAGE_SERVER.
+            if row.creator != *member {
+                let perms = resolve_member_server_perms(conn, member, is_owner)?;
+                if !permissions::has(perms, permissions::MANAGE_SERVER) {
+                    return err("only the creator or a moderator can reroll");
+                }
+            }
+            if row.status != "ended" || row.winner.is_none() {
+                return err("can only reroll a finished giveaway with a winner");
+            }
+            match crate::giveaways::reroll_and_announce(conn, &row)? {
+                // Eligible set empty → previous winner stands, nothing written.
+                None => err("no eligible entries to reroll"),
+                Some((info, msg)) => ok_with(
+                    ServerResponse::Ok,
+                    vec![
+                        BroadcastEvent {
+                            target: EventTarget::Subscribers(row.channel_id as u64),
+                            event: ServerEvent::GiveawayUpdated { giveaway: info },
+                        },
+                        BroadcastEvent {
+                            target: EventTarget::Subscribers(row.channel_id as u64),
+                            event: ServerEvent::NewMessage { message: msg },
+                        },
+                    ],
+                ),
+            }
         }
     }
 }
@@ -6214,5 +6404,378 @@ mod tests {
             },
             "", &fake_state()).unwrap();
         expect_err(&r, "kind must be 'text', 'api', 'poll' or 'giveaway'");
+    }
+
+    // -----------------------------------------------------------------------
+    // Giveaways
+    // -----------------------------------------------------------------------
+
+    fn make_giveaway(conn: &Connection, channel_id: u64, creator: &PublicKey, ends_at: i64) -> i64 {
+        crate::giveaways::create(conn, channel_id as i64, 1, creator, "prize", ends_at).unwrap()
+    }
+
+    fn far_future() -> i64 {
+        crate::db::now() as i64 + 10_000
+    }
+
+    #[test]
+    fn test_enter_giveaway_happy_and_idempotent() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let entrant = add_member(&conn, "Entrant");
+        let gid = make_giveaway(&conn, channel_id, &creator, far_future());
+        let state = fake_state();
+
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::EnterGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(r.events.len(), 1);
+        match &r.events[0] {
+            BroadcastEvent { target: EventTarget::Subscribers(cid), event: ServerEvent::GiveawayUpdated { giveaway } } => {
+                assert_eq!(*cid, channel_id);
+                assert_eq!(giveaway.entry_count, 1);
+                assert_eq!(giveaway.status, "open");
+            }
+            other => panic!("expected GiveawayUpdated to Subscribers, got {other:?}"),
+        }
+        // Double-enter: Ok, NO event, still one row.
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::EnterGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(r.events.is_empty(), "idempotent enter must not broadcast");
+        assert!(crate::giveaways::my_entered(&conn, gid, &entrant).unwrap());
+    }
+
+    #[test]
+    fn test_leave_giveaway_idempotent() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let entrant = add_member(&conn, "Entrant");
+        let gid = make_giveaway(&conn, channel_id, &creator, far_future());
+        let state = fake_state();
+
+        // No entry yet → plain Ok, NO event.
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::LeaveGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(r.events.is_empty(), "idempotent leave must not broadcast");
+
+        // With an entry → Ok + GiveawayUpdated with the count back at 0.
+        crate::giveaways::enter(&conn, gid, &entrant, 1).unwrap();
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::LeaveGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(r.events.len(), 1);
+        match &r.events[0].event {
+            ServerEvent::GiveawayUpdated { giveaway } => assert_eq!(giveaway.entry_count, 0),
+            other => panic!("expected GiveawayUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_enter_leave_denied_while_timed_out_but_get_allowed() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let muted = add_member(&conn, "Muted");
+        let gid = make_giveaway(&conn, channel_id, &creator, far_future());
+        members::set_timeout(&conn, &muted, current_unix_ms() + 60_000, None).unwrap();
+        let state = fake_state();
+
+        let r = handle_request(&conn, &muted, false,
+            ServerRequest::EnterGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        expect_err(&r, "timed out");
+        let r = handle_request(&conn, &muted, false,
+            ServerRequest::LeaveGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        expect_err(&r, "timed out");
+        // Reads stay allowed while timed out.
+        let r = handle_request(&conn, &muted, false,
+            ServerRequest::GetGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Giveaway { .. }));
+    }
+
+    #[test]
+    fn test_enter_after_ends_at_and_on_cancelled_errors() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let entrant = add_member(&conn, "Entrant");
+        let state = fake_state();
+
+        // Past ends_at but not yet swept → err (belt-and-braces, no late entries).
+        let past = make_giveaway(&conn, channel_id, &creator, 1);
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::EnterGiveaway { giveaway_id: past }, "", &state).unwrap();
+        expect_err(&r, "this giveaway has ended");
+        assert!(!crate::giveaways::my_entered(&conn, past, &entrant).unwrap());
+
+        // Cancelled → its own error.
+        let cancelled = make_giveaway(&conn, channel_id, &creator, far_future());
+        crate::giveaways::cancel(&conn, cancelled).unwrap();
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::EnterGiveaway { giveaway_id: cancelled }, "", &state).unwrap();
+        expect_err(&r, "this giveaway was cancelled");
+        // Leave on cancelled also errs.
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::LeaveGiveaway { giveaway_id: cancelled }, "", &state).unwrap();
+        expect_err(&r, "this giveaway was cancelled");
+    }
+
+    #[test]
+    fn test_giveaway_hidden_without_view_channel_is_opaque_not_found() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let gid = make_giveaway(&conn, channel_id, &creator, far_future());
+        // Strip VIEW_CHANNEL from @everyone.
+        conn.execute(
+            "UPDATE roles SET permissions = ?1 WHERE name = '@everyone' AND builtin = 1",
+            rusqlite::params![(permissions::READ_MESSAGES | permissions::SEND_MESSAGES) as i64],
+        )
+        .unwrap();
+        let outsider = add_member(&conn, "Outsider");
+        let state = fake_state();
+
+        for req in [
+            ServerRequest::GetGiveaway { giveaway_id: gid },
+            ServerRequest::EnterGiveaway { giveaway_id: gid },
+            ServerRequest::LeaveGiveaway { giveaway_id: gid },
+            ServerRequest::CancelGiveaway { giveaway_id: gid },
+            ServerRequest::RerollGiveaway { giveaway_id: gid },
+        ] {
+            let r = handle_request(&conn, &outsider, false, req, "", &state).unwrap();
+            expect_err(&r, "giveaway not found"); // opaque — no existence oracle
+        }
+    }
+
+    #[test]
+    fn test_cancel_giveaway_authz_matrix() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let rando = add_member(&conn, "Rando");
+        let moderator = add_member(&conn, "Mod");
+        let mod_role = members::create_role(&conn, "Mods", permissions::MANAGE_SERVER, None, 1, false, false).unwrap();
+        members::assign_role(&conn, &moderator, mod_role).unwrap();
+        let state = fake_state();
+
+        // Non-creator non-mod → denied, still open.
+        let g1 = make_giveaway(&conn, channel_id, &creator, far_future());
+        let r = handle_request(&conn, &rando, false,
+            ServerRequest::CancelGiveaway { giveaway_id: g1 }, "", &state).unwrap();
+        expect_err(&r, "only the creator or a moderator can cancel");
+        assert_eq!(crate::giveaways::get(&conn, g1).unwrap().unwrap().status, "open");
+
+        // Creator cancels their own; event carries status cancelled; no announcement.
+        let msgs_before: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::CancelGiveaway { giveaway_id: g1 }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(r.events.len(), 1);
+        match &r.events[0].event {
+            ServerEvent::GiveawayUpdated { giveaway } => assert_eq!(giveaway.status, "cancelled"),
+            other => panic!("expected GiveawayUpdated, got {other:?}"),
+        }
+        let msgs_after: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(msgs_before, msgs_after, "cancel posts no announcement");
+
+        // Double-cancel → err.
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::CancelGiveaway { giveaway_id: g1 }, "", &state).unwrap();
+        expect_err(&r, "giveaway already ended");
+
+        // MANAGE_SERVER holder cancels someone else's.
+        let g2 = make_giveaway(&conn, channel_id, &creator, far_future());
+        let r = handle_request(&conn, &moderator, false,
+            ServerRequest::CancelGiveaway { giveaway_id: g2 }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(crate::giveaways::get(&conn, g2).unwrap().unwrap().status, "cancelled");
+    }
+
+    #[test]
+    fn test_reroll_giveaway_gates_and_happy_path() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let rando = add_member(&conn, "Rando");
+        let entrant = add_member(&conn, "Entrant");
+        let state = fake_state();
+
+        // On an OPEN giveaway → err.
+        let open = make_giveaway(&conn, channel_id, &creator, far_future());
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::RerollGiveaway { giveaway_id: open }, "", &state).unwrap();
+        expect_err(&r, "can only reroll a finished giveaway with a winner");
+
+        // Ended with NO winner (no entries) → err.
+        let empty = make_giveaway(&conn, channel_id, &creator, 1);
+        let row = crate::giveaways::get(&conn, empty).unwrap().unwrap();
+        crate::giveaways::close_and_draw(&conn, &row).unwrap();
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::RerollGiveaway { giveaway_id: empty }, "", &state).unwrap();
+        expect_err(&r, "can only reroll a finished giveaway with a winner");
+
+        // Ended with a winner: non-creator non-mod denied.
+        let g = make_giveaway(&conn, channel_id, &creator, 1);
+        crate::giveaways::enter(&conn, g, &entrant, 1).unwrap();
+        let row = crate::giveaways::get(&conn, g).unwrap().unwrap();
+        crate::giveaways::close_and_draw(&conn, &row).unwrap();
+        let r = handle_request(&conn, &rando, false,
+            ServerRequest::RerollGiveaway { giveaway_id: g }, "", &state).unwrap();
+        expect_err(&r, "only the creator or a moderator can reroll");
+
+        // Creator rerolls → Ok + [GiveawayUpdated, NewMessage announcement].
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::RerollGiveaway { giveaway_id: g }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(r.events.len(), 2);
+        match (&r.events[0].event, &r.events[1].event) {
+            (ServerEvent::GiveawayUpdated { giveaway }, ServerEvent::NewMessage { message }) => {
+                assert_eq!(giveaway.winner.as_ref(), Some(&entrant));
+                assert!(message.content.contains("Reroll"));
+            }
+            other => panic!("expected [GiveawayUpdated, NewMessage], got {other:?}"),
+        }
+
+        // All entrants ineligible → err, previous winner stands.
+        members::ban_member(&conn, &entrant, None).unwrap();
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::RerollGiveaway { giveaway_id: g }, "", &state).unwrap();
+        expect_err(&r, "no eligible entries to reroll");
+        assert_eq!(
+            crate::giveaways::get(&conn, g).unwrap().unwrap().winner,
+            Some(entrant),
+            "previous winner stands when the eligible set is empty"
+        );
+    }
+
+    #[test]
+    fn test_get_giveaway_my_entered_per_requester() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+        let gid = make_giveaway(&conn, channel_id, &creator, far_future());
+        crate::giveaways::enter(&conn, gid, &alice, 1).unwrap();
+        let state = fake_state();
+
+        for (who, expected) in [(&alice, true), (&bob, false), (&creator, false)] {
+            let r = handle_request(&conn, who, false,
+                ServerRequest::GetGiveaway { giveaway_id: gid }, "", &state).unwrap();
+            match r.response {
+                ServerResponse::Giveaway { giveaway, my_entered } => {
+                    assert_eq!(my_entered, expected, "my_entered is requester-specific");
+                    assert_eq!(giveaway.entry_count, 1);
+                    assert_eq!(giveaway.status, "open");
+                }
+                other => panic!("expected Giveaway, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_delete_message_cancels_open_giveaway() {
+        let (mut conn, owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+        let (msg, info) = crate::giveaways::create_giveaway_card(
+            &mut conn, channel_id, &owner_pk, "prize", 3_600, crate::db::now(),
+        )
+        .unwrap();
+        let entrant = add_member(&conn, "Entrant");
+        crate::giveaways::enter(&conn, info.id, &entrant, 1).unwrap();
+
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::DeleteMessage { message_id: msg.id }, "", &fake_state()).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(r.events.iter().any(|e| matches!(e.event, ServerEvent::MessageDeleted { .. })));
+        let cancelled_event = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::GiveawayUpdated { giveaway } => Some(giveaway),
+            _ => None,
+        });
+        assert_eq!(
+            cancelled_event.expect("GiveawayUpdated alongside MessageDeleted").status,
+            "cancelled"
+        );
+        // Rows retained but cancelled; the sweeper will never draw it.
+        assert_eq!(crate::giveaways::get(&conn, info.id).unwrap().unwrap().status, "cancelled");
+        let due = crate::giveaways::list_due(&conn, i64::MAX).unwrap();
+        assert!(due.iter().all(|g| g.id != info.id), "cancelled giveaway never due");
+    }
+
+    #[test]
+    fn test_delete_message_on_ended_giveaway_changes_nothing() {
+        let (mut conn, owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+        let (msg, info) = crate::giveaways::create_giveaway_card(
+            &mut conn, channel_id, &owner_pk, "prize", 3_600, crate::db::now(),
+        )
+        .unwrap();
+        let entrant = add_member(&conn, "Entrant");
+        crate::giveaways::enter(&conn, info.id, &entrant, 1).unwrap();
+        let row = crate::giveaways::get(&conn, info.id).unwrap().unwrap();
+        crate::giveaways::close_and_draw(&conn, &row).unwrap();
+
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::DeleteMessage { message_id: msg.id }, "", &fake_state()).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(
+            !r.events.iter().any(|e| matches!(e.event, ServerEvent::GiveawayUpdated { .. })),
+            "ended giveaway card delete emits no GiveawayUpdated"
+        );
+        let after = crate::giveaways::get(&conn, info.id).unwrap().unwrap();
+        assert_eq!(after.status, "ended", "winner stands");
+        assert_eq!(after.winner, Some(entrant));
+    }
+
+    #[test]
+    fn test_enter_giveaway_rate_limited_by_widget_limiter() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let entrant = add_member(&conn, "Entrant");
+        let gid = make_giveaway(&conn, channel_id, &creator, far_future());
+        let state = fake_state(); // one state → limiter persists across calls
+
+        // 10 interactions in the window pass; the 11th is rate limited.
+        for i in 0..5 {
+            let r = handle_request(&conn, &entrant, false,
+                ServerRequest::EnterGiveaway { giveaway_id: gid }, "", &state).unwrap();
+            assert!(matches!(r.response, ServerResponse::Ok), "enter {i} should pass");
+            let r = handle_request(&conn, &entrant, false,
+                ServerRequest::LeaveGiveaway { giveaway_id: gid }, "", &state).unwrap();
+            assert!(matches!(r.response, ServerResponse::Ok), "leave {i} should pass");
+        }
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::EnterGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        expect_err(&r, "slow down");
+        // GetGiveaway is unlimited (read).
+        let r = handle_request(&conn, &entrant, false,
+            ServerRequest::GetGiveaway { giveaway_id: gid }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Giveaway { .. }));
+    }
+
+    #[test]
+    fn test_add_command_giveaway_kind_no_extra_fields_and_takes_arg() {
+        let (conn, owner_pk) = setup();
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::AddCommand {
+                name: "Giveaway".into(),
+                trigger: "giveaway".into(),
+                description: "start a giveaway".into(),
+                kind: "giveaway".into(),
+                body_text: None,
+                url_template: None,
+                value_path: None,
+                response_template: None,
+                unit: None,
+            },
+            "", &fake_state()).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok), "giveaway kind needs no extra fields: {:?}", r.response);
+        let infos = crate::commands::list_infos(&conn).unwrap();
+        let cmd = infos.iter().find(|c| c.trigger == "giveaway").unwrap();
+        assert!(cmd.takes_arg, "giveaway commands take an arg (autocomplete trailing space)");
     }
 }

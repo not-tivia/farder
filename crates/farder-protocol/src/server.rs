@@ -257,6 +257,28 @@ pub struct PollInfo {
     pub closed: bool,
 }
 
+/// Live giveaway state, broadcast whole on every change (`GiveawayUpdated`) and
+/// returned by `GetGiveaway`. Carries shared state only — entrant identities
+/// never leave the server in v1 (`entry_count`, not a list); the requester-specific
+/// `my_entered` rides solely in `ServerResponse::Giveaway`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GiveawayInfo {
+    pub id: i64,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub creator: PublicKey,
+    pub prize: String,
+    pub ends_at: u64, // unix secs
+    /// "open" | "ended" | "cancelled"
+    pub status: String,
+    /// Live entry count; identities stay server-side.
+    pub entry_count: u32,
+    pub winner: Option<PublicKey>,
+    /// Server-resolved display name, set when ended with a winner still on the
+    /// roster (`None` → clients fall back to the short key form).
+    pub winner_name: Option<String>,
+}
+
 /// A slash-command summary returned by `ListCommands`. Deliberately omits
 /// `url_template` and `body_text` — those fields may hold API keys and must
 /// never be exposed to members via this response.
@@ -438,6 +460,17 @@ pub enum ServerRequest {
     RetractVote { poll_id: i64 },
     /// Close a poll early (creator or MANAGE_SERVER).
     ClosePoll { poll_id: i64 },
+    /// Enter the giveaway (idempotent — already-entered returns Ok, no event).
+    EnterGiveaway { giveaway_id: i64 },
+    /// Withdraw the caller's entry (idempotent — no event when not entered).
+    LeaveGiveaway { giveaway_id: i64 },
+    /// Void an open giveaway (creator or MANAGE_SERVER). No draw, no announcement.
+    CancelGiveaway { giveaway_id: i64 },
+    /// Redraw an ended-with-winner giveaway among still-eligible entrants
+    /// (creator or MANAGE_SERVER).
+    RerollGiveaway { giveaway_id: i64 },
+    /// Read full giveaway state (membership-gated; visibility-checked; allowed while timed out).
+    GetGiveaway { giveaway_id: i64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -503,6 +536,9 @@ pub enum ServerResponse {
     /// Full poll state for `GetPoll`. `my_vote` is requester-specific (self-only —
     /// per-voter data never leaves the server in v1).
     Poll { poll: PollInfo, my_vote: Option<u32> },
+    /// Full giveaway state for `GetGiveaway`. `my_entered` is requester-specific
+    /// (self-only — entrant identities never leave the server in v1).
+    Giveaway { giveaway: GiveawayInfo, my_entered: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -610,6 +646,9 @@ pub enum ServerEvent {
     /// Poll state changed (vote cast/retracted, or the poll closed — terminal close
     /// folds into this same shape with `closed: true`; there is no separate PollClosed).
     PollUpdated { poll: PollInfo },
+    /// Giveaway state changed (enter/leave/cancel/draw/reroll — terminal states
+    /// fold into `status` + `winner`; there is no separate GiveawayEnded).
+    GiveawayUpdated { giveaway: GiveawayInfo },
 }
 
 #[cfg(test)]

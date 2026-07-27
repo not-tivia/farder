@@ -1073,6 +1073,98 @@ pub(crate) async fn main_loop(
                                     }
                                     continue;
                                 }
+                                // Interactive `giveaway` kind: MANAGE_SERVER gate at dispatch
+                                // (server-side — any client-side gating is cosmetic), pure
+                                // parse, then one scoped lock + transaction posting the card +
+                                // giveaway row + widget cross-link. Card authored by the
+                                // INVOKER (no override, no badge); broadcasts after the guard
+                                // drops.
+                                if cmd.kind.as_str() == "giveaway" {
+                                    let server_perms = {
+                                        let conn = state.db.lock().unwrap();
+                                        handlers::resolve_member_server_perms(&conn, &member_key, is_owner)
+                                    }; // MutexGuard dropped here
+                                    match server_perms {
+                                        Err(e) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error {
+                                                    reason: format!("internal error: {e}"),
+                                                },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                            continue;
+                                        }
+                                        Ok(perms)
+                                            if !permissions::has(perms, permissions::MANAGE_SERVER) =>
+                                        {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error {
+                                                    reason: "giveaways can only be started by moderators (missing MANAGE_SERVER)".to_string(),
+                                                },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                            continue;
+                                        }
+                                        Ok(_) => {}
+                                    }
+                                    let (duration_secs, prize) =
+                                        match crate::giveaways::parse_giveaway_args(&args) {
+                                            Err(reason) => {
+                                                // Parse failure → error to the invoker only; nothing posts.
+                                                let response = ServerFrame::Response {
+                                                    request_id: id,
+                                                    body: ServerResponse::Error { reason },
+                                                };
+                                                send_server_frame(send, &response).await?;
+                                                continue;
+                                            }
+                                            Ok(p) => p,
+                                        };
+                                    let created = {
+                                        let mut conn = state.db.lock().unwrap();
+                                        crate::giveaways::create_giveaway_card(
+                                            &mut conn,
+                                            channel_id,
+                                            &member_key,
+                                            &prize,
+                                            duration_secs,
+                                            crate::db::now(),
+                                        )
+                                    }; // MutexGuard dropped here — before any .await
+                                    match created {
+                                        Err(e) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error {
+                                                    reason: format!("internal error: {e}"),
+                                                },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                        }
+                                        Ok((msg, info)) => {
+                                            broadcast_event(
+                                                &state,
+                                                EventTarget::Subscribers(channel_id),
+                                                ServerEvent::NewMessage { message: msg },
+                                            ).await;
+                                            // Pre-seed connected clients' reducers so the widget
+                                            // mounts with state (no GetGiveaway round-trip).
+                                            broadcast_event(
+                                                &state,
+                                                EventTarget::Subscribers(channel_id),
+                                                ServerEvent::GiveawayUpdated { giveaway: info },
+                                            ).await;
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Ok,
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                        }
+                                    }
+                                    continue;
+                                }
                                 // Build the message content. For `api` commands this involves
                                 // an async HTTP fetch — no DB lock is held here.
                                 let content: Option<String> = match cmd.kind.as_str() {

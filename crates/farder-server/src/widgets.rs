@@ -33,6 +33,33 @@ pub fn sweep_once(conn: &rusqlite::Connection, now: u64) -> Vec<PendingBroadcast
         }
         Err(e) => tracing::warn!("widget sweeper: poll close_due failed: {e}"),
     }
+    // Giveaway half: draw every due open giveaway (persist + announcement commit
+    // inside close_and_draw, under the caller's lock) → card flip + announcement.
+    match crate::giveaways::list_due(conn, now as i64) {
+        Ok(rows) => {
+            for row in rows {
+                match crate::giveaways::close_and_draw(conn, &row) {
+                    Ok((info, msg)) => {
+                        let channel_id = info.channel_id;
+                        out.push(PendingBroadcast {
+                            target: crate::events::EventTarget::Subscribers(channel_id),
+                            event: farder_protocol::server::ServerEvent::GiveawayUpdated {
+                                giveaway: info,
+                            },
+                        });
+                        out.push(PendingBroadcast {
+                            target: crate::events::EventTarget::Subscribers(channel_id),
+                            event: farder_protocol::server::ServerEvent::NewMessage { message: msg },
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("widget sweeper: giveaway {} draw failed: {e}", row.id)
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!("widget sweeper: giveaway list_due failed: {e}"),
+    }
     out
 }
 
@@ -70,6 +97,51 @@ mod tests {
         assert!(crate::polls::get(&conn, poll_id).unwrap().unwrap().closed_at.is_some());
         // Idempotent: a second sweep returns nothing (never re-closes).
         assert!(sweep_once(&conn, now).is_empty());
+    }
+
+    #[test]
+    fn sweep_once_draws_due_giveaway_exactly_once() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let channel_id = crate::channels::create_channel(
+            &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
+        )
+        .unwrap();
+        let creator = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &creator, "Creator").unwrap();
+        let entrant = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &entrant, "Entrant").unwrap();
+        let now = 1_000_000u64;
+        let gid = crate::giveaways::create(
+            &conn, channel_id as i64, 1, &creator, "prize", now as i64 - 10,
+        )
+        .unwrap();
+        crate::giveaways::enter(&conn, gid, &entrant, 1).unwrap();
+
+        let pending = sweep_once(&conn, now);
+        assert_eq!(pending.len(), 2, "draw → GiveawayUpdated + NewMessage announcement");
+        match &pending[0].event {
+            farder_protocol::server::ServerEvent::GiveawayUpdated { giveaway } => {
+                assert_eq!(giveaway.id, gid);
+                assert_eq!(giveaway.status, "ended");
+                assert_eq!(giveaway.winner, Some(entrant.clone()));
+            }
+            other => panic!("expected GiveawayUpdated, got {other:?}"),
+        }
+        match &pending[1].event {
+            farder_protocol::server::ServerEvent::NewMessage { message } => {
+                assert_eq!(message.author_badge.as_deref(), Some("BOT"));
+                assert!(message.content.contains("won: prize"));
+            }
+            other => panic!("expected NewMessage announcement, got {other:?}"),
+        }
+        // Persisted before broadcast; second sweep draws NOTHING (no double
+        // announcement — crash-safety idempotence).
+        let msg_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert!(sweep_once(&conn, now).is_empty());
+        let msg_count_after: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(msg_count, msg_count_after, "sweep pass twice → zero new announcements");
     }
 }
 

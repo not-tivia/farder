@@ -10,6 +10,7 @@ pub mod image_validation;
 pub mod connection;
 pub mod db;
 pub mod events;
+pub mod giveaways;
 pub mod handlers;
 pub mod invites;
 pub mod media_stream;
