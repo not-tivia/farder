@@ -373,6 +373,35 @@ TypeScript types in `types.ts` use `{ bytes: number[] }` for the serde form. Cal
 | `PermissionGranted` | `member`, `capability` | Owner or member who already holds the capability |
 | `AttachmentRedacted` | `content_hash: String` | Author is the recorded uploader OR holds `"kick"`; hash must be known; not already redacted |
 
+#### Rung-2 MLS/E2EE variants (DORMANT — schema only)
+
+Appended after `AttachmentRedacted` (the enum is **append-only**: existing
+variants never change shape or order, so old events' canonical bytes and hashes
+are stable — pinned by `existing_variant_bytes_are_untouched_by_new_variants`).
+Nothing emits these yet; `LogState::apply` currently **rejects all of them**
+(TEMP fail-closed arms) until their fold rules land in sub-2 Tasks 2–4. Ingest
+handling is sub-3.
+
+| Variant | Fields | Intended rule (future fold) |
+|---|---|---|
+| `ChannelCreated` | `channel_id: u64`, `name`, `kind`, `class: ChannelClass`, `parent: Option<u64>` | Owner-only; class immutable; no `ChannelCreated` ⇒ channel unknown to the log (legacy = plaintext) |
+| `MlsKeyPackagePublished` | `key_package: Vec<u8>`, `store_instance_hash: [u8;32]`, `expires_at_log_pos: u64` | Owning device; consumed-once; capped + log-position lifetime |
+| `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | Epoch CAS + authenticator chaining; `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit's `prev_epoch_authenticator` must equal (plan resolved ambiguity #1) |
+| `MlsWelcome` | `channel_id`, `generation`, `commit: EventRef`, `for_member: PublicKey`, `for_device: DeviceId`, `welcome: Vec<u8>` | `for_*` unverifiable by the fold — leaves count only once the joiner confirms |
+| `MlsLeafConfirmed` | `channel_id`, `generation`, `epoch`, `tree_hash: [u8;32]`, `store_instance_hash: [u8;32]` | Authored by the joining device; promotes leaf pending → confirmed iff `tree_hash` matches |
+| `MlsGroupReset` | `channel_id`, `new_generation: u64`, `welcomes: Vec<EventRef>` | Owner-only; valid only if `welcomes` covers exactly members × live devices (non-selective) |
+| `MessagePostedE2ee` | `channel_id`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `reply_to: Option<EventRef>`, `attachments: Vec<AttachmentCap>`, `authz_head: EventHash` | Sealed content; `reply_to`/caps stay outside the seal for blind threading/validation |
+| `MessageEditedE2ee` | `channel_id`, `target: EventRef`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `authz_head: EventHash` | Sealed edit |
+| `MessageDeleted` | `channel_id`, `target: EventRef`, `reason: DeleteReason` | Durable content-blind tombstone — deletions cannot resurrect |
+| `DeviceRevoked` | `device: DeviceId` | Cert dead, chain frozen (history stands, new events rejected) |
+
+Support types (all in `event_log.rs`):
+
+- `ChannelClass` — `Plaintext | E2ee` (`Copy`, part of channel identity, immutable).
+- `DeclaredAdd { identity: PublicKey, device: DeviceId, key_package: EventRef }` — fold-readable Add declaration inside `MlsCommit`.
+- `DeclaredRemove { identity: PublicKey, device: DeviceId }` — fold-readable Remove declaration.
+- `DeleteReason` — `Author | Moderation` (`Copy`). `Author` claims are verified against the derived view by ingest (sub-3); the fold verifies `Moderation` authority itself.
+
 #### `EventPayload::AttachmentRedacted { content_hash: String }`
 
 Signals that the bytes for the attachment identified by `content_hash` (hex SHA-256) should be permanently deleted and the attachment replaced by a tombstone. Authorization is content-addressed and log-derived: the server derives the uploader from `LogState::attachment_uploader`, so the right applies globally even if the attachment was uploaded to a different node.
@@ -394,6 +423,25 @@ pub struct AttachmentCap {
 ```
 
 Embedded in `MessagePosted.attachments`. Validated at ingest by `event_ingest::derive_attachments` (size/mime/uploader must match the stored blob).
+
+### `DeviceCert` expiry (Rung 2, dormant)
+
+`DeviceCertCore` gained an optional **last** field:
+
+```
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub expires_at: Option<u64>,   // unix seconds; checked against event.core.timestamp by the fold (untrusted author clock)
+```
+
+Because `None` is skipped in serialization, a cert made by `DeviceCert::create`
+(unchanged signature, always `expires_at: None`) produces the **byte-identical
+4-field canonical encoding** legacy certs were signed over — pre-Rung-2
+signatures verify unchanged after decode → re-encode (pinned by
+`device_cert_without_expiry_preserves_legacy_signed_bytes`).
+
+New constructor: `DeviceCert::create_expiring(identity: &Keypair, device_pubkey: &PublicKey, created_at: u64, expires_at: u64) -> DeviceCert`
+— identical to `create` but signs `expires_at: Some(expires_at)`. Expiry
+enforcement in the fold lands in sub-2 Task 2; nothing calls this yet.
 
 ---
 

@@ -283,6 +283,23 @@ impl LogState {
                 );
                 Ok(())
             }
+
+            // TEMP (fail closed, Task 1): the Rung-2 MLS/E2EE variants are pure
+            // schema so far — their fold rules land in Tasks 2–4. Explicitly
+            // listed (no `_`) so adding a variant without a rule cannot be
+            // silently permissive.
+            EventPayload::ChannelCreated { .. }
+            | EventPayload::MlsKeyPackagePublished { .. }
+            | EventPayload::MlsCommit { .. }
+            | EventPayload::MlsWelcome { .. }
+            | EventPayload::MlsLeafConfirmed { .. }
+            | EventPayload::MlsGroupReset { .. }
+            | EventPayload::MessagePostedE2ee { .. }
+            | EventPayload::MessageEditedE2ee { .. }
+            | EventPayload::MessageDeleted { .. }
+            | EventPayload::DeviceRevoked { .. } => {
+                anyhow::bail!("MLS/E2EE variants are folded in Tasks 2-4")
+            }
         }
     }
 
@@ -352,6 +369,21 @@ impl LogState {
             }
             EventPayload::AttachmentRedacted { content_hash } => {
                 self.redacted_attachments.insert(content_hash.clone());
+            }
+
+            // TEMP (Task 1): unreachable — check_payload_authz rejects every
+            // Rung-2 MLS/E2EE variant until their fold rules land in Tasks 2–4.
+            EventPayload::ChannelCreated { .. }
+            | EventPayload::MlsKeyPackagePublished { .. }
+            | EventPayload::MlsCommit { .. }
+            | EventPayload::MlsWelcome { .. }
+            | EventPayload::MlsLeafConfirmed { .. }
+            | EventPayload::MlsGroupReset { .. }
+            | EventPayload::MessagePostedE2ee { .. }
+            | EventPayload::MessageEditedE2ee { .. }
+            | EventPayload::MessageDeleted { .. }
+            | EventPayload::DeviceRevoked { .. } => {
+                unreachable!("rung-2 variants are rejected by check_payload_authz until Tasks 2-4")
             }
         }
     }
