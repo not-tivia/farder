@@ -9,6 +9,12 @@
 //! lying-commit detection the spec's commit-chaining section mandates on the
 //! member side (the fold-side authenticator chain is sub-2).
 //!
+//! [`ActualLeaf`] — on [`ProcessedCommit::actual_adds`] and via
+//! [`MlsChannelGroup::leaves`] — carries each **real** leaf's credential and
+//! signature key, so sub-2 can run the spec's §Leaves rule
+//! ([`crate::credential::verify_leaf_binding`]) against actual tree state
+//! rather than credential bytes alone.
+//!
 //! Epoch conventions:
 //! - [`CommitOutcome::epoch`] / [`ProcessedCommit::epoch`] are the epoch the
 //!   commit was **authored in** (what `MlsCommit.epoch` carries; the fold
@@ -41,6 +47,26 @@ pub struct DeclaredMember {
     pub device: DeviceId,
 }
 
+/// An **actual** leaf as it sits in the ratchet tree: the declared
+/// `{ identity, device }` decoded from the leaf credential **plus** the raw
+/// credential and leaf signature key. Carrying the real key pair is what lets
+/// sub-2 run the spec's leaf-binding rule
+/// ([`crate::credential::verify_leaf_binding`]) against actual tree state —
+/// credential bytes alone can be cloned by an attacker onto a self-minted
+/// KeyPackage whose signature/HPKE keys are attacker-owned, which OpenMLS
+/// accepts (KeyPackages are self-signed; duplicate credential identities are
+/// legal). Only `signature_key` vs. an identity-signed `DeviceCert` tells a
+/// genuine leaf from that impostor.
+#[derive(Debug, Clone)]
+pub struct ActualLeaf {
+    /// The `{ identity, device }` the leaf's credential *claims*.
+    pub member: DeclaredMember,
+    /// The leaf's credential exactly as it sits in the tree.
+    pub credential: Credential,
+    /// The leaf's signature public key bytes exactly as they sit in the tree.
+    pub signature_key: Vec<u8>,
+}
+
 /// Everything sub-2's `MlsCommit` event needs from a commit we authored.
 #[derive(Debug, Clone)]
 pub struct CommitOutcome {
@@ -61,7 +87,10 @@ pub struct CommitOutcome {
 /// The member-side view of someone else's commit, after processing+merging.
 #[derive(Debug, Clone)]
 pub struct ProcessedCommit {
-    pub actual_adds: Vec<DeclaredMember>,
+    /// The actually-added leaves, with real credential + signature key so the
+    /// caller (sub-2) can run [`crate::credential::verify_leaf_binding`] on
+    /// each new leaf — the spec's §Leaves rule for commit processing.
+    pub actual_adds: Vec<ActualLeaf>,
     pub actual_removes: Vec<DeclaredMember>,
     /// The tree hash after merging the commit.
     pub post_tree_hash: [u8; 32],
@@ -125,6 +154,14 @@ fn declared_member(credential: &Credential) -> Result<DeclaredMember> {
     Ok(DeclaredMember { identity, device })
 }
 
+fn actual_leaf(credential: &Credential, signature_key: &[u8]) -> Result<ActualLeaf> {
+    Ok(ActualLeaf {
+        member: declared_member(credential)?,
+        credential: credential.clone(),
+        signature_key: signature_key.to_vec(),
+    })
+}
+
 /// Sort key for order-insensitive set comparison of declared members.
 fn sorted(mut members: Vec<DeclaredMember>) -> Vec<DeclaredMember> {
     members.sort_by(|a, b| {
@@ -161,22 +198,26 @@ fn process_message_contained(
     .map_err(|e| anyhow!("process message: {e}"))
 }
 
-/// What a staged commit did, in declared form.
+/// What a staged commit did: added leaves in **actual** form (credential +
+/// signature key straight from the proposal's leaf node), removes in declared
+/// form.
 struct StagedSummary {
-    adds: Vec<DeclaredMember>,
+    adds: Vec<ActualLeaf>,
     removes: Vec<DeclaredMember>,
     post_tree_hash: [u8; 32],
     /// The epoch the commit was authored in (post-merge epoch minus one).
     authored_epoch: u64,
 }
 
-/// Extract declared adds/removes and the post-merge context from a staged
-/// commit, resolving removed leaf indices against the (pre-merge) tree.
+/// Extract adds/removes and the post-merge context from a staged commit,
+/// resolving removed leaf indices against the (pre-merge) tree.
 fn staged_commit_summary(inner: &MlsGroup, staged: &StagedCommit) -> Result<StagedSummary> {
     let mut adds = Vec::new();
     for add in staged.add_proposals() {
-        adds.push(declared_member(
-            add.add_proposal().key_package().leaf_node().credential(),
+        let leaf = add.add_proposal().key_package().leaf_node();
+        adds.push(actual_leaf(
+            leaf.credential(),
+            leaf.signature_key().as_slice(),
         )?);
     }
     let mut removes = Vec::new();
@@ -305,8 +346,14 @@ impl MlsChannelGroup {
         self.finish_own_commit(provider, commit, Some(welcome), prev_auth, epoch)
     }
 
-    /// Remove members, resolving each [`DeclaredMember`] to its leaf index by
+    /// Remove members, resolving each [`DeclaredMember`] to leaf indices by
     /// credential; commits and merges immediately.
+    ///
+    /// Removes **every** leaf whose credential claims the target
+    /// `{ identity, device }` — duplicate credential identities are legal in
+    /// MLS (an impostor can clone a real member's credential bytes onto its
+    /// own leaf), so resolving to a single "first match" would be ambiguous.
+    /// A target matching no leaf is an error.
     pub fn remove_members(
         &mut self,
         provider: &impl OpenMlsProvider,
@@ -315,18 +362,21 @@ impl MlsChannelGroup {
     ) -> Result<CommitOutcome> {
         let mut indices = Vec::with_capacity(members.len());
         for target in members {
-            let index = self
+            let matched: Vec<_> = self
                 .inner
                 .members()
-                .find_map(|m| {
+                .filter_map(|m| {
                     let declared = declared_member(&m.credential).ok()?;
                     (&declared == target).then_some(m.index)
                 })
-                .with_context(|| {
-                    format!("no group member matches declared device {}", target.device)
-                })?;
-            indices.push(index);
+                .collect();
+            if matched.is_empty() {
+                bail!("no group member matches declared device {}", target.device);
+            }
+            indices.extend(matched);
         }
+        indices.sort_unstable_by_key(|i| i.u32());
+        indices.dedup();
         let (prev_auth, epoch) = self.pre_commit_state();
         let (commit, welcome, _group_info) = self
             .inner
@@ -403,10 +453,21 @@ impl MlsChannelGroup {
 
     /// All current members in declared `{ identity, device }` form. Errs if
     /// any leaf carries a credential that is not a farder credential.
+    ///
+    /// This is the *claimed* view only — for anything security-relevant use
+    /// [`Self::leaves`], which also carries each leaf's real signature key.
     pub fn members(&self) -> Result<Vec<DeclaredMember>> {
+        Ok(self.leaves()?.into_iter().map(|l| l.member).collect())
+    }
+
+    /// All current leaves in **actual** form: credential + leaf signature key
+    /// per member, so the caller (sub-2) can run
+    /// [`crate::credential::verify_leaf_binding`] against real tree state.
+    /// Errs if any leaf carries a credential that is not a farder credential.
+    pub fn leaves(&self) -> Result<Vec<ActualLeaf>> {
         self.inner
             .members()
-            .map(|m| declared_member(&m.credential))
+            .map(|m| actual_leaf(&m.credential, &m.signature_key))
             .collect()
     }
 
@@ -494,7 +555,7 @@ impl MlsChannelGroup {
             prev_epoch_authenticator,
             post_tree_hash: summary.post_tree_hash,
             epoch,
-            adds: summary.adds,
+            adds: summary.adds.into_iter().map(|l| l.member).collect(),
             removes: summary.removes,
         })
     }
@@ -527,13 +588,26 @@ pub fn decode_key_package(
 /// adds/removes and post tree hash of an `MlsCommit` event must equal what
 /// actually happened when the commit was processed. Order-insensitive on the
 /// member sets; any mismatch is an error.
+///
+/// This compares the *declared* `{ identity, device }` sets only. It does NOT
+/// prove the added leaves are genuine — an impostor leaf can clone a real
+/// member's credential bytes over attacker-owned keys and pass this check.
+/// Callers MUST additionally run
+/// [`crate::credential::verify_leaf_binding`] on each
+/// [`ProcessedCommit::actual_adds`] entry against a log-valid `DeviceCert`
+/// (the spec's §Leaves rule).
 pub fn verify_declared_matches_actual(
     processed: &ProcessedCommit,
     declared_adds: &[DeclaredMember],
     declared_removes: &[DeclaredMember],
     declared_post_tree_hash: &[u8; 32],
 ) -> Result<()> {
-    if sorted(processed.actual_adds.clone()) != sorted(declared_adds.to_vec()) {
+    let actual_adds: Vec<DeclaredMember> = processed
+        .actual_adds
+        .iter()
+        .map(|l| l.member.clone())
+        .collect();
+    if sorted(actual_adds) != sorted(declared_adds.to_vec()) {
         bail!(
             "declared adds do not match actual adds (declared {}, actual {})",
             declared_adds.len(),
@@ -556,10 +630,13 @@ pub fn verify_declared_matches_actual(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential::{credential_with_key, generate_key_package};
-    use farder_crypto::event_log::device_id;
+    use crate::credential::{
+        credential_with_key, encode_credential_identity, generate_key_package, verify_leaf_binding,
+    };
+    use farder_crypto::event_log::{device_id, DeviceCert};
     use farder_crypto::identity::Keypair;
     use openmls::prelude::tls_codec::Serialize as TlsSerialize;
+    use openmls::prelude::BasicCredential;
     use openmls_rust_crypto::OpenMlsRustCrypto;
 
     /// (identity keypair, device keypair, provider) for one test member.
@@ -576,6 +653,38 @@ mod tests {
             identity: identity.public_key(),
             device: device_id(&device.public_key()),
         }
+    }
+
+    /// A self-minted KeyPackage whose credential *claims*
+    /// `(victim_identity, victim_device)` but whose signature/HPKE keys are
+    /// attacker-owned. OpenMLS accepts it (KeyPackages are self-signed by
+    /// their own key; duplicate credential identities are legal) — only the
+    /// leaf-binding check against a `DeviceCert` can tell it apart.
+    fn impostor_key_package(
+        provider: &OpenMlsRustCrypto,
+        attacker_device: &Keypair,
+        victim_identity: &Keypair,
+        victim_device: &Keypair,
+    ) -> KeyPackage {
+        let credential: Credential = BasicCredential::new(encode_credential_identity(
+            &victim_identity.public_key(),
+            &device_id(&victim_device.public_key()),
+        ))
+        .into();
+        let credential_with_key = CredentialWithKey {
+            credential,
+            signature_key: attacker_device.public_key().as_bytes().to_vec().into(),
+        };
+        KeyPackage::builder()
+            .build(
+                crate::CIPHERSUITE,
+                provider,
+                &DeviceSigner(attacker_device),
+                credential_with_key,
+            )
+            .unwrap()
+            .key_package()
+            .clone()
     }
 
     /// A three-member group: alice creates, adds bob + carol, both join.
@@ -800,6 +909,126 @@ mod tests {
 
         // Pure garbage is refused.
         assert!(decode_key_package(&decoder_prov, b"not a key package").is_err());
+    }
+
+    #[test]
+    fn leaves_expose_signature_keys_that_pass_leaf_binding_with_real_certs() {
+        let ((a_id, a_dev, _, alice), (b_id, b_dev, _, _), (c_id, c_dev, _, _), _, _, _) =
+            three_member_group();
+        let leaves = alice.leaves().unwrap();
+        assert_eq!(leaves.len(), 3);
+        for (id, dev) in [(&a_id, &a_dev), (&b_id, &b_dev), (&c_id, &c_dev)] {
+            let leaf = leaves
+                .iter()
+                .find(|l| l.member == declared(id, dev))
+                .expect("every member has a leaf");
+            assert_eq!(leaf.signature_key, dev.public_key().as_bytes().to_vec());
+            let cert = DeviceCert::create(id, &dev.public_key(), 1_700_000_000);
+            verify_leaf_binding(&leaf.credential, &leaf.signature_key, &cert).unwrap();
+        }
+    }
+
+    #[test]
+    fn impostor_add_passes_declared_check_but_fails_leaf_binding_on_actual_leaf() {
+        let (
+            (_a_id, a_dev, a_prov, mut alice),
+            (b_id, b_dev, b_prov, mut bob),
+            _,
+            _,
+            _,
+            _,
+        ) = three_member_group();
+
+        // Attacker mints a KeyPackage claiming bob's (identity, device) over
+        // attacker-owned keys. The strict byte-decode path accepts it: it is
+        // self-consistently signed under the pinned suite.
+        let attacker_dev = Keypair::generate();
+        let attacker_prov = OpenMlsRustCrypto::default();
+        let impostor = impostor_key_package(&attacker_prov, &attacker_dev, &b_id, &b_dev);
+        let impostor_bytes = impostor.tls_serialize_detached().unwrap();
+        let impostor = decode_key_package(&a_prov, &impostor_bytes).unwrap();
+
+        let outcome = alice
+            .add_members(&a_prov, &DeviceSigner(&a_dev), &[impostor])
+            .unwrap();
+        let processed = bob.process_commit(&b_prov, &outcome.commit_bytes).unwrap();
+
+        // The declared identity/device set check alone CANNOT catch this: the
+        // cloned credential claims bob, and the tree hash is declared honestly.
+        let declared_bob = declared(&b_id, &b_dev);
+        verify_declared_matches_actual(
+            &processed,
+            &[declared_bob.clone()],
+            &[],
+            &outcome.post_tree_hash,
+        )
+        .unwrap();
+
+        // But the actual added leaf carries the attacker's signature key, so
+        // the spec's leaf-binding rule catches it against bob's real cert.
+        let bob_cert = DeviceCert::create(&b_id, &b_dev.public_key(), 1_700_000_000);
+        assert_eq!(processed.actual_adds.len(), 1);
+        let added = &processed.actual_adds[0];
+        assert_eq!(added.member, declared_bob);
+        assert_eq!(
+            added.signature_key,
+            attacker_dev.public_key().as_bytes().to_vec()
+        );
+        assert!(verify_leaf_binding(&added.credential, &added.signature_key, &bob_cert).is_err());
+
+        // leaves() exposes it on the standing tree too: of the two leaves
+        // claiming bob, exactly the genuine one passes leaf binding.
+        let bob_claiming: Vec<_> = bob
+            .leaves()
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.member == declared_bob)
+            .collect();
+        assert_eq!(bob_claiming.len(), 2);
+        let passing = bob_claiming
+            .iter()
+            .filter(|l| verify_leaf_binding(&l.credential, &l.signature_key, &bob_cert).is_ok())
+            .count();
+        assert_eq!(passing, 1);
+    }
+
+    #[test]
+    fn remove_members_removes_every_leaf_claiming_the_target() {
+        let (
+            (_a_id, a_dev, a_prov, mut alice),
+            (_b_id, _b_dev, b_prov, mut bob),
+            (c_id, c_dev, _, _),
+            _,
+            _,
+            _,
+        ) = three_member_group();
+
+        // An impostor leaf cloning carol's credential joins the tree.
+        let attacker_dev = Keypair::generate();
+        let attacker_prov = OpenMlsRustCrypto::default();
+        let impostor = impostor_key_package(&attacker_prov, &attacker_dev, &c_id, &c_dev);
+        let add = alice
+            .add_members(&a_prov, &DeviceSigner(&a_dev), &[impostor])
+            .unwrap();
+        bob.process_commit(&b_prov, &add.commit_bytes).unwrap();
+        assert_eq!(alice.members().unwrap().len(), 4);
+
+        // Removing declared carol removes BOTH leaves that claim her — a
+        // first-match resolution would ambiguously leave the impostor behind.
+        let carol_member = declared(&c_id, &c_dev);
+        let outcome = alice
+            .remove_members(&a_prov, &DeviceSigner(&a_dev), &[carol_member.clone()])
+            .unwrap();
+        assert_eq!(
+            outcome.removes,
+            vec![carol_member.clone(), carol_member.clone()]
+        );
+        assert_eq!(alice.members().unwrap().len(), 2);
+        assert!(!alice.members().unwrap().contains(&carol_member));
+
+        let processed = bob.process_commit(&b_prov, &outcome.commit_bytes).unwrap();
+        assert_eq!(processed.actual_removes.len(), 2);
+        assert_eq!(bob.members().unwrap().len(), 2);
     }
 
     #[test]

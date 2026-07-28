@@ -88,14 +88,23 @@ Types (fields all public):
 - `DeclaredMember { identity: PublicKey, device: DeviceId }` — the spec's
   `DeclaredAdd`/`DeclaredRemove` shape (the `key_package: EventRef` half of
   `DeclaredAdd` is log-layer data, sub-2).
+- `ActualLeaf { member: DeclaredMember, credential: Credential, signature_key: Vec<u8> }`
+  — a leaf as it **actually** sits in the tree: the claimed
+  `{ identity, device }` plus the real credential and leaf signature key.
+  This is what lets sub-2 run the spec's §Leaves rule
+  (`verify_leaf_binding`) against real tree state — credential bytes alone
+  can be cloned by an impostor onto attacker-owned keys, and OpenMLS accepts
+  that (KeyPackages are self-signed; duplicate credential identities are
+  legal).
 - `CommitOutcome { commit_bytes, welcome_bytes: Option<_>, prev_epoch_authenticator: [u8;32], post_tree_hash: [u8;32], epoch: u64, adds, removes }`
   — exactly what sub-2's `MlsCommit` event carries. `prev_epoch_authenticator`
   is captured **before** merging, `post_tree_hash` after. **Epoch convention:**
   `epoch` is the epoch the commit was *authored in* (what the fold checks
   against `current_epoch`); merging moves the group to `epoch + 1`.
-- `ProcessedCommit { actual_adds, actual_removes, post_tree_hash, epoch }` —
-  the member-side view after processing someone else's commit (same epoch
-  convention).
+- `ProcessedCommit { actual_adds: Vec<ActualLeaf>, actual_removes: Vec<DeclaredMember>, post_tree_hash, epoch }`
+  — the member-side view after processing someone else's commit (same epoch
+  convention). `actual_adds` carries the added leaves in **actual** form so
+  the caller can run `verify_leaf_binding` on each one.
 - `JoinInfo { epoch, tree_hash }` — what a joiner's `MlsLeafConfirmed` (sub-2)
   cites; `epoch` is the joiner's *starting* epoch (authored epoch + 1) and
   `tree_hash` equals the adding commit's `post_tree_hash`.
@@ -113,14 +122,20 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
   — self-contained Welcome (ratchet-tree extension), no external tree needed.
 - `add_members(provider, signer, key_packages: &[KeyPackage]) -> Result<CommitOutcome>`
 - `remove_members(provider, signer, members: &[DeclaredMember]) -> Result<CommitOutcome>`
-  — resolves leaf indices by credential; unknown members are errors.
+  — resolves leaf indices by credential and removes **every** leaf claiming a
+  target `{ identity, device }` (duplicate credential identities are legal in
+  MLS, so first-match resolution would ambiguously leave an impostor leaf
+  behind); a target matching no leaf is an error.
 - `self_update(provider, signer) -> Result<CommitOutcome>` — the rekey-cadence
   primitive: epoch +1, membership unchanged, authenticator rotates.
 - `process_commit(provider, commit_bytes: &[u8]) -> Result<ProcessedCommit>`
   — OpenMLS-verifies + stages, reports **actual** adds/removes and post tree
   hash, then merges.
 - Accessors: `epoch() -> u64`, `epoch_authenticator() -> [u8;32]`,
-  `tree_hash() -> [u8;32]`, `members() -> Result<Vec<DeclaredMember>>`.
+  `tree_hash() -> [u8;32]`, `leaves() -> Result<Vec<ActualLeaf>>` (the
+  security-relevant view: real credential + signature key per leaf, for
+  `verify_leaf_binding` against the standing tree), and
+  `members() -> Result<Vec<DeclaredMember>>` (the *claimed* view only).
 - `seal_message(provider, signer, envelope: &MessageEnvelope) -> Result<Vec<u8>>`
   — encode → `check_preseal_limits` → `pad_to_bucket` → encrypt as an MLS
   application message (`PrivateMessage`); returns serialized `MlsMessageOut`
@@ -140,7 +155,11 @@ Free functions:
 - `verify_declared_matches_actual(processed, declared_adds, declared_removes, declared_post_tree_hash) -> Result<()>`
   — the member-side lying-commit check (spec §Commit chaining):
   order-insensitive set equality on adds/removes plus tree-hash equality. The
-  fold-side authenticator chain is sub-2's job.
+  fold-side authenticator chain is sub-2's job. **Not sufficient on its
+  own:** it compares declared `{ identity, device }` sets, which an impostor
+  leaf with cloned credential bytes passes — callers must also run
+  `verify_leaf_binding` on each `ProcessedCommit::actual_adds` entry against
+  a log-valid `DeviceCert` (spec §Leaves rule).
 
 ### `envelope` module — sealed body + padding ladder
 
