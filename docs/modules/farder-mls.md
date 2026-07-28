@@ -130,7 +130,16 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
   primitive: epoch +1, membership unchanged, authenticator rotates.
 - `process_commit(provider, commit_bytes: &[u8]) -> Result<ProcessedCommit>`
   — OpenMLS-verifies + stages, reports **actual** adds/removes and post tree
-  hash, then merges.
+  hash, then merges **unconditionally** (a lying commit is only detectable
+  afterwards via `verify_declared_matches_actual`). Consumers holding the
+  declared `MlsCommit` fields (sub-2) SHOULD use `process_commit_checked`.
+- `process_commit_checked(provider, commit_bytes, declared_adds, declared_removes, declared_post_tree_hash) -> Result<ProcessedCommit>`
+  — misuse-resistant variant: inspects the **staged** commit pre-merge and
+  refuses to merge on any declared-vs-actual mismatch, discarding the staged
+  commit — a lying commit is never merged; the group stays in its current
+  epoch and the same bytes can still be merged later with an honest
+  declaration. Same impostor caveat as `verify_declared_matches_actual`:
+  callers must still run `verify_leaf_binding` on each `actual_adds` entry.
 - Accessors: `epoch() -> u64`, `epoch_authenticator() -> [u8;32]`,
   `tree_hash() -> [u8;32]`, `leaves() -> Result<Vec<ActualLeaf>>` (the
   security-relevant view: real credential + signature key per leaf, for

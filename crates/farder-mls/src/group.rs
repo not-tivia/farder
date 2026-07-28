@@ -404,11 +404,68 @@ impl MlsChannelGroup {
 
     /// Process someone else's commit: verify + stage via OpenMLS, report the
     /// **actual** adds/removes and post-merge tree hash, then merge.
+    ///
+    /// This merges **unconditionally** — a lying `MlsCommit` event is only
+    /// detected afterwards, when the caller runs
+    /// [`verify_declared_matches_actual`] on the result. Consumers with the
+    /// declared event fields in hand (sub-2) SHOULD use
+    /// [`Self::process_commit_checked`] instead, which refuses to merge on
+    /// any mismatch.
     pub fn process_commit(
         &mut self,
         provider: &impl OpenMlsProvider,
         commit_bytes: &[u8],
     ) -> Result<ProcessedCommit> {
+        let (staged, summary) = self.stage_commit(provider, commit_bytes)?;
+        self.merge_staged(provider, *staged, summary)
+    }
+
+    /// Misuse-resistant variant of [`Self::process_commit`]: verify + stage
+    /// via OpenMLS, then check the **staged** (pre-merge) commit against the
+    /// declared adds/removes/post-tree-hash of the `MlsCommit` event, and
+    /// merge only if they match. On any mismatch the staged commit is
+    /// discarded unmerged and the group stays in its current epoch — a lying
+    /// commit is never merged rather than detected post-merge.
+    ///
+    /// The same caveat as [`verify_declared_matches_actual`] applies: the
+    /// declared-set check cannot tell a genuine leaf from an impostor leaf
+    /// with cloned credential bytes — callers MUST still run
+    /// [`crate::credential::verify_leaf_binding`] on each
+    /// [`ProcessedCommit::actual_adds`] entry (spec §Leaves rule).
+    pub fn process_commit_checked(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        commit_bytes: &[u8],
+        declared_adds: &[DeclaredMember],
+        declared_removes: &[DeclaredMember],
+        declared_post_tree_hash: &[u8; 32],
+    ) -> Result<ProcessedCommit> {
+        let (staged, summary) = self.stage_commit(provider, commit_bytes)?;
+        let preview = ProcessedCommit {
+            actual_adds: summary.adds.clone(),
+            actual_removes: summary.removes.clone(),
+            post_tree_hash: summary.post_tree_hash,
+            epoch: summary.authored_epoch,
+        };
+        verify_declared_matches_actual(
+            &preview,
+            declared_adds,
+            declared_removes,
+            declared_post_tree_hash,
+        )
+        .context("refusing to merge: declared commit metadata does not match the staged commit")?;
+        self.merge_staged(provider, *staged, summary)
+    }
+
+    /// Shared first half of commit processing: parse, OpenMLS-verify + stage,
+    /// and summarize the staged commit against the (pre-merge) tree. Dropping
+    /// the returned [`StagedCommit`] without merging leaves the group state
+    /// untouched (staging someone else's commit persists nothing).
+    fn stage_commit(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        commit_bytes: &[u8],
+    ) -> Result<(Box<StagedCommit>, StagedSummary)> {
         let message = MlsMessageIn::tls_deserialize_exact(commit_bytes)
             .map_err(|e| anyhow!("commit bytes do not parse as an MLS message: {e}"))?;
         let protocol_message = message
@@ -420,8 +477,19 @@ impl MlsChannelGroup {
             bail!("message is not a commit");
         };
         let summary = staged_commit_summary(&self.inner, &staged)?;
+        Ok((staged, summary))
+    }
+
+    /// Shared second half of commit processing: merge the staged commit and
+    /// assemble the [`ProcessedCommit`].
+    fn merge_staged(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        staged: StagedCommit,
+        summary: StagedSummary,
+    ) -> Result<ProcessedCommit> {
         self.inner
-            .merge_staged_commit(provider, *staged)
+            .merge_staged_commit(provider, staged)
             .map_err(|e| anyhow!("merge staged commit: {e}"))?;
         self.tree_hash = summary.post_tree_hash;
         Ok(ProcessedCommit {
@@ -1036,6 +1104,95 @@ mod tests {
         // one success is not enough evidence on its own).
         alice.self_update(&a_prov, &DeviceSigner(&a_dev)).unwrap();
         assert_eq!(alice.epoch(), epoch_before + 2);
+    }
+
+    #[test]
+    fn process_commit_checked_merges_an_honest_commit() {
+        let (
+            (_a_id, a_dev, a_prov, mut alice),
+            (_b_id, _b_dev, b_prov, mut bob),
+            (c_id, c_dev, _, _carol),
+            _,
+            _,
+            _,
+        ) = three_member_group();
+
+        let carol_member = declared(&c_id, &c_dev);
+        let outcome = alice
+            .remove_members(&a_prov, &DeviceSigner(&a_dev), &[carol_member.clone()])
+            .unwrap();
+
+        let processed = bob
+            .process_commit_checked(
+                &b_prov,
+                &outcome.commit_bytes,
+                &outcome.adds,
+                &outcome.removes,
+                &outcome.post_tree_hash,
+            )
+            .unwrap();
+        assert!(processed.actual_adds.is_empty());
+        assert_eq!(processed.actual_removes, vec![carol_member]);
+        assert_eq!(processed.post_tree_hash, outcome.post_tree_hash);
+        assert_eq!(bob.epoch(), alice.epoch());
+        assert_eq!(bob.tree_hash(), alice.tree_hash());
+        assert_eq!(bob.epoch_authenticator(), alice.epoch_authenticator());
+    }
+
+    #[test]
+    fn process_commit_checked_refuses_to_merge_a_lying_commit() {
+        let (
+            (_a_id, a_dev, a_prov, mut alice),
+            (_b_id, _b_dev, b_prov, mut bob),
+            (c_id, c_dev, _, _carol),
+            _,
+            _,
+            _,
+        ) = three_member_group();
+
+        // Alice self-updates, but the "event" lies: declares removes=[carol].
+        let outcome = alice.self_update(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+        let carol_member = declared(&c_id, &c_dev);
+
+        let epoch_before = bob.epoch();
+        let auth_before = bob.epoch_authenticator();
+        let tree_before = bob.tree_hash();
+        assert!(bob
+            .process_commit_checked(
+                &b_prov,
+                &outcome.commit_bytes,
+                &[],
+                &[carol_member],
+                &outcome.post_tree_hash,
+            )
+            .is_err());
+
+        // The lying commit was never merged: bob is still in the old epoch.
+        assert_eq!(bob.epoch(), epoch_before);
+        assert_eq!(bob.epoch_authenticator(), auth_before);
+        assert_eq!(bob.tree_hash(), tree_before);
+
+        // A lying post tree hash is refused pre-merge too.
+        let mut wrong_tree_hash = outcome.post_tree_hash;
+        wrong_tree_hash[0] ^= 0xff;
+        assert!(bob
+            .process_commit_checked(&b_prov, &outcome.commit_bytes, &[], &[], &wrong_tree_hash)
+            .is_err());
+        assert_eq!(bob.epoch(), epoch_before);
+
+        // Refusal consumed nothing: the same bytes with the honest
+        // declaration still merge, and bob converges with alice.
+        bob.process_commit_checked(
+            &b_prov,
+            &outcome.commit_bytes,
+            &[],
+            &[],
+            &outcome.post_tree_hash,
+        )
+        .unwrap();
+        assert_eq!(bob.epoch(), alice.epoch());
+        assert_eq!(bob.epoch_authenticator(), alice.epoch_authenticator());
+        assert_eq!(bob.tree_hash(), alice.tree_hash());
     }
 
     #[test]
