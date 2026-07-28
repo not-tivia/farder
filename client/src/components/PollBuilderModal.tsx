@@ -17,7 +17,28 @@ const DURATIONS: { value: string; label: string }[] = [
   { value: "1d", label: "1 day" },
   { value: "3d", label: "3 days" },
   { value: "7d", label: "7 days" },
+  { value: "custom", label: "Custom…" },
 ];
+
+// Server bounds (polls.rs MIN_DURATION_SECS / MAX_DURATION_SECS) — mirrored
+// client-side for a friendly error; the server re-validates from scratch.
+const MIN_DURATION_SECS = 60; // 1m
+const MAX_DURATION_SECS = 30 * 86_400; // 30d
+const UNIT_SECS: Record<string, number> = { m: 60, h: 3600, d: 86_400 };
+
+/**
+ * Resolves the duration <select> value plus custom amount/unit into the exact
+ * `\d{1,4}(m|h|d)` token the server's duration regex accepts, or "" for no
+ * duration. Returns null when the custom combo violates the 1m–30d bounds.
+ */
+function resolveDurationToken(duration: string, amount: string, unit: string): string | null {
+  if (duration !== "custom") return duration;
+  const n = Number(amount);
+  if (!Number.isInteger(n) || n < 1 || n > 9999) return null;
+  const secs = n * UNIT_SECS[unit];
+  if (secs < MIN_DURATION_SECS || secs > MAX_DURATION_SECS) return null;
+  return `${n}${unit}`;
+}
 
 interface Props {
   serverId: string;
@@ -33,6 +54,8 @@ export default function PollBuilderModal({ serverId, channelId, trigger, onClose
   const [question, setQuestion] = useState("");
   const [options, setOptions] = useState<string[]>(["", ""]);
   const [duration, setDuration] = useState("");
+  const [customAmount, setCustomAmount] = useState("");
+  const [customUnit, setCustomUnit] = useState("m");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -64,15 +87,21 @@ export default function PollBuilderModal({ serverId, channelId, trigger, onClose
       if (seen.has(key)) { setError(`Duplicate option: "${o}"`); return; }
       seen.add(key);
     }
+    // Resolve the duration token ("" = no end time; custom builds `${n}${unit}`).
+    const token = resolveDurationToken(duration, customAmount, customUnit);
+    if (token === null) {
+      setError("Duration must be between 1 minute and 30 days");
+      return;
+    }
     // A bare duration-shaped final segment is ALWAYS consumed as the duration
     // by the server parser — a last option like "30m" with no end time chosen
     // would silently become the poll's duration and drop an option.
-    if (!duration && /^\d{1,4}[mhd]$/i.test(opts[opts.length - 1])) {
+    if (!token && /^\d{1,4}[mhd]$/i.test(opts[opts.length - 1])) {
       setError(`"${opts[opts.length - 1]}" can't be the last option without an end time (it reads as a duration) — reorder the options or pick an end time`);
       return;
     }
     // Build the exact server syntax: <question> | <opt> | <opt>[ | <token>]
-    const args = [q, ...opts, ...(duration ? [duration] : [])].join(" | ");
+    const args = [q, ...opts, ...(token ? [token] : [])].join(" | ");
     setSubmitting(true);
     try {
       await api.runCommand(serverId, trigger, channelId, args);
@@ -144,6 +173,30 @@ export default function PollBuilderModal({ serverId, channelId, trigger, onClose
                 <option key={d.value} value={d.value}>{d.label}</option>
               ))}
             </select>
+            {duration === "custom" && (
+              <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                <input
+                  className="connect-input"
+                  type="number"
+                  min={1}
+                  max={9999}
+                  step={1}
+                  value={customAmount}
+                  placeholder="45"
+                  onChange={(e) => setCustomAmount(e.target.value)}
+                  style={{ width: 80 }}
+                />
+                <select
+                  className="connect-input"
+                  value={customUnit}
+                  onChange={(e) => setCustomUnit(e.target.value)}
+                >
+                  <option value="m">minutes</option>
+                  <option value="h">hours</option>
+                  <option value="d">days</option>
+                </select>
+              </div>
+            )}
           </div>
           {error && <div className="error-text">{error}</div>}
           <div className="connect-actions">
