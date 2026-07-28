@@ -134,6 +134,7 @@ pub fn list_infos(conn: &Connection) -> Result<Vec<CommandInfo>> {
             trigger: r.trigger,
             description: r.description,
             takes_arg: matches!(r.kind.as_str(), "api" | "poll" | "giveaway"),
+            kind: r.kind,
         })
         .collect())
 }
@@ -227,6 +228,7 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].trigger, "rules");
         assert_eq!(infos[0].takes_arg, false); // text -> no arg
+        assert_eq!(infos[0].kind, "text"); // kind exposed (not sensitive)
         let row = find_by_trigger(&conn, "rules").unwrap().unwrap();
         assert_eq!(row.body_text.as_deref(), Some("be nice"));
         // api command -> takes_arg true

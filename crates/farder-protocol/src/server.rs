@@ -288,6 +288,12 @@ pub struct CommandInfo {
     pub trigger: String,
     pub description: String,
     pub takes_arg: bool,
+    /// Command kind ("text" | "api" | "poll" | "giveaway"). Not sensitive —
+    /// unlike `url_template`/`body_text` it is safe to expose; clients use it
+    /// to offer builder UIs for structured kinds. `default` so old servers
+    /// (which omit it) decode as an empty string.
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// First frame on every relay-bridged stream, identifying its role. Relay-mode

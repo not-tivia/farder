@@ -406,6 +406,7 @@ A slash-command summary as returned by `ListCommands`. **Safe-fields-only view**
 | `trigger` | `String` | The trigger word (without `/`). Always stored and returned lowercase. |
 | `description` | `String` | Short human-readable description (≤160 chars). |
 | `takes_arg` | `bool` | `true` for `"api"`, `"poll"`, and `"giveaway"` commands; `false` for `"text"` commands. The client UI uses this to hint that trailing input is expected. |
+| `kind` | `String` | The command kind (`"text"` \| `"api"` \| `"poll"` \| `"giveaway"`). `#[serde(default)]` — empty string when talking to an old server that omits it. Not sensitive (unlike `url_template`/`body_text`); the client uses it to open builder forms for structured kinds (poll/giveaway) instead of raw text entry. |
 
 ### `PollInfo`
 

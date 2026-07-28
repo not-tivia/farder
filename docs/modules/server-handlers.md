@@ -618,7 +618,7 @@ Implements CRUD for server-configured `/trigger` slash commands plus the utility
 
 - **`commands` table** — `(id, trigger, name, description, kind, body_text, url_template, value_path, response_template, unit, public_key, created_at)`. `trigger` is UNIQUE and stored lowercase. `public_key` is a fresh Ed25519 key generated at creation time — the command's author identity, **never a roster member**. `url_template` and `body_text` are server-only; they are never sent to clients.
 - **`CommandRow`** (internal) — full DB row including secrets. Used by `find_by_trigger` in the `RunCommand` dispatch.
-- **`CommandInfo`** (protocol) — safe-fields-only view (`id`, `trigger`, `description`, `takes_arg`). Returned by `list_infos` and sent to clients.
+- **`CommandInfo`** (protocol) — safe-fields-only view (`id`, `trigger`, `description`, `takes_arg`, `kind`). `kind` is not sensitive (it names the command's behavior class, used by the client's builder UIs); `url_template`/`body_text` remain excluded. Returned by `list_infos` and sent to clients.
 
 ### CRUD helpers
 
@@ -627,7 +627,7 @@ Implements CRUD for server-configured `/trigger` slash commands plus the utility
 | `create` | `(conn, name, trigger, description, kind, body_text, url_template, value_path, response_template, unit) -> Result<i64>` | Inserts a command row. Generates a fresh Ed25519 keypair; stores the public key as the command's author identity. Returns the new row id. |
 | `delete` | `(conn, id) -> Result<()>` | Deletes a command row by id. |
 | `list_rows` | `(conn) -> Result<Vec<CommandRow>>` | Full rows ordered by trigger. Includes secrets — server-internal only. |
-| `list_infos` | `(conn) -> Result<Vec<CommandInfo>>` | Safe-fields-only list for clients. `takes_arg` is `true` iff `kind == "api"`. |
+| `list_infos` | `(conn) -> Result<Vec<CommandInfo>>` | Safe-fields-only list for clients. `takes_arg` is `true` for kinds `"api"`, `"poll"`, `"giveaway"`; `kind` is passed through verbatim. |
 | `find_by_trigger` | `(conn, trigger) -> Result<Option<CommandRow>>` | Look up a command by its trigger string. `None` if not found. Used by the `RunCommand` dispatch in `connection.rs`. |
 
 ### Dispatch utilities
