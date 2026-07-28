@@ -378,18 +378,20 @@ TypeScript types in `types.ts` use `{ bytes: number[] }` for the serde form. Cal
 Appended after `AttachmentRedacted` (the enum is **append-only**: existing
 variants never change shape or order, so old events' canonical bytes and hashes
 are stable — pinned by `existing_variant_bytes_are_untouched_by_new_variants`).
-Nothing emits these yet. Fold rules for `ChannelCreated`, `MessageDeleted`, and
-`DeviceRevoked` are **live in `LogState::apply`** (sub-2 Task 2); the MLS group
-variants are still rejected by TEMP fail-closed arms until Tasks 3–4. Ingest
-handling is sub-3.
+Nothing emits these yet. Fold rules for `ChannelCreated`, `MessageDeleted`,
+`DeviceRevoked` (sub-2 Task 2) and the MLS group bookkeeping —
+`MlsKeyPackagePublished`, `MlsCommit`, `MlsWelcome`, `MlsLeafConfirmed` (sub-2
+Task 3) — are **live in `LogState::apply`**; `MlsGroupReset` and the
+sealed-content variants are still rejected by TEMP fail-closed arms until
+Task 4. Ingest handling is sub-3.
 
 | Variant | Fields | Fold rule (× = still a TEMP reject) |
 |---|---|---|
 | `ChannelCreated` | `channel_id: u64`, `name`, `kind`, `class: ChannelClass`, `parent: Option<u64>` | Owner-only (spec M3, no new capability string); `channel_id` must be new (class is set once or the channel does not exist to the log — no class-change event exists); `parent: Some(p)` requires `p` known to the log AND the child's `class` equal to `p`'s (thread children inherit their parent's class) |
-| `MlsKeyPackagePublished` | `key_package: Vec<u8>`, `store_instance_hash: [u8;32]`, `expires_at_log_pos: u64` | × Owning device; consumed-once; capped + log-position lifetime |
-| `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | × Epoch CAS + authenticator chaining; `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit's `prev_epoch_authenticator` must equal (plan resolved ambiguity #1) |
-| `MlsWelcome` | `channel_id`, `generation`, `commit: EventRef`, `for_member: PublicKey`, `for_device: DeviceId`, `welcome: Vec<u8>` | × `for_*` unverifiable by the fold — leaves count only once the joiner confirms |
-| `MlsLeafConfirmed` | `channel_id`, `generation`, `epoch`, `tree_hash: [u8;32]`, `store_instance_hash: [u8;32]` | × Authored by the joining device; promotes leaf pending → confirmed iff `tree_hash` matches |
+| `MlsKeyPackagePublished` | `key_package: Vec<u8>`, `store_instance_hash: [u8;32]`, `expires_at_log_pos: u64` | Full member only; `store_instance_hash` must match/pin the device's instance pin; `expires_at_log_pos > log_pos` at publish; at most `MAX_LIVE_KEY_PACKAGES_PER_DEVICE = 10` live (unconsumed, unexpired) refs per device — expired refs stop counting and are pruned on touch. Effect: record ref → expiry log pos |
+| `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | Channel must have an E2ee group; `generation` must match; **epoch CAS**: a commit re-declaring a past epoch folds `Ok` as an **accepted no-op** (only chain head + `log_pos` advance — the Rung-3-deterministic loser); instance-hash pin; author must hold a **confirmed** leaf and `prev_epoch_authenticator` must equal the previous commit's declared `post_epoch_authenticator` (BOTH exempt for a generation's first commit — bootstrap, its author's leaf becomes confirmed); each `DeclaredAdd` needs a full non-banned member, a live device, an unconsumed unexpired KeyPackage of exactly that `(identity, device)`, an absent leaf, and the **self-add rule** (an identity with a confirmed leaf may only be extended by itself); each `DeclaredRemove` needs a present leaf that is out of good standing OR self-removal; **commit-rate rule** (`COMMIT_RATE_MIN_EPOCH_GAP = 4`): drift-discharging commits are never blocked, others need to be the author's first or ≥ 4 epochs past their previous. `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit must chain onto (plan resolved ambiguity #1); a liar wedges the chain and cannot be built upon. `authz_head` is opaque to the fold (client head attestation) |
+| `MlsWelcome` | `channel_id`, `generation`, `commit: EventRef`, `for_member: PublicKey`, `for_device: DeviceId`, `welcome: Vec<u8>` | `generation == current`: author must hold a confirmed leaf, target leaf must be pending, cited commit must be fold-recorded. `generation == current + 1`: owner-only reset staging (Welcomes precede the content-addressed reset, ambiguity #6). `for_*` unverifiable by the fold — recording a Welcome NEVER promotes a leaf; only the joiner's confirmation does |
+| `MlsLeafConfirmed` | `channel_id`, `generation`, `epoch`, `tree_hash: [u8;32]`, `store_instance_hash: [u8;32]` | Must be authored by the joining device of a **pending** leaf; instance-hash pin; `tree_hash` must equal `commits_by_epoch[epoch].post_tree_hash` — or, in a reset generation with no logged commits, seed/match `reset_expected_tree_hash` (ambiguity #7). Effect: pending → confirmed; clears `reset_pending` once confirmed = members × live devices |
 | `MlsGroupReset` | `channel_id`, `new_generation: u64`, `welcomes: Vec<EventRef>` | × Owner-only; valid only if `welcomes` covers exactly members × live devices (non-selective) |
 | `MessagePostedE2ee` | `channel_id`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `reply_to: Option<EventRef>`, `attachments: Vec<AttachmentCap>`, `authz_head: EventHash` | × Sealed content; `reply_to`/caps stay outside the seal for blind threading/validation |
 | `MessageEditedE2ee` | `channel_id`, `target: EventRef`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `authz_head: EventHash` | × Sealed edit |
@@ -480,6 +482,37 @@ Constant: `MAX_LIVE_DEVICES_PER_IDENTITY = 8` (pub). `DeviceAuthorized` is
 rejected when the author already has 8 live (non-revoked, cert-unexpired at the
 event's timestamp) devices; revoking a device frees its slot.
 
+### Rung-2 MLS fold state (sub-2 Task 3)
+
+| Field | Type | Populated by | Purpose |
+|---|---|---|---|
+| `mls_groups` | `HashMap<u64, MlsGroupRecord>` | `ChannelCreated { E2ee }` (generation 0 / epoch 0), then commit/welcome/confirm effects | Per-E2ee-channel MLS control-plane bookkeeping. |
+| `key_packages` | `HashMap<(PublicKey, DeviceId), HashMap<EventRef, u64>>` | `MlsKeyPackagePublished` effect | Live (unconsumed) KeyPackage refs → expiry **log position**; expired refs are pruned on touch. |
+| `consumed_key_packages` | `HashMap<EventRef, u64>` | `MlsCommit` effect (Add consumption) | Consumed refs → expiry log pos, so a consumed ref can never be replayed as an Add target; prunable past expiry (spec I5). |
+| `device_store_instance` | `HashMap<DeviceId, [u8;32]>` | First `MlsKeyPackagePublished` (or commit/confirm) per device | The pinned MLS store-instance hash (spec C6); any later publish/commit/confirm with a different hash is rejected — the clone/restore poison signal. |
+
+`MlsGroupRecord` (private) holds: `generation`, `epoch` (the epoch the group is
+IN = declared + 1 of the last accepted commit), `commit_head`,
+`epoch_authenticator` (**the chain variable** — the last commit's declared
+`post_epoch_authenticator`; `None` marks a generation's bootstrap),
+`tree_hash`, `leaves_confirmed` / `leaves_pending` (`HashSet<(PublicKey,
+DeviceId)>`), `events_since_last_commit` (reset to 0 by every accepted commit;
+the Task-4 freshness ceiling reads it), `last_commit_epoch_by_author`
+(commit-rate clock), `channel_events_since_reset`, `reset_pending`,
+`reset_expected_tree_hash`, `commits_by_epoch: HashMap<u64, CommitRecord>`
+(keyed by the epoch a commit **created**), `welcomes: HashMap<EventHash,
+WelcomeRecord>`.
+
+Constants (pub): `MAX_LIVE_KEY_PACKAGES_PER_DEVICE = 10`,
+`COMMIT_RATE_MIN_EPOCH_GAP = 4`.
+
+**Stale-commit no-op:** `apply` keeps its `Result<()>` signature. An `MlsCommit`
+that loses the epoch CAS returns `Ok(())` but skips all payload effects — only
+the author's chain head and `log_pos` advance, zero MLS state change — so any
+converged event set folds to the same winner on every replica (plan resolved
+ambiguity #8). Ingest's distinct `stale-epoch` bounce is sub-3's job, served by
+`mls_current_epoch`.
+
 ### Public query methods
 
 #### `is_attachment_redacted(hash: &str) -> bool`
@@ -508,7 +541,44 @@ An identity's live devices at `at_ts`: authorized, non-revoked, and cert-unexpir
 
 #### `log_pos() -> u64`
 
-The log-position clock: count of accepted events folded so far.
+The log-position clock: count of accepted events folded so far (a stale-commit
+no-op still counts — it is an accepted event). Drives KeyPackage lifetimes.
+
+#### `pending_removals(channel_id: u64, at_ts: u64) -> HashSet<(PublicKey, DeviceId)>`
+
+The spec's derived drift set: leaves the group holds that the authz fold says
+should not be there — `(confirmed ∪ pending) \ (members × live_devices(at_ts))`.
+Non-empty ⇒ sealed sends are blocked (Task 4) until a Remove-commit discharges
+it. Empty for channels without an MLS group.
+
+#### `pending_adds(channel_id: u64, at_ts: u64) -> HashSet<(PublicKey, DeviceId)>`
+
+The complement: member devices the group should hold but does not —
+`(members × live_devices) \ (confirmed ∪ pending)`. Stewards read this to build
+Add-commits.
+
+#### `mls_current_epoch(channel_id: u64) -> Option<(u64, u64)>`
+
+`(generation, epoch)` the channel's group is currently in — sub-3's stale-epoch
+pre-check. `None` = no MLS group (unknown or Plaintext channel).
+
+#### `leaves_confirmed(channel_id: u64) -> HashSet<(PublicKey, DeviceId)>`
+
+The joiner-confirmed leaves (drift detection runs on these, never on pending
+leaves — a bogus Welcome therefore leaves visible drift).
+
+#### `commit_discharges_drift(event: &Event) -> bool`
+
+Whether an `MlsCommit` event discharges an outstanding fold obligation (an add
+∈ `pending_adds` or a remove ∈ `pending_removals` at the event's timestamp).
+`false` for non-commit payloads.
+
+#### `compare_same_epoch_commits(a: &Event, b: &Event) -> Ordering`
+
+The drift-priority tiebreak for same-epoch candidate commits (spec I2, exported
+pure for Rung 3's orderer): an obligation-discharging commit orders first
+regardless of hash grinding or self-asserted lamport; when neither or both
+discharge, canonical order `(lamport, author, event_hash)`.
 
 ### Integration map
 

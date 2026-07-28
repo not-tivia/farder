@@ -3,9 +3,10 @@
 //! event against the per-payload signing rules. Pure (no I/O), so it replays
 //! deterministically and composes from any checkpoint.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 use crate::event_log::{
     ChannelClass, DeleteReason, DeviceId, Event, EventHash, EventPayload, EventRef, Genesis,
@@ -16,6 +17,16 @@ use crate::identity::PublicKey;
 /// Spec C5/I8: at most this many live (non-revoked, cert-unexpired) devices per
 /// identity. Revoking a device frees its slot — revoked ≠ live.
 pub const MAX_LIVE_DEVICES_PER_IDENTITY: usize = 8;
+
+/// Spec I5: at most this many live (unconsumed, `expires_at_log_pos > log_pos`)
+/// KeyPackages per device. Expired refs do not count and are pruned on touch.
+pub const MAX_LIVE_KEY_PACKAGES_PER_DEVICE: usize = 10;
+
+/// Spec I3: a commit by author A in a channel is invalid unless it discharges
+/// drift, is A's first commit there, or declares an epoch at least this many
+/// epochs past A's previous commit — stops self-update spam from bouncing every
+/// other member's in-flight sealed message with `stale-epoch`.
+pub const COMMIT_RATE_MIN_EPOCH_GAP: u64 = 4;
 
 /// A device authorized within this server's log (identity ↔ signing subkey).
 #[derive(Clone, Debug)]
@@ -42,6 +53,101 @@ struct ChannelRecord {
     class: ChannelClass,
     #[allow(dead_code)]
     parent: Option<u64>,
+}
+
+/// One accepted `MlsCommit`, keyed in `MlsGroupRecord.commits_by_epoch` by the
+/// epoch it CREATED (declared epoch + 1) — the epoch a joiner lands in.
+#[derive(Clone, Debug, PartialEq)]
+struct CommitRecord {
+    event_hash: EventHash,
+    post_tree_hash: [u8; 32],
+}
+
+/// One recorded `MlsWelcome`, keyed by its event hash. Read by Task 4's reset
+/// completeness check (a reset's `welcomes` refs resolve against these).
+#[derive(Clone, Debug, PartialEq)]
+struct WelcomeRecord {
+    #[allow(dead_code)] // read by Task 4 (reset completeness)
+    generation: u64,
+    #[allow(dead_code)]
+    for_member: PublicKey,
+    #[allow(dead_code)]
+    for_device: DeviceId,
+}
+
+/// Per-channel MLS control-plane bookkeeping (spec sub-2). Created by
+/// `ChannelCreated { class: E2ee }` at generation 0 / epoch 0. The fold never
+/// runs MLS — it chains the values commits DECLARE (resolved ambiguity #1) so
+/// a liar cannot be built upon.
+#[derive(Clone, Debug, PartialEq)]
+struct MlsGroupRecord {
+    generation: u64,
+    /// The epoch the group is IN (declared epoch + 1 of the last accepted commit).
+    epoch: u64,
+    #[allow(dead_code)] // read by sub-3 (stale-epoch bounce diagnostics)
+    commit_head: Option<EventHash>,
+    /// The last accepted commit's declared `post_epoch_authenticator` — the
+    /// value the NEXT commit's `prev_epoch_authenticator` must equal. `None` =
+    /// no commit accepted yet in this generation (bootstrap: chain + confirmed
+    /// -leaf checks are exempt for the generation's first commit, resolved
+    /// ambiguity #5).
+    epoch_authenticator: Option<[u8; 32]>,
+    #[allow(dead_code)] // read by Task 4 / sub-3
+    tree_hash: Option<[u8; 32]>,
+    leaves_confirmed: HashSet<(PublicKey, DeviceId)>,
+    leaves_pending: HashSet<(PublicKey, DeviceId)>,
+    /// Freshness-ceiling counter (spec C4). Reset to 0 by every accepted
+    /// commit; incremented by sealed content in Task 4.
+    #[allow(dead_code)] // read by Task 4 (freshness ceiling)
+    events_since_last_commit: u32,
+    /// Commit-rate clock (spec I3): the DECLARED epoch of each author's last
+    /// accepted commit in this channel.
+    last_commit_epoch_by_author: HashMap<PublicKey, u64>,
+    /// Reset rate-limit clock — incremented by channel events in Task 4.
+    #[allow(dead_code)] // read/written by Task 4 (reset rate limit)
+    channel_events_since_reset: u32,
+    /// True after an accepted `MlsGroupReset` until every welcomed leaf
+    /// confirms (Task 4 sets it; leaf confirmation clears it).
+    reset_pending: bool,
+    /// The tree hash seeded by the FIRST `MlsLeafConfirmed` of a reset
+    /// generation (its add-commit is never a log event, so there is no
+    /// `commits_by_epoch` entry to check against — resolved ambiguity #7).
+    reset_expected_tree_hash: Option<[u8; 32]>,
+    /// Accepted commits keyed by the epoch each CREATED (declared + 1).
+    commits_by_epoch: HashMap<u64, CommitRecord>,
+    /// Recorded Welcomes, keyed by event hash (resolved by Task 4's reset).
+    welcomes: HashMap<EventHash, WelcomeRecord>,
+}
+
+impl MlsGroupRecord {
+    fn new() -> Self {
+        Self {
+            generation: 0,
+            epoch: 0,
+            commit_head: None,
+            epoch_authenticator: None,
+            tree_hash: None,
+            leaves_confirmed: HashSet::new(),
+            leaves_pending: HashSet::new(),
+            events_since_last_commit: 0,
+            last_commit_epoch_by_author: HashMap::new(),
+            channel_events_since_reset: 0,
+            reset_pending: false,
+            reset_expected_tree_hash: None,
+            commits_by_epoch: HashMap::new(),
+            welcomes: HashMap::new(),
+        }
+    }
+}
+
+/// Outcome of payload authorization. `StaleCommitNoOp` is an `MlsCommit` that
+/// lost the epoch CAS: ACCEPTED (Ok, chain head + log_pos advance) but with
+/// zero MLS state change — the Rung-3-deterministic no-op (resolved ambiguity
+/// #8; ingest's distinct `stale-epoch` bounce is sub-3's job).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Authorized {
+    Apply,
+    StaleCommitNoOp,
 }
 
 /// An open invite, keyed in `LogState.invites` by its `InviteCreated` event hash.
@@ -90,8 +196,20 @@ pub struct LogState {
     /// filtered by `live_devices`, never by removal — history must stand.
     devices_by_identity: HashMap<PublicKey, HashSet<DeviceId>>,
     /// Count of accepted events — the pure log-position clock (drives KeyPackage
-    /// lifetimes in Task 3; never wall time).
+    /// lifetimes; never wall time).
     log_pos: u64,
+    /// Per-E2ee-channel MLS bookkeeping, created by `ChannelCreated { E2ee }`.
+    mls_groups: HashMap<u64, MlsGroupRecord>,
+    /// Live (unconsumed) KeyPackages per (identity, device): ref → expiry log
+    /// pos. Consuming an Add moves the ref to `consumed_key_packages`.
+    key_packages: HashMap<(PublicKey, DeviceId), HashMap<EventRef, u64>>,
+    /// Consumed KeyPackage refs → expiry log pos. Kept so a consumed ref can
+    /// never be replayed as an Add target; prunable past expiry (spec I5).
+    consumed_key_packages: HashMap<EventRef, u64>,
+    /// The pinned MLS store-instance hash per device (spec C6): first
+    /// `MlsKeyPackagePublished` pins it; any later publish/commit/confirm from
+    /// the device with a different hash is rejected (clone/restore poison).
+    device_store_instance: HashMap<DeviceId, [u8; 32]>,
 }
 
 impl LogState {
@@ -116,6 +234,10 @@ impl LogState {
             revoked_devices: HashSet::new(),
             devices_by_identity: HashMap::new(),
             log_pos: 0,
+            mls_groups: HashMap::new(),
+            key_packages: HashMap::new(),
+            consumed_key_packages: HashMap::new(),
+            device_store_instance: HashMap::new(),
         }
     }
 
@@ -193,6 +315,109 @@ impl LogState {
         live
     }
 
+    /// The spec's MLS target set: every full member's live devices at `at_ts`.
+    /// Pending (unapproved) members are not in `members`, so they are excluded.
+    fn member_leaf_set(&self, at_ts: u64) -> HashSet<(PublicKey, DeviceId)> {
+        let mut set = HashSet::new();
+        for m in &self.members {
+            for d in self.live_devices(m, at_ts) {
+                set.insert((m.clone(), d));
+            }
+        }
+        set
+    }
+
+    /// Spec-derived pure function: leaves the group holds that the authz fold
+    /// says should NOT be there — `(confirmed ∪ pending) \ (members × live_devices)`.
+    /// Non-empty ⇒ sealed sends are blocked (Task 4) until a Remove-commit
+    /// discharges the drift. Empty for channels without an MLS group.
+    pub fn pending_removals(&self, channel_id: u64, at_ts: u64) -> HashSet<(PublicKey, DeviceId)> {
+        let Some(group) = self.mls_groups.get(&channel_id) else {
+            return HashSet::new();
+        };
+        let target = self.member_leaf_set(at_ts);
+        group
+            .leaves_confirmed
+            .union(&group.leaves_pending)
+            .filter(|leaf| !target.contains(*leaf))
+            .cloned()
+            .collect()
+    }
+
+    /// The complement of `pending_removals`: member devices the group should
+    /// hold but does not — `(members × live_devices) \ (confirmed ∪ pending)`.
+    pub fn pending_adds(&self, channel_id: u64, at_ts: u64) -> HashSet<(PublicKey, DeviceId)> {
+        let Some(group) = self.mls_groups.get(&channel_id) else {
+            return HashSet::new();
+        };
+        self.member_leaf_set(at_ts)
+            .into_iter()
+            .filter(|leaf| {
+                !group.leaves_confirmed.contains(leaf) && !group.leaves_pending.contains(leaf)
+            })
+            .collect()
+    }
+
+    /// The (generation, epoch) an E2ee channel's group is currently in — sub-3's
+    /// stale-epoch pre-check. `None` = the channel has no MLS group.
+    pub fn mls_current_epoch(&self, channel_id: u64) -> Option<(u64, u64)> {
+        self.mls_groups.get(&channel_id).map(|g| (g.generation, g.epoch))
+    }
+
+    /// The joiner-confirmed leaves of a channel's group (drift detection runs on
+    /// these, never on pending leaves). Empty for channels without a group.
+    pub fn leaves_confirmed(&self, channel_id: u64) -> HashSet<(PublicKey, DeviceId)> {
+        self.mls_groups
+            .get(&channel_id)
+            .map(|g| g.leaves_confirmed.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether an `MlsCommit` event discharges an outstanding fold obligation:
+    /// at least one declared add ∈ `pending_adds` or remove ∈ `pending_removals`
+    /// (at the event's claimed timestamp). `false` for non-commit payloads.
+    pub fn commit_discharges_drift(&self, event: &Event) -> bool {
+        let EventPayload::MlsCommit { channel_id, adds, removes, .. } = &event.core.payload
+        else {
+            return false;
+        };
+        let at_ts = event.core.timestamp;
+        let padds = self.pending_adds(*channel_id, at_ts);
+        let premoves = self.pending_removals(*channel_id, at_ts);
+        adds.iter().any(|a| padds.contains(&(a.identity.clone(), a.device.clone())))
+            || removes.iter().any(|r| premoves.contains(&(r.identity.clone(), r.device.clone())))
+    }
+
+    /// The drift-priority tiebreak for two same-epoch candidate commits (spec
+    /// I2, exported pure for Rung 3's orderer): an obligation-discharging commit
+    /// orders FIRST regardless of hash grinding or self-asserted lamport; when
+    /// neither or both discharge, canonical order `(lamport, author, event_hash)`.
+    pub fn compare_same_epoch_commits(&self, a: &Event, b: &Event) -> Ordering {
+        match (self.commit_discharges_drift(a), self.commit_discharges_drift(b)) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => (a.core.lamport, a.core.author.as_bytes(), a.hash())
+                .cmp(&(b.core.lamport, b.core.author.as_bytes(), b.hash())),
+        }
+    }
+
+    /// Spec C6: if the device has a pinned store-instance hash, `hash` must
+    /// match it (a mismatch is the clone/restore poison signal). An unpinned
+    /// device passes — the effect pins it (matches-or-pins semantics).
+    fn check_instance_pin(&self, device: &DeviceId, hash: &[u8; 32]) -> Result<()> {
+        if let Some(pinned) = self.device_store_instance.get(device) {
+            ensure!(
+                pinned == hash,
+                "store_instance_hash does not match this device's pinned instance (possible clone/restore)"
+            );
+        }
+        Ok(())
+    }
+
+    fn pin_instance(&mut self, device: &DeviceId, hash: &[u8; 32]) {
+        self.device_store_instance.entry(device.clone()).or_insert(*hash);
+    }
+
     /// Fold a genesis + an ordered slice of events into the resulting state,
     /// rejecting on the first invalid event. Equivalent to `from_genesis` then
     /// `apply` in sequence.
@@ -241,10 +466,15 @@ impl LogState {
         self.check_chain(event)?;
 
         // --- Payload authorization (read-only) ---
-        self.check_payload_authz(event)?;
+        let authorized = self.check_payload_authz(event)?;
 
         // --- Effects (only reached once every check passed) ---
-        self.apply_payload_effect(event, &device_pubkey);
+        // A stale commit (lost epoch CAS) is ACCEPTED but skips payload effects:
+        // only the chain head and log_pos (both envelope accounting, not MLS
+        // state) advance — the deterministic no-op (resolved ambiguity #8).
+        if authorized == Authorized::Apply {
+            self.apply_payload_effect(event, &device_pubkey);
+        }
         self.advance_chain(event);
         self.log_pos += 1;
         Ok(())
@@ -307,11 +537,10 @@ impl LogState {
             .insert(key, ChainHead { seq: event.core.seq, hash: event.hash() });
     }
 
-    /// Per-payload authorization (read-only). Tasks 3–4 fill the membership /
-    /// moderation / message arms; this task handles only `DeviceAuthorized` (whose
-    /// cert checks already happened in `resolve_device_pubkey`) and permits the
-    /// rest so the envelope can be tested in isolation.
-    fn check_payload_authz(&self, event: &Event) -> Result<()> {
+    /// Per-payload authorization (read-only — CHECK-THEN-MUTATE: no state may
+    /// change here). Returns the verdict `apply` acts on: normally `Apply`;
+    /// `StaleCommitNoOp` for an `MlsCommit` that lost the epoch CAS.
+    fn check_payload_authz(&self, event: &Event) -> Result<Authorized> {
         let author = &event.core.author;
         match &event.core.payload {
             EventPayload::DeviceAuthorized { .. } => {
@@ -323,12 +552,12 @@ impl LogState {
                         < MAX_LIVE_DEVICES_PER_IDENTITY,
                     "identity already has the maximum number of live devices"
                 );
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::InviteCreated { .. } => {
                 ensure!(self.has_capability(author, "invite"), "missing 'invite' capability");
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::MemberJoined { member, invite } => {
@@ -338,13 +567,13 @@ impl LogState {
                 let inv = self.invites.get(invite).context("join cites an unknown invite")?;
                 ensure!(inv.use_count < inv.max_uses, "invite has no uses left");
                 ensure!(event.core.timestamp <= inv.expires_at, "invite has expired");
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::MemberApproved { member } => {
                 ensure!(self.has_capability(author, "kick"), "missing 'kick' capability");
                 ensure!(self.is_pending(member), "target is not pending approval");
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::MessagePosted { channel_id, .. } => {
@@ -360,7 +589,7 @@ impl LogState {
                         "plaintext MessagePosted is invalid in an E2ee channel"
                     );
                 }
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::MemberRemoved { member } => {
@@ -372,18 +601,18 @@ impl LogState {
                     member == author || self.has_capability(author, "kick"),
                     "must be the member (leave) or hold 'kick'"
                 );
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::MemberBanned { member } => {
                 ensure!(self.has_capability(author, "ban"), "missing 'ban' capability");
                 ensure!(!self.is_owner(member), "the owner cannot be banned");
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::MemberUnbanned { .. } => {
                 ensure!(self.has_capability(author, "ban"), "missing 'ban' capability");
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::PermissionGranted { member, capability } => {
@@ -392,7 +621,7 @@ impl LogState {
                     self.is_owner(author) || self.has_capability(author, capability),
                     "cannot grant a capability you do not hold"
                 );
-                Ok(())
+                Ok(Authorized::Apply)
             }
             EventPayload::AttachmentRedacted { content_hash } => {
                 let uploader = self
@@ -407,7 +636,7 @@ impl LogState {
                     !self.redacted_attachments.contains(content_hash),
                     "attachment already redacted"
                 );
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::ChannelCreated { channel_id, class, parent, .. } => {
@@ -432,7 +661,7 @@ impl LogState {
                         "thread child must inherit its parent's class"
                     );
                 }
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::MessageDeleted { channel_id, target, reason } => {
@@ -457,7 +686,7 @@ impl LogState {
                         ensure!(self.is_member(author), "only members may delete their messages");
                     }
                 }
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
             EventPayload::DeviceRevoked { device } => {
@@ -473,20 +702,239 @@ impl LogState {
                     *author == rec.identity || self.is_owner(author),
                     "only the owning identity or the server owner may revoke a device"
                 );
-                Ok(())
+                Ok(Authorized::Apply)
             }
 
-            // TEMP (fail closed, Task 2): the MLS group variants are folded in
-            // Tasks 3–4. Explicitly listed (no `_`) so adding a variant without
-            // a rule cannot be silently permissive.
-            EventPayload::MlsKeyPackagePublished { .. }
-            | EventPayload::MlsCommit { .. }
-            | EventPayload::MlsWelcome { .. }
-            | EventPayload::MlsLeafConfirmed { .. }
-            | EventPayload::MlsGroupReset { .. }
+            EventPayload::MlsKeyPackagePublished { store_instance_hash, expires_at_log_pos, .. } => {
+                // Full members only (approved, non-pending — pending identities
+                // are never in `members`, checked explicitly for defense).
+                ensure!(
+                    self.is_member(author) && !self.is_pending(author),
+                    "only full members may publish key packages"
+                );
+                self.check_instance_pin(&event.core.device, store_instance_hash)?;
+                // Log-position lifetime (spec I5): must expire in the future.
+                ensure!(
+                    *expires_at_log_pos > self.log_pos,
+                    "key package is already expired at its publish log position"
+                );
+                // Live cap: expired refs do not count (they are pruned on touch,
+                // in the effect — never here: authz is read-only).
+                let live = self
+                    .key_packages
+                    .get(&(author.clone(), event.core.device.clone()))
+                    .map_or(0, |m| m.values().filter(|&&exp| exp > self.log_pos).count());
+                ensure!(
+                    live < MAX_LIVE_KEY_PACKAGES_PER_DEVICE,
+                    "device already has the maximum number of live key packages"
+                );
+                Ok(Authorized::Apply)
+            }
+
+            EventPayload::MlsCommit {
+                channel_id,
+                generation,
+                epoch,
+                adds,
+                removes,
+                prev_epoch_authenticator,
+                store_instance_hash,
+                ..
+            } => {
+                // Groups exist only for E2ee channels, so presence covers the
+                // class gate (fail closed: Plaintext/unknown channel ⇒ no group).
+                let group = self
+                    .mls_groups
+                    .get(channel_id)
+                    .context("MlsCommit cites a channel with no E2ee group")?;
+                ensure!(
+                    *generation == group.generation,
+                    "commit generation does not match the group"
+                );
+                // Epoch CAS (spec: one winner per epoch). A loser is an ACCEPTED
+                // no-op — recorded, ignored, zero MLS state change — so any
+                // converged event set folds identically on every replica.
+                if *epoch != group.epoch {
+                    return Ok(Authorized::StaleCommitNoOp);
+                }
+                self.check_instance_pin(&event.core.device, store_instance_hash)?;
+                // Bootstrap (resolved ambiguity #5): the first commit of a
+                // generation has nothing to chain to and no confirmed tree yet —
+                // both the chain check and the confirmed-leaf requirement are
+                // exempt. `epoch_authenticator` is None exactly then.
+                if let Some(expected) = group.epoch_authenticator {
+                    ensure!(
+                        group
+                            .leaves_confirmed
+                            .contains(&(author.clone(), event.core.device.clone())),
+                        "commit author does not hold a confirmed leaf"
+                    );
+                    // Chain (spec C3): a commit must chain onto the authenticator
+                    // the previously accepted commit DECLARED. A liar therefore
+                    // cannot be built upon — the next honest commit fails here.
+                    ensure!(
+                        *prev_epoch_authenticator == expected,
+                        "commit does not chain onto the previous commit's declared authenticator"
+                    );
+                }
+                for add in adds {
+                    ensure!(
+                        self.is_member(&add.identity) && !self.is_pending(&add.identity),
+                        "declared add of a non-member"
+                    );
+                    ensure!(!self.is_banned(&add.identity), "declared add of a banned identity");
+                    ensure!(
+                        self.live_devices(&add.identity, event.core.timestamp)
+                            .contains(&add.device),
+                        "declared add of a device that is not live (unknown, revoked, or cert-expired)"
+                    );
+                    ensure!(
+                        !self.consumed_key_packages.contains_key(&add.key_package),
+                        "declared add cites a consumed key package"
+                    );
+                    ensure!(
+                        self.key_packages
+                            .get(&(add.identity.clone(), add.device.clone()))
+                            .and_then(|m| m.get(&add.key_package))
+                            .is_some_and(|&exp| exp > self.log_pos),
+                        "declared add does not cite a live key package of exactly that (identity, device)"
+                    );
+                    let leaf = (add.identity.clone(), add.device.clone());
+                    ensure!(
+                        !group.leaves_confirmed.contains(&leaf)
+                            && !group.leaves_pending.contains(&leaf),
+                        "declared add of a leaf that is already present or pending"
+                    );
+                    // Self-add rule (spec C5/Q12): once an identity holds a
+                    // confirmed leaf, only that identity may add its further
+                    // devices — a stolen identity key alone cannot obtain read
+                    // access while a real device of the victim is alive.
+                    if group.leaves_confirmed.iter().any(|(pk, _)| pk == &add.identity) {
+                        ensure!(
+                            author == &add.identity,
+                            "self-add rule: only the identity itself may add its additional devices"
+                        );
+                    }
+                }
+                for rem in removes {
+                    let leaf = (rem.identity.clone(), rem.device.clone());
+                    ensure!(
+                        group.leaves_confirmed.contains(&leaf)
+                            || group.leaves_pending.contains(&leaf),
+                        "declared remove of an absent leaf"
+                    );
+                    // Bridge rule: a good-standing member's leaf may only be
+                    // removed by that member itself (self-removal of a device).
+                    let good_standing = self.is_member(&rem.identity)
+                        && !self.is_banned(&rem.identity)
+                        && self
+                            .live_devices(&rem.identity, event.core.timestamp)
+                            .contains(&rem.device);
+                    ensure!(
+                        !good_standing || author == &rem.identity,
+                        "cannot remove a leaf of a member in good standing (except self-removal)"
+                    );
+                }
+                // Commit-rate rule (spec I3): drift discharge is NEVER blocked;
+                // otherwise the author's first commit, or an epoch gap of at
+                // least COMMIT_RATE_MIN_EPOCH_GAP, is required.
+                let rate_ok = self.commit_discharges_drift(event)
+                    || match group.last_commit_epoch_by_author.get(author) {
+                        None => true,
+                        Some(&last) => *epoch >= last + COMMIT_RATE_MIN_EPOCH_GAP,
+                    };
+                ensure!(
+                    rate_ok,
+                    "commit-rate rule: a non-drift-discharging commit must be its author's first or at least {COMMIT_RATE_MIN_EPOCH_GAP} epochs past their previous one"
+                );
+                Ok(Authorized::Apply)
+            }
+
+            EventPayload::MlsWelcome { channel_id, generation, commit, for_member, for_device, .. } => {
+                let group = self
+                    .mls_groups
+                    .get(channel_id)
+                    .context("MlsWelcome cites a channel with no E2ee group")?;
+                if *generation == group.generation {
+                    // Normal join flow: only a confirmed-leaf holder can welcome,
+                    // the target leaf must be pending, and the cited commit must
+                    // be one the fold recorded.
+                    ensure!(
+                        group
+                            .leaves_confirmed
+                            .contains(&(author.clone(), event.core.device.clone())),
+                        "welcome author does not hold a confirmed leaf"
+                    );
+                    ensure!(
+                        group
+                            .leaves_pending
+                            .contains(&(for_member.clone(), for_device.clone())),
+                        "welcome target leaf is not pending"
+                    );
+                    ensure!(
+                        group.commits_by_epoch.values().any(|c| &c.event_hash == commit),
+                        "welcome cites a commit the fold has not recorded"
+                    );
+                } else if *generation == group.generation + 1 {
+                    // Reset staging (resolved ambiguity #6): Welcomes for the
+                    // NEXT generation precede the owner's MlsGroupReset (whose
+                    // refs are content-addressed) — owner-only, like the reset.
+                    ensure!(
+                        self.is_owner(author),
+                        "next-generation (reset-staging) welcomes are owner-only"
+                    );
+                } else {
+                    bail!("welcome generation is neither the current one nor current + 1");
+                }
+                Ok(Authorized::Apply)
+            }
+
+            EventPayload::MlsLeafConfirmed { channel_id, generation, epoch, tree_hash, store_instance_hash } => {
+                let group = self
+                    .mls_groups
+                    .get(channel_id)
+                    .context("MlsLeafConfirmed cites a channel with no E2ee group")?;
+                ensure!(
+                    *generation == group.generation,
+                    "leaf confirmation generation does not match the group"
+                );
+                // Authored BY the joining device (spec C3: the joiner itself is
+                // the only party that can prove its Welcome worked).
+                ensure!(
+                    group
+                        .leaves_pending
+                        .contains(&(author.clone(), event.core.device.clone())),
+                    "leaf confirmation must come from the joining device of a pending leaf"
+                );
+                self.check_instance_pin(&event.core.device, store_instance_hash)?;
+                if let Some(rec) = group.commits_by_epoch.get(epoch) {
+                    ensure!(
+                        rec.post_tree_hash == *tree_hash,
+                        "confirmed tree hash does not match the cited epoch's commit"
+                    );
+                } else if group.reset_pending {
+                    // Reset generation (resolved ambiguity #7): its add-commit
+                    // is never a log event, so the FIRST confirmation seeds the
+                    // expected tree hash; every later one must match it.
+                    if let Some(expected) = group.reset_expected_tree_hash {
+                        ensure!(
+                            expected == *tree_hash,
+                            "confirmed tree hash does not match the reset generation's seeded tree hash"
+                        );
+                    }
+                } else {
+                    bail!("leaf confirmation cites an epoch with no recorded commit");
+                }
+                Ok(Authorized::Apply)
+            }
+
+            // TEMP (fail closed): MlsGroupReset and the sealed-content variants
+            // are folded in Task 4. Explicitly listed (no `_`) so adding a
+            // variant without a rule cannot be silently permissive.
+            EventPayload::MlsGroupReset { .. }
             | EventPayload::MessagePostedE2ee { .. }
             | EventPayload::MessageEditedE2ee { .. } => {
-                anyhow::bail!("MLS group variants are folded in Tasks 3-4")
+                bail!("reset/sealed-content variants are folded in Task 4")
             }
         }
     }
@@ -574,6 +1022,12 @@ impl LogState {
                         parent: *parent,
                     },
                 );
+                // An E2ee channel is born with its MLS group bookkeeping:
+                // generation 0, epoch 0 (the creator authors the first logged
+                // commit at epoch 0 — resolved ambiguity #5).
+                if *class == ChannelClass::E2ee {
+                    self.mls_groups.insert(*channel_id, MlsGroupRecord::new());
+                }
             }
             EventPayload::MessageDeleted { target, .. } => {
                 self.tombstones.insert(target.clone());
@@ -584,16 +1038,126 @@ impl LogState {
                 self.revoked_devices.insert(device.clone());
             }
 
-            // TEMP (Task 2): unreachable — check_payload_authz rejects the MLS
-            // group variants until their fold rules land in Tasks 3–4.
-            EventPayload::MlsKeyPackagePublished { .. }
-            | EventPayload::MlsCommit { .. }
-            | EventPayload::MlsWelcome { .. }
-            | EventPayload::MlsLeafConfirmed { .. }
-            | EventPayload::MlsGroupReset { .. }
+            EventPayload::MlsKeyPackagePublished { store_instance_hash, expires_at_log_pos, .. } => {
+                self.pin_instance(&event.core.device, store_instance_hash);
+                let log_pos = self.log_pos;
+                let entry = self
+                    .key_packages
+                    .entry((event.core.author.clone(), event.core.device.clone()))
+                    .or_default();
+                // Prune expired refs on touch (spec I5) — deterministic: driven
+                // only by the log-position clock.
+                entry.retain(|_, exp| *exp > log_pos);
+                entry.insert(event.hash(), *expires_at_log_pos);
+            }
+
+            EventPayload::MlsCommit {
+                channel_id,
+                epoch,
+                adds,
+                removes,
+                post_epoch_authenticator,
+                post_tree_hash,
+                store_instance_hash,
+                ..
+            } => {
+                // Only reached when the epoch CAS passed (a stale commit is a
+                // no-op that never enters this fn).
+                self.pin_instance(&event.core.device, store_instance_hash);
+                // Consume the cited KeyPackages: live → consumed (a consumed
+                // ref can never be an Add target again).
+                for add in adds {
+                    if let Some(m) =
+                        self.key_packages.get_mut(&(add.identity.clone(), add.device.clone()))
+                    {
+                        if let Some(exp) = m.remove(&add.key_package) {
+                            self.consumed_key_packages.insert(add.key_package.clone(), exp);
+                        }
+                    }
+                }
+                let event_hash = event.hash();
+                let group = self
+                    .mls_groups
+                    .get_mut(channel_id)
+                    .expect("authz verified the group exists");
+                let bootstrap = group.epoch_authenticator.is_none();
+                group.epoch = *epoch + 1;
+                group.commit_head = Some(event_hash.clone());
+                group.epoch_authenticator = Some(*post_epoch_authenticator);
+                group.tree_hash = Some(*post_tree_hash);
+                group.commits_by_epoch.insert(
+                    *epoch + 1,
+                    CommitRecord { event_hash, post_tree_hash: *post_tree_hash },
+                );
+                for add in adds {
+                    group.leaves_pending.insert((add.identity.clone(), add.device.clone()));
+                }
+                for rem in removes {
+                    let leaf = (rem.identity.clone(), rem.device.clone());
+                    group.leaves_confirmed.remove(&leaf);
+                    group.leaves_pending.remove(&leaf);
+                }
+                if bootstrap {
+                    // The generation's first commit: its author IS the tree by
+                    // construction (resolved ambiguity #5) — leaf confirmed.
+                    let leaf = (event.core.author.clone(), event.core.device.clone());
+                    group.leaves_pending.remove(&leaf);
+                    group.leaves_confirmed.insert(leaf);
+                }
+                group.events_since_last_commit = 0;
+                group
+                    .last_commit_epoch_by_author
+                    .insert(event.core.author.clone(), *epoch);
+            }
+
+            EventPayload::MlsWelcome { channel_id, generation, for_member, for_device, .. } => {
+                let hash = event.hash();
+                let group = self
+                    .mls_groups
+                    .get_mut(channel_id)
+                    .expect("authz verified the group exists");
+                group.welcomes.insert(
+                    hash,
+                    WelcomeRecord {
+                        generation: *generation,
+                        for_member: for_member.clone(),
+                        for_device: for_device.clone(),
+                    },
+                );
+            }
+
+            EventPayload::MlsLeafConfirmed { channel_id, tree_hash, store_instance_hash, .. } => {
+                self.pin_instance(&event.core.device, store_instance_hash);
+                // Computed before the mutable group borrow; only consulted on
+                // the reset path.
+                let full_set = self.member_leaf_set(event.core.timestamp);
+                let group = self
+                    .mls_groups
+                    .get_mut(channel_id)
+                    .expect("authz verified the group exists");
+                let leaf = (event.core.author.clone(), event.core.device.clone());
+                group.leaves_pending.remove(&leaf);
+                group.leaves_confirmed.insert(leaf);
+                if group.reset_pending {
+                    // First confirmation of a reset generation seeds the tree
+                    // hash every later confirmation must match (ambiguity #7).
+                    if group.reset_expected_tree_hash.is_none() {
+                        group.reset_expected_tree_hash = Some(*tree_hash);
+                    }
+                    // A reset stops being pending only when EVERY member device
+                    // holds a confirmed leaf (partial reset = dead channel).
+                    if group.leaves_confirmed == full_set {
+                        group.reset_pending = false;
+                    }
+                }
+            }
+
+            // TEMP (Task 3): unreachable — check_payload_authz rejects the
+            // reset/sealed-content variants until their fold rules land in Task 4.
+            EventPayload::MlsGroupReset { .. }
             | EventPayload::MessagePostedE2ee { .. }
             | EventPayload::MessageEditedE2ee { .. } => {
-                unreachable!("MLS group variants are rejected by check_payload_authz until Tasks 3-4")
+                unreachable!("reset/sealed-content variants are rejected by check_payload_authz until Task 4")
             }
         }
     }
@@ -604,7 +1168,7 @@ mod tests {
     use super::*;
     use crate::identity::Keypair;
     use crate::event_log::{device_id, AttachmentCap, DeviceCert, Event as Ev, EventPayload as EP};
-    use crate::event_log::{ChannelClass, DeleteReason};
+    use crate::event_log::{ChannelClass, DeclaredAdd, DeclaredRemove, DeleteReason};
 
     fn genesis(owner: &Keypair) -> Genesis {
         Genesis {
@@ -1612,5 +2176,630 @@ mod tests {
         assert_eq!(st.live_devices(&owner.public_key(), 51).len(), 7);
         st.apply(&e9).expect("after a revocation, an additional device is accepted");
         assert_eq!(st.live_devices(&owner.public_key(), 51).len(), MAX_LIVE_DEVICES_PER_IDENTITY);
+    }
+
+    // ---- Rung 2, Task 3: MLS group bookkeeping ----
+
+    /// The E2ee test channel and per-device MLS store-instance hashes.
+    const CH: u64 = 5;
+    const OWNER_STORE: [u8; 32] = [1u8; 32];
+    const ALICE_STORE: [u8; 32] = [2u8; 32];
+    /// Declared epoch authenticators / tree hashes used across the tests:
+    /// `Xn` = the authenticator the commit creating epoch n+1... (indexing by
+    /// the commit sequence: c0 declares post X0, c1 declares post X1, ...).
+    const X0: [u8; 32] = [10u8; 32];
+    const X1: [u8; 32] = [11u8; 32];
+    const X2: [u8; 32] = [12u8; 32];
+    const T0: [u8; 32] = [20u8; 32];
+    const T1: [u8; 32] = [21u8; 32];
+    const T2: [u8; 32] = [22u8; 32];
+
+    fn kp_publish(
+        dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev,
+        store: [u8; 32], expires_at_log_pos: u64, ts: u64,
+    ) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, ts,
+            EP::MlsKeyPackagePublished {
+                key_package: vec![0xAB], store_instance_hash: store, expires_at_log_pos,
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mls_commit(
+        dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, epoch: u64,
+        adds: Vec<DeclaredAdd>, removes: Vec<DeclaredRemove>,
+        prev_auth: [u8; 32], post_auth: [u8; 32], post_tree: [u8; 32], store: [u8; 32],
+    ) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, 500,
+            EP::MlsCommit {
+                channel_id: CH, generation: 0, epoch, mls_message: vec![0xC0],
+                adds, removes,
+                prev_epoch_authenticator: prev_auth, post_epoch_authenticator: post_auth,
+                post_tree_hash: post_tree, authz_head: "a".repeat(64), store_instance_hash: store,
+            })
+    }
+
+    fn leaf_confirm(
+        dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev,
+        epoch: u64, tree: [u8; 32], store: [u8; 32],
+    ) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, 500,
+            EP::MlsLeafConfirmed {
+                channel_id: CH, generation: 0, epoch, tree_hash: tree, store_instance_hash: store,
+            })
+    }
+
+    fn welcome_for(
+        dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev,
+        generation: u64, commit: EventRef, for_member: &PublicKey, for_device: &DeviceId,
+    ) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, 500,
+            EP::MlsWelcome {
+                channel_id: CH, generation, commit,
+                for_member: for_member.clone(), for_device: for_device.clone(), welcome: vec![0xEE],
+            })
+    }
+
+    fn add_of(identity: &PublicKey, device: &Keypair, kp_ref: &EventRef) -> DeclaredAdd {
+        DeclaredAdd {
+            identity: identity.clone(),
+            device: device_id(&device.public_key()),
+            key_package: kp_ref.clone(),
+        }
+    }
+
+    fn rem_of(identity: &PublicKey, device: &Keypair) -> DeclaredRemove {
+        DeclaredRemove { identity: identity.clone(), device: device_id(&device.public_key()) }
+    }
+
+    /// Owner + owner device, member alice + device, `ChannelCreated { E2ee }`
+    /// (channel CH), and one KeyPackage published per device (which PINS each
+    /// device's store-instance hash).
+    struct E2eeFix {
+        st: LogState,
+        sid: String,
+        owner: Keypair,
+        owner_dev: Keypair,
+        owner_prev: Ev,
+        alice: Keypair,
+        alice_dev: Keypair,
+        alice_prev: Ev,
+        alice_kp_ref: EventRef,
+    }
+
+    fn e2ee_fixture() -> E2eeFix {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+        let (alice, alice_dev, alice_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        let ch = channel(&owner_dev, &owner.public_key(), &sid, &owner_prev, CH, ChannelClass::E2ee, None);
+        st.apply(&ch).expect("owner creates the E2ee channel");
+        owner_prev = ch;
+        let okp = kp_publish(&owner_dev, &owner.public_key(), &sid, &owner_prev, OWNER_STORE, 1_000_000, 500);
+        st.apply(&okp).expect("owner key package publishes");
+        owner_prev = okp;
+        let akp = kp_publish(&alice_dev, &alice.public_key(), &sid, &alice_last, ALICE_STORE, 1_000_000, 500);
+        st.apply(&akp).expect("alice key package publishes");
+        let alice_kp_ref = akp.hash();
+        E2eeFix { st, sid, owner, owner_dev, owner_prev, alice, alice_dev, alice_prev: akp, alice_kp_ref }
+    }
+
+    /// The creator's bootstrap commit: epoch 0, declares post-authenticator X0
+    /// / tree T0 (nothing to chain onto; the author's leaf becomes confirmed).
+    fn apply_bootstrap(f: &mut E2eeFix) {
+        let c0 = mls_commit(&f.owner_dev, &f.owner.public_key(), &f.sid, &f.owner_prev,
+            0, vec![], vec![], [0u8; 32], X0, T0, OWNER_STORE);
+        f.st.apply(&c0).expect("bootstrap commit folds");
+        f.owner_prev = c0;
+    }
+
+    /// Owner add-commit for alice at epoch 1 (chains X0 → X1, tree T1), then
+    /// alice's matching confirmation at epoch 2. Leaves the group at epoch 2
+    /// with both leaves confirmed and zero drift.
+    fn add_and_confirm_alice(f: &mut E2eeFix) {
+        let c1 = mls_commit(&f.owner_dev, &f.owner.public_key(), &f.sid, &f.owner_prev, 1,
+            vec![add_of(&f.alice.public_key(), &f.alice_dev, &f.alice_kp_ref)], vec![],
+            X0, X1, T1, OWNER_STORE);
+        f.st.apply(&c1).expect("add-commit for alice folds");
+        f.owner_prev = c1;
+        let cf = leaf_confirm(&f.alice_dev, &f.alice.public_key(), &f.sid, &f.alice_prev, 2, T1, ALICE_STORE);
+        f.st.apply(&cf).expect("alice's leaf confirmation folds");
+        f.alice_prev = cf;
+    }
+
+    #[test]
+    fn key_package_cap_and_log_position_lifetime_are_enforced() {
+        let mut f = e2ee_fixture();
+        let alice_pk = f.alice.public_key();
+        let owner_pk = f.owner.public_key();
+
+        // Alice already holds 1 live package (fixture); 9 more reach the cap.
+        for i in 0..9 {
+            let e = kp_publish(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, ALICE_STORE, 1_000_000, 500);
+            f.st.apply(&e).unwrap_or_else(|err| panic!("live package {} should fold: {err}", i + 2));
+            f.alice_prev = e;
+        }
+        let over = kp_publish(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, ALICE_STORE, 1_000_000, 500);
+        assert!(f.st.clone().apply(&over).is_err(), "11th live key package must be rejected");
+
+        // Bob: publishing a package that is already expired at its log position
+        // is rejected outright.
+        let (bob, bob_dev, mut bob_prev) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let bob_pk = bob.public_key();
+        let dead = kp_publish(&bob_dev, &bob_pk, &f.sid, &bob_prev, [4u8; 32], f.st.log_pos(), 500);
+        assert!(f.st.clone().apply(&dead).is_err(), "expires_at_log_pos <= log_pos must be rejected");
+
+        // A short-lived package: live for exactly one more accepted event.
+        let short = kp_publish(&bob_dev, &bob_pk, &f.sid, &bob_prev, [4u8; 32], f.st.log_pos() + 2, 500);
+        let short_ref = short.hash();
+        f.st.apply(&short).expect("a not-yet-expired package folds");
+        bob_prev = short;
+        // One more accepted event pushes log_pos past the expiry.
+        let filler = post_in(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1);
+        f.st.apply(&filler).unwrap();
+        f.owner_prev = filler;
+
+        // The expired package no longer counts toward the cap: 10 fresh
+        // publishes all fold (if it counted, the 10th would exceed the cap).
+        let mut fresh_ref = String::new();
+        for i in 0..10 {
+            let e = kp_publish(&bob_dev, &bob_pk, &f.sid, &bob_prev, [4u8; 32], 1_000_000, 500);
+            fresh_ref = e.hash();
+            f.st.apply(&e).unwrap_or_else(|err| panic!("fresh package {} should fold: {err}", i + 1));
+            bob_prev = e;
+        }
+
+        // And the expired ref is invalid as an Add target, while a live one works.
+        apply_bootstrap(&mut f);
+        let bad_add = DeclaredAdd {
+            identity: bob_pk.clone(),
+            device: device_id(&bob_dev.public_key()),
+            key_package: short_ref,
+        };
+        let bad = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            vec![bad_add], vec![], X0, X1, T1, OWNER_STORE);
+        assert!(f.st.clone().apply(&bad).is_err(), "an expired key package is invalid as an Add target");
+        let good = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            vec![add_of(&bob_pk, &bob_dev, &fresh_ref)], vec![], X0, X1, T1, OWNER_STORE);
+        f.st.apply(&good).expect("a live key package is a valid Add target");
+    }
+
+    #[test]
+    fn first_commit_bootstraps_then_epoch_cas_noops_stale_commits() {
+        let mut f = e2ee_fixture();
+        assert_eq!(f.st.mls_current_epoch(CH), Some((0, 0)), "E2ee creation starts gen 0 / epoch 0");
+        apply_bootstrap(&mut f);
+        assert_eq!(f.st.mls_current_epoch(CH), Some((0, 1)), "bootstrap commit advances to epoch 1");
+        let owner_leaf = (f.owner.public_key(), device_id(&f.owner_dev.public_key()));
+        assert!(
+            f.st.leaves_confirmed(CH).contains(&owner_leaf),
+            "the bootstrap author IS the tree — leaf confirmed without a Welcome"
+        );
+
+        // Alice re-declares epoch 0 (lost the CAS): an ACCEPTED no-op.
+        let stale = mls_commit(&f.alice_dev, &f.alice.public_key(), &f.sid, &f.alice_prev,
+            0, vec![], vec![], [9u8; 32], [9u8; 32], [9u8; 32], ALICE_STORE);
+        let group_before = f.st.mls_groups.get(&CH).cloned().unwrap();
+        let key_packages_before = f.st.key_packages.clone();
+        f.st.apply(&stale).expect("a stale commit is an accepted no-op, not an error");
+        assert_eq!(
+            f.st.mls_groups.get(&CH).unwrap(), &group_before,
+            "a stale commit must change zero MLS state"
+        );
+        assert_eq!(f.st.key_packages, key_packages_before, "a stale commit consumes nothing");
+        assert_eq!(f.st.mls_current_epoch(CH), Some((0, 1)), "epoch unchanged");
+        // ...but the author's chain head DID advance (the event is recorded).
+        let chain_key = (f.alice.public_key(), device_id(&f.alice_dev.public_key()));
+        assert_eq!(
+            f.st.chains.get(&chain_key).unwrap().hash, stale.hash(),
+            "the stale commit still advances its author's chain head"
+        );
+    }
+
+    #[test]
+    fn commit_chaining_rejects_build_on_a_liar() {
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f); // declared post_epoch_authenticator = X0
+        let owner_pk = f.owner.public_key();
+        let alice_add = vec![add_of(&f.alice.public_key(), &f.alice_dev, &f.alice_kp_ref)];
+
+        // A commit whose prev does not equal what the previous commit DECLARED
+        // is rejected — a liar cannot be built upon, checked blind.
+        let on_liar = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            alice_add.clone(), vec![], [99u8; 32], X1, T1, OWNER_STORE);
+        assert!(
+            f.st.clone().apply(&on_liar).is_err(),
+            "a commit not chaining onto the declared authenticator must be rejected"
+        );
+
+        let honest = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            alice_add, vec![], X0, X1, T1, OWNER_STORE);
+        f.st.apply(&honest).expect("the chaining commit folds");
+        assert_eq!(f.st.mls_current_epoch(CH), Some((0, 2)));
+    }
+
+    /// An owner-authored epoch-3 commit (prev X2) with exactly one declared
+    /// add, applied to a CLONE — returns whether the fold rejected it.
+    fn add_rejected(f: &E2eeFix, add: DeclaredAdd) -> bool {
+        let c = mls_commit(&f.owner_dev, &f.owner.public_key(), &f.sid, &f.owner_prev, 3,
+            vec![add], vec![], X2, [13u8; 32], [23u8; 32], OWNER_STORE);
+        f.st.clone().apply(&c).is_err()
+    }
+
+    #[test]
+    fn declared_add_requires_a_live_key_package_of_a_member_in_good_standing() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2; alice's fixture package consumed
+
+        // Alice self-removes her leaf so re-add scenarios are testable.
+        let c2 = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![], vec![rem_of(&alice_pk, &f.alice_dev)], X1, X2, T2, ALICE_STORE);
+        f.st.apply(&c2).expect("self-removal folds");
+        f.alice_prev = c2;
+        // Group is at epoch 3, chained on X2.
+
+        // (a) non-member identity.
+        let stranger = Keypair::generate().public_key();
+        assert!(
+            add_rejected(&f, DeclaredAdd {
+                identity: stranger, device: "d".repeat(64), key_package: "e".repeat(64),
+            }),
+            "add of a non-member must be rejected"
+        );
+
+        // (b) banned member: bob joins, publishes a package, gets banned.
+        let (bob, bob_dev, bob_last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let bkp = kp_publish(&bob_dev, &bob.public_key(), &f.sid, &bob_last, [4u8; 32], 1_000_000, 500);
+        f.st.apply(&bkp).unwrap();
+        let bob_ref = bkp.hash();
+        let ban = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 500, EP::MemberBanned { member: bob.public_key() });
+        f.st.apply(&ban).unwrap();
+        f.owner_prev = ban;
+        assert!(
+            add_rejected(&f, add_of(&bob.public_key(), &bob_dev, &bob_ref)),
+            "add of a banned identity must be rejected"
+        );
+
+        // (c) revoked device: carol joins, publishes, her device is revoked.
+        let (carol, carol_dev, carol_last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let ckp = kp_publish(&carol_dev, &carol.public_key(), &f.sid, &carol_last, [5u8; 32], 1_000_000, 500);
+        f.st.apply(&ckp).unwrap();
+        let carol_ref = ckp.hash();
+        let revoke = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 500,
+            EP::DeviceRevoked { device: device_id(&carol_dev.public_key()) });
+        f.st.apply(&revoke).unwrap();
+        f.owner_prev = revoke;
+        assert!(
+            add_rejected(&f, add_of(&carol.public_key(), &carol_dev, &carol_ref)),
+            "add of a revoked device must be rejected"
+        );
+
+        // (d) expired cert: dave's cert expires at t=100; commits claim t=500.
+        let inv = invite(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev,
+            f.owner_prev.core.lamport + 1, 5, 9999, false);
+        f.st.apply(&inv).unwrap();
+        f.owner_prev = inv.clone();
+        let dave = Keypair::generate();
+        let dave_dev = Keypair::generate();
+        let d_da = Ev::next(&dave_dev, dave.public_key(), f.sid.clone(), None, 0, 50,
+            EP::DeviceAuthorized { cert: DeviceCert::create_expiring(&dave, &dave_dev.public_key(), 1, 100) });
+        f.st.apply(&d_da).unwrap();
+        let d_join = Ev::next(&dave_dev, dave.public_key(), f.sid.clone(), Some(&d_da), 1, 50,
+            EP::MemberJoined { member: dave.public_key(), invite: inv.hash() });
+        f.st.apply(&d_join).unwrap();
+        let dkp = kp_publish(&dave_dev, &dave.public_key(), &f.sid, &d_join, [6u8; 32], 1_000_000, 60);
+        f.st.apply(&dkp).unwrap();
+        let dave_ref = dkp.hash();
+        assert!(
+            add_rejected(&f, add_of(&dave.public_key(), &dave_dev, &dave_ref)),
+            "add of a device whose cert is expired at the commit's timestamp must be rejected"
+        );
+
+        // (e) consumed ref: alice's fixture package was consumed by her add.
+        assert!(
+            add_rejected(&f, add_of(&alice_pk, &f.alice_dev, &f.alice_kp_ref)),
+            "add citing a consumed key package must be rejected"
+        );
+
+        // (f) another device's ref: alice publishes a fresh package from her
+        // FIRST device; citing it for her second device is rejected.
+        let a2 = Keypair::generate();
+        let a2_da = Ev::next(&a2, alice_pk.clone(), f.sid.clone(), None, 0, 500,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&f.alice, &a2.public_key(), 500) });
+        f.st.apply(&a2_da).unwrap();
+        let akp2 = kp_publish(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, ALICE_STORE, 1_000_000, 500);
+        f.st.apply(&akp2).unwrap();
+        let fresh_alice_ref = akp2.hash();
+        f.alice_prev = akp2;
+        assert!(
+            add_rejected(&f, add_of(&alice_pk, &a2, &fresh_alice_ref)),
+            "add citing another device's key package must be rejected"
+        );
+
+        // The counterfactual: the same commit shape with a live ref of exactly
+        // the declared (identity, device) folds.
+        let ok = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3,
+            vec![add_of(&alice_pk, &f.alice_dev, &fresh_alice_ref)], vec![],
+            X2, [13u8; 32], [23u8; 32], OWNER_STORE);
+        f.st.apply(&ok).expect("a good-standing member with a live package can be added");
+    }
+
+    #[test]
+    fn remove_of_a_member_in_good_standing_is_rejected_except_self_removal() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2, alice confirmed, good standing
+
+        // A steward (the owner) removing a good-standing leaf is rejected.
+        let steward_rm = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
+            vec![], vec![rem_of(&alice_pk, &f.alice_dev)], X1, X2, T2, OWNER_STORE);
+        assert!(
+            f.st.clone().apply(&steward_rm).is_err(),
+            "removing a member in good standing must be rejected"
+        );
+
+        // The member removing their OWN device is allowed.
+        let self_rm = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![], vec![rem_of(&alice_pk, &f.alice_dev)], X1, X2, T2, ALICE_STORE);
+        f.st.apply(&self_rm).expect("self-removal of one's own device folds");
+        f.alice_prev = self_rm;
+        let alice_leaf = (alice_pk.clone(), device_id(&f.alice_dev.public_key()));
+        assert!(!f.st.leaves_confirmed(CH).contains(&alice_leaf));
+
+        // A banned member's leaf CAN be removed by anyone holding a leaf.
+        let (bob, bob_dev, bob_last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let bkp = kp_publish(&bob_dev, &bob.public_key(), &f.sid, &bob_last, [4u8; 32], 1_000_000, 500);
+        f.st.apply(&bkp).unwrap();
+        let c3 = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3,
+            vec![add_of(&bob.public_key(), &bob_dev, &bkp.hash())], vec![],
+            X2, [13u8; 32], [23u8; 32], OWNER_STORE);
+        f.st.apply(&c3).expect("bob's add folds");
+        f.owner_prev = c3;
+        let ban = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 500, EP::MemberBanned { member: bob.public_key() });
+        f.st.apply(&ban).unwrap();
+        f.owner_prev = ban;
+        let rm_banned = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 4,
+            vec![], vec![rem_of(&bob.public_key(), &bob_dev)],
+            [13u8; 32], [14u8; 32], [24u8; 32], OWNER_STORE);
+        f.st.apply(&rm_banned).expect("removing a banned member's leaf folds");
+        let bob_leaf = (bob.public_key(), device_id(&bob_dev.public_key()));
+        assert!(f.st.pending_removals(CH, 500).is_empty(), "the ban drift is discharged");
+        assert!(!f.st.mls_groups.get(&CH).unwrap().leaves_pending.contains(&bob_leaf));
+    }
+
+    #[test]
+    fn self_add_rule_blocks_stewards_adding_a_second_device() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // alice holds a CONFIRMED leaf
+
+        // Alice's second device registers and publishes its own package.
+        let a2 = Keypair::generate();
+        let a2_da = Ev::next(&a2, alice_pk.clone(), f.sid.clone(), None, 0, 500,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&f.alice, &a2.public_key(), 500) });
+        f.st.apply(&a2_da).unwrap();
+        let a2_kp = kp_publish(&a2, &alice_pk, &f.sid, &a2_da, [3u8; 32], 1_000_000, 500);
+        f.st.apply(&a2_kp).unwrap();
+        let a2_ref = a2_kp.hash();
+
+        // A steward (the owner) adding alice's second device is rejected: only
+        // the identity itself may extend its own read set (spec C5/Q12).
+        let steward_add = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
+            vec![add_of(&alice_pk, &a2, &a2_ref)], vec![], X1, X2, T2, OWNER_STORE);
+        assert!(
+            f.st.clone().apply(&steward_add).is_err(),
+            "a steward adding a second device of a leaf-holding identity must be rejected"
+        );
+
+        // The same add authored by alice (from her confirmed device) folds.
+        let self_add = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![add_of(&alice_pk, &a2, &a2_ref)], vec![], X1, X2, T2, ALICE_STORE);
+        f.st.apply(&self_add).expect("the identity itself can add its second device");
+        let a2_leaf = (alice_pk.clone(), device_id(&a2.public_key()));
+        assert!(f.st.mls_groups.get(&CH).unwrap().leaves_pending.contains(&a2_leaf));
+    }
+
+    #[test]
+    fn joiner_confirmation_promotes_only_on_matching_tree_hash() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        let alice_did = device_id(&f.alice_dev.public_key());
+        let alice_leaf = (alice_pk.clone(), alice_did.clone());
+
+        // Before any commit, alice's device is visible drift (a pending add).
+        assert!(f.st.pending_adds(CH, 500).contains(&alice_leaf));
+        apply_bootstrap(&mut f);
+        let c1 = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            vec![add_of(&alice_pk, &f.alice_dev, &f.alice_kp_ref)], vec![],
+            X0, X1, T1, OWNER_STORE);
+        f.st.apply(&c1).expect("add-commit folds");
+        f.owner_prev = c1.clone();
+
+        // Declared ≠ present: the leaf is pending, never confirmed by the add.
+        assert!(!f.st.leaves_confirmed(CH).contains(&alice_leaf));
+        assert!(f.st.pending_adds(CH, 500).is_empty(), "pending leaf absorbs the declared add");
+
+        // A Welcome from a non-confirmed author is rejected; so is one citing
+        // an unrecorded commit.
+        let self_welcome = welcome_for(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev,
+            0, c1.hash(), &alice_pk, &alice_did);
+        assert!(f.st.clone().apply(&self_welcome).is_err(), "welcome author must hold a confirmed leaf");
+        let bad_ref = welcome_for(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev,
+            0, "9".repeat(64), &alice_pk, &alice_did);
+        assert!(f.st.clone().apply(&bad_ref).is_err(), "welcome must cite a recorded commit");
+
+        // The owner's Welcome is recorded — but recording a Welcome (even a
+        // sealed bogus one) NEVER promotes the leaf: it stays pending.
+        let w = welcome_for(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev,
+            0, c1.hash(), &alice_pk, &alice_did);
+        f.st.apply(&w).expect("owner welcome folds");
+        f.owner_prev = w;
+        assert_eq!(f.st.mls_groups.get(&CH).unwrap().welcomes.len(), 1);
+        assert!(!f.st.leaves_confirmed(CH).contains(&alice_leaf), "a Welcome alone never confirms");
+
+        // Confirmation with the WRONG tree hash is rejected.
+        let wrong = leaf_confirm(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2, [99u8; 32], ALICE_STORE);
+        assert!(f.st.clone().apply(&wrong).is_err(), "mismatched tree hash must be rejected");
+
+        // A DIFFERENT device of the same identity cannot confirm the leaf.
+        let a2 = Keypair::generate();
+        let a2_da = Ev::next(&a2, alice_pk.clone(), f.sid.clone(), None, 0, 500,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&f.alice, &a2.public_key(), 500) });
+        f.st.apply(&a2_da).unwrap();
+        let other_dev = leaf_confirm(&a2, &alice_pk, &f.sid, &a2_da, 2, T1, [3u8; 32]);
+        assert!(
+            f.st.clone().apply(&other_dev).is_err(),
+            "only the joining device itself may confirm its leaf"
+        );
+
+        // The joining device with the matching tree hash promotes to confirmed.
+        let ok = leaf_confirm(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2, T1, ALICE_STORE);
+        f.st.apply(&ok).expect("matching confirmation folds");
+        assert!(f.st.leaves_confirmed(CH).contains(&alice_leaf));
+        assert!(f.st.mls_groups.get(&CH).unwrap().leaves_pending.is_empty());
+    }
+
+    #[test]
+    fn store_instance_hash_is_pinned_per_device() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+
+        // The fixture's first publish pinned each device; a different hash on a
+        // later publish is the clone/restore poison signal — rejected.
+        let repin = kp_publish(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, [9u8; 32], 1_000_000, 500);
+        assert!(f.st.clone().apply(&repin).is_err(), "publish with a different instance hash must be rejected");
+
+        apply_bootstrap(&mut f);
+
+        // A commit from a pinned device with a different hash is rejected.
+        let bad_commit = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            vec![add_of(&alice_pk, &f.alice_dev, &f.alice_kp_ref)], vec![],
+            X0, X1, T1, [9u8; 32]);
+        assert!(f.st.clone().apply(&bad_commit).is_err(), "commit with a different instance hash must be rejected");
+        let c1 = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            vec![add_of(&alice_pk, &f.alice_dev, &f.alice_kp_ref)], vec![],
+            X0, X1, T1, OWNER_STORE);
+        f.st.apply(&c1).expect("pinned-hash commit folds");
+        f.owner_prev = c1;
+
+        // A confirmation from a pinned device with a different hash is rejected.
+        let bad_confirm = leaf_confirm(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2, T1, [9u8; 32]);
+        assert!(f.st.clone().apply(&bad_confirm).is_err(), "confirm with a different instance hash must be rejected");
+        let ok = leaf_confirm(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2, T1, ALICE_STORE);
+        f.st.apply(&ok).expect("pinned-hash confirmation folds");
+    }
+
+    #[test]
+    fn commit_rate_rule_blocks_spam_but_never_drift_discharge() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);          // owner's commit at epoch 0
+        add_and_confirm_alice(&mut f);    // owner's commit at epoch 1
+        assert!(f.st.pending_adds(CH, 500).is_empty());
+        assert!(f.st.pending_removals(CH, 500).is_empty());
+
+        // Same author, epochs n and n+1, discharging nothing: spam — rejected
+        // (epoch 2 < 1 + COMMIT_RATE_MIN_EPOCH_GAP, and not a first commit).
+        let spam = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
+            vec![], vec![], X1, X2, T2, OWNER_STORE);
+        assert!(
+            f.st.clone().apply(&spam).is_err(),
+            "a quick non-drift-discharging self-update must be rate-blocked"
+        );
+
+        // Ban alice: her confirmed leaf becomes a pending removal.
+        let ban = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 500, EP::MemberBanned { member: alice_pk.clone() });
+        f.st.apply(&ban).unwrap();
+        f.owner_prev = ban;
+        let alice_leaf = (alice_pk.clone(), device_id(&f.alice_dev.public_key()));
+        assert!(f.st.pending_removals(CH, 500).contains(&alice_leaf));
+
+        // The SAME quick cadence, now discharging the drift: never blocked.
+        let discharge = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
+            vec![], vec![rem_of(&alice_pk, &f.alice_dev)], X1, X2, T2, OWNER_STORE);
+        f.st.apply(&discharge).expect("a drift-discharging commit is never rate-blocked");
+        assert!(f.st.pending_removals(CH, 500).is_empty());
+    }
+
+    #[test]
+    fn drift_priority_tiebreak_beats_a_premined_commit() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2, both leaves confirmed
+
+        // Bob: a member with a live package and no leaf — outstanding drift.
+        let (bob, bob_dev, bob_last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let bkp = kp_publish(&bob_dev, &bob.public_key(), &f.sid, &bob_last, [4u8; 32], 1_000_000, 500);
+        f.st.apply(&bkp).unwrap();
+        let bob_add = add_of(&bob.public_key(), &bob_dev, &bkp.hash());
+        assert!(f.st.pending_adds(CH, 500).contains(&(bob.public_key(), device_id(&bob_dev.public_key()))));
+
+        // Candidate A (alice) discharges the drift. Candidate B (owner) is a
+        // self-update PRE-MINED to sort first canonically — lamport is
+        // self-asserted (the same grindable surface as the event hash), so B
+        // claims lamport 1, far below A's.
+        let a = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![bob_add.clone()], vec![], X1, X2, T2, ALICE_STORE);
+        let premined = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev), 0, 500,
+            EP::MlsCommit {
+                channel_id: CH, generation: 0, epoch: 2, mls_message: vec![0xC0],
+                adds: vec![], removes: vec![],
+                prev_epoch_authenticator: X1, post_epoch_authenticator: X2,
+                post_tree_hash: T2, authz_head: "a".repeat(64), store_instance_hash: OWNER_STORE,
+            });
+        assert!(premined.core.lamport < a.core.lamport, "the pre-mined commit sorts first canonically");
+        assert!(f.st.commit_discharges_drift(&a));
+        assert!(!f.st.commit_discharges_drift(&premined));
+
+        // Drift priority beats canonical order in BOTH argument orders.
+        assert_eq!(f.st.compare_same_epoch_commits(&a, &premined), Ordering::Less);
+        assert_eq!(f.st.compare_same_epoch_commits(&premined, &a), Ordering::Greater);
+
+        // Neither discharges → canonical (lamport, author, hash) decides.
+        let alice_self = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![], vec![], X1, X2, T2, ALICE_STORE);
+        assert_eq!(
+            f.st.compare_same_epoch_commits(&premined, &alice_self),
+            Ordering::Less,
+            "with no drift discharged on either side, the lower lamport wins"
+        );
+        assert_eq!(f.st.compare_same_epoch_commits(&alice_self, &premined), Ordering::Greater);
+
+        // Both discharge → canonical order again.
+        let owner_add = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev), 0, 500,
+            EP::MlsCommit {
+                channel_id: CH, generation: 0, epoch: 2, mls_message: vec![0xC0],
+                adds: vec![bob_add], removes: vec![],
+                prev_epoch_authenticator: X1, post_epoch_authenticator: X2,
+                post_tree_hash: T2, authz_head: "a".repeat(64), store_instance_hash: OWNER_STORE,
+            });
+        assert!(f.st.commit_discharges_drift(&owner_add));
+        assert!(owner_add.core.lamport < a.core.lamport);
+        assert_eq!(f.st.compare_same_epoch_commits(&owner_add, &a), Ordering::Less);
+        assert_eq!(f.st.compare_same_epoch_commits(&a, &owner_add), Ordering::Greater);
     }
 }
