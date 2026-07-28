@@ -40,7 +40,7 @@ A server member. `public_key` is a `{ bytes: number[] }` object — call `public
 
 ### `MessageInfo`
 
-A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any. `attachments` is an `AttachmentInfo[]`. For webhook-posted messages, `author_name_override` carries the webhook display name (the per-delivery `username` or the webhook's registered name); it is `null` or absent on all normal member messages. The `Message` component uses this field to display the author name. `author_badge` is a data-driven label displayed next to the author name for non-member posts: `"WEBHOOK"` for messages posted by an incoming webhook, `"BOT"` for messages posted by a slash command. `null` or absent on all normal member messages. The `Message` component should render the badge text when present.
+A single message. `author` is also a `{ bytes: number[] }` public key. `reactions` is an array of `ReactionGroup` entries, each grouped by `emoji` plus an optional `file_id` for custom-emoji reactions. `thread_id` points to the `Thread` channel created for this message, if any. `attachments` is an `AttachmentInfo[]`. For webhook-posted messages, `author_name_override` carries the webhook display name (the per-delivery `username` or the webhook's registered name); it is `null` or absent on all normal member messages. The `Message` component uses this field to display the author name. `author_badge` is a data-driven label displayed next to the author name for non-member posts: `"WEBHOOK"` for messages posted by an incoming webhook, `"BOT"` for messages posted by a slash command. `null` or absent on all normal member messages. The `Message` component should render the badge text when present. `widget?: string | null` is server-written JSON (`{"type":"poll"|"giveaway","id":<number>}`) marking the message as an interactive widget card; `Message.tsx` parses it as untrusted (try/catch + numeric-id check) and mounts `PollWidget`/`GiveawayWidget`, falling back to plain `content` on any parse failure.
 
 ### `CommandInfo`
 
@@ -51,7 +51,19 @@ A slash-command summary as returned by `listCommands()`. **Safe fields only** �
 | `id` | `number` | Server-assigned command id (use for `deleteCommand`). |
 | `trigger` | `string` | The trigger word (without `/`). Always lowercase. |
 | `description` | `string` | Short human-readable description shown in the autocomplete menu. |
-| `takes_arg` | `boolean` | `true` for `"api"` commands (the user must supply an argument that is substituted into the URL); `false` for `"text"` commands. Used by the autocomplete UI to indicate whether trailing input is expected. |
+| `takes_arg` | `boolean` | `true` for `"api"`, `"poll"`, and `"giveaway"` commands (trailing input expected); `false` for `"text"` commands. Used by the autocomplete UI to indicate whether trailing input is expected. |
+
+### `PollInfo` (types.ts)
+
+Live poll state (shared fields only — no voter identities). `creator` is a `{ bytes: number[] }` public key (same shape as `MessageInfo.author` — use `publicKeyToString` for creator-is-me checks). `counts: number[]` aligns index-for-index with `options: string[]`; `created_at`/`closes_at` are unix **seconds** (`closes_at: number | null` — `null` = untimed); `closed: boolean` is the terminal flag.
+
+### `GiveawayInfo` (types.ts)
+
+Live giveaway state (shared fields only — `entry_count`, never an entrant list). `creator` is `{ bytes: number[] }`; `status` is the union `"open" | "ended" | "cancelled"`; `ends_at` is unix seconds; `winner: string | null` is already a `"vk_<hex>"` string (the Tauri layer converts it via `commands::giveaway_json`); `winner_name: string | null` is the server-resolved display name.
+
+### `PollState` / `GiveawayState` (tauri-bridge.ts)
+
+Returned by `getPoll(serverId, pollId)` / `getGiveaway(serverId, giveawayId)`: `{ poll: PollInfo; my_vote: number | null }` and `{ giveaway: GiveawayInfo; my_entered: boolean }`. The `my_*` field is self-only data for the requester. The other seven widget wrappers (`votePoll(serverId, pollId, optionIndex)`, `retractVote`, `closePoll`, `enterGiveaway`, `leaveGiveaway`, `cancelGiveaway`, `rerollGiveaway`) return `void` — updated state arrives via the `server:poll_updated` / `server:giveaway_updated` events. See `tauri-commands.md` Group 26.
 
 ### `AttachmentInfo` (types.ts)
 

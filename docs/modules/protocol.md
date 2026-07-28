@@ -197,9 +197,25 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 | Variant | Fields | What it asks the server to do |
 |---|---|---|
 | `ListCommands {}` | — | List all slash commands registered on the server. **No permission gate** — any connected member may call this. Returns `Commands { commands: Vec<CommandInfo> }`. Only safe fields are returned (`id`, `trigger`, `description`, `takes_arg`); `url_template` and `body_text` are never exposed. |
-| `AddCommand` | `name: String`, `trigger: String`, `description: String`, `kind: String`, `body_text: Option<String>`, `url_template: Option<String>`, `value_path: Option<String>`, `response_template: Option<String>`, `unit: Option<String>` | Register a new slash command. **MANAGE_SERVER-gated.** `name` trimmed, 1–48 chars; `trigger` trimmed/lowercased, 1–32 chars of `[a-z0-9_-]`, must be unique; `description` ≤160 chars. `kind` must be `"text"` (requires `body_text`) or `"api"` (requires `url_template` starting with `http(s)://` and ≤2048 chars, and non-empty `value_path`). A fresh Ed25519 keypair is generated per command — that key is never a roster member; it is only used to author the command's response messages with `author_badge = "BOT"`. Returns `Ok`. |
+| `AddCommand` | `name: String`, `trigger: String`, `description: String`, `kind: String`, `body_text: Option<String>`, `url_template: Option<String>`, `value_path: Option<String>`, `response_template: Option<String>`, `unit: Option<String>` | Register a new slash command. **MANAGE_SERVER-gated.** `name` trimmed, 1–48 chars; `trigger` trimmed/lowercased, 1–32 chars of `[a-z0-9_-]`, must be unique; `description` ≤160 chars. `kind` must be `"text"` (requires `body_text`), `"api"` (requires `url_template` starting with `http(s)://` and ≤2048 chars, and non-empty `value_path`), `"poll"`, or `"giveaway"` (the last two take **no** kind-specific fields). A fresh Ed25519 keypair is generated per command — that key is never a roster member; it is only used to author the command's response messages with `author_badge = "BOT"`. Returns `Ok`. |
 | `DeleteCommand` | `id: i64` | Delete a slash command by id. **MANAGE_SERVER-gated.** No-op if the id does not exist. Returns `Ok`. |
-| `RunCommand` | `trigger: String`, `channel_id: u64`, `args: String` | Invoke a slash command. **No create-gate** — any connected member may call this; subject to content-block check (`content_block_reason`) and a per-user rate limit of 5 runs / 10 s (`command_limiter`). Handled asynchronously at the connection level (not in `handlers.rs`) because `"api"` commands require an HTTP fetch. On success: inserts a message authored by the command's synthetic public key with `author_name_override = cmd.name` and `author_badge = "BOT"`, broadcasts `ServerEvent::NewMessage` to channel subscribers, returns `Ok`. On any failure (unknown trigger, rate-limited, `"api"` fetch error, non-2xx response, dot-path miss): returns `Error { reason }` and does NOT post a message to the channel. |
+| `RunCommand` | `trigger: String`, `channel_id: u64`, `args: String` | Invoke a slash command. **No create-gate** for `"text"`/`"api"`/`"poll"` — any connected member may call these; `"giveaway"` is **MANAGE_SERVER-gated at dispatch**. Subject to content-block check (`content_block_reason`) and a per-user rate limit of 5 runs / 10 s (`command_limiter`). Handled asynchronously at the connection level (not in `handlers.rs`) because `"api"` commands require an HTTP fetch. On success: `"text"`/`"api"` insert a message authored by the command's synthetic public key with `author_name_override = cmd.name` and `author_badge = "BOT"` and broadcast `ServerEvent::NewMessage`; `"poll"`/`"giveaway"` parse `args`, create the widget card + feature row in one transaction (`polls::create_poll_card` / `giveaways::create_giveaway_card` — see `server-widgets.md`), and broadcast `NewMessage` then `PollUpdated`/`GiveawayUpdated`. On any failure (unknown trigger, rate-limited, `"api"` fetch error, parse error, missing permission): returns `Error { reason }` and does NOT post a message to the channel. |
+
+### Polls & giveaways (widget interactions)
+
+A poll/giveaway is **created** by `RunCommand` on a command of kind `"poll"` / `"giveaway"` (poll: any member with SEND_MESSAGES; giveaway: **MANAGE_SERVER-gated at dispatch**). The variants below only interact with an existing widget by id. All are membership-gated (default-deny `request_requires_membership`); every variant re-checks channel visibility (VIEW_CHANNEL, or DM participant) and returns an opaque `Error { "poll not found" }` / `"giveaway not found"` on any visibility failure — widget ids are not an existence oracle. Mutating variants are timeout-gated; `VotePoll`/`RetractVote`/`EnterGiveaway`/`LeaveGiveaway` share the `widget_limiter` (10 interactions / 10 s per member).
+
+| Variant | Fields | What it asks the server to do |
+|---|---|---|
+| `GetPoll` | `poll_id: i64` | Fetch full poll state. Returns `Poll { poll: PollInfo, my_vote: Option<u32> }` — `my_vote` is the caller's own vote only. |
+| `VotePoll` | `poll_id: i64`, `option_index: u32` | Cast or move the caller's single vote. Fails on closed poll / bad index / rate limit. Broadcasts `PollUpdated` to channel subscribers. |
+| `RetractVote` | `poll_id: i64` | Remove the caller's vote on an open poll. Broadcasts `PollUpdated`. |
+| `ClosePoll` | `poll_id: i64` | Close early. **Creator-or-MANAGE_SERVER.** Idempotent. Broadcasts `PollUpdated`. |
+| `GetGiveaway` | `giveaway_id: i64` | Fetch full giveaway state. Returns `Giveaway { giveaway: GiveawayInfo, my_entered: bool }` — `my_entered` is caller-only. |
+| `EnterGiveaway` | `giveaway_id: i64` | Enter an open giveaway (idempotent). Broadcasts `GiveawayUpdated` with the new `entry_count`. |
+| `LeaveGiveaway` | `giveaway_id: i64` | Leave an open giveaway (idempotent). Broadcasts `GiveawayUpdated`. |
+| `CancelGiveaway` | `giveaway_id: i64` | Cancel an open giveaway — no draw, no announcement. **Creator-or-MANAGE_SERVER.** Broadcasts `GiveawayUpdated` (`status = "cancelled"`). |
+| `RerollGiveaway` | `giveaway_id: i64` | Redraw the winner of an `"ended"` giveaway that has one, from the still-eligible entrants. **Creator-or-MANAGE_SERVER.** Broadcasts `GiveawayUpdated` then a winner-announcement `NewMessage`. |
 
 ### Voice / media
 
@@ -247,6 +263,8 @@ Every request receives exactly one response.
 | `WebhookToken` | `id: i64`, `token: String`, `server_id_hex: Option<String>` | The new/rotated webhook token in response to `CreateWebhook` or `RegenerateWebhookToken`. `server_id_hex` is the relay's routing id (used to build the ingest URL `POST /webhook/<server_id_hex>/<token>`); `None` for direct (non-relay) servers. **Shown once** — the token is write-only in the DB after this response. |
 | `Webhooks` | `webhooks: Vec<WebhookInfo>` | The webhook list in response to `ListWebhooks`. No tokens. |
 | `Commands` | `commands: Vec<CommandInfo>` | The slash-command list in response to `ListCommands`. Safe fields only — no `url_template` or `body_text`. |
+| `Poll` | `poll: PollInfo`, `my_vote: Option<u32>` | Full poll state in response to `GetPoll`. `my_vote` is the requester's own vote index (self-only — voter identities are never sent to anyone else). |
+| `Giveaway` | `giveaway: GiveawayInfo`, `my_entered: bool` | Full giveaway state in response to `GetGiveaway`. `my_entered` is self-only; entrant identities never leave the server. |
 
 ---
 
@@ -332,6 +350,15 @@ These events fall into two categories in `bridge.rs`: some are re-emitted to the
 | `StreamCallEnded` | `channel_id: u64` | An incoming DM call ended or was declined. Currently a no-op in `bridge.rs`. |
 | `StreamKeyOffer` | `channel_id: u64`, `sender: PublicKey`, `session_id: [u8; 16]`, `kind: TrackKind`, `wrapped_key: Vec<u8>` | A peer is distributing their per-session E2EE media key, wrapped for this client. Routed to `VoiceController::on_stream_key_offer`. |
 
+### Widget events (polls & giveaways)
+
+Broadcast to the widget's channel subscribers on every state change (vote, retract, close, enter, leave, cancel, draw, reroll — including sweeper-driven closes/draws). Both carry the full shared state struct, never per-member data.
+
+| Variant | Fields | When the server broadcasts it |
+|---|---|---|
+| `PollUpdated` | `poll: PollInfo` | A poll's counts or closed state changed. Maps to `server:poll_updated`. |
+| `GiveawayUpdated` | `giveaway: GiveawayInfo` | A giveaway's entry count, status, or winner changed. Maps to `server:giveaway_updated` (bridge maps `winner` to its `"vk_<hex>"` string form). A draw/reroll is followed by a winner-announcement `NewMessage`. |
+
 ---
 
 ## Shared structs
@@ -357,6 +384,7 @@ The canonical representation of a message, used in `NewMessage`, `History`,
 | `thread_message_count` | `Option<u32>` | Cached reply count for the thread, if any. |
 | `author_name_override` | `Option<String>` | Display-name override for webhook-posted messages. `None` for all normal member messages. Decorated with `#[serde(default)]` so it deserializes as `None` from older frames. When present, clients must use this name instead of a roster lookup — the author public key is a per-webhook synthetic key, not a roster member. |
 | `author_badge` | `Option<String>` | Badge label shown next to the author name for non-member posts. `"WEBHOOK"` for messages posted by an incoming webhook; `"BOT"` for messages posted by a slash command. `None` / absent on all normal member messages. Decorated with `#[serde(default)]` for schema evolution. The badge is data-driven: it is stored in `messages.author_badge` and returned verbatim; adding new values here (e.g. `"POLL"`) does not require a client code change. |
+| `widget` | `Option<String>` | Server-written JSON marking this message as an interactive widget card: `{"type":"poll"\|"giveaway","id":<i64>}`. `None` on all normal messages. Decorated with `#[serde(default)]` — old peers deserialize frames without it, and old clients that ignore it still render the card's plain-text `content` fallback. Written only via `messages::set_widget`; clients parse it as untrusted input. |
 
 ### `WebhookInfo`
 
@@ -377,7 +405,42 @@ A slash-command summary as returned by `ListCommands`. **Safe-fields-only view**
 | `id` | `i64` | Server-assigned command id. Use for `DeleteCommand`. |
 | `trigger` | `String` | The trigger word (without `/`). Always stored and returned lowercase. |
 | `description` | `String` | Short human-readable description (≤160 chars). |
-| `takes_arg` | `bool` | `true` for `"api"` commands (argument is percent-encoded and substituted into `url_template`); `false` for `"text"` commands. The client UI uses this to hint that trailing input is expected. |
+| `takes_arg` | `bool` | `true` for `"api"`, `"poll"`, and `"giveaway"` commands; `false` for `"text"` commands. The client UI uses this to hint that trailing input is expected. |
+
+### `PollInfo`
+
+Live poll state, broadcast whole on every change (`PollUpdated`) and returned by `GetPoll`. Shared state only — voter identities never leave the server (a member's own vote arrives separately as `Poll.my_vote`).
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `i64` | Poll id (also in the card message's `widget` JSON). |
+| `channel_id` | `u64` | Channel of the card message. |
+| `message_id` | `u64` | The card message's id. |
+| `creator` | `PublicKey` | The member who ran the command (`{bytes}` shape, like `MessageInfo.author`). |
+| `question` | `String` | 1–256 chars. |
+| `options` | `Vec<String>` | 2–10 options, 1–100 chars each, no duplicates. |
+| `counts` | `Vec<u32>` | Vote counts aligned index-for-index with `options`. |
+| `total_votes` | `u32` | Sum of `counts`. |
+| `created_at` | `u64` | Unix **seconds** (`db::now()`, same unit as `messages.timestamp`). |
+| `closes_at` | `Option<u64>` | Unix-secs deadline, or `None` for an untimed poll (closes only manually / on card delete). |
+| `closed` | `bool` | Terminal flag; set by `ClosePoll`, the sweeper, or card deletion. |
+
+### `GiveawayInfo`
+
+Live giveaway state, broadcast whole on every change (`GiveawayUpdated`) and returned by `GetGiveaway`. Shared state only — `entry_count`, never an entrant list; a member's own entry arrives separately as `Giveaway.my_entered`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `i64` | Giveaway id (also in the card message's `widget` JSON). |
+| `channel_id` | `u64` | Channel of the card message. |
+| `message_id` | `u64` | The card message's id. |
+| `creator` | `PublicKey` | The moderator who ran the command. |
+| `prize` | `String` | 1–200 chars. |
+| `ends_at` | `u64` | Unix-secs draw deadline (giveaways are always timed, 1m–30d). |
+| `status` | `String` | `"open"` \| `"ended"` \| `"cancelled"`. |
+| `entry_count` | `u32` | Live entry count; identities stay server-side. |
+| `winner` | `Option<PublicKey>` | Set on a drawn `"ended"` giveaway; `None` if winnerless/cancelled/open. The Tauri bridge converts it to a `"vk_<hex>"` string for the frontend. |
+| `winner_name` | `Option<String>` | Server-resolved display name, set when ended with a winner still on the roster (`None` → clients fall back to the short key form). |
 
 ### `AttachmentInfo`
 
@@ -767,7 +830,7 @@ Two additions to the server's SQLite schema relate to this protocol:
 
 Two additions to the server's SQLite schema relate to slash commands:
 
-- **`commands` table** — `CREATE TABLE IF NOT EXISTS commands (id INTEGER PRIMARY KEY AUTOINCREMENT, trigger TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL, kind TEXT NOT NULL, body_text TEXT, url_template TEXT, value_path TEXT, response_template TEXT, unit TEXT, public_key BLOB NOT NULL, created_at INTEGER NOT NULL)`. `trigger` is unique and stored lowercase. `public_key` is a fresh Ed25519 key generated at creation time (the command's author identity — **never a roster member**). `url_template` and `body_text` are server-only secrets; they are intentionally excluded from the `CommandInfo` wire type. `kind` is the extension point: currently `"text"` or `"api"`; future interactive types (e.g. `"poll"`, `"giveaway"`) add new dispatch arms in `connection.rs` without changing the schema.
+- **`commands` table** — `CREATE TABLE IF NOT EXISTS commands (id INTEGER PRIMARY KEY AUTOINCREMENT, trigger TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL, kind TEXT NOT NULL, body_text TEXT, url_template TEXT, value_path TEXT, response_template TEXT, unit TEXT, public_key BLOB NOT NULL, created_at INTEGER NOT NULL)`. `trigger` is unique and stored lowercase. `public_key` is a fresh Ed25519 key generated at creation time (the command's author identity — **never a roster member**). `url_template` and `body_text` are server-only secrets; they are intentionally excluded from the `CommandInfo` wire type. `kind` is the extension point: `"text"`, `"api"`, `"poll"`, and `"giveaway"` — the interactive kinds landed exactly this way, as new dispatch arms in `connection.rs` with no schema change (their per-widget state lives in the `polls`/`giveaways` tables, see `server-widgets.md`).
 
 - **`messages.author_badge` column** — `ALTER TABLE messages ADD COLUMN author_badge TEXT` (applied as a migration; defaults to `NULL`). Data-driven badge label stored verbatim and returned in `MessageInfo`. Current values: `"WEBHOOK"` (set by `webhooks::deliver`) and `"BOT"` (set by `RunCommand` dispatch in `connection.rs`). Extending the badge vocabulary requires no schema change — add a new string value in the relevant dispatch site.
 

@@ -44,6 +44,8 @@ These three files together are the entire client-side state layer. `ServerContex
 | `currentVoiceChannelId` | `number \| null` | Which voice channel the local user has joined. Set by `JOIN_VOICE_CHANNEL`, cleared by `LEAVE_VOICE_CHANNEL`. |
 | `ownerPublicKey` | `string \| null` | Server owner's pubkey in `"vk_<hex>"` form |
 | `highlightMessageId` | `number \| null` | Message to scroll-to-and-highlight; cleared by the UI after use |
+| `polls` | `Record<number, { poll: PollInfo; myVote: number \| null }>` | Live poll state keyed by poll id. Populated lazily by `PollWidget` (`POLL_STATE` after `getPoll`), patched by `POLL_UPDATED` broadcasts and `POLL_MY_VOTE` |
+| `giveaways` | `Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>` | Live giveaway state keyed by giveaway id. Populated lazily by `GiveawayWidget` (`GIVEAWAY_STATE` after `getGiveaway`), patched by `GIVEAWAY_UPDATED` broadcasts and `GIVEAWAY_MY_ENTERED` |
 
 ---
 
@@ -146,6 +148,19 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | `DM_CREATED` | Appends a new `DmEntry` (deduplicates by channel id) |
 | `OPEN_DM_PANEL` | Sets `dmPanelChannelId` |
 | `CLOSE_DM_PANEL` | Clears `dmPanelChannelId` |
+
+### Poll / giveaway widget actions (per-server)
+
+Broadcast events (`POLL_UPDATED` / `GIVEAWAY_UPDATED`) carry shared state only — the reducer preserves the local user's existing `myVote` / `myEntered` (defaulting to `null` / `false` for a slice not yet hydrated). The `MY_*` patch actions no-op when the id is not in state yet, so widgets must dispatch `POLL_STATE` / `GIVEAWAY_STATE` (from the `getPoll` / `getGiveaway` fetch) before relying on them.
+
+| Action type | What it mutates |
+|---|---|
+| `POLL_UPDATED` | Upserts `polls[poll.id].poll` from a `server:poll_updated` broadcast; preserves existing `myVote` |
+| `POLL_STATE` | Sets `polls[poll.id]` to `{ poll, myVote }` (full self-inclusive state from `getPoll`) |
+| `POLL_MY_VOTE` | Patches only `myVote` on an already-hydrated poll (optimistic local update after vote/retract) |
+| `GIVEAWAY_UPDATED` | Upserts `giveaways[giveaway.id].giveaway` from a `server:giveaway_updated` broadcast; preserves existing `myEntered` |
+| `GIVEAWAY_STATE` | Sets `giveaways[giveaway.id]` to `{ giveaway, myEntered }` (full self-inclusive state from `getGiveaway`) |
+| `GIVEAWAY_MY_ENTERED` | Patches only `myEntered` on an already-hydrated giveaway (optimistic local update after enter/leave) |
 
 ### Typing actions (per-server)
 

@@ -42,7 +42,7 @@ export default function BotsTab({ serverId }: Props) {
   const [cmdName, setCmdName] = useState("");
   const [cmdTrigger, setCmdTrigger] = useState("");
   const [cmdDescription, setCmdDescription] = useState("");
-  const [cmdKind, setCmdKind] = useState<"text" | "api">("text");
+  const [cmdKind, setCmdKind] = useState<"text" | "api" | "poll" | "giveaway">("text");
   const [cmdBody, setCmdBody] = useState("");
   const [cmdUrl, setCmdUrl] = useState("");
   const [cmdPath, setCmdPath] = useState("");
@@ -133,6 +133,7 @@ export default function BotsTab({ serverId }: Props) {
 
   async function handleAddCommand() {
     setCmdError(null);
+    const isWidgetKind = cmdKind === "poll" || cmdKind === "giveaway";
     try {
       await api.addCommand(
         serverId,
@@ -143,8 +144,8 @@ export default function BotsTab({ serverId }: Props) {
         cmdKind === "text" ? cmdBody.trim() : null,
         cmdKind === "api" ? cmdUrl.trim() : null,
         cmdKind === "api" ? cmdPath.trim() : null,
-        cmdRespTemplate.trim() || null,
-        cmdUnit.trim() || null,
+        isWidgetKind ? null : cmdRespTemplate.trim() || null,
+        isWidgetKind ? null : cmdUnit.trim() || null,
       );
       setCmdName("");
       setCmdTrigger("");
@@ -528,10 +529,12 @@ export default function BotsTab({ serverId }: Props) {
                 <select
                   className="connect-input"
                   value={cmdKind}
-                  onChange={(e) => setCmdKind(e.target.value as "text" | "api")}
+                  onChange={(e) => setCmdKind(e.target.value as "text" | "api" | "poll" | "giveaway")}
                 >
                   <option value="text">text</option>
                   <option value="api">api</option>
+                  <option value="poll">Poll</option>
+                  <option value="giveaway">Giveaway</option>
                 </select>
               </div>
             </div>
@@ -547,6 +550,18 @@ export default function BotsTab({ serverId }: Props) {
                   rows={3}
                   style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
                 />
+              </div>
+            )}
+
+            {cmdKind === "poll" && (
+              <div style={{ color: "var(--xp-text-muted)", marginTop: 6, fontSize: 12 }}>
+                Members run <code>{"/<trigger> Question | option A | option B [| 30m|2h|1d]"}</code>
+              </div>
+            )}
+
+            {cmdKind === "giveaway" && (
+              <div style={{ color: "var(--xp-text-muted)", marginTop: 6, fontSize: 12 }}>
+                Usage: <code>{"/<trigger> <duration> <prize>"}</code> — e.g. <code>/giveaway 24h Steam key</code> (moderators only)
               </div>
             )}
 
@@ -601,7 +616,11 @@ export default function BotsTab({ serverId }: Props) {
                   !cmdName.trim() ||
                   !cmdTrigger.trim() ||
                   !cmdDescription.trim() ||
-                  (cmdKind === "text" ? !cmdBody.trim() : !cmdUrl.trim() || !cmdPath.trim())
+                  (cmdKind === "text"
+                    ? !cmdBody.trim()
+                    : cmdKind === "api"
+                      ? !cmdUrl.trim() || !cmdPath.trim()
+                      : false)
                 }
               >
                 Add Command

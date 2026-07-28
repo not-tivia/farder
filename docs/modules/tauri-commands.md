@@ -2394,7 +2394,7 @@ Register a new slash command on the server. **MANAGE_SERVER-gated.**
 - `name: String` — display name shown in the autocomplete menu (1–48 chars after trimming).
 - `trigger: String` — the trigger word (1–32 chars, `a-z 0-9 _ -` only; stored lowercase). Invoked as `/trigger` in channels.
 - `description: String` — short description (≤160 chars).
-- `kind: String` — `"text"` for a fixed-body reply, `"api"` for a JSON API fetch-and-format reply.
+- `kind: String` — `"text"` for a fixed-body reply, `"api"` for a JSON API fetch-and-format reply, `"poll"` for a live poll card, `"giveaway"` for a live giveaway card (see Group 26). `"poll"` and `"giveaway"` take **no** kind-specific fields — pass `null` for all of them.
 - `body_text: Option<String>` — required when `kind = "text"`, ignored for `"api"`.
 - `url_template: Option<String>` — required when `kind = "api"`. Must be `http(s)://` and ≤2048 chars. Use `{arg}` as placeholder for the user argument.
 - `value_path: Option<String>` — required when `kind = "api"`. Dot-separated path into the JSON response to extract a numeric leaf (e.g. `stargazers_count`).
@@ -2440,3 +2440,111 @@ Invoke a slash command in a channel. Available to all members; per-user rate-lim
 **Side effects:** sends `ServerRequest::RunCommand { trigger, channel_id, args }`. On success the server inserts a message authored by the command's synthetic Ed25519 key with `author_badge = "BOT"` and broadcasts `ServerEvent::NewMessage { message }` to channel subscribers; then responds `ServerResponse::Ok`. On any failure the server responds `ServerResponse::Error { reason }` and does NOT post a message.
 
 **invoke name:** `"run_command"` → `runCommand(serverId, trigger, channelId, args)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+## Group 26 — Poll & giveaway widget interactions
+
+Nine commands backing the live message widgets (`PollWidget.tsx` / `GiveawayWidget.tsx`). A poll or giveaway is created by **running** a slash command of kind `"poll"` / `"giveaway"` (Group 25 `run_command` — the server posts a card message whose `MessageInfo.widget` JSON carries `{ "type": "poll" | "giveaway", "id": <i64> }`); these commands only *interact* with an existing widget by its id. All are membership-gated server-side; `vote_poll`, `retract_vote`, `enter_giveaway`, and `leave_giveaway` share the server's widget rate limit (10 interactions / 10 s per member). Authorization is always the authenticated connection key — no command carries a member identity. Visibility failures return opaque `"poll not found"` / `"giveaway not found"`.
+
+### `get_poll(state, server_id, poll_id) -> Result<PollState, String>`
+
+Fetch a poll's current state plus my own vote. The widget's state-recovery path on mount/reconnect/server switch.
+
+**Parameters:**
+- `server_id: String` — connection address string.
+- `poll_id: i64` — the poll id from the card's `widget` JSON.
+
+**Returns:** `PollState { poll: PollInfo, my_vote: Option<u32> }` — `my_vote` is self-only (the requester's own vote index, never another member's).
+
+**Side effects:** sends `ServerRequest::GetPoll { poll_id }` → reads `ServerResponse::Poll { poll, my_vote }`.
+
+**invoke name:** `"get_poll"` → `getPoll(serverId, pollId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `vote_poll(state, server_id, poll_id, option_index) -> Result<(), String>`
+
+Cast (or change) my vote on an open poll. One vote per member; voting again moves it.
+
+**Parameters:** `poll_id: i64`; `option_index: u32` — 0-based index into `poll.options`.
+
+**Returns:** `()`; `Err` if closed, invalid index, or rate-limited (`"slow down — too many interactions"`).
+
+**Side effects:** sends `ServerRequest::VotePoll { poll_id, option_index }`; on success the server broadcasts `ServerEvent::PollUpdated` (→ `server:poll_updated`) with fresh counts to everyone who can see the channel.
+
+**invoke name:** `"vote_poll"` → `votePoll(serverId, pollId, optionIndex)`.
+
+---
+
+### `retract_vote(state, server_id, poll_id) -> Result<(), String>`
+
+Retract my vote on an open poll. Idempotent-ish: retracting with no vote is Ok.
+
+**Side effects:** sends `ServerRequest::RetractVote { poll_id }`; broadcasts `PollUpdated` on success.
+
+**invoke name:** `"retract_vote"` → `retractVote(serverId, pollId)`.
+
+---
+
+### `close_poll(state, server_id, poll_id) -> Result<(), String>`
+
+Close a poll early. **Creator-or-MANAGE_SERVER, enforced server-side.** Idempotent on already-closed.
+
+**Side effects:** sends `ServerRequest::ClosePoll { poll_id }`; broadcasts `PollUpdated` (with `closed_at` set) on success.
+
+**invoke name:** `"close_poll"` → `closePoll(serverId, pollId)`.
+
+---
+
+### `get_giveaway(state, server_id, giveaway_id) -> Result<GiveawayState, String>`
+
+Fetch a giveaway's current state plus whether I have entered. The widget's state-recovery path.
+
+**Parameters:** `giveaway_id: i64` — the giveaway id from the card's `widget` JSON.
+
+**Returns:** `GiveawayState { giveaway, my_entered: bool }` — `giveaway` is the frontend JSON shape produced by `commands::giveaway_json` (`winner` mapped to a `"vk_<hex>"` string or `null`; `creator` stays the `{ bytes }` object like `MessageInfo.author`; also `entry_count`, `status: "open" | "ended" | "cancelled"`, `winner_name`). `my_entered` is self-only. Entrant identities never leave the server.
+
+**Side effects:** sends `ServerRequest::GetGiveaway { giveaway_id }` → reads `ServerResponse::Giveaway { giveaway, my_entered }`.
+
+**invoke name:** `"get_giveaway"` → `getGiveaway(serverId, giveawayId)`.
+
+---
+
+### `enter_giveaway(state, server_id, giveaway_id) -> Result<(), String>`
+
+Enter an open giveaway (idempotent — already-entered is Ok).
+
+**Side effects:** sends `ServerRequest::EnterGiveaway { giveaway_id }`; on success the server broadcasts `ServerEvent::GiveawayUpdated` (→ `server:giveaway_updated`) with the new `entry_count`.
+
+**invoke name:** `"enter_giveaway"` → `enterGiveaway(serverId, giveawayId)`.
+
+---
+
+### `leave_giveaway(state, server_id, giveaway_id) -> Result<(), String>`
+
+Leave an open giveaway (idempotent).
+
+**Side effects:** sends `ServerRequest::LeaveGiveaway { giveaway_id }`; broadcasts `GiveawayUpdated` on success.
+
+**invoke name:** `"leave_giveaway"` → `leaveGiveaway(serverId, giveawayId)`.
+
+---
+
+### `cancel_giveaway(state, server_id, giveaway_id) -> Result<(), String>`
+
+Cancel an open giveaway — no draw, no winner announcement. **Creator-or-MANAGE_SERVER, enforced server-side.**
+
+**Side effects:** sends `ServerRequest::CancelGiveaway { giveaway_id }`; broadcasts `GiveawayUpdated` (`status = "cancelled"`) on success.
+
+**invoke name:** `"cancel_giveaway"` → `cancelGiveaway(serverId, giveawayId)`.
+
+---
+
+### `reroll_giveaway(state, server_id, giveaway_id) -> Result<(), String>`
+
+Redraw a finished giveaway's winner from the still-eligible entrants. **Creator-or-MANAGE_SERVER, enforced server-side.** Only valid on an `"ended"` giveaway that has a winner.
+
+**Side effects:** sends `ServerRequest::RerollGiveaway { giveaway_id }`; on success the server persists the new winner, broadcasts `GiveawayUpdated`, and posts a fresh winner-announcement message (`NewMessage`, BOT-badged throwaway author, reply to the card).
+
+**invoke name:** `"reroll_giveaway"` → `rerollGiveaway(serverId, giveawayId)`.

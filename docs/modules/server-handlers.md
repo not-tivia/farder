@@ -643,10 +643,25 @@ CRUD arms run synchronously inside the standard `handle_request` dispatch. `RunC
 
 | `ServerRequest` | Permission | Action |
 |---|---|---|
-| `ListCommands {}` | none (any member) | Calls `commands::list_infos(conn)`; returns `Commands { commands }`. |
-| `AddCommand { ... }` | `MANAGE_SERVER` | Validates all fields; checks trigger uniqueness via `find_by_trigger`; calls `commands::create`; returns `Ok`. |
+| `ListCommands {}` | none (any member) | Calls `commands::list_infos(conn)`; returns `Commands { commands }`. `takes_arg` is `true` for kinds `"api"`, `"poll"`, `"giveaway"`. |
+| `AddCommand { ... }` | `MANAGE_SERVER` | Validates all fields; checks trigger uniqueness via `find_by_trigger`; calls `commands::create`; returns `Ok`. Kinds `"poll"`/`"giveaway"` accept no kind-specific fields ("kind must be 'text', 'api', 'poll' or 'giveaway'" otherwise). |
 | `DeleteCommand { id }` | `MANAGE_SERVER` | Calls `commands::delete(conn, id)`; returns `Ok`. |
 | `RunCommand { .. }` | — | Stub arm — returns `Error("RunCommand must be handled at the connection level")`. See the `RunCommand` dispatch note below. |
+
+### Widget interaction arms (polls & giveaways)
+
+Nine synchronous arms in `handle_request` servicing the message widgets — see `docs/modules/server-widgets.md` for the storage modules and `protocol.md` for the full variant table. Shared shape of every arm: load the row → **channel visibility** via `widget_channel_visible(conn, member, channel_id, is_owner)` (DM ⇒ participant, else `VIEW_CHANNEL`; missing channel ⇒ false) with an **opaque** `Error { "poll not found" }` / `"giveaway not found"` on any failure (no existence oracle) → then status/authz checks. Mutating arms are `is_timed_out`-gated; `VotePoll`/`RetractVote`/`EnterGiveaway`/`LeaveGiveaway` also pass through `state.widget_limiter` (10 / 10 s per member, "slow down — too many interactions").
+
+| `ServerRequest` | Permission | Action |
+|---|---|---|
+| `GetPoll` / `GetGiveaway` | visibility only (read; not rate-limited) | Returns `Poll { poll, my_vote }` / `Giveaway { giveaway, my_entered }` — the `my_*` field is the caller's own state only. |
+| `VotePoll` / `RetractVote` | visibility + not timed out + limiter | `polls::vote` / `polls::retract` on an open poll; broadcasts `PollUpdated` → `Subscribers(channel_id)`. |
+| `ClosePoll` | creator or `MANAGE_SERVER` | `polls::close` (idempotent); broadcasts `PollUpdated`. |
+| `EnterGiveaway` / `LeaveGiveaway` | visibility + not timed out + limiter | `giveaways::enter` / `leave` (idempotent) on an open giveaway; broadcasts `GiveawayUpdated`. |
+| `CancelGiveaway` | creator or `MANAGE_SERVER` | `giveaways::cancel` — no draw, no announcement; broadcasts `GiveawayUpdated`. |
+| `RerollGiveaway` | creator or `MANAGE_SERVER` | `giveaways::reroll_and_announce` on an `"ended"` giveaway with a winner; broadcasts `GiveawayUpdated` then the announcement `NewMessage`. |
+
+The `DeleteMessage` arm additionally parses the deleted message's `widget` JSON: an open poll is closed (+`PollUpdated`), an open giveaway is cancelled (+`GiveawayUpdated`) — deleting an already-ended/cancelled card is a no-op.
 
 ### `RunCommand` dispatch in `connection.rs`
 
@@ -658,9 +673,11 @@ CRUD arms run synchronously inside the standard `handle_request` dispatch. `RunC
 4. **Content resolution** (no lock held):
    - `"text"` commands: use `cmd.body_text` directly.
    - `"api"` commands: call `commands::build_command_url(url_template, args)`, then `bots::fetch_json(&url)` (SSRF-guarded via `ssrf::resolves_to_global`; rejects private/loopback IPs, 10 s timeout, redirects disabled, 256 KiB cap); on success call `bots::extract_dot_path(&json, value_path)` to get the numeric leaf, then `commands::format_response(response_template, args, value, unit)`.
+   - `"poll"` commands: `polls::parse_poll_args(args)` (pure), then `polls::create_poll_card` under one scoped DB lock (card message + `polls` row + widget JSON in one transaction); broadcasts `NewMessage` then `PollUpdated`.
+   - `"giveaway"` commands: **MANAGE_SERVER re-checked at dispatch** ("giveaways can only be started by moderators (missing MANAGE_SERVER)"), then `giveaways::parse_giveaway_args(args)` and `giveaways::create_giveaway_card`; broadcasts `NewMessage` then `GiveawayUpdated`.
    - Unknown `kind`: returns `Error { reason: "command misconfigured" }`.
-   - Any fetch/extract failure: returns `Error { reason: "couldn't run /..." }`. No message is posted.
-5. **Message insert and broadcast** (DB lock scoped off the broadcast `.await`): calls `messages::insert_message_with_author_name(conn, channel_id, &cmd.public_key, &content, None, Some(&cmd.name), Some("BOT"))` — `author_name_override = cmd.name`, `author_badge = "BOT"`. Broadcasts `ServerEvent::NewMessage { message }` to `EventTarget::Subscribers(channel_id)`. Returns `Ok`.
+   - Any fetch/extract/parse failure: returns `Error { reason }`. No message is posted.
+5. **Message insert and broadcast** (DB lock scoped off the broadcast `.await`): for `"text"`/`"api"`, calls `messages::insert_message_with_author_name(conn, channel_id, &cmd.public_key, &content, None, Some(&cmd.name), Some("BOT"))` — `author_name_override = cmd.name`, `author_badge = "BOT"`. Broadcasts `ServerEvent::NewMessage { message }` to `EventTarget::Subscribers(channel_id)`. Returns `Ok`.
 
 ---
 
@@ -736,7 +753,8 @@ SQLite (via the module helpers). The only in-memory state it touches is:
   override tables, DM channel helpers.
 - **`members.rs`** — member CRUD, role management, ban/timeout tables,
   block-list, deletion requests.
-- **`messages.rs`** — message insert/edit/delete/fetch, pin/unpin.
+- **`messages.rs`** — message insert/edit/delete/fetch, pin/unpin; `set_widget(conn, message_id: u64, widget_json)` stamps a card message's `widget` column (insert-then-set-widget idiom used by the poll/giveaway creation transactions).
+- **`polls.rs` / `giveaways.rs` / `widgets.rs`** — interactive widget storage, state transitions, and the shared 15 s sweeper. See `docs/modules/server-widgets.md`.
 - **`reactions.rs`** — reaction add/remove.
 - **`invites.rs`** — invite code creation.
 - **`audit.rs`** — audit row insert and paginated list.

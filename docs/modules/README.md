@@ -15,6 +15,7 @@ module relevant to what you're touching. New docs use
 - [`server-handlers.md`](server-handlers.md) — request dispatch, per-request permissions + DB effects + event broadcasts.
 - [`server-connection.md`](server-connection.md) — QUIC connection lifecycle, broadcast, voice media relay, DB schema.
 - [`server-permissions.md`](server-permissions.md) — auth + the permission model (flags, role resolution, overrides).
+- [`server-widgets.md`](server-widgets.md) — interactive message widgets: polls, giveaways, and the shared sweeper (`polls.rs`, `giveaways.rs`, `widgets.rs`).
 
 ## Shared crates
 - [`protocol.md`](protocol.md) — the wire contract: `ServerRequest` / `ServerResponse` / `ServerEvent` catalogs + shared structs.

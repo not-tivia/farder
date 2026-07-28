@@ -76,6 +76,8 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `MediaLeft` | `server:voice_left` | `channel_id, public_key` | `VOICE_LEFT` (roster) |
 | `StreamCallIncoming` / `StreamCallEnded` | — (no-op) | — | DM-call signaling; no UI yet |
 | `MembershipChanged` | `server:membership_changed` | `public_key` | `useServerEvents` → `membership_changed` listener re-fetches caller's membership status, member list, and pending queue |
+| `PollUpdated` | `server:poll_updated` | `poll` (`PollInfo` — counts/closed state, never voter identities) | `useServerEvents` → `POLL_UPDATED` (dropped for background servers; widgets re-hydrate via `getPoll` on next mount) |
+| `GiveawayUpdated` | `server:giveaway_updated` | `giveaway` (frontend JSON shape via `commands::giveaway_json` — `winner` as `"vk_<hex>"` string/null, `entry_count`, `status`; never entrant identities) | `useServerEvents` → `GIVEAWAY_UPDATED` (dropped for background servers; widgets re-hydrate via `getGiveaway` on next mount) |
 
 **`server:member_presence_updated` payload fields:**
 - `server_id` — the server this event came from (added by `dispatch_event`, common to all `server:*` events).

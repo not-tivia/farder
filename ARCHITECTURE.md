@@ -43,7 +43,7 @@ Data crosses several hard boundaries; each is a place bugs hide.
 |---|---|
 | `client/src/` | React + TypeScript frontend. `components/`, `hooks/`, `context/` (the reducer/state), `lib/` (incl. `tauri-bridge.ts`, the `invoke()` wrappers, and `types.ts`). |
 | `client/src-tauri/src/` | The Tauri (Rust) backend the UI talks to. `commands.rs` (every `#[tauri::command]`), `bridge.rs` (server-event → frontend-event bus + voice-event routing), `voice/` (the local voice engine), `audio_cpal.rs`/`audio.rs` (audio devices), `server_manager.rs` (spawns local server sidecars). |
-| `crates/farder-server/` | The server: `handlers.rs` (request dispatch + permissions + DB writes + event broadcast), `channels.rs`, `members.rs`, `connection.rs`, `db.rs`, `media_stream.rs` (voice media relay). |
+| `crates/farder-server/` | The server: `handlers.rs` (request dispatch + permissions + DB writes + event broadcast), `channels.rs`, `members.rs`, `connection.rs`, `db.rs`, `media_stream.rs` (voice media relay), `polls.rs`/`giveaways.rs`/`widgets.rs` (interactive message widgets + the shared sweeper). |
 | `crates/farder-protocol/` | The wire contract: `ServerRequest`, `ServerResponse`, `ServerEvent`, shared types. The single source of truth for client↔server messages. |
 | `crates/farder-crypto/` | Ed25519 identity, X25519 key exchange, AES-GCM, E2EE DM + media key wrapping. |
 | `crates/farder-node/` | Personal node embedded in the client (DMs). |
@@ -152,7 +152,7 @@ Webhooks let an external caller (CI system, bot, script) POST a message into a F
 
 Slash commands let a server owner configure `/trigger` shortcuts that post a bot-authored message in a channel. Commands are **not roster members** — each command has a synthetic Ed25519 keypair generated at creation time (stored in the `commands` table, never in `members`). Their messages carry `author_badge = "BOT"` and `author_name_override = cmd.name`.
 
-Two command kinds exist: **text** (posts a fixed body string) and **api** (fetches a remote JSON endpoint and formats a numeric value). The `kind` string is the extension point for future interactive types — adding `/poll` or `/giveaway` means adding a new dispatch arm in `connection.rs` without any schema change.
+Four command kinds exist: **text** (posts a fixed body string), **api** (fetches a remote JSON endpoint and formats a numeric value), and the interactive **poll** and **giveaway** kinds (post a live widget card — see the "Poll & giveaway widgets" section below). The `kind` string is the extension point: the interactive kinds landed exactly as new dispatch arms in `connection.rs` with no schema change.
 
 **Data path — user types `/rules` → bot message appears:**
 
@@ -171,6 +171,21 @@ Two command kinds exist: **text** (posts a fixed body string) and **api** (fetch
 **Management:** server owners (MANAGE_SERVER) create and delete commands via the Bots tab → Slash Commands section. `addCommand` / `deleteCommand` → `ServerRequest::AddCommand` / `DeleteCommand`. The Add Command form in `BotsTab.tsx` accepts all fields (name, trigger, description, kind, and kind-specific fields).
 
 **SSRF guard:** `"api"` command URL templates are fetched by `bots::fetch_json`, which calls `ssrf::resolves_to_global` before opening any connection. Private, loopback, and link-local IPs are rejected. The `url_template` is never logged or returned to clients.
+
+---
+
+## Poll & giveaway widgets
+
+Interactive message widgets built on the slash-command substrate. Full reference: `docs/modules/server-widgets.md` (server), `protocol.md` (wire), `tauri-commands.md` Group 26 (client seam).
+
+**Data path — member runs `/poll Question | A | B | 2h` → live card everyone can vote on:**
+
+1. **Creation** — `RunCommand` on a command of kind `"poll"`/`"giveaway"` (dispatch in `connection.rs`, like all RunCommand): parse the arg string (`polls::parse_poll_args` / `giveaways::parse_giveaway_args`), then in ONE transaction insert the fallback card message, the `polls`/`giveaways` feature row, and stamp the card's `messages.widget` column with `{"type":"poll"|"giveaway","id":…}` (`messages::set_widget`). Broadcasts `NewMessage` then `PollUpdated`/`GiveawayUpdated`. Poll creation is open to anyone who can send in the channel; **giveaway creation is MANAGE_SERVER-gated at dispatch**.
+2. **Render** — `Message.tsx` parses `MessageInfo.widget` as untrusted JSON (try/catch + numeric-id check) and mounts `PollWidget.tsx` / `GiveawayWidget.tsx` in place of the plain content; old clients (or parse failures) fall back to the card's plain-text content. On mount the widget hydrates via `get_poll`/`get_giveaway` into the `polls`/`giveaways` slices of `ServerContext`.
+3. **Interaction** — nine `ServerRequest` variants (`VotePoll`, `RetractVote`, `ClosePoll`, `GetPoll`, `EnterGiveaway`, `LeaveGiveaway`, `CancelGiveaway`, `RerollGiveaway`, `GetGiveaway`), all membership-gated (default-deny), visibility-checked with opaque not-found errors, timeout-gated on mutation, and rate-limited (`widget_limiter`, 10/10 s) on vote/retract/enter/leave. Every state change broadcasts the full shared struct as `PollUpdated`/`GiveawayUpdated` → `bridge.rs` → `server:poll_updated`/`server:giveaway_updated` → reducer → every visible card updates live.
+4. **Retirement** — the single `widgets::spawn_widget_sweeper` task (15 s tick) closes due polls and draws due giveaways (`rand::thread_rng()` over eligible entrants; winner announcement posted by a fresh throwaway BOT-badged key). All sweeper work persists **before** broadcasting, so a crash can never re-close or redraw. Deleting a card closes/cancels its widget.
+
+**Privacy invariants:** broadcasts and reads carry counts/status/winner only — voter and entrant identities never leave the server; a member's own `my_vote`/`my_entered` is returned only to them.
 
 ---
 
