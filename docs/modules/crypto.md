@@ -373,27 +373,28 @@ TypeScript types in `types.ts` use `{ bytes: number[] }` for the serde form. Cal
 | `PermissionGranted` | `member`, `capability` | Owner or member who already holds the capability |
 | `AttachmentRedacted` | `content_hash: String` | Author is the recorded uploader OR holds `"kick"`; hash must be known; not already redacted |
 
-#### Rung-2 MLS/E2EE variants (DORMANT — schema only)
+#### Rung-2 MLS/E2EE variants (DORMANT — nothing emits them yet)
 
 Appended after `AttachmentRedacted` (the enum is **append-only**: existing
 variants never change shape or order, so old events' canonical bytes and hashes
 are stable — pinned by `existing_variant_bytes_are_untouched_by_new_variants`).
-Nothing emits these yet; `LogState::apply` currently **rejects all of them**
-(TEMP fail-closed arms) until their fold rules land in sub-2 Tasks 2–4. Ingest
+Nothing emits these yet. Fold rules for `ChannelCreated`, `MessageDeleted`, and
+`DeviceRevoked` are **live in `LogState::apply`** (sub-2 Task 2); the MLS group
+variants are still rejected by TEMP fail-closed arms until Tasks 3–4. Ingest
 handling is sub-3.
 
-| Variant | Fields | Intended rule (future fold) |
+| Variant | Fields | Fold rule (× = still a TEMP reject) |
 |---|---|---|
-| `ChannelCreated` | `channel_id: u64`, `name`, `kind`, `class: ChannelClass`, `parent: Option<u64>` | Owner-only; class immutable; no `ChannelCreated` ⇒ channel unknown to the log (legacy = plaintext) |
-| `MlsKeyPackagePublished` | `key_package: Vec<u8>`, `store_instance_hash: [u8;32]`, `expires_at_log_pos: u64` | Owning device; consumed-once; capped + log-position lifetime |
-| `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | Epoch CAS + authenticator chaining; `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit's `prev_epoch_authenticator` must equal (plan resolved ambiguity #1) |
-| `MlsWelcome` | `channel_id`, `generation`, `commit: EventRef`, `for_member: PublicKey`, `for_device: DeviceId`, `welcome: Vec<u8>` | `for_*` unverifiable by the fold — leaves count only once the joiner confirms |
-| `MlsLeafConfirmed` | `channel_id`, `generation`, `epoch`, `tree_hash: [u8;32]`, `store_instance_hash: [u8;32]` | Authored by the joining device; promotes leaf pending → confirmed iff `tree_hash` matches |
-| `MlsGroupReset` | `channel_id`, `new_generation: u64`, `welcomes: Vec<EventRef>` | Owner-only; valid only if `welcomes` covers exactly members × live devices (non-selective) |
-| `MessagePostedE2ee` | `channel_id`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `reply_to: Option<EventRef>`, `attachments: Vec<AttachmentCap>`, `authz_head: EventHash` | Sealed content; `reply_to`/caps stay outside the seal for blind threading/validation |
-| `MessageEditedE2ee` | `channel_id`, `target: EventRef`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `authz_head: EventHash` | Sealed edit |
-| `MessageDeleted` | `channel_id`, `target: EventRef`, `reason: DeleteReason` | Durable content-blind tombstone — deletions cannot resurrect |
-| `DeviceRevoked` | `device: DeviceId` | Cert dead, chain frozen (history stands, new events rejected) |
+| `ChannelCreated` | `channel_id: u64`, `name`, `kind`, `class: ChannelClass`, `parent: Option<u64>` | Owner-only (spec M3, no new capability string); `channel_id` must be new (class is set once or the channel does not exist to the log — no class-change event exists); `parent: Some(p)` requires `p` known to the log AND the child's `class` equal to `p`'s (thread children inherit their parent's class) |
+| `MlsKeyPackagePublished` | `key_package: Vec<u8>`, `store_instance_hash: [u8;32]`, `expires_at_log_pos: u64` | × Owning device; consumed-once; capped + log-position lifetime |
+| `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | × Epoch CAS + authenticator chaining; `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit's `prev_epoch_authenticator` must equal (plan resolved ambiguity #1) |
+| `MlsWelcome` | `channel_id`, `generation`, `commit: EventRef`, `for_member: PublicKey`, `for_device: DeviceId`, `welcome: Vec<u8>` | × `for_*` unverifiable by the fold — leaves count only once the joiner confirms |
+| `MlsLeafConfirmed` | `channel_id`, `generation`, `epoch`, `tree_hash: [u8;32]`, `store_instance_hash: [u8;32]` | × Authored by the joining device; promotes leaf pending → confirmed iff `tree_hash` matches |
+| `MlsGroupReset` | `channel_id`, `new_generation: u64`, `welcomes: Vec<EventRef>` | × Owner-only; valid only if `welcomes` covers exactly members × live devices (non-selective) |
+| `MessagePostedE2ee` | `channel_id`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `reply_to: Option<EventRef>`, `attachments: Vec<AttachmentCap>`, `authz_head: EventHash` | × Sealed content; `reply_to`/caps stay outside the seal for blind threading/validation |
+| `MessageEditedE2ee` | `channel_id`, `target: EventRef`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `authz_head: EventHash` | × Sealed edit |
+| `MessageDeleted` | `channel_id`, `target: EventRef`, `reason: DeleteReason` | Channel must be known to the log (log deletes are for log channels); target not already tombstoned; `Moderation` requires `"kick"` (the fold verifies moderation authority itself); `Author` requires membership only — target *authorship* needs a per-message index the fold deliberately omits, so ingest (sub-3) verifies it against the derived `messages` table. Effect: durable tombstone, queryable via `is_tombstoned` — deletions cannot resurrect |
+| `DeviceRevoked` | `device: DeviceId` | Device must be known and not already revoked; author must be the owning identity (any of its devices — self-revoke included) or the server owner. Effect: cert dead, chain frozen — history stands (records are kept), new events from the device are rejected at the envelope |
 
 Support types (all in `event_log.rs`):
 
@@ -440,8 +441,11 @@ signatures verify unchanged after decode → re-encode (pinned by
 `device_cert_without_expiry_preserves_legacy_signed_bytes`).
 
 New constructor: `DeviceCert::create_expiring(identity: &Keypair, device_pubkey: &PublicKey, created_at: u64, expires_at: u64) -> DeviceCert`
-— identical to `create` but signs `expires_at: Some(expires_at)`. Expiry
-enforcement in the fold lands in sub-2 Task 2; nothing calls this yet.
+— identical to `create` but signs `expires_at: Some(expires_at)`. Expiry is
+**enforced by the fold** (sub-2 Task 2): `LogState::apply` rejects any event
+whose author-device cert has `expires_at < event.core.timestamp` — including
+the `DeviceAuthorized` self-registration itself. Nothing emits expiring certs
+yet.
 
 ---
 
@@ -456,6 +460,26 @@ enforcement in the fold lands in sub-2 Task 2; nothing calls this yet.
 | `attachment_uploaders` | `HashMap<String, PublicKey>` | `MessagePosted` effect (`or_insert_with`) | Maps `content_hash` → first uploader seen; first-writer-wins. Authz basis for self-takedown. |
 | `redacted_attachments` | `HashSet<String>` | `AttachmentRedacted` effect | Set of `content_hash` values that have been redacted. Once in this set, the hash is permanently blocked from re-upload via the authz check. |
 
+### Rung-2 fold state (sub-2 Task 2)
+
+| Field | Type | Populated by | Purpose |
+|---|---|---|---|
+| `channels` | `HashMap<u64, ChannelRecord { name, kind, class, parent }>` | `ChannelCreated` effect | Channels known to the log. **Absence = legacy plaintext channel** (the replay carve-out: `MessagePosted` into an unknown channel stays valid, exactly Rung-1 behavior; into a known `E2ee` channel it is rejected). |
+| `tombstones` | `HashSet<EventRef>` | `MessageDeleted` effect | Durable content-blind deletion tombstones (spec F2). |
+| `revoked_devices` | `HashSet<DeviceId>` | `DeviceRevoked` effect | Dead devices. Checked at the **envelope**: a revoked device can author nothing new (not even a fresh `DeviceAuthorized`); its history stands. |
+| `devices_by_identity` | `HashMap<PublicKey, HashSet<DeviceId>>` | `DeviceAuthorized` effect | Every device ever authorized per identity; liveness is filtered by `live_devices`, never by removal. |
+| `log_pos` | `u64` | `+1` per accepted event | The pure log-position clock (drives KeyPackage lifetimes in Task 3). No wall clock enters the fold. |
+
+`DeviceRecord` also gained `expires_at: Option<u64>` (from the `DeviceAuthorized`
+cert). Two envelope gates run right after signature verification, before the ban
+gate: **revocation** (`revoked_devices`) and **cert expiry** — judged against
+`event.core.timestamp`, the untrusted author clock (the same acceptance Rung 1
+made for invite expiry).
+
+Constant: `MAX_LIVE_DEVICES_PER_IDENTITY = 8` (pub). `DeviceAuthorized` is
+rejected when the author already has 8 live (non-revoked, cert-unexpired at the
+event's timestamp) devices; revoking a device frees its slot.
+
 ### Public query methods
 
 #### `is_attachment_redacted(hash: &str) -> bool`
@@ -465,6 +489,26 @@ Returns `true` if `hash` is in `redacted_attachments`. Used by `handlers.rs` to 
 #### `attachment_uploader(hash: &str) -> Option<&PublicKey>`
 
 Returns the recorded first uploader of `hash`, or `None` if no `MessagePosted` event has cited it. Used by `handlers.rs` to resolve `by_moderator` before broadcasting `ServerEvent::AttachmentRedacted`.
+
+#### `channel_class(channel_id: u64) -> Option<ChannelClass>`
+
+The class of a channel known to the log. `None` = no `ChannelCreated` exists — a legacy DB channel (permanently plaintext) or no channel at all.
+
+#### `is_tombstoned(target: &str) -> bool`
+
+Whether an accepted `MessageDeleted` tombstone exists for this event ref. Sub-3's derive/reconcile paths consult it so deletions cannot resurrect.
+
+#### `is_device_revoked(device: &str) -> bool`
+
+Whether the device has been killed by an accepted `DeviceRevoked`.
+
+#### `live_devices(pk: &PublicKey, at_ts: u64) -> Vec<DeviceId>`
+
+An identity's live devices at `at_ts`: authorized, non-revoked, and cert-unexpired at that (untrusted, author-claimed) timestamp. Sorted for determinism. Feeds the device cap, and (Tasks 3–4) the `members × live_devices` MLS target set.
+
+#### `log_pos() -> u64`
+
+The log-position clock: count of accepted events folded so far.
 
 ### Integration map
 

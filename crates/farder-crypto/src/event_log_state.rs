@@ -7,14 +7,41 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{ensure, Context, Result};
 
-use crate::event_log::{DeviceId, Event, EventHash, EventPayload, Genesis, ServerId};
+use crate::event_log::{
+    ChannelClass, DeleteReason, DeviceId, Event, EventHash, EventPayload, EventRef, Genesis,
+    ServerId,
+};
 use crate::identity::PublicKey;
+
+/// Spec C5/I8: at most this many live (non-revoked, cert-unexpired) devices per
+/// identity. Revoking a device frees its slot — revoked ≠ live.
+pub const MAX_LIVE_DEVICES_PER_IDENTITY: usize = 8;
 
 /// A device authorized within this server's log (identity ↔ signing subkey).
 #[derive(Clone, Debug)]
 struct DeviceRecord {
     identity: PublicKey,
     device_pubkey: PublicKey,
+    /// Cert expiry (unix seconds) from the `DeviceAuthorized` cert, if any.
+    /// Judged against `event.core.timestamp` — the untrusted author clock,
+    /// the same acceptance Rung 1 made for invite expiry.
+    expires_at: Option<u64>,
+}
+
+/// A channel known to the log (from `ChannelCreated`). The class is immutable:
+/// no class-change event exists by construction. A channel ABSENT from this map
+/// is a legacy DB channel — permanently plaintext (replay carve-out).
+#[derive(Clone, Debug)]
+struct ChannelRecord {
+    /// name/kind/parent are recorded for sub-3's derive path; the fold itself
+    /// reads only `class` (and resolves `parent` at creation time).
+    #[allow(dead_code)]
+    name: String,
+    #[allow(dead_code)]
+    kind: String,
+    class: ChannelClass,
+    #[allow(dead_code)]
+    parent: Option<u64>,
 }
 
 /// An open invite, keyed in `LogState.invites` by its `InviteCreated` event hash.
@@ -50,6 +77,21 @@ pub struct LogState {
     attachment_uploaders: HashMap<String, PublicKey>,
     /// content hashes that have been redacted.
     redacted_attachments: HashSet<String>,
+    /// Channels known to the log, from `ChannelCreated` (Rung 2). Absence =
+    /// legacy plaintext channel.
+    channels: HashMap<u64, ChannelRecord>,
+    /// Durable deletion tombstones (spec F2): targets of accepted `MessageDeleted`
+    /// events — derive/reconcile consult these so deletions cannot resurrect.
+    tombstones: HashSet<EventRef>,
+    /// Devices killed by `DeviceRevoked`: cert dead, chain frozen (their history
+    /// stands; new events from them are rejected at the envelope).
+    revoked_devices: HashSet<DeviceId>,
+    /// Every device ever authorized, per identity. Liveness (revoked/expired) is
+    /// filtered by `live_devices`, never by removal — history must stand.
+    devices_by_identity: HashMap<PublicKey, HashSet<DeviceId>>,
+    /// Count of accepted events — the pure log-position clock (drives KeyPackage
+    /// lifetimes in Task 3; never wall time).
+    log_pos: u64,
 }
 
 impl LogState {
@@ -69,6 +111,11 @@ impl LogState {
             chains: HashMap::new(),
             attachment_uploaders: HashMap::new(),
             redacted_attachments: HashSet::new(),
+            channels: HashMap::new(),
+            tombstones: HashSet::new(),
+            revoked_devices: HashSet::new(),
+            devices_by_identity: HashMap::new(),
+            log_pos: 0,
         }
     }
 
@@ -107,6 +154,44 @@ impl LogState {
     pub fn attachment_uploader(&self, hash: &str) -> Option<&PublicKey> {
         self.attachment_uploaders.get(hash)
     }
+    /// The class of a channel known to the log. `None` = no `ChannelCreated`
+    /// exists — a legacy DB channel (permanently plaintext) or no channel at all.
+    pub fn channel_class(&self, channel_id: u64) -> Option<ChannelClass> {
+        self.channels.get(&channel_id).map(|c| c.class)
+    }
+    /// Whether an accepted `MessageDeleted` tombstone exists for this event ref.
+    pub fn is_tombstoned(&self, target: &str) -> bool {
+        self.tombstones.contains(target)
+    }
+    /// Whether this device has been killed by an accepted `DeviceRevoked`.
+    pub fn is_device_revoked(&self, device: &str) -> bool {
+        self.revoked_devices.contains(device)
+    }
+    /// The log-position clock: number of accepted events folded so far.
+    pub fn log_pos(&self) -> u64 {
+        self.log_pos
+    }
+    /// An identity's live devices at `at_ts`: authorized, non-revoked, and
+    /// cert-unexpired at that (untrusted, author-claimed) timestamp. Sorted so
+    /// the result is deterministic for every fold consumer.
+    pub fn live_devices(&self, pk: &PublicKey, at_ts: u64) -> Vec<DeviceId> {
+        let Some(devs) = self.devices_by_identity.get(pk) else {
+            return Vec::new();
+        };
+        let mut live: Vec<DeviceId> = devs
+            .iter()
+            .filter(|d| !self.revoked_devices.contains(*d))
+            .filter(|d| {
+                self.devices
+                    .get(*d)
+                    .and_then(|r| r.expires_at)
+                    .is_none_or(|t| at_ts <= t)
+            })
+            .cloned()
+            .collect();
+        live.sort();
+        live
+    }
 
     /// Fold a genesis + an ordered slice of events into the resulting state,
     /// rejecting on the first invalid event. Equivalent to `from_genesis` then
@@ -131,6 +216,25 @@ impl LogState {
         // to this author/device, then verify the event signature under it.
         let device_pubkey = self.resolve_device_pubkey(event)?;
         event.verify(&device_pubkey).context("event signature is invalid")?;
+        // Revocation gate (Rung 2): a revoked device's chain is frozen — its
+        // history stands, but it can author nothing new (not even a fresh
+        // DeviceAuthorized: the cert is dead for good).
+        ensure!(
+            !self.revoked_devices.contains(&event.core.device),
+            "device has been revoked"
+        );
+        // Cert-expiry gate (Rung 2): an expired cert cannot author events.
+        // Expiry is judged against `event.core.timestamp` — the untrusted
+        // author clock, the same acceptance Rung 1 made for invite expiry.
+        // For DeviceAuthorized the expiry comes from the payload cert itself
+        // (self-bootstrap: registering with an already-expired cert is invalid).
+        let cert_expiry = match &event.core.payload {
+            EventPayload::DeviceAuthorized { cert } => cert.core.expires_at,
+            _ => self.devices.get(&event.core.device).and_then(|r| r.expires_at),
+        };
+        if let Some(t) = cert_expiry {
+            ensure!(event.core.timestamp <= t, "device cert has expired");
+        }
         // Ban gate: a banned identity cannot act from any device.
         ensure!(!self.is_banned(&event.core.author), "author is banned");
         // Per-(author, device) chain continuity.
@@ -142,6 +246,7 @@ impl LogState {
         // --- Effects (only reached once every check passed) ---
         self.apply_payload_effect(event, &device_pubkey);
         self.advance_chain(event);
+        self.log_pos += 1;
         Ok(())
     }
 
@@ -209,7 +314,17 @@ impl LogState {
     fn check_payload_authz(&self, event: &Event) -> Result<()> {
         let author = &event.core.author;
         match &event.core.payload {
-            EventPayload::DeviceAuthorized { .. } => Ok(()),
+            EventPayload::DeviceAuthorized { .. } => {
+                // Live-device cap (spec C5): live = non-revoked + cert-unexpired
+                // at this event's (untrusted) timestamp — revoked or expired
+                // devices free their slot.
+                ensure!(
+                    self.live_devices(author, event.core.timestamp).len()
+                        < MAX_LIVE_DEVICES_PER_IDENTITY,
+                    "identity already has the maximum number of live devices"
+                );
+                Ok(())
+            }
 
             EventPayload::InviteCreated { .. } => {
                 ensure!(self.has_capability(author, "invite"), "missing 'invite' capability");
@@ -232,8 +347,19 @@ impl LogState {
                 Ok(())
             }
 
-            EventPayload::MessagePosted { .. } => {
+            EventPayload::MessagePosted { channel_id, .. } => {
                 ensure!(self.is_member(author), "only members may post");
+                // Class gate (fail closed where it matters): a channel the log
+                // knows as E2ee never accepts plaintext posts. A channel UNKNOWN
+                // to the log is a legacy plaintext channel and stays writable —
+                // the replay carve-out that keeps pre-Rung-2 logs folding
+                // (plan resolved ambiguity #2, spec Q8 fresh-servers-only).
+                if let Some(ch) = self.channels.get(channel_id) {
+                    ensure!(
+                        ch.class == ChannelClass::Plaintext,
+                        "plaintext MessagePosted is invalid in an E2ee channel"
+                    );
+                }
                 Ok(())
             }
 
@@ -284,21 +410,83 @@ impl LogState {
                 Ok(())
             }
 
-            // TEMP (fail closed, Task 1): the Rung-2 MLS/E2EE variants are pure
-            // schema so far — their fold rules land in Tasks 2–4. Explicitly
-            // listed (no `_`) so adding a variant without a rule cannot be
-            // silently permissive.
-            EventPayload::ChannelCreated { .. }
-            | EventPayload::MlsKeyPackagePublished { .. }
+            EventPayload::ChannelCreated { channel_id, class, parent, .. } => {
+                // Owner-only this rung (spec M3) — no new capability string.
+                ensure!(self.is_owner(author), "only the owner may create channels");
+                // channel_id is immutable identity: the class is set exactly once
+                // at creation or the channel does not exist to the log (no
+                // class-change event exists by construction).
+                ensure!(
+                    !self.channels.contains_key(channel_id),
+                    "channel_id already exists (channel identity is immutable)"
+                );
+                // Thread children inherit their parent's class (spec coexistence
+                // row 12): an unknown or class-mismatched parent is rejected.
+                if let Some(p) = parent {
+                    let parent_rec = self
+                        .channels
+                        .get(p)
+                        .context("thread parent channel is unknown to the log")?;
+                    ensure!(
+                        parent_rec.class == *class,
+                        "thread child must inherit its parent's class"
+                    );
+                }
+                Ok(())
+            }
+
+            EventPayload::MessageDeleted { channel_id, target, reason } => {
+                // Log deletes are for log channels: a channel with no
+                // ChannelCreated is unknown to the log and cannot be moderated
+                // through it.
+                ensure!(
+                    self.channels.contains_key(channel_id),
+                    "MessageDeleted cites a channel unknown to the log"
+                );
+                ensure!(!self.tombstones.contains(target), "target already tombstoned");
+                match reason {
+                    // The fold verifies moderation authority itself.
+                    DeleteReason::Moderation => {
+                        ensure!(self.has_capability(author, "kick"), "missing 'kick' capability");
+                    }
+                    // Verifying an Author claim needs target authorship, which
+                    // needs a per-message index the fold's state deliberately
+                    // omits — ingest (sub-3) checks authorship against the
+                    // derived `messages` table; the fold gates membership only.
+                    DeleteReason::Author => {
+                        ensure!(self.is_member(author), "only members may delete their messages");
+                    }
+                }
+                Ok(())
+            }
+
+            EventPayload::DeviceRevoked { device } => {
+                let rec = self
+                    .devices
+                    .get(device)
+                    .context("revocation cites an unknown device")?;
+                ensure!(!self.revoked_devices.contains(device), "device already revoked");
+                // The owning identity kills its own device (from any of its
+                // devices, including the revoked one itself — self-revoke), or
+                // the server owner does, for abuse.
+                ensure!(
+                    *author == rec.identity || self.is_owner(author),
+                    "only the owning identity or the server owner may revoke a device"
+                );
+                Ok(())
+            }
+
+            // TEMP (fail closed, Task 2): the MLS group variants are folded in
+            // Tasks 3–4. Explicitly listed (no `_`) so adding a variant without
+            // a rule cannot be silently permissive.
+            EventPayload::MlsKeyPackagePublished { .. }
             | EventPayload::MlsCommit { .. }
             | EventPayload::MlsWelcome { .. }
             | EventPayload::MlsLeafConfirmed { .. }
             | EventPayload::MlsGroupReset { .. }
             | EventPayload::MessagePostedE2ee { .. }
-            | EventPayload::MessageEditedE2ee { .. }
-            | EventPayload::MessageDeleted { .. }
-            | EventPayload::DeviceRevoked { .. } => {
-                anyhow::bail!("MLS/E2EE variants are folded in Tasks 2-4")
+            | EventPayload::MessageEditedE2ee { .. } => {
+                anyhow::bail!("MLS group variants are folded in Tasks 3-4")
             }
         }
     }
@@ -307,14 +495,19 @@ impl LogState {
     /// already passed. Tasks 3–4 fill the remaining arms.
     fn apply_payload_effect(&mut self, event: &Event, device_pubkey: &PublicKey) {
         match &event.core.payload {
-            EventPayload::DeviceAuthorized { .. } => {
+            EventPayload::DeviceAuthorized { cert } => {
                 self.devices.insert(
                     event.core.device.clone(),
                     DeviceRecord {
                         identity: event.core.author.clone(),
                         device_pubkey: device_pubkey.clone(),
+                        expires_at: cert.core.expires_at,
                     },
                 );
+                self.devices_by_identity
+                    .entry(event.core.author.clone())
+                    .or_default()
+                    .insert(event.core.device.clone());
             }
             EventPayload::InviteCreated { max_uses, expires_at, requires_approval, .. } => {
                 self.invites.insert(
@@ -371,19 +564,36 @@ impl LogState {
                 self.redacted_attachments.insert(content_hash.clone());
             }
 
-            // TEMP (Task 1): unreachable — check_payload_authz rejects every
-            // Rung-2 MLS/E2EE variant until their fold rules land in Tasks 2–4.
-            EventPayload::ChannelCreated { .. }
-            | EventPayload::MlsKeyPackagePublished { .. }
+            EventPayload::ChannelCreated { channel_id, name, kind, class, parent } => {
+                self.channels.insert(
+                    *channel_id,
+                    ChannelRecord {
+                        name: name.clone(),
+                        kind: kind.clone(),
+                        class: *class,
+                        parent: *parent,
+                    },
+                );
+            }
+            EventPayload::MessageDeleted { target, .. } => {
+                self.tombstones.insert(target.clone());
+            }
+            EventPayload::DeviceRevoked { device } => {
+                // The device stays in `devices`/`devices_by_identity` — its
+                // history stands; liveness queries filter by this set.
+                self.revoked_devices.insert(device.clone());
+            }
+
+            // TEMP (Task 2): unreachable — check_payload_authz rejects the MLS
+            // group variants until their fold rules land in Tasks 3–4.
+            EventPayload::MlsKeyPackagePublished { .. }
             | EventPayload::MlsCommit { .. }
             | EventPayload::MlsWelcome { .. }
             | EventPayload::MlsLeafConfirmed { .. }
             | EventPayload::MlsGroupReset { .. }
             | EventPayload::MessagePostedE2ee { .. }
-            | EventPayload::MessageEditedE2ee { .. }
-            | EventPayload::MessageDeleted { .. }
-            | EventPayload::DeviceRevoked { .. } => {
-                unreachable!("rung-2 variants are rejected by check_payload_authz until Tasks 2-4")
+            | EventPayload::MessageEditedE2ee { .. } => {
+                unreachable!("MLS group variants are rejected by check_payload_authz until Tasks 3-4")
             }
         }
     }
@@ -394,6 +604,7 @@ mod tests {
     use super::*;
     use crate::identity::Keypair;
     use crate::event_log::{device_id, AttachmentCap, DeviceCert, Event as Ev, EventPayload as EP};
+    use crate::event_log::{ChannelClass, DeleteReason};
 
     fn genesis(owner: &Keypair) -> Genesis {
         Genesis {
@@ -1107,5 +1318,299 @@ mod tests {
         st.apply(&bjoin).expect("instant join succeeds");
         assert!(st.is_member(&bob.public_key()), "instant join → member immediately");
         assert!(!st.is_pending(&bob.public_key()));
+    }
+
+    // ---- Rung 2, Task 2: channel class gating, tombstones, revocation, expiry, device cap ----
+
+    fn channel(
+        dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev,
+        channel_id: u64, class: ChannelClass, parent: Option<u64>,
+    ) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, 10,
+            EP::ChannelCreated {
+                channel_id, name: format!("ch{channel_id}"), kind: "text".into(), class, parent,
+            })
+    }
+
+    fn post_in(dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, channel_id: u64) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, 10,
+            EP::MessagePosted { channel_id, content: "hi".into(), reply_to: None, attachments: vec![] })
+    }
+
+    #[test]
+    fn channel_created_is_owner_only_and_ids_are_immutable() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+
+        // A plain member cannot create a channel (owner-only this rung, spec M3).
+        let (alice, alice_dev, alice_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        let bad = channel(&alice_dev, &alice.public_key(), &sid, &alice_last, 10, ChannelClass::Plaintext, None);
+        assert!(st.clone().apply(&bad).is_err(), "non-owner ChannelCreated must be rejected");
+
+        // Owner creates channel 10 as Plaintext.
+        let c10 = channel(&owner_dev, &owner.public_key(), &sid, &owner_prev, 10, ChannelClass::Plaintext, None);
+        st.apply(&c10).expect("owner can create a channel");
+        assert_eq!(st.channel_class(10), Some(ChannelClass::Plaintext));
+        assert_eq!(st.channel_class(99), None, "unknown channel has no class");
+
+        // Duplicate channel_id — even one trying to flip the class — is rejected:
+        // class is set once at creation or the channel does not exist to the log.
+        let dup = channel(&owner_dev, &owner.public_key(), &sid, &c10, 10, ChannelClass::E2ee, None);
+        assert!(st.clone().apply(&dup).is_err(), "duplicate channel_id must be rejected");
+        assert_eq!(st.channel_class(10), Some(ChannelClass::Plaintext), "class must be unchanged");
+    }
+
+    #[test]
+    fn plaintext_post_is_invalid_in_an_e2ee_channel() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        let c5 = channel(&owner_dev, &owner.public_key(), &sid, &da, 5, ChannelClass::E2ee, None);
+        st.apply(&c5).unwrap();
+        assert_eq!(st.channel_class(5), Some(ChannelClass::E2ee));
+
+        // Even a full member (the owner) cannot post plaintext into it —
+        // the fail-closed half of class gating.
+        let bad = post_in(&owner_dev, &owner.public_key(), &sid, &c5, 5);
+        assert!(st.apply(&bad).is_err(), "plaintext post into an E2ee channel must be rejected");
+    }
+
+    #[test]
+    fn legacy_channels_without_channelcreated_stay_plaintext_writable() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // The exact Rung-1 flow: MessagePosted into a channel the log has never
+        // seen a ChannelCreated for — still valid (replay compatibility for
+        // every existing post-Rung-1 server).
+        let legacy = post_in(&owner_dev, &owner.public_key(), &sid, &da, 1);
+        st.apply(&legacy).expect("legacy channel (no ChannelCreated) stays plaintext-writable");
+
+        // And a created Plaintext-class channel accepts plaintext posts.
+        let c2 = channel(&owner_dev, &owner.public_key(), &sid, &legacy, 2, ChannelClass::Plaintext, None);
+        st.apply(&c2).unwrap();
+        let ok = post_in(&owner_dev, &owner.public_key(), &sid, &c2, 2);
+        st.apply(&ok).expect("plaintext post into a Plaintext-class channel is valid");
+    }
+
+    #[test]
+    fn thread_child_inherits_parent_class_or_is_rejected() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        let parent = channel(&owner_dev, &owner.public_key(), &sid, &da, 5, ChannelClass::E2ee, None);
+        st.apply(&parent).unwrap();
+
+        // Matching class → accepted.
+        let child_ok = channel(&owner_dev, &owner.public_key(), &sid, &parent, 6, ChannelClass::E2ee, Some(5));
+        st.apply(&child_ok).expect("child inheriting the parent's class is valid");
+        assert_eq!(st.channel_class(6), Some(ChannelClass::E2ee));
+
+        // Class mismatch → rejected.
+        let child_bad = channel(&owner_dev, &owner.public_key(), &sid, &child_ok, 7, ChannelClass::Plaintext, Some(5));
+        assert!(st.clone().apply(&child_bad).is_err(), "class-mismatched thread child must be rejected");
+
+        // Unknown parent → rejected.
+        let child_orphan = channel(&owner_dev, &owner.public_key(), &sid, &child_ok, 8, ChannelClass::E2ee, Some(999));
+        assert!(st.clone().apply(&child_orphan).is_err(), "unknown thread parent must be rejected");
+    }
+
+    #[test]
+    fn message_deleted_writes_a_queryable_tombstone() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+
+        let c3 = channel(&owner_dev, &owner.public_key(), &sid, &owner_prev, 3, ChannelClass::Plaintext, None);
+        st.apply(&c3).unwrap();
+        owner_prev = c3;
+
+        let (mod_k, mod_dev, mod_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, Some("kick"));
+        let (bob, bob_dev, bob_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+
+        // Targets are opaque event refs to the fold (no per-message index by
+        // design — ingest verifies Author-claims against the derived view).
+        let t1 = "a".repeat(64);
+        let t2 = "b".repeat(64);
+
+        // Moderation delete by a "kick"-holder → accepted, tombstone queryable.
+        let del1 = Ev::next(&mod_dev, mod_k.public_key(), sid.clone(), Some(&mod_last),
+            mod_last.core.lamport + 1, 20,
+            EP::MessageDeleted { channel_id: 3, target: t1.clone(), reason: DeleteReason::Moderation });
+        assert!(!st.is_tombstoned(&t1));
+        st.apply(&del1).expect("'kick'-holder moderation delete succeeds");
+        assert!(st.is_tombstoned(&t1), "tombstone must be queryable after the fold");
+
+        // Moderation WITHOUT "kick" → rejected.
+        let del_bad = Ev::next(&bob_dev, bob.public_key(), sid.clone(), Some(&bob_last),
+            bob_last.core.lamport + 1, 21,
+            EP::MessageDeleted { channel_id: 3, target: t2.clone(), reason: DeleteReason::Moderation });
+        assert!(st.clone().apply(&del_bad).is_err(), "moderation delete without 'kick' must be rejected");
+
+        // Author delete requires membership only (authorship is ingest's check).
+        let del2 = Ev::next(&bob_dev, bob.public_key(), sid.clone(), Some(&bob_last),
+            bob_last.core.lamport + 1, 22,
+            EP::MessageDeleted { channel_id: 3, target: t2.clone(), reason: DeleteReason::Author });
+        st.apply(&del2).expect("author delete by a member folds");
+        assert!(st.is_tombstoned(&t2));
+
+        // Duplicate tombstone for the same target → rejected.
+        let dup = Ev::next(&mod_dev, mod_k.public_key(), sid.clone(), Some(&del1),
+            del1.core.lamport + 1, 23,
+            EP::MessageDeleted { channel_id: 3, target: t1.clone(), reason: DeleteReason::Moderation });
+        assert!(st.clone().apply(&dup).is_err(), "duplicate tombstone must be rejected");
+
+        // Delete in a channel unknown to the log → rejected (log deletes are
+        // for log channels).
+        let unk = Ev::next(&mod_dev, mod_k.public_key(), sid.clone(), Some(&del1),
+            del1.core.lamport + 1, 24,
+            EP::MessageDeleted { channel_id: 999, target: "c".repeat(64), reason: DeleteReason::Moderation });
+        assert!(st.clone().apply(&unk).is_err(), "MessageDeleted in an unknown channel must be rejected");
+    }
+
+    #[test]
+    fn revoked_device_cannot_author_but_history_stands() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mut owner_prev = da;
+
+        let (alice, alice_dev_a, alice_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+        let (mallory, mallory_dev, mallory_last) =
+            add_member_with_cap(&mut st, &owner, &owner_dev, &mut owner_prev, None);
+
+        // Alice registers a second device B and posts from it.
+        let alice_dev_b = Keypair::generate();
+        let b_id = device_id(&alice_dev_b.public_key());
+        let b_da = Ev::next(&alice_dev_b, alice.public_key(), sid.clone(), None, 0, 30,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&alice, &alice_dev_b.public_key(), 30) });
+        st.apply(&b_da).unwrap();
+        let b_post = post_in(&alice_dev_b, &alice.public_key(), &sid, &b_da, 1);
+        st.apply(&b_post).unwrap();
+
+        // An unrelated identity cannot revoke Alice's device.
+        let bad = Ev::next(&mallory_dev, mallory.public_key(), sid.clone(), Some(&mallory_last),
+            mallory_last.core.lamport + 1, 31, EP::DeviceRevoked { device: b_id.clone() });
+        assert!(st.clone().apply(&bad).is_err(), "unrelated identity cannot revoke");
+
+        // Revoking a device unknown to the log is rejected.
+        let unk = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&owner_prev),
+            owner_prev.core.lamport + 1, 31, EP::DeviceRevoked { device: "f".repeat(64) });
+        assert!(st.clone().apply(&unk).is_err(), "unknown device cannot be revoked");
+
+        // The server owner CAN revoke (abuse hatch) — proven on a clone.
+        let owner_revoke = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&owner_prev),
+            owner_prev.core.lamport + 1, 32, EP::DeviceRevoked { device: b_id.clone() });
+        let mut st2 = st.clone();
+        st2.apply(&owner_revoke).expect("server owner can revoke any device");
+        assert!(st2.is_device_revoked(&b_id));
+
+        // The owning identity revokes its own device from its OTHER device.
+        let revoke = Ev::next(&alice_dev_a, alice.public_key(), sid.clone(), Some(&alice_last),
+            alice_last.core.lamport + 1, 33, EP::DeviceRevoked { device: b_id.clone() });
+        st.apply(&revoke).expect("owning identity can revoke its device");
+        assert!(st.is_device_revoked(&b_id));
+
+        // Double revocation is rejected.
+        let again = Ev::next(&alice_dev_a, alice.public_key(), sid.clone(), Some(&revoke),
+            revoke.core.lamport + 1, 34, EP::DeviceRevoked { device: b_id.clone() });
+        assert!(st.clone().apply(&again).is_err(), "double revocation must be rejected");
+
+        // A new event signed by the revoked device is rejected at the envelope.
+        let dead = post_in(&alice_dev_b, &alice.public_key(), &sid, &b_post, 1);
+        assert!(st.clone().apply(&dead).is_err(), "revoked device cannot author new events");
+
+        // History stands: state derived from B's earlier events is unchanged.
+        assert!(st.is_member(&alice.public_key()));
+        assert!(st.devices.contains_key(&b_id), "the device record itself is kept");
+        // Liveness excludes the revoked device but keeps device A.
+        let live = st.live_devices(&alice.public_key(), 100);
+        assert!(!live.contains(&b_id), "revoked device is not live");
+        assert!(live.contains(&device_id(&alice_dev_a.public_key())), "sibling device stays live");
+    }
+
+    #[test]
+    fn expired_cert_cannot_author_events() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, _da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // A second owner device whose cert expires at T = 100.
+        let dev2 = Keypair::generate();
+        let dev2_id = device_id(&dev2.public_key());
+        let da2 = Ev::next(&dev2, owner.public_key(), sid.clone(), None, 0, 50,
+            EP::DeviceAuthorized { cert: DeviceCert::create_expiring(&owner, &dev2.public_key(), 50, 100) });
+        st.apply(&da2).expect("registering before expiry succeeds");
+
+        // timestamp <= T folds; timestamp > T is rejected (untrusted author
+        // clock — the same acceptance Rung 1 made for invite expiry).
+        let at_100 = Ev::next(&dev2, owner.public_key(), sid.clone(), Some(&da2), 1, 100,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
+        st.apply(&at_100).expect("event at the expiry boundary folds");
+        let at_101 = Ev::next(&dev2, owner.public_key(), sid.clone(), Some(&at_100), 2, 101,
+            EP::MessagePosted { channel_id: 1, content: "x".into(), reply_to: None, attachments: vec![] });
+        assert!(st.clone().apply(&at_101).is_err(), "expired cert cannot author events");
+
+        // Liveness respects expiry: live at 100, not live at 101.
+        assert!(st.live_devices(&owner.public_key(), 100).contains(&dev2_id));
+        assert!(!st.live_devices(&owner.public_key(), 101).contains(&dev2_id));
+
+        // Registering with an ALREADY-expired cert is rejected outright.
+        let dev3 = Keypair::generate();
+        let da3 = Ev::next(&dev3, owner.public_key(), sid.clone(), None, 0, 200,
+            EP::DeviceAuthorized { cert: DeviceCert::create_expiring(&owner, &dev3.public_key(), 10, 20) });
+        assert!(st.clone().apply(&da3).is_err(), "an expired cert cannot even self-register");
+    }
+
+    #[test]
+    fn ninth_live_device_of_an_identity_is_rejected() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+
+        // The bootstrapped device is #1; authorize 7 more → 8 live devices.
+        let mut extra = Vec::new();
+        for i in 0..7u64 {
+            let d = Keypair::generate();
+            let e = Ev::next(&d, owner.public_key(), sid.clone(), None, 0, 40 + i,
+                EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &d.public_key(), 40 + i) });
+            st.apply(&e).unwrap_or_else(|err| panic!("device {} should fold: {err}", i + 2));
+            extra.push(d);
+        }
+        assert_eq!(st.live_devices(&owner.public_key(), 50).len(), MAX_LIVE_DEVICES_PER_IDENTITY);
+
+        // The 9th live device is rejected.
+        let ninth = Keypair::generate();
+        let e9 = Ev::next(&ninth, owner.public_key(), sid.clone(), None, 0, 50,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &ninth.public_key(), 50) });
+        assert!(st.clone().apply(&e9).is_err(), "ninth live device must be rejected");
+
+        // Revoke one device → a slot frees up (revoked ≠ live) and a new
+        // device is accepted again.
+        let victim_id = device_id(&extra[0].public_key());
+        let revoke = Ev::next(&owner_dev, owner.public_key(), sid.clone(), Some(&da),
+            da.core.lamport + 1, 51, EP::DeviceRevoked { device: victim_id });
+        st.apply(&revoke).unwrap();
+        assert_eq!(st.live_devices(&owner.public_key(), 51).len(), 7);
+        st.apply(&e9).expect("after a revocation, an additional device is accepted");
+        assert_eq!(st.live_devices(&owner.public_key(), 51).len(), MAX_LIVE_DEVICES_PER_IDENTITY);
     }
 }
