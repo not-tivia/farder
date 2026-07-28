@@ -46,6 +46,7 @@ Data crosses several hard boundaries; each is a place bugs hide.
 | `crates/farder-server/` | The server: `handlers.rs` (request dispatch + permissions + DB writes + event broadcast), `channels.rs`, `members.rs`, `connection.rs`, `db.rs`, `media_stream.rs` (voice media relay), `polls.rs`/`giveaways.rs`/`widgets.rs` (interactive message widgets + the shared sweeper). |
 | `crates/farder-protocol/` | The wire contract: `ServerRequest`, `ServerResponse`, `ServerEvent`, shared types. The single source of truth for client↔server messages. |
 | `crates/farder-crypto/` | Ed25519 identity, X25519 key exchange, AES-GCM, E2EE DM + media key wrapping. |
+| `crates/farder-mls/` | OpenMLS 0.8.1 wrapper for E2EE channel groups (mesh rung 2). Client-side only — the server never links it and never holds group keys. See `docs/modules/farder-mls.md`. |
 | `crates/farder-node/` | Personal node embedded in the client (DMs). |
 | `crates/farder-relay/` | Relay node (IP masking). |
 | `crates/farder-notify/` | Desktop notifications helper. |

@@ -8,6 +8,7 @@ members = [
     "crates/farder-node",
     "crates/farder-demo",
     "crates/farder-server",
+    "crates/farder-mls",
 ]
 
 [package]
@@ -52,6 +53,7 @@ farder-crypto = { path = "crates/farder-crypto" }
 farder-protocol = { path = "crates/farder-protocol" }
 farder-node = { path = "crates/farder-node" }
 farder-server = { path = "crates/farder-server" }
+farder-mls = { path = "crates/farder-mls" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
