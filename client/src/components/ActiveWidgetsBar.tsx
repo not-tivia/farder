@@ -165,9 +165,13 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
       )}
       {open && (
         <div className="widget-chip-dropdown" ref={dropdownRef} style={dropdownStyle}>
+          {/* Keyed per widget: a chip-to-chip switch of the same kind must
+              REMOUNT (not reconcile) so the widget's one-shot fetchedRef guard
+              re-runs the refetch="mount" fetch for the new id — otherwise the
+              new widget renders without its per-viewer my_vote/my_entered. */}
           {open.kind === "poll"
-            ? <PollWidget serverId={serverId} pollId={open.id} refetch="mount" />
-            : <GiveawayWidget serverId={serverId} giveawayId={open.id} refetch="mount" />}
+            ? <PollWidget key={`poll-${open.id}`} serverId={serverId} pollId={open.id} refetch="mount" />
+            : <GiveawayWidget key={`giveaway-${open.id}`} serverId={serverId} giveawayId={open.id} refetch="mount" />}
         </div>
       )}
     </>
