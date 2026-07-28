@@ -23,9 +23,9 @@ use farder_crypto::identity::PublicKey;
 use openmls::prelude::{
     tls_codec::Deserialize as TlsDeserialize, Credential, CredentialWithKey, GroupId, KeyPackage,
     KeyPackageIn, LeafNodeParameters, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig,
-    MlsMessageBodyIn, MlsMessageBodyOut, MlsMessageIn, MlsMessageOut, ProcessedMessageContent,
-    ProtocolVersion, SenderRatchetConfiguration, StagedCommit, StagedWelcome,
-    PURE_PLAINTEXT_WIRE_FORMAT_POLICY,
+    MlsMessageBodyIn, MlsMessageBodyOut, MlsMessageIn, MlsMessageOut, ProcessedMessage,
+    ProcessedMessageContent, ProtocolMessage, ProtocolVersion, SenderRatchetConfiguration,
+    StagedCommit, StagedWelcome, PURE_PLAINTEXT_WIRE_FORMAT_POLICY,
 };
 use openmls_traits::OpenMlsProvider;
 
@@ -131,6 +131,34 @@ fn sorted(mut members: Vec<DeclaredMember>) -> Vec<DeclaredMember> {
         (a.identity.as_bytes(), &a.device).cmp(&(b.identity.as_bytes(), &b.device))
     });
     members
+}
+
+/// Run [`MlsGroup::process_message`] with panics contained to a clean `Err`.
+///
+/// OpenMLS 0.8.1 fires `debug_assert!(false, "Ciphertext decryption failed")`
+/// on AEAD failure (`framing/private_message_in.rs`), so in **debug builds**
+/// (`cargo test`, `npm run tauri dev`) a tampered/undecryptable
+/// `PrivateMessage` panics inside `process_message` where release builds
+/// return `Err`. These bytes are attacker-suppliable (sub-4 feeds server
+/// input into this path), so the panic is contained here rather than pushed
+/// onto every consumer: both build profiles get the same clean `Err`.
+fn process_message_contained(
+    inner: &mut MlsGroup,
+    provider: &impl OpenMlsProvider,
+    message: ProtocolMessage,
+) -> Result<ProcessedMessage> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        inner.process_message(provider, message)
+    }))
+    .map_err(|payload| {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_owned());
+        anyhow!("process message rejected undecryptable ciphertext: {msg}")
+    })?
+    .map_err(|e| anyhow!("process message: {e}"))
 }
 
 /// What a staged commit did, in declared form.
@@ -336,10 +364,8 @@ impl MlsChannelGroup {
         let protocol_message = message
             .try_into_protocol_message()
             .map_err(|e| anyhow!("commit message is not a protocol message: {e}"))?;
-        let processed = self
-            .inner
-            .process_message(provider, protocol_message)
-            .map_err(|e| anyhow!("process commit: {e}"))?;
+        let processed = process_message_contained(&mut self.inner, provider, protocol_message)
+            .context("process commit")?;
         let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
             bail!("message is not a commit");
         };
@@ -417,10 +443,8 @@ impl MlsChannelGroup {
         let protocol_message = message
             .try_into_protocol_message()
             .map_err(|e| anyhow!("sealed message is not a protocol message: {e}"))?;
-        let processed = self
-            .inner
-            .process_message(provider, protocol_message)
-            .map_err(|e| anyhow!("open message: {e}"))?;
+        let processed = process_message_contained(&mut self.inner, provider, protocol_message)
+            .context("open message")?;
         let ProcessedMessageContent::ApplicationMessage(app) = processed.into_content() else {
             bail!("message is not an application message");
         };

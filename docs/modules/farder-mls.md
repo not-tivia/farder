@@ -229,11 +229,16 @@ was written against these exact versions.
   `MlsChannelGroup::load` (the store-resume path) re-derives the cache via a
   signed `export_group_info` — which is why it takes the device signer.
 - OpenMLS 0.8.1 has `debug_assert!(false, "Ciphertext decryption failed")` on
-  AEAD failure (`framing/private_message_in.rs`), so in **debug builds** a
-  tampered/undecryptable `PrivateMessage` **panics** inside `process_message`
-  where release builds return a clean `Err`. Consumers (sub-3/4) handling
-  hostile ciphertext in debug/test builds must account for this (the tamper
-  test uses `catch_unwind`).
+  AEAD failure (`framing/private_message_in.rs`), which would make a
+  tampered/undecryptable `PrivateMessage` **panic** inside `process_message`
+  in debug builds (`cargo test`, `npm run tauri dev`) where release builds
+  return a clean `Err`. Because these bytes are attacker-suppliable (sub-4
+  feeds server input here), the panic is **contained inside this crate**:
+  `open_message` and `process_commit` route through
+  `group::process_message_contained`, which `catch_unwind`s and converts any
+  panic to `Err` — consumers (sub-3/4) get the same clean `Err` in both build
+  profiles and need no special handling. The tamper test asserts this
+  contained-Err contract directly (no `catch_unwind` at the call site).
 - Opening a sealed message **consumes** that generation's decryption key
   (forward secrecy): the same ciphertext cannot be opened twice by the same
   member, and a failed AEAD attempt also burns the key. Callers must not

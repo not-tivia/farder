@@ -412,18 +412,18 @@ mod tests {
         let mut dave = other.remove(0);
         assert!(dave.open(&sealed).is_err());
 
-        // Bit-flip inside the ciphertext body: AEAD must reject. OpenMLS
-        // 0.8.1 has `debug_assert!(false, ..)` on AEAD failure
-        // (framing/private_message_in.rs), so debug builds (cargo test)
-        // panic where release builds return Err — accept either
-        // "did not open" outcome. See docs/modules/farder-mls.md gotchas.
+        // Bit-flip inside the ciphertext body: AEAD must reject with a clean
+        // `Err` in BOTH build profiles. OpenMLS 0.8.1 has
+        // `debug_assert!(false, ..)` on AEAD failure
+        // (framing/private_message_in.rs) which would panic debug builds, but
+        // `open_message` contains it (see `group::process_message_contained`
+        // and docs/modules/farder-mls.md gotchas) — so this asserts the
+        // contained-Err contract, not "Err or panic".
         let mut tampered = sealed.clone();
         let mid = tampered.len() - 10;
         tampered[mid] ^= 0x01;
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bob.open(&tampered)));
         assert!(
-            !matches!(result, Ok(Ok(_))),
+            bob.open(&tampered).is_err(),
             "tampered ciphertext must not open"
         );
 
