@@ -1,6 +1,6 @@
 # farder-mls
 
-> **File(s):** `crates/farder-mls/src/lib.rs`, `crates/farder-mls/src/credential.rs`
+> **File(s):** `crates/farder-mls/src/lib.rs`, `crates/farder-mls/src/credential.rs`, `crates/farder-mls/src/group.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-07-28
 
@@ -14,8 +14,8 @@ binding. It deliberately does NOT define protocol events, fold rules, ingest
 checks, or any server/client wiring — those are later sub-projects that consume
 this crate's values.
 
-**Status:** constants + credential binding (`credential.rs`). Group ops,
-envelopes, and storage land task-by-task per
+**Status:** constants + credential binding (`credential.rs`) + group ops with
+commit chaining (`group.rs`). Envelopes and storage land task-by-task per
 `docs/superpowers/plans/2026-07-27-mesh-rung2-sub1-mls-core.md`.
 
 ---
@@ -60,6 +60,9 @@ server-ingest's job (sub-3), not this crate's.
 - `DeviceSigner<'a>(pub &'a Keypair)` — `openmls_traits::signatures::Signer`
   adapter; the MLS leaf signs with the same Ed25519 device subkey that signs
   log events (`signature_scheme()` = ED25519).
+- `credential_with_key(device: &Keypair, identity: &PublicKey) -> CredentialWithKey`
+  — the leaf credential + device-subkey signature key pair used both for
+  KeyPackages and for `MlsChannelGroup::create`.
 - `generate_key_package(provider, device: &Keypair, identity: &PublicKey) -> Result<KeyPackageBundle>`
   — builds a KeyPackage under `CIPHERSUITE` whose leaf credential is the
   encoded `(identity, device_id)` and whose leaf signature key is the device
@@ -69,6 +72,60 @@ server-ingest's job (sub-3), not this crate's.
   the cert, leaf key == certified `device_pubkey`, and `cert.verify()` passes.
   Fold-status checks (membership, revocation, expiry) are sub-2's job — callers
   pass a cert they already trust per fold state.
+
+### `group` module — channel group ops + commit chaining
+
+One `MlsChannelGroup` per E2EE channel group, wrapping `MlsGroup` with the
+spec's fixed configuration: `CIPHERSUITE`, ratchet-tree extension ON
+(self-contained Welcomes), `max_past_epochs = 3`,
+`PURE_PLAINTEXT_WIRE_FORMAT_POLICY` (handshake framing is public by
+constraint), default sender-ratchet config, OpenMLS `padding_size(0)` (bucket
+padding is this crate's own, Task 4).
+
+Types (fields all public):
+
+- `DeclaredMember { identity: PublicKey, device: DeviceId }` — the spec's
+  `DeclaredAdd`/`DeclaredRemove` shape (the `key_package: EventRef` half of
+  `DeclaredAdd` is log-layer data, sub-2).
+- `CommitOutcome { commit_bytes, welcome_bytes: Option<_>, prev_epoch_authenticator: [u8;32], post_tree_hash: [u8;32], epoch: u64, adds, removes }`
+  — exactly what sub-2's `MlsCommit` event carries. `prev_epoch_authenticator`
+  is captured **before** merging, `post_tree_hash` after. **Epoch convention:**
+  `epoch` is the epoch the commit was *authored in* (what the fold checks
+  against `current_epoch`); merging moves the group to `epoch + 1`.
+- `ProcessedCommit { actual_adds, actual_removes, post_tree_hash, epoch }` —
+  the member-side view after processing someone else's commit (same epoch
+  convention).
+- `JoinInfo { epoch, tree_hash }` — what a joiner's `MlsLeafConfirmed` (sub-2)
+  cites; `epoch` is the joiner's *starting* epoch (authored epoch + 1) and
+  `tree_hash` equals the adding commit's `post_tree_hash`.
+
+Methods (all take `provider: &impl OpenMlsProvider`; mutators also
+`signer: &DeviceSigner`):
+
+- `create(provider, signer, credential_with_key, channel_group_id: &[u8]) -> Result<Self>`
+- `join_from_welcome(provider, welcome_bytes: &[u8]) -> Result<(Self, JoinInfo)>`
+  — self-contained Welcome (ratchet-tree extension), no external tree needed.
+- `add_members(provider, signer, key_packages: &[KeyPackage]) -> Result<CommitOutcome>`
+- `remove_members(provider, signer, members: &[DeclaredMember]) -> Result<CommitOutcome>`
+  — resolves leaf indices by credential; unknown members are errors.
+- `self_update(provider, signer) -> Result<CommitOutcome>` — the rekey-cadence
+  primitive: epoch +1, membership unchanged, authenticator rotates.
+- `process_commit(provider, commit_bytes: &[u8]) -> Result<ProcessedCommit>`
+  — OpenMLS-verifies + stages, reports **actual** adds/removes and post tree
+  hash, then merges.
+- Accessors: `epoch() -> u64`, `epoch_authenticator() -> [u8;32]`,
+  `tree_hash() -> [u8;32]`, `members() -> Result<Vec<DeclaredMember>>`.
+
+Free functions:
+
+- `decode_key_package(provider, bytes: &[u8]) -> Result<KeyPackage>` — strict
+  byte-level decode + OpenMLS validation + pinned-suite check; how KeyPackages
+  read from the log become addable. Garbage, truncation, tampering, and wrong
+  suites are all errors.
+- `verify_declared_matches_actual(processed, declared_adds, declared_removes, declared_post_tree_hash) -> Result<()>`
+  — the member-side lying-commit check (spec §Commit chaining):
+  order-insensitive set equality on adds/removes plus tree-hash equality. The
+  fold-side authenticator chain is sub-2's job.
 
 ---
 
@@ -91,6 +148,13 @@ was written against these exact versions.
 
 ## Known gotchas
 
+- OpenMLS 0.8.1 gates `MlsGroup::tree_hash()`/`export_group_context()` behind
+  its `test-utils` feature, so `MlsChannelGroup` **caches** the current tree
+  hash, maintained via ungated paths (`StagedWelcome::group_context()`,
+  `StagedCommit::group_context()`, and `export_group_info` at creation). A
+  future `MlsGroup::load` path (Task 5's store resume) must re-derive the
+  cache via `export_group_info` (needs the device signer) when constructing
+  the wrapper.
 - Everything here is synchronous plain-library code; async callers must use
   `spawn_blocking` (caller policy, not this crate's).
 - The server must never grow a dependency on this crate — E2EE group keys are

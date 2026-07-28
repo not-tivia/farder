@@ -100,6 +100,21 @@ impl Signer for DeviceSigner<'_> {
     }
 }
 
+/// Build the [`CredentialWithKey`] for a device's MLS leaf: the normative
+/// length-prefixed credential identity plus the device subkey as the leaf
+/// signature key. Used for group creation (`MlsChannelGroup::create`) and
+/// inside [`generate_key_package`].
+pub fn credential_with_key(device: &Keypair, identity: &PublicKey) -> CredentialWithKey {
+    let device_pubkey = device.public_key();
+    let device_id = farder_crypto::event_log::device_id(&device_pubkey);
+    let credential: Credential =
+        BasicCredential::new(encode_credential_identity(identity, &device_id)).into();
+    CredentialWithKey {
+        credential,
+        signature_key: device_pubkey.as_bytes().to_vec().into(),
+    }
+}
+
 /// Generate a [`KeyPackageBundle`] for `device` under the pinned suite, with
 /// the leaf credential bound to `(identity, device_id(device))` and the leaf
 /// signature key set to the device subkey.
@@ -108,14 +123,7 @@ pub fn generate_key_package(
     device: &Keypair,
     identity: &PublicKey,
 ) -> Result<KeyPackageBundle> {
-    let device_pubkey = device.public_key();
-    let device_id = farder_crypto::event_log::device_id(&device_pubkey);
-    let credential: Credential =
-        BasicCredential::new(encode_credential_identity(identity, &device_id)).into();
-    let credential_with_key = CredentialWithKey {
-        credential,
-        signature_key: device_pubkey.as_bytes().to_vec().into(),
-    };
+    let credential_with_key = credential_with_key(device, identity);
     KeyPackage::builder()
         .build(
             CIPHERSUITE,
