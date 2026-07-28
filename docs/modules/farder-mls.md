@@ -149,9 +149,17 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
 Free functions:
 
 - `decode_key_package(provider, bytes: &[u8]) -> Result<KeyPackage>` — strict
-  byte-level decode + OpenMLS validation + pinned-suite check; how KeyPackages
-  read from the log become addable. Garbage, truncation, tampering, and wrong
-  suites are all errors.
+  byte-level decode + OpenMLS validation + pinned-suite check + **farder
+  credential gate** (the leaf credential must satisfy
+  `decode_credential_identity`); how KeyPackages read from the log become
+  addable. Garbage, truncation, tampering, wrong suites, and non-farder
+  credentials are all errors — the credential gate fails closed at this
+  boundary because an MLS-valid non-farder KeyPackage passed to `add_members`
+  would only fail *after* OpenMLS stages (and persists) the commit.
+  Belt-and-braces on that path: a failed own commit
+  (`add_members`/`remove_members`/`self_update`) always clears the staged
+  pending commit (memory + storage), so the group is never wedged in
+  `PendingCommit` — state is unchanged and later mutators still work.
 - `verify_declared_matches_actual(processed, declared_adds, declared_removes, declared_post_tree_hash) -> Result<()>`
   — the member-side lying-commit check (spec §Commit chaining):
   order-insensitive set equality on adds/removes plus tree-hash equality. The

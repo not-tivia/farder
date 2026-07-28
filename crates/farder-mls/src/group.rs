@@ -519,7 +519,37 @@ impl MlsChannelGroup {
 
     /// Read declared members + post state from our own staged commit, merge
     /// it, and assemble the [`CommitOutcome`].
+    ///
+    /// On ANY error the staged pending commit is cleared (memory + storage):
+    /// OpenMLS stages and **persists** the pending commit as part of
+    /// `add_members`/`remove_members`/`self_update` before this method runs,
+    /// so without the clear a failure here (e.g. a summary that bails on an
+    /// undecodable credential) would wedge the group in
+    /// `MlsGroupState::PendingCommit` — every later mutator fails with
+    /// "a pending commit exists", and the wedge survives store restarts.
     fn finish_own_commit(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        commit: MlsMessageOut,
+        welcome: Option<MlsMessageOut>,
+        prev_epoch_authenticator: [u8; 32],
+        epoch: u64,
+    ) -> Result<CommitOutcome> {
+        let result =
+            self.finish_own_commit_inner(provider, commit, welcome, prev_epoch_authenticator, epoch);
+        if result.is_err() {
+            // Belt-and-braces: never leave a failed own commit staged. A
+            // no-op if the commit already merged (or none is pending).
+            if let Err(clear_err) = self.inner.clear_pending_commit(provider.storage()) {
+                return result.with_context(|| {
+                    format!("additionally failed to clear the staged pending commit: {clear_err}")
+                });
+            }
+        }
+        result
+    }
+
+    fn finish_own_commit_inner(
         &mut self,
         provider: &impl OpenMlsProvider,
         commit: MlsMessageOut,
@@ -562,9 +592,18 @@ impl MlsChannelGroup {
 }
 
 /// Strictly decode serialized KeyPackage bytes: TLS-decode, verify signatures
-/// and validity via OpenMLS, and require the pinned ciphersuite. This is how
-/// KeyPackages received from the log (sub-2) become [`KeyPackage`]s that
-/// [`MlsChannelGroup::add_members`] accepts.
+/// and validity via OpenMLS, require the pinned ciphersuite, and require the
+/// leaf credential to decode as a **farder credential**
+/// ([`decode_credential_identity`]). This is how KeyPackages received from
+/// the log (sub-2) become [`KeyPackage`]s that
+/// [`MlsChannelGroup::add_members`] accepts. Garbage, truncation, tampering,
+/// wrong suites, and non-farder credentials are all errors.
+///
+/// The credential gate fails closed at this boundary on purpose: an
+/// MLS-valid KeyPackage with a non-farder credential would otherwise pass
+/// into `add_members`, whose staged commit fails only *after* OpenMLS has
+/// persisted it — see `finish_own_commit`'s pending-commit clearing for the
+/// second line of defense.
 pub fn decode_key_package(
     provider: &impl OpenMlsProvider,
     bytes: &[u8],
@@ -581,6 +620,8 @@ pub fn decode_key_package(
             CIPHERSUITE
         );
     }
+    decode_credential_identity(key_package.leaf_node().credential().serialized_content())
+        .context("key package credential is not a farder credential")?;
     Ok(key_package)
 }
 
@@ -680,6 +721,29 @@ mod tests {
                 crate::CIPHERSUITE,
                 provider,
                 &DeviceSigner(attacker_device),
+                credential_with_key,
+            )
+            .unwrap()
+            .key_package()
+            .clone()
+    }
+
+    /// An MLS-valid KeyPackage under the pinned suite whose credential is
+    /// NOT a farder credential (arbitrary identity bytes): TLS-valid and
+    /// self-consistently signed, so only the farder-credential gate in
+    /// `decode_key_package` can refuse it.
+    fn non_farder_key_package(provider: &OpenMlsRustCrypto, device: &Keypair) -> KeyPackage {
+        let credential: Credential =
+            BasicCredential::new(b"not-a-farder-credential".to_vec()).into();
+        let credential_with_key = CredentialWithKey {
+            credential,
+            signature_key: device.public_key().as_bytes().to_vec().into(),
+        };
+        KeyPackage::builder()
+            .build(
+                crate::CIPHERSUITE,
+                provider,
+                &DeviceSigner(device),
                 credential_with_key,
             )
             .unwrap()
@@ -909,6 +973,69 @@ mod tests {
 
         // Pure garbage is refused.
         assert!(decode_key_package(&decoder_prov, b"not a key package").is_err());
+    }
+
+    #[test]
+    fn decode_key_package_rejects_mls_valid_non_farder_credential() {
+        // TLS-valid, OpenMLS-valid, pinned suite — but the credential is not
+        // a farder credential. The documented gate for KeyPackages read from
+        // the log must fail closed here, BEFORE add_members can stage (and
+        // persist) a commit that only fails later.
+        let outsider_dev = Keypair::generate();
+        let outsider_prov = OpenMlsRustCrypto::default();
+        let kp = non_farder_key_package(&outsider_prov, &outsider_dev);
+        let bytes = kp.tls_serialize_detached().unwrap();
+
+        let decoder_prov = OpenMlsRustCrypto::default();
+        let err = decode_key_package(&decoder_prov, &bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("not a farder credential"),
+            "expected the farder-credential gate to reject, got: {err}"
+        );
+    }
+
+    #[test]
+    fn failed_add_commit_does_not_wedge_the_group_in_pending_commit() {
+        // The reviewer's empirical wedge scenario: a non-farder-credential
+        // KeyPackage handed straight to add_members (bypassing the
+        // decode_key_package gate). OpenMLS stages AND persists the pending
+        // commit before finish_own_commit's summary bails on the
+        // undecodable credential — without clear_pending_commit on the error
+        // path, every subsequent mutator fails with "a pending commit
+        // exists".
+        let (a_id, a_dev, a_prov) = member();
+        let mut alice = MlsChannelGroup::create(
+            &a_prov,
+            &DeviceSigner(&a_dev),
+            credential_with_key(&a_dev, &a_id.public_key()),
+            b"wedge-test",
+        )
+        .unwrap();
+
+        let outsider_dev = Keypair::generate();
+        let outsider_prov = OpenMlsRustCrypto::default();
+        let kp = non_farder_key_package(&outsider_prov, &outsider_dev);
+
+        let epoch_before = alice.epoch();
+        let auth_before = alice.epoch_authenticator();
+        let tree_before = alice.tree_hash();
+        assert!(alice
+            .add_members(&a_prov, &DeviceSigner(&a_dev), &[kp])
+            .is_err());
+
+        // The failed commit left no trace: state unchanged, and the group is
+        // NOT stuck in PendingCommit — a self_update still succeeds.
+        assert_eq!(alice.epoch(), epoch_before);
+        assert_eq!(alice.epoch_authenticator(), auth_before);
+        assert_eq!(alice.tree_hash(), tree_before);
+        let outcome = alice.self_update(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+        assert_eq!(outcome.epoch, epoch_before);
+        assert_eq!(alice.epoch(), epoch_before + 1);
+
+        // And further mutators keep working (the wedge was persistent, so
+        // one success is not enough evidence on its own).
+        alice.self_update(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+        assert_eq!(alice.epoch(), epoch_before + 2);
     }
 
     #[test]
