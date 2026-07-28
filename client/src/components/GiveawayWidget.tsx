@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
+import { toast } from "../lib/toast";
 import { publicKeyToString } from "../lib/types";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 
@@ -10,6 +11,13 @@ interface GiveawayWidgetProps {
   /** Called when the giveaway can't be loaded (deleted/unknown) — parent falls
    *  back to rendering the message's plain-text content. */
   onUnavailable?: () => void;
+  /** Freshness discipline for linked renders (GiveawayUpdated broadcasts reach
+   *  origin-channel subscribers only, so cards outside that channel go stale):
+   *  - undefined (default): fetch only when absent from the slice;
+   *  - "mount": always fetch once on mount (fresh count + my_entered);
+   *  - "interval": "mount" plus refetch after each own successful interaction
+   *    ack plus a 20 s interval while mounted. */
+  refetch?: "mount" | "interval";
 }
 
 // Module-level cache for own public key (same idiom as Message.tsx/PollWidget.tsx).
@@ -35,7 +43,7 @@ function shortKey(pk: string): string {
   return pk.slice(0, 11);
 }
 
-export default function GiveawayWidget({ serverId, giveawayId, onUnavailable }: GiveawayWidgetProps) {
+export default function GiveawayWidget({ serverId, giveawayId, onUnavailable, refetch }: GiveawayWidgetProps) {
   const { state, dispatch } = useApp();
   const server = state.servers[serverId] ?? null;
   const entry = server?.giveaways[giveawayId] ?? null;
@@ -54,10 +62,7 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable }: 
     }
   }, []);
 
-  // State recovery: absent from the reducer → fetch once on mount.
-  useEffect(() => {
-    if (entry || fetchedRef.current) return;
-    fetchedRef.current = true;
+  function fetchGiveaway() {
     api.getGiveaway(serverId, giveawayId)
       .then((s) => {
         dispatch({
@@ -67,8 +72,27 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable }: 
         });
       })
       .catch(() => { onUnavailable?.(); });
+  }
+
+  // State recovery: absent from the reducer → fetch once on mount.
+  // refetch="mount"/"interval" always fetch on mount, even when the slice
+  // already has the giveaway (refreshes the count + the per-viewer my_entered).
+  useEffect(() => {
+    if (fetchedRef.current) return;
+    if (!refetch && entry) return;
+    fetchedRef.current = true;
+    fetchGiveaway();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry, serverId, giveawayId]);
+
+  // refetch="interval": 20 s poll for linked cards outside the origin channel
+  // (they receive no GiveawayUpdated events); cleared on unmount.
+  useEffect(() => {
+    if (refetch !== "interval") return;
+    const t = window.setInterval(fetchGiveaway, 20_000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refetch, serverId, giveawayId]);
 
   // Live 1 s countdown while open; re-derived from ends_at, no server ticks.
   useEffect(() => {
@@ -104,6 +128,9 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable }: 
         await api.enterGiveaway(serverId, giveawayId);
         dispatch({ type: "GIVEAWAY_MY_ENTERED", serverId, payload: { giveawayId, myEntered: true } });
       }
+      // Cross-channel linked cards get no GiveawayUpdated broadcast — pull the
+      // fresh count right after our own ack instead of waiting for the tick.
+      if (refetch === "interval") fetchGiveaway();
     } catch (e) {
       setError(String(e)); // e.g. lost race with the draw; next GiveawayUpdated corrects
     } finally {
@@ -117,6 +144,7 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable }: 
     setError(null);
     try {
       await api.cancelGiveaway(serverId, giveawayId); // GiveawayUpdated broadcast flips the UI
+      if (refetch === "interval") fetchGiveaway(); // no broadcast off-channel — refresh now
     } catch (e) {
       setError(String(e));
     } finally {
@@ -130,11 +158,21 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable }: 
     setError(null);
     try {
       await api.rerollGiveaway(serverId, giveawayId); // GiveawayUpdated + announcement follow
+      if (refetch === "interval") fetchGiveaway(); // no broadcast off-channel — refresh now
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  function copyWidgetLink() {
+    if (!giveaway) return;
+    const link = `farder://widget/giveaway/${giveaway.channel_id}/${giveaway.id}`;
+    navigator.clipboard?.writeText(link).then(
+      () => toast.success("Widget link copied"),
+      () => {},
+    );
   }
 
   const entries = giveaway.entry_count;
@@ -147,6 +185,10 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable }: 
         <>
           <div className="giveaway-meta">
             ends in {formatRemaining(giveaway.ends_at - nowSecs)} · {entries} entr{entries === 1 ? "y" : "ies"}
+            {" "}
+            <button className="widget-copy-link" title="Copy widget link" onClick={copyWidgetLink}>
+              🔗
+            </button>
           </div>
           <div className="giveaway-actions">
             <button

@@ -115,7 +115,7 @@ Redraw for an `ended` giveaway with a winner; `None` when the eligible set is em
 - **`messages.rs`** — `insert_message` + `set_widget(conn, message_id: u64, widget_json)` write the card; `MSG_SELECT` returns `widget` at index 10 into `MessageInfo.widget: Option<String>` (`#[serde(default)]` — old peers deserialize fine).
 - **`handlers.rs`** — owns ALL gates: default-deny membership, `widget_channel_visible` (VIEW_CHANNEL / DM-participant with opaque not-found), `is_timed_out` on mutations, `widget_limiter` (`RateLimiter::new(10, 10)` on `ServerState`) for vote/retract/enter/leave, MANAGE_SERVER for giveaway creation, creator-or-mod for close/cancel/reroll.
 - **`connection.rs` / `events.rs`** — `broadcast_event(state, target, event)` fans out the `PendingBroadcast`s after the DB guard drops.
-- **Client** — `PollWidget.tsx` / `GiveawayWidget.tsx` render from the `polls`/`giveaways` context slices (see `frontend-state.md`); Group 26 of `tauri-commands.md` lists the nine interaction commands.
+- **Client** — `PollWidget.tsx` / `GiveawayWidget.tsx` render from the `polls`/`giveaways` context slices (see `frontend-state.md`); Group 26 of `tauri-commands.md` lists the nine interaction commands. `LinkedWidgetCard.tsx` re-mounts the same widgets under messages containing `farder://widget/...` links, resolving through the same `GetPoll`/`GetGiveaway` reads (opaque failures → a "not available" card; no new server surface — see `frontend-bridge.md` "Shareable widget links").
 
 ## Known gotchas
 

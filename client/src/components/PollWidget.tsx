@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
+import { toast } from "../lib/toast";
 import { publicKeyToString } from "../lib/types";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 
@@ -10,6 +11,13 @@ interface PollWidgetProps {
   /** Called when the poll can't be loaded (deleted/unknown) — parent falls back
    *  to rendering the message's plain-text content. */
   onUnavailable?: () => void;
+  /** Freshness discipline for linked renders (PollUpdated broadcasts reach
+   *  origin-channel subscribers only, so cards outside that channel go stale):
+   *  - undefined (default): fetch only when absent from the slice;
+   *  - "mount": always fetch once on mount (fresh counts + my_vote);
+   *  - "interval": "mount" plus refetch after each own successful interaction
+   *    ack plus a 20 s interval while mounted. */
+  refetch?: "mount" | "interval";
 }
 
 // Module-level cache for own public key (same idiom as Message.tsx).
@@ -27,7 +35,7 @@ function formatRemaining(secs: number): string {
   return "under a minute";
 }
 
-export default function PollWidget({ serverId, pollId, onUnavailable }: PollWidgetProps) {
+export default function PollWidget({ serverId, pollId, onUnavailable, refetch }: PollWidgetProps) {
   const { state, dispatch } = useApp();
   const server = state.servers[serverId] ?? null;
   const entry = server?.polls[pollId] ?? null;
@@ -46,17 +54,33 @@ export default function PollWidget({ serverId, pollId, onUnavailable }: PollWidg
     }
   }, []);
 
-  // State recovery: absent from the reducer → fetch once on mount.
-  useEffect(() => {
-    if (entry || fetchedRef.current) return;
-    fetchedRef.current = true;
+  function fetchPoll() {
     api.getPoll(serverId, pollId)
       .then((s) => {
         dispatch({ type: "POLL_STATE", serverId, payload: { poll: s.poll, myVote: s.my_vote } });
       })
       .catch(() => { onUnavailable?.(); });
+  }
+
+  // State recovery: absent from the reducer → fetch once on mount.
+  // refetch="mount"/"interval" always fetch on mount, even when the slice
+  // already has the poll (refreshes counts + the per-viewer my_vote).
+  useEffect(() => {
+    if (fetchedRef.current) return;
+    if (!refetch && entry) return;
+    fetchedRef.current = true;
+    fetchPoll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry, serverId, pollId]);
+
+  // refetch="interval": 20 s poll for linked cards outside the origin channel
+  // (they receive no PollUpdated events); cleared on unmount.
+  useEffect(() => {
+    if (refetch !== "interval") return;
+    const t = window.setInterval(fetchPoll, 20_000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refetch, serverId, pollId]);
 
   // 30 s countdown tick while open + timed; re-derived from closes_at, no server ticks.
   useEffect(() => {
@@ -104,6 +128,9 @@ export default function PollWidget({ serverId, pollId, onUnavailable }: PollWidg
         await api.votePoll(serverId, pollId, index);
         dispatch({ type: "POLL_MY_VOTE", serverId, payload: { pollId, myVote: index } });
       }
+      // Cross-channel linked cards get no PollUpdated broadcast — pull the
+      // fresh counts right after our own ack instead of waiting for the tick.
+      if (refetch === "interval") fetchPoll();
     } catch (e) {
       setError(String(e)); // e.g. lost race with close; next PollUpdated corrects
     } finally {
@@ -117,11 +144,21 @@ export default function PollWidget({ serverId, pollId, onUnavailable }: PollWidg
     setError(null);
     try {
       await api.closePoll(serverId, pollId); // PollUpdated broadcast flips the UI
+      if (refetch === "interval") fetchPoll(); // no broadcast off-channel — refresh now
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  function copyWidgetLink() {
+    if (!poll) return;
+    const link = `farder://widget/poll/${poll.channel_id}/${poll.id}`;
+    navigator.clipboard?.writeText(link).then(
+      () => toast.success("Widget link copied"),
+      () => {},
+    );
   }
 
   const footerStatus = closed
@@ -160,11 +197,16 @@ export default function PollWidget({ serverId, pollId, onUnavailable }: PollWidg
           {total} vote{total === 1 ? "" : "s"}
           {footerStatus ? ` · ${footerStatus}` : ""}
         </span>
-        {canClose && (
-          <button className="xp-button" onClick={handleClose} disabled={busy}>
-            Close poll
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          {canClose && (
+            <button className="xp-button" onClick={handleClose} disabled={busy}>
+              Close poll
+            </button>
+          )}
+          <button className="widget-copy-link" title="Copy widget link" onClick={copyWidgetLink}>
+            🔗
           </button>
-        )}
+        </span>
       </div>
     </div>
   );

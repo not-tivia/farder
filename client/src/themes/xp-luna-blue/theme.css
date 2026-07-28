@@ -3124,3 +3124,50 @@ body {
   color: var(--xp-text-muted, var(--xp-text-secondary));
   font-style: italic;
 }
+
+/* ── Widget links (copy control, text pill, linked cards) ── */
+.widget-copy-link {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+}
+.widget-copy-link:hover {
+  color: var(--xp-blue);
+}
+.widget-link-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  margin: 0 2px;
+  border: 1px solid var(--xp-border);
+  border-radius: 2px;
+  background: var(--xp-panel-bg);
+  color: var(--xp-text-normal, #222);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.widget-link-pill:hover {
+  border-color: var(--xp-blue);
+}
+.linked-widget-embeds {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.linked-widget-unavailable {
+  border: 1px solid var(--xp-border);
+  border-left: 3px solid var(--xp-border);
+  background: var(--xp-panel-bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-width: 460px;
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  font-style: italic;
+  font-size: 0.9em;
+}

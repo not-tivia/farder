@@ -44,8 +44,8 @@ These three files together are the entire client-side state layer. `ServerContex
 | `currentVoiceChannelId` | `number \| null` | Which voice channel the local user has joined. Set by `JOIN_VOICE_CHANNEL`, cleared by `LEAVE_VOICE_CHANNEL`. |
 | `ownerPublicKey` | `string \| null` | Server owner's pubkey in `"vk_<hex>"` form |
 | `highlightMessageId` | `number \| null` | Message to scroll-to-and-highlight; cleared by the UI after use |
-| `polls` | `Record<number, { poll: PollInfo; myVote: number \| null }>` | Live poll state keyed by poll id. Populated lazily by `PollWidget` (`POLL_STATE` after `getPoll`), patched by `POLL_UPDATED` broadcasts and `POLL_MY_VOTE` |
-| `giveaways` | `Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>` | Live giveaway state keyed by giveaway id. Populated lazily by `GiveawayWidget` (`GIVEAWAY_STATE` after `getGiveaway`), patched by `GIVEAWAY_UPDATED` broadcasts and `GIVEAWAY_MY_ENTERED` |
+| `polls` | `Record<number, { poll: PollInfo; myVote: number \| null }>` | Live poll state keyed by poll id. Populated lazily by `PollWidget` (`POLL_STATE` after `getPoll` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `POLL_UPDATED` broadcasts and `POLL_MY_VOTE` |
+| `giveaways` | `Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>` | Live giveaway state keyed by giveaway id. Populated lazily by `GiveawayWidget` (`GIVEAWAY_STATE` after `getGiveaway` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `GIVEAWAY_UPDATED` broadcasts and `GIVEAWAY_MY_ENTERED` |
 
 ---
 

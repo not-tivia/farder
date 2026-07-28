@@ -23,12 +23,21 @@ import LinkEmbed from "./LinkEmbed";
 import { detectEmbedUrls } from "../lib/linkEmbed";
 import PollWidget from "./PollWidget";
 import GiveawayWidget from "./GiveawayWidget";
+import LinkedWidgetCard from "./LinkedWidgetCard";
+import type { WidgetLink } from "./LinkedWidgetCard";
 import MemberAvatar from "./MemberAvatar";
 import { useDataSaver } from "../context/DataSaverContext";
 import { imageIsGated } from "../lib/dataSaver";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
+
+// Shareable widget links: farder://widget/(poll|giveaway)/<channel_id>/<widget_id>.
+// They share the farder:// scheme, so INVITE_REGEX / INVITE_SPLIT_REGEX already
+// match and tokenize them — every invite-side consumer must exclude the
+// farder://widget/ prefix first (isInviteLink, the invite-embeds IIFE) or a
+// widget link would render as a bogus invite pill / garbage join card.
+const WIDGET_LINK_REGEX = /farder:\/\/widget\/(poll|giveaway)\/(\d+)\/(\d+)/gi;
 
 interface MessageProps {
   message: MessageInfo;
@@ -99,13 +108,44 @@ function loadBookIndex(): Promise<void> {
 // Fresh non-global tester per call below — a shared /g regex is stateful.
 const INVITE_SPLIT_REGEX = /((?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+)/gi;
 
+/** Prefix test: is this token in the widget-link namespace (even if malformed)?
+ *  Used to keep widget links out of the invite pipeline. */
+function isWidgetSchemeLink(s: string): boolean {
+  return /^farder:\/\/widget\//i.test(s);
+}
+
+/** Anchored, non-global full-token tester (a shared /g regex is stateful). */
+function isWidgetLink(s: string): boolean {
+  return /^farder:\/\/widget\/(poll|giveaway)\/\d+\/\d+$/i.test(s);
+}
+
+/** Parse a widget link; null when malformed or either id overflows a safe
+ *  integer. The channel id is display/consistency data only — never sent to
+ *  the server. */
+function parseWidgetLink(link: string): WidgetLink | null {
+  const m = /^farder:\/\/widget\/(poll|giveaway)\/(\d+)\/(\d+)$/i.exec(link);
+  if (!m) return null;
+  const channelId = Number(m[2]);
+  const widgetId = Number(m[3]);
+  if (!Number.isSafeInteger(channelId) || !Number.isSafeInteger(widgetId)) return null;
+  return { kind: m[1].toLowerCase() as "poll" | "giveaway", channelId, widgetId };
+}
+
 function isInviteLink(s: string): boolean {
+  if (isWidgetSchemeLink(s)) return false; // farder://widget/... is never an invite
   return /^(?:(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+)$/i.test(s);
 }
 
 function copyInviteLink(link: string) {
   navigator.clipboard?.writeText(link).then(
     () => toast.success("Invite link copied"),
+    () => {},
+  );
+}
+
+function copyWidgetLink(link: string) {
+  navigator.clipboard?.writeText(link).then(
+    () => toast.success("Widget link copied"),
     () => {},
   );
 }
@@ -138,6 +178,23 @@ function renderContent(text: string, memberNames: Record<string, string>, ownDis
   // The underlying message content is untouched — only the display changes.
   const segments = text.split(INVITE_SPLIT_REGEX);
   return segments.map((seg, si) => {
+    // Widget check FIRST: widget links match the invite split's farder://
+    // alternative, so they arrive here as tokens too.
+    if (seg && isWidgetLink(seg)) {
+      return (
+        <span
+          key={`wpill-${si}`}
+          className="widget-link-pill"
+          title={seg}
+          onClick={(e) => {
+            e.stopPropagation();
+            copyWidgetLink(seg);
+          }}
+        >
+          {/^farder:\/\/widget\/poll\//i.test(seg) ? "📊 Poll link" : "🎉 Giveaway link"}
+        </span>
+      );
+    }
     if (seg && isInviteLink(seg)) {
       return (
         <span
@@ -532,6 +589,9 @@ export default function Message({ message, memberNames, grouped = false, serverI
         const embeds: string[] = [];
         for (const m of rawMatches) {
           if (embeds.length >= 3) break;
+          // Widget links match INVITE_REGEX's farder:// alternative — keep them
+          // out of parseInviteLink (they'd misparse into a garbage join card).
+          if (isWidgetSchemeLink(m)) continue;
           const parsed = parseInviteLink(m);
           if (!parsed.address) continue;
           if (seen.has(parsed.address)) continue;
@@ -541,6 +601,34 @@ export default function Message({ message, memberNames, grouped = false, serverI
         return embeds.length > 0 ? (
           <div className="invite-embeds">
             {embeds.map((m, i) => <InviteEmbed key={i} link={m} />)}
+          </div>
+        ) : null;
+      })()}
+
+      {!deleted && (() => {
+        // Linked widget cards: same dedupe + cap-3 discipline as invite embeds.
+        const rawMatches = message.content.match(WIDGET_LINK_REGEX) ?? [];
+        const seen = new Set<string>();
+        const links: WidgetLink[] = [];
+        for (const m of rawMatches) {
+          if (links.length >= 3) break;
+          const parsed = parseWidgetLink(m);
+          if (!parsed) continue;
+          const key = `${parsed.kind}/${parsed.channelId}/${parsed.widgetId}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          links.push(parsed);
+        }
+        return links.length > 0 ? (
+          <div className="linked-widget-embeds">
+            {links.map((l) => (
+              <LinkedWidgetCard
+                key={`${l.kind}/${l.channelId}/${l.widgetId}`}
+                serverId={serverId}
+                link={l}
+                messageChannelId={message.channel_id}
+              />
+            ))}
           </div>
         ) : null;
       })()}
