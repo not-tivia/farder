@@ -22,6 +22,7 @@ import { parseInviteLink } from "../lib/invite";
 import LinkEmbed from "./LinkEmbed";
 import { detectEmbedUrls } from "../lib/linkEmbed";
 import PollWidget from "./PollWidget";
+import GiveawayWidget from "./GiveawayWidget";
 import MemberAvatar from "./MemberAvatar";
 import { useDataSaver } from "../context/DataSaverContext";
 import { imageIsGated } from "../lib/dataSaver";
@@ -317,6 +318,14 @@ export default function Message({ message, memberNames, grouped = false, serverI
           <PollWidget
             serverId={serverId}
             pollId={parsedWidget.id}
+            onUnavailable={() => setWidgetUnavailable(true)}
+          />
+        );
+      case "giveaway":
+        return (
+          <GiveawayWidget
+            serverId={serverId}
+            giveawayId={parsedWidget.id}
             onUnavailable={() => setWidgetUnavailable(true)}
           />
         );

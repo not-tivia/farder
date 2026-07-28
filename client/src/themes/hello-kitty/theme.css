@@ -3060,3 +3060,57 @@ body {
   color: var(--xp-text-muted, var(--xp-text-secondary));
   font-size: 0.85em;
 }
+
+/* ── Giveaway widget (interactive /giveaway card) ───────── */
+.giveaway-widget {
+  border: 1px solid var(--xp-border);
+  border-left: 3px solid var(--xp-blue);
+  background: var(--xp-panel-bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-width: 460px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.giveaway-prize {
+  font-weight: 600;
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+}
+.giveaway-meta {
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  font-size: 0.85em;
+}
+.giveaway-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.giveaway-enter-btn {
+  background: var(--xp-panel-bg);
+  border: 1px solid var(--xp-border);
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.giveaway-enter-btn:not(:disabled):hover { border-color: var(--xp-blue); }
+.giveaway-enter-btn:disabled { cursor: default; }
+.giveaway-action-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--xp-blue);
+  font-size: 0.85em;
+}
+.giveaway-action-link:not(:disabled):hover { text-decoration: underline; }
+.giveaway-action-link:disabled { cursor: default; }
+.giveaway-winner {
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+}
+.giveaway-cancelled {
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  font-style: italic;
+}
