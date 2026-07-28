@@ -1,23 +1,23 @@
 # farder-mls
 
-> **File(s):** `crates/farder-mls/src/lib.rs`, `crates/farder-mls/src/credential.rs`, `crates/farder-mls/src/group.rs`, `crates/farder-mls/src/envelope.rs`
+> **File(s):** `crates/farder-mls/src/lib.rs`, `crates/farder-mls/src/credential.rs`, `crates/farder-mls/src/group.rs`, `crates/farder-mls/src/envelope.rs`, `crates/farder-mls/src/store.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-07-28
 
 ## Purpose
 
 Pure-Rust wrapper around **OpenMLS 0.8.1** for Farder's E2EE channel groups
-(mesh rung 2, sub-project 1). It will own group lifecycle (create / join from
+(mesh rung 2, sub-project 1). It owns group lifecycle (create / join from
 Welcome / add / remove / self-update), message sealing with a padding bucket
 ladder, the device-subkey signer adapter, and sqlite storage with store-instance
-binding. It deliberately does NOT define protocol events, fold rules, ingest
-checks, or any server/client wiring — those are later sub-projects that consume
-this crate's values.
+binding + the no-resume rule. It deliberately does NOT define protocol events,
+fold rules, ingest checks, or any server/client wiring — those are later
+sub-projects that consume this crate's values.
 
-**Status:** constants + credential binding (`credential.rs`) + group ops with
-commit chaining (`group.rs`) + message sealing with the padding ladder
-(`envelope.rs`, group `seal_message`/`open_message`). Sqlite storage lands
-task-by-task per `docs/superpowers/plans/2026-07-27-mesh-rung2-sub1-mls-core.md`.
+**Status:** sub-1 COMPLETE — constants + credential binding (`credential.rs`)
++ group ops with commit chaining (`group.rs`) + message sealing with the
+padding ladder (`envelope.rs`) + sqlite store with instance binding
+(`store.rs`), per `docs/superpowers/plans/2026-07-27-mesh-rung2-sub1-mls-core.md`.
 
 ---
 
@@ -104,6 +104,11 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
 `signer: &DeviceSigner`):
 
 - `create(provider, signer, credential_with_key, channel_group_id: &[u8]) -> Result<Self>`
+- `load(provider, signer, channel_group_id: &[u8]) -> Result<Option<Self>>`
+  — the store-resume path: loads a persisted group from the provider's
+  storage (`Ok(None)` if the storage holds no such group). Needs the device
+  signer to re-derive the cached tree hash via a signed `export_group_info`
+  (see gotchas).
 - `join_from_welcome(provider, welcome_bytes: &[u8]) -> Result<(Self, JoinInfo)>`
   — self-contained Welcome (ratchet-tree extension), no external tree needed.
 - `add_members(provider, signer, key_packages: &[KeyPackage]) -> Result<CommitOutcome>`
@@ -156,6 +161,46 @@ Free functions:
   AND encoded bytes ≤ `MAX_PRESEAL_BYTES`. The 40 KiB ciphertext cap is
   ingest's (sub-3).
 
+### `store` module — sqlite provider with instance binding + no-resume
+
+Spec §MLS store safety (rev 2, C6): the MLS store holds the sender-ratchet
+generation counter, so two live instances sharing one store's contents would
+encrypt at the same `(epoch, generation)` — identical AES-128-GCM key AND
+nonce (catastrophic). Realistic triggers need no attacker: backup restore,
+profile copy, VM snapshot rollback, cloud-synced home dir. Hence:
+
+- `RmpCodec` — `openmls_sqlite_storage::Codec` via canonical rmp-serde bytes
+  (same MessagePack convention as farder-crypto's `EventCore`). Errors are
+  `RmpCodecError::{Encode, Decode}`.
+- `FarderMlsStore` — sqlite-backed `OpenMlsProvider` (owns the rusqlite
+  `Connection` inside a `SqliteStorageProvider<RmpCodec, Connection>`, plus
+  `RustCrypto` for crypto/rand). Every credential/group/envelope API takes it
+  interchangeably with the in-memory test provider.
+- `FarderMlsStore::create(db_path: &Path) -> Result<(Self, [u8; 16])>` —
+  creates a brand-new store, generating a random 16-byte `store_instance_id`
+  (OS RNG) persisted in a side table `farder_store_meta(instance_id BLOB NOT
+  NULL)`. **Fails if `db_path` already exists** (creating over an existing
+  file — including a poisoned store with stripped metadata — is exactly the
+  silent-recreate hazard the no-resume rule forbids; use a fresh path).
+- `store_instance_hash(&self) -> [u8; 32]` — SHA-256 of the raw id: the value
+  sub-2 publishes in `MlsKeyPackagePublished` and carries on every
+  `MlsCommit`/`MlsLeafConfirmed`. The raw id never leaves the store.
+- `FarderMlsStore::resume(db_path, expected_instance_hash: &[u8; 32]) -> Result<Self, StoreResumeError>`
+  — opens WITHOUT sqlite's create flag and verifies the instance binding
+  **before any write** (including migrations). `StoreResumeError`:
+  - `InstanceMismatch` — the persisted id doesn't hash to the expected value
+    (cloned/restored/foreign store).
+  - `MissingInstanceId` — no/ambiguous/malformed instance metadata
+    (poisoned-store posture; also returned for zero or multiple meta rows or
+    a wrong-sized blob).
+  - `Io` — the store can't be read at all (missing file, corruption, ...).
+
+  **`InstanceMismatch`/`MissingInstanceId` are terminal for that store: the
+  caller must self-`DeviceRevoked` and re-provision as a fresh device (sub-5
+  behavior). This crate never silently re-creates or resumes.** Rule 3 of the
+  spec (non-portable directory placement, backup exclusion, recovery-UI copy)
+  is the client crate's job (sub-4), not this crate's.
+
 ---
 
 ## Dependency pinning (deliberate)
@@ -180,10 +225,9 @@ was written against these exact versions.
 - OpenMLS 0.8.1 gates `MlsGroup::tree_hash()`/`export_group_context()` behind
   its `test-utils` feature, so `MlsChannelGroup` **caches** the current tree
   hash, maintained via ungated paths (`StagedWelcome::group_context()`,
-  `StagedCommit::group_context()`, and `export_group_info` at creation). A
-  future `MlsGroup::load` path (Task 5's store resume) must re-derive the
-  cache via `export_group_info` (needs the device signer) when constructing
-  the wrapper.
+  `StagedCommit::group_context()`, and `export_group_info` at creation).
+  `MlsChannelGroup::load` (the store-resume path) re-derives the cache via a
+  signed `export_group_info` — which is why it takes the device signer.
 - OpenMLS 0.8.1 has `debug_assert!(false, "Ciphertext decryption failed")` on
   AEAD failure (`framing/private_message_in.rs`), so in **debug builds** a
   tampered/undecryptable `PrivateMessage` **panics** inside `process_message`

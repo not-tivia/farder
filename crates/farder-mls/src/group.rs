@@ -203,6 +203,34 @@ impl MlsChannelGroup {
         Ok(Self { inner, tree_hash })
     }
 
+    /// Load a persisted group from the provider's storage (the store-resume
+    /// path — see `store::FarderMlsStore::resume`). Returns `Ok(None)` when
+    /// the storage holds no group under `channel_group_id`.
+    ///
+    /// Needs the device `signer` because OpenMLS 0.8.1 exposes no ungated
+    /// tree-hash accessor on a live group: the cached tree hash is re-derived
+    /// by exporting a (ratchet-tree-free, signed) `GroupInfo`.
+    pub fn load(
+        provider: &impl OpenMlsProvider,
+        signer: &DeviceSigner,
+        channel_group_id: &[u8],
+    ) -> Result<Option<Self>> {
+        let Some(inner) =
+            MlsGroup::load(provider.storage(), &GroupId::from_slice(channel_group_id))
+                .map_err(|e| anyhow!("load group from storage: {e}"))?
+        else {
+            return Ok(None);
+        };
+        let group_info = inner
+            .export_group_info(provider.crypto(), signer, false)
+            .map_err(|e| anyhow!("export group info: {e}"))?;
+        let MlsMessageBodyOut::GroupInfo(gi) = group_info.body() else {
+            bail!("export_group_info did not return a GroupInfo body");
+        };
+        let tree_hash = hash32(gi.group_context().tree_hash())?;
+        Ok(Some(Self { inner, tree_hash }))
+    }
+
     /// Join a group from serialized Welcome bytes (self-contained via the
     /// ratchet-tree extension). Returns the group plus the [`JoinInfo`] the
     /// joiner's `MlsLeafConfirmed` (sub-2) will cite.
