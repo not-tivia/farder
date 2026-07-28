@@ -1,6 +1,6 @@
 # farder-mls
 
-> **File(s):** `crates/farder-mls/src/lib.rs`, `crates/farder-mls/src/credential.rs`, `crates/farder-mls/src/group.rs`
+> **File(s):** `crates/farder-mls/src/lib.rs`, `crates/farder-mls/src/credential.rs`, `crates/farder-mls/src/group.rs`, `crates/farder-mls/src/envelope.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-07-28
 
@@ -15,8 +15,9 @@ checks, or any server/client wiring — those are later sub-projects that consum
 this crate's values.
 
 **Status:** constants + credential binding (`credential.rs`) + group ops with
-commit chaining (`group.rs`). Envelopes and storage land task-by-task per
-`docs/superpowers/plans/2026-07-27-mesh-rung2-sub1-mls-core.md`.
+commit chaining (`group.rs`) + message sealing with the padding ladder
+(`envelope.rs`, group `seal_message`/`open_message`). Sqlite storage lands
+task-by-task per `docs/superpowers/plans/2026-07-27-mesh-rung2-sub1-mls-core.md`.
 
 ---
 
@@ -115,6 +116,15 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
   hash, then merges.
 - Accessors: `epoch() -> u64`, `epoch_authenticator() -> [u8;32]`,
   `tree_hash() -> [u8;32]`, `members() -> Result<Vec<DeclaredMember>>`.
+- `seal_message(provider, signer, envelope: &MessageEnvelope) -> Result<Vec<u8>>`
+  — encode → `check_preseal_limits` → `pad_to_bucket` → encrypt as an MLS
+  application message (`PrivateMessage`); returns serialized `MlsMessageOut`
+  bytes. Oversize envelopes are refused, never truncated.
+- `open_message(provider, bytes: &[u8]) -> Result<MessageEnvelope>` — decrypt
+  via OpenMLS (`process_message`) → strict `unpad` → decode. Fails for
+  tampered ciphertext, non-application messages, wrong groups, removed
+  members (post-removal epochs), and joiners on pre-join epochs (forward
+  secrecy — covered by observation tests).
 
 Free functions:
 
@@ -126,6 +136,25 @@ Free functions:
   — the member-side lying-commit check (spec §Commit chaining):
   order-insensitive set equality on adds/removes plus tree-hash equality. The
   fold-side authenticator chain is sub-2's job.
+
+### `envelope` module — sealed body + padding ladder
+
+- `MessageEnvelope { content: String, attachment_keys: Vec<[u8;32]>, filenames: Vec<String>, mimes: Vec<String> }`
+  — the exact plaintext structure sealed inside a `MessagePostedE2ee`
+  ciphertext (spec §Wire formats). Per-file keys, real filenames, and real
+  MIME types travel **inside** the seal only. On receipt, filenames/MIMEs are
+  attacker-controlled — sanitization before write/render is the client's job
+  (sub-6). `encode()`/`decode()` are canonical rmp-serde bytes.
+- `pad_to_bucket(bytes: &[u8]) -> Result<Vec<u8>>` — `u32_be(len) || bytes ||
+  0x00…` sized to the smallest `PADDING_BUCKETS` entry ≥ `len + 4`; errors
+  (never truncates) above the top 40 KiB bucket.
+- `unpad(padded: &[u8]) -> Result<Vec<u8>>` — strict: total length must be
+  exactly a bucket size and the prefix must fit. The zero tail is not
+  checked — padding sits inside the AEAD, so integrity comes from MLS.
+- `check_preseal_limits(envelope, encoded_len) -> Result<()>` — the
+  client-rule half of the spec's size caps: content ≤ `MAX_CONTENT_CHARS`
+  AND encoded bytes ≤ `MAX_PRESEAL_BYTES`. The 40 KiB ciphertext cap is
+  ingest's (sub-3).
 
 ---
 
@@ -155,6 +184,16 @@ was written against these exact versions.
   future `MlsGroup::load` path (Task 5's store resume) must re-derive the
   cache via `export_group_info` (needs the device signer) when constructing
   the wrapper.
+- OpenMLS 0.8.1 has `debug_assert!(false, "Ciphertext decryption failed")` on
+  AEAD failure (`framing/private_message_in.rs`), so in **debug builds** a
+  tampered/undecryptable `PrivateMessage` **panics** inside `process_message`
+  where release builds return a clean `Err`. Consumers (sub-3/4) handling
+  hostile ciphertext in debug/test builds must account for this (the tamper
+  test uses `catch_unwind`).
+- Opening a sealed message **consumes** that generation's decryption key
+  (forward secrecy): the same ciphertext cannot be opened twice by the same
+  member, and a failed AEAD attempt also burns the key. Callers must not
+  retry `open_message` on the same bytes expecting a different outcome.
 - Everything here is synchronous plain-library code; async callers must use
   `spawn_blocking` (caller policy, not this crate's).
 - The server must never grow a dependency on this crate — E2EE group keys are

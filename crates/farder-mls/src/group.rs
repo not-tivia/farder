@@ -30,6 +30,7 @@ use openmls::prelude::{
 use openmls_traits::OpenMlsProvider;
 
 use crate::credential::{decode_credential_identity, DeviceSigner};
+use crate::envelope::{check_preseal_limits, pad_to_bucket, unpad, MessageEnvelope};
 use crate::{CIPHERSUITE, MAX_PAST_EPOCHS};
 
 /// A group member as declared in fold-readable form: the spec's
@@ -353,6 +354,50 @@ impl MlsChannelGroup {
             .members()
             .map(|m| declared_member(&m.credential))
             .collect()
+    }
+
+    /// Seal a [`MessageEnvelope`] as an MLS application message
+    /// (`PrivateMessage`): encode → pre-seal limits → pad to the bucket
+    /// ladder → encrypt. Returns the serialized `MlsMessageOut` bytes.
+    pub fn seal_message(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        signer: &DeviceSigner,
+        envelope: &MessageEnvelope,
+    ) -> Result<Vec<u8>> {
+        let encoded = envelope.encode()?;
+        check_preseal_limits(envelope, encoded.len())?;
+        let padded = pad_to_bucket(&encoded)?;
+        let message = self
+            .inner
+            .create_message(provider, signer, &padded)
+            .map_err(|e| anyhow!("seal message: {e}"))?;
+        message
+            .to_bytes()
+            .map_err(|e| anyhow!("serialize sealed message: {e}"))
+    }
+
+    /// Open a sealed application message from another member: decrypt via
+    /// OpenMLS → strict unpad → decode the envelope.
+    pub fn open_message(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        bytes: &[u8],
+    ) -> Result<MessageEnvelope> {
+        let message = MlsMessageIn::tls_deserialize_exact(bytes)
+            .map_err(|e| anyhow!("sealed bytes do not parse as an MLS message: {e}"))?;
+        let protocol_message = message
+            .try_into_protocol_message()
+            .map_err(|e| anyhow!("sealed message is not a protocol message: {e}"))?;
+        let processed = self
+            .inner
+            .process_message(provider, protocol_message)
+            .map_err(|e| anyhow!("open message: {e}"))?;
+        let ProcessedMessageContent::ApplicationMessage(app) = processed.into_content() else {
+            bail!("message is not an application message");
+        };
+        let encoded = unpad(&app.into_bytes())?;
+        MessageEnvelope::decode(&encoded)
     }
 
     fn pre_commit_state(&self) -> ([u8; 32], u64) {
