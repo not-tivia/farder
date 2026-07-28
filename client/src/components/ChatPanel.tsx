@@ -7,6 +7,7 @@ import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
 import MessageInput from "./MessageInput";
 import ThreadPanel from "./ThreadPanel";
+import ActiveWidgetsBar from "./ActiveWidgetsBar";
 import { openMessageSearch } from "./AppShell";
 
 export default function ChatPanel() {
@@ -147,6 +148,7 @@ export default function ChatPanel() {
           🔍
         </button>
       </div>
+      <ActiveWidgetsBar serverId={serverId} channelId={currentChannelId} />
       <div className="message-list" onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
         {channelMessages.map((msg, i) => {

@@ -46,6 +46,7 @@ These three files together are the entire client-side state layer. `ServerContex
 | `highlightMessageId` | `number \| null` | Message to scroll-to-and-highlight; cleared by the UI after use |
 | `polls` | `Record<number, { poll: PollInfo; myVote: number \| null }>` | Live poll state keyed by poll id. Populated lazily by `PollWidget` (`POLL_STATE` after `getPoll` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `POLL_UPDATED` broadcasts and `POLL_MY_VOTE` |
 | `giveaways` | `Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>` | Live giveaway state keyed by giveaway id. Populated lazily by `GiveawayWidget` (`GIVEAWAY_STATE` after `getGiveaway` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `GIVEAWAY_UPDATED` broadcasts and `GIVEAWAY_MY_ENTERED` |
+| `activeWidgets` | `{ channelId: number; polls: number[]; giveaways: number[] } \| null` | The viewed channel's open-widget **id lists** for the active-widgets bar (`ActiveWidgetsBar.tsx`); the infos are upserted into `polls`/`giveaways` so chips share one source of truth with the widgets. Replaced whole by `ACTIVE_WIDGETS` (fetched via `listActiveWidgets` on channel switch/reconnect), maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED` (append on open-and-missing, remove on closed/ended/cancelled, 20 combined cap). `null` until the first fetch |
 
 ---
 
@@ -155,12 +156,13 @@ Broadcast events (`POLL_UPDATED` / `GIVEAWAY_UPDATED`) carry shared state only �
 
 | Action type | What it mutates |
 |---|---|
-| `POLL_UPDATED` | Upserts `polls[poll.id].poll` from a `server:poll_updated` broadcast; preserves existing `myVote` |
+| `POLL_UPDATED` | Upserts `polls[poll.id].poll` from a `server:poll_updated` broadcast; preserves existing `myVote`. Also maintains `activeWidgets` when set and the poll is in its channel: open-and-missing → append id (20 combined cap), closed → remove id |
 | `POLL_STATE` | Sets `polls[poll.id]` to `{ poll, myVote }` (full self-inclusive state from `getPoll`) |
 | `POLL_MY_VOTE` | Patches only `myVote` on an already-hydrated poll (optimistic local update after vote/retract) |
-| `GIVEAWAY_UPDATED` | Upserts `giveaways[giveaway.id].giveaway` from a `server:giveaway_updated` broadcast; preserves existing `myEntered` |
+| `GIVEAWAY_UPDATED` | Upserts `giveaways[giveaway.id].giveaway` from a `server:giveaway_updated` broadcast; preserves existing `myEntered`. Also maintains `activeWidgets` when set and the giveaway is in its channel: open-and-missing → append id (20 combined cap), ended/cancelled → remove id |
 | `GIVEAWAY_STATE` | Sets `giveaways[giveaway.id]` to `{ giveaway, myEntered }` (full self-inclusive state from `getGiveaway`) |
 | `GIVEAWAY_MY_ENTERED` | Patches only `myEntered` on an already-hydrated giveaway (optimistic local update after enter/leave) |
+| `ACTIVE_WIDGETS` | Replaces `activeWidgets` whole with `{ channelId, polls: ids, giveaways: ids }` (from `listActiveWidgets`; an empty payload hides the bar) and upserts every carried info into `polls`/`giveaways` with broadcast semantics (shared state only — existing `myVote`/`myEntered` preserved) |
 
 ### Typing actions (per-server)
 

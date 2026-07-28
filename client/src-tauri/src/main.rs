@@ -290,6 +290,7 @@ fn main() {
             commands::leave_giveaway,
             commands::cancel_giveaway,
             commands::reroll_giveaway,
+            commands::list_active_widgets,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

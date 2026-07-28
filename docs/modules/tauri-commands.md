@@ -2445,7 +2445,7 @@ Invoke a slash command in a channel. Available to all members; per-user rate-lim
 
 ## Group 26 — Poll & giveaway widget interactions
 
-Nine commands backing the live message widgets (`PollWidget.tsx` / `GiveawayWidget.tsx`). A poll or giveaway is created by **running** a slash command of kind `"poll"` / `"giveaway"` (Group 25 `run_command` — the server posts a card message whose `MessageInfo.widget` JSON carries `{ "type": "poll" | "giveaway", "id": <i64> }`); these commands only *interact* with an existing widget by its id. All are membership-gated server-side; `vote_poll`, `retract_vote`, `enter_giveaway`, and `leave_giveaway` share the server's widget rate limit (10 interactions / 10 s per member). Authorization is always the authenticated connection key — no command carries a member identity. Visibility failures return opaque `"poll not found"` / `"giveaway not found"`.
+Ten commands backing the live message widgets (`PollWidget.tsx` / `GiveawayWidget.tsx`) and the active-widgets bar (`ActiveWidgetsBar.tsx`). A poll or giveaway is created by **running** a slash command of kind `"poll"` / `"giveaway"` (Group 25 `run_command` — the server posts a card message whose `MessageInfo.widget` JSON carries `{ "type": "poll" | "giveaway", "id": <i64> }`); these commands only *interact* with an existing widget by its id. All are membership-gated server-side; `vote_poll`, `retract_vote`, `enter_giveaway`, and `leave_giveaway` share the server's widget rate limit (10 interactions / 10 s per member). Authorization is always the authenticated connection key — no command carries a member identity. Visibility failures return opaque `"poll not found"` / `"giveaway not found"`.
 
 ### `get_poll(state, server_id, poll_id) -> Result<PollState, String>`
 
@@ -2548,3 +2548,15 @@ Redraw a finished giveaway's winner from the still-eligible entrants. **Creator-
 **Side effects:** sends `ServerRequest::RerollGiveaway { giveaway_id }`; on success the server persists the new winner, broadcasts `GiveawayUpdated`, and posts a fresh winner-announcement message (`NewMessage`, BOT-badged throwaway author, reply to the card).
 
 **invoke name:** `"reroll_giveaway"` → `rerollGiveaway(serverId, giveawayId)`.
+
+---
+
+### `list_active_widgets(state, server_id, channel_id) -> Result<ActiveWidgets, String>`
+
+Fetch a channel's OPEN widgets for the active-widgets bar: `ActiveWidgets { polls: Vec<PollInfo>, giveaways: Vec<serde_json::Value> }` — each list oldest-first (creation order), 20 combined server-side. Shared state only: no per-viewer `my_vote`/`my_entered` (those stay exclusive to `get_poll`/`get_giveaway`; the chip dropdown's widget pulls them via its own mount fetch). Giveaways are mapped through `giveaway_json` so the frontend shape (`winner` as a `"vk_<hex>"` string) matches the `get_giveaway` / `server:giveaway_updated` paths.
+
+**Parameters:** `channel_id: u64` — the viewed channel (server channel or DM).
+
+**Side effects:** sends `ServerRequest::ListActiveWidgets { channel_id }`; pure read — no broadcasts, no rate limit. Visibility failures (nonexistent channel and channel the caller can't see alike) reject with the server's opaque `"channel not found"`; the client hides the bar rather than surfacing it.
+
+**invoke name:** `"list_active_widgets"` → `listActiveWidgets(serverId, channelId)` in `client/src/lib/tauri-bridge.ts`.

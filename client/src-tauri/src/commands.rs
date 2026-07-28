@@ -4831,6 +4831,40 @@ pub async fn reroll_giveaway(
     }
 }
 
+/// The channel's OPEN widgets for the active-widgets bar. Shared state only —
+/// no per-viewer fields (`my_vote`/`my_entered` stay exclusive to `get_poll` /
+/// `get_giveaway`; the chip dropdown's widget pulls those via its own mount
+/// fetch). Giveaways go through `giveaway_json` so the frontend shape
+/// (`winner` as a "vk_<hex>" string) can never drift from the `get_giveaway`
+/// and `server:giveaway_updated` paths.
+#[derive(serde::Serialize)]
+pub struct ActiveWidgets {
+    pub polls: Vec<PollInfo>,
+    pub giveaways: Vec<serde_json::Value>,
+}
+
+/// Fetch a channel's open polls + giveaways (each list oldest-first, 20
+/// combined server-side). Visibility failures come back as the server's opaque
+/// "channel not found".
+#[tauri::command]
+pub async fn list_active_widgets(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+) -> Result<ActiveWidgets, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ListActiveWidgets { channel_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::ActiveWidgets { polls, giveaways } => Ok(ActiveWidgets {
+            polls,
+            giveaways: giveaways.iter().map(giveaway_json).collect(),
+        }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 // Public re-export so other modules can resolve paths under ~/.farder/.

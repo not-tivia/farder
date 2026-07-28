@@ -1038,3 +1038,11 @@ export async function cancelGiveaway(serverId: string, giveawayId: number): Prom
 export async function rerollGiveaway(serverId: string, giveawayId: number): Promise<void> {
   return invoke<void>("reroll_giveaway", { serverId, giveawayId });
 }
+
+/** The channel's open widgets for the active-widgets bar — each list oldest-first,
+ *  20 combined server-side. Shared state only (no per-viewer my_vote/my_entered;
+ *  the chip dropdown's widget pulls those via its own getPoll/getGiveaway mount
+ *  fetch). Visibility failures reject with the server's opaque "channel not found". */
+export async function listActiveWidgets(serverId: string, channelId: number): Promise<{ polls: PollInfo[]; giveaways: GiveawayInfo[] }> {
+  return invoke<{ polls: PollInfo[]; giveaways: GiveawayInfo[] }>("list_active_widgets", { serverId, channelId });
+}
