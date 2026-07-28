@@ -179,16 +179,19 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable, re
 
   return (
     <div className="giveaway-widget">
-      <div className="giveaway-prize">🎉 {giveaway.prize}</div>
+      {/* The copy-link control lives on the always-rendered prize row so ended/
+          cancelled giveaways stay linkable (mirrors PollWidget's footer 🔗). */}
+      <div className="giveaway-prize" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span>🎉 {giveaway.prize}</span>
+        <button className="widget-copy-link" title="Copy widget link" onClick={copyWidgetLink}>
+          🔗
+        </button>
+      </div>
 
       {giveaway.status === "open" && (
         <>
           <div className="giveaway-meta">
             ends in {formatRemaining(giveaway.ends_at - nowSecs)} · {entries} entr{entries === 1 ? "y" : "ies"}
-            {" "}
-            <button className="widget-copy-link" title="Copy widget link" onClick={copyWidgetLink}>
-              🔗
-            </button>
           </div>
           <div className="giveaway-actions">
             <button
