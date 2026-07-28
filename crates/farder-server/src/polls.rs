@@ -268,6 +268,30 @@ pub fn close_due(conn: &Connection, now: i64) -> Result<Vec<PollInfo>> {
     Ok(out)
 }
 
+/// Open polls of one channel, oldest-first (`id ASC` = creation order,
+/// AUTOINCREMENT). "Open" is exact even before the sweeper ticks: a past-
+/// `closes_at`-but-unswept poll is excluded (`closes_at > now`), matching the
+/// VotePoll closed-check exactness. Untimed open polls are included.
+pub fn list_open_in_channel(
+    conn: &Connection,
+    channel_id: i64,
+    now: i64,
+    limit: u32,
+) -> Result<Vec<PollRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {POLL_SELECT} FROM polls \
+         WHERE channel_id = ?1 AND closed_at IS NULL \
+           AND (closes_at IS NULL OR closes_at > ?2) \
+         ORDER BY id ASC LIMIT ?3"
+    ))?;
+    let rows = stmt.query_map(params![channel_id, now, limit as i64], row_to_poll)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub fn my_vote(conn: &Connection, poll_id: i64, voter: &PublicKey) -> Result<Option<u32>> {
     Ok(conn
         .query_row(
@@ -498,6 +522,52 @@ mod tests {
         assert_eq!(get(&conn, already).unwrap().unwrap().closed_at, Some(now - 40));
         // Idempotent: a second sweep finds nothing.
         assert!(close_due(&conn, now).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_open_in_channel_filters_orders_and_limits() {
+        let (conn, cid, pk) = setup();
+        let other = crate::channels::create_channel(
+            &conn,
+            "other",
+            farder_protocol::server::ChannelType::Text,
+            None,
+            1,
+        )
+        .unwrap() as i64;
+        let now = 1_000_000i64;
+        let untimed = create(&conn, cid, 1, &pk, "untimed", &two_opts(), None).unwrap();
+        let future = create(&conn, cid, 2, &pk, "future", &two_opts(), Some(now + 500)).unwrap();
+        let closed = create(&conn, cid, 3, &pk, "closed", &two_opts(), None).unwrap();
+        close(&conn, closed, now - 1).unwrap();
+        // Past closes_at but unswept: excluded (open-check is exact, like VotePoll).
+        let _due_unswept = create(&conn, cid, 4, &pk, "due", &two_opts(), Some(now - 5)).unwrap();
+        // closes_at == now boundary: excluded (strict `closes_at > now`).
+        let _at_now = create(&conn, cid, 5, &pk, "at-now", &two_opts(), Some(now)).unwrap();
+        let elsewhere = create(&conn, other, 6, &pk, "elsewhere", &two_opts(), None).unwrap();
+
+        let ids: Vec<i64> = list_open_in_channel(&conn, cid, now, 20)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![untimed, future], "open-only, this channel only, id ASC");
+
+        // Limit respected (keeps the oldest).
+        let ids: Vec<i64> = list_open_in_channel(&conn, cid, now, 1)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![untimed]);
+
+        // Other channel sees only its own poll.
+        let ids: Vec<i64> = list_open_in_channel(&conn, other, now, 20)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![elsewhere]);
     }
 
     #[test]

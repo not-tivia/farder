@@ -650,7 +650,7 @@ CRUD arms run synchronously inside the standard `handle_request` dispatch. `RunC
 
 ### Widget interaction arms (polls & giveaways)
 
-Nine synchronous arms in `handle_request` servicing the message widgets — see `docs/modules/server-widgets.md` for the storage modules and `protocol.md` for the full variant table. Shared shape of every arm: load the row → **channel visibility** via `widget_channel_visible(conn, member, channel_id, is_owner)` (DM ⇒ participant, else `VIEW_CHANNEL`; missing channel ⇒ false) with an **opaque** `Error { "poll not found" }` / `"giveaway not found"` on any failure (no existence oracle) → then status/authz checks. Mutating arms are `is_timed_out`-gated; `VotePoll`/`RetractVote`/`EnterGiveaway`/`LeaveGiveaway` also pass through `state.widget_limiter` (10 / 10 s per member, "slow down — too many interactions").
+Ten synchronous arms in `handle_request` servicing the message widgets — see `docs/modules/server-widgets.md` for the storage modules and `protocol.md` for the full variant table. Shared shape of every arm: load the row → **channel visibility** via `widget_channel_visible(conn, member, channel_id, is_owner)` (DM ⇒ participant, else `VIEW_CHANNEL`; missing channel ⇒ false) with an **opaque** `Error { "poll not found" }` / `"giveaway not found"` on any failure (no existence oracle) → then status/authz checks. Mutating arms are `is_timed_out`-gated; `VotePoll`/`RetractVote`/`EnterGiveaway`/`LeaveGiveaway` also pass through `state.widget_limiter` (10 / 10 s per member, "slow down — too many interactions").
 
 | `ServerRequest` | Permission | Action |
 |---|---|---|
@@ -660,6 +660,7 @@ Nine synchronous arms in `handle_request` servicing the message widgets — see 
 | `EnterGiveaway` / `LeaveGiveaway` | visibility + not timed out + limiter | `giveaways::enter` / `leave` (idempotent) on an open giveaway; broadcasts `GiveawayUpdated`. |
 | `CancelGiveaway` | creator or `MANAGE_SERVER` | `giveaways::cancel` — no draw, no announcement; broadcasts `GiveawayUpdated`. |
 | `RerollGiveaway` | creator or `MANAGE_SERVER` | `giveaways::reroll_and_announce` on an `"ended"` giveaway with a winner; broadcasts `GiveawayUpdated` then the announcement `NewMessage`. |
+| `ListActiveWidgets` | visibility only (read; not rate-limited; allowed while timed out) | Visibility is checked on the requested `channel_id` itself (the only client-supplied field) with an opaque `Error { "channel not found" }` for missing AND invisible channels. Calls `polls::list_open_in_channel` + `giveaways::list_open_in_channel` (each `LIMIT 20`), merges by `created_at` ascending (ties take the poll), truncates to 20 combined, `build_info`s each; returns `ActiveWidgets { polls, giveaways }`. No per-viewer fields, no broadcasts. |
 
 The `DeleteMessage` arm additionally parses the deleted message's `widget` JSON: an open poll is closed (+`PollUpdated`), an open giveaway is cancelled (+`GiveawayUpdated`) — deleting an already-ended/cancelled card is a no-op.
 

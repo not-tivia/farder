@@ -55,6 +55,7 @@ The whole poll-kind `RunCommand` transaction: inserts the fallback card message 
 - `my_vote(conn, poll_id, voter) -> Result<Option<u32>>` — self-only read.
 - `close(conn, poll_id, now: i64)` — idempotent (`AND closed_at IS NULL`).
 - `close_due(conn, now: i64) -> Result<Vec<PollInfo>>` — sweeper half: close every open timed poll past `closes_at`, return their terminal infos.
+- `list_open_in_channel(conn, channel_id: i64, now: i64, limit: u32) -> Result<Vec<PollRow>>` — the channel's open polls, oldest-first (`id ASC`). "Open" is exact: past-`closes_at`-but-unswept polls are excluded (`closes_at > now`), matching the `VotePoll` closed-check; untimed open polls are included. For `ListActiveWidgets`.
 
 ---
 
@@ -85,6 +86,7 @@ Redraw for an `ended` giveaway with a winner; `None` when the eligible set is em
 - `my_entered(conn, giveaway_id, member) -> Result<bool>` — self-only read.
 - `cancel(conn, giveaway_id) -> Result<bool>` — `open` → `cancelled`; no draw, no announcement.
 - `list_due(conn, now: i64) -> Result<Vec<GiveawayRow>>` — open rows past `ends_at`, for the sweeper.
+- `list_open_in_channel(conn, channel_id: i64, limit: u32) -> Result<Vec<GiveawayRow>>` — the channel's `status='open'` giveaways, oldest-first (`id ASC`), for `ListActiveWidgets`. A due-but-unswept giveaway may appear for ≤15 s; its Enter is still rejected by the handler's `ends_at` check.
 - `eligible_entrants(conn, giveaway_id) -> Result<Vec<PublicKey>>` — entrants still in the roster and not banned.
 
 ---
@@ -104,6 +106,7 @@ Redraw for an `ended` giveaway with a winner; `None` when the eligible set is em
 | `RunCommand` (kind `poll`/`giveaway`) | handlers.rs dispatch | `create_poll_card` / `create_giveaway_card` |
 | `GetPoll`/`VotePoll`/`RetractVote`/`ClosePoll` | handlers.rs | row fns above; visibility + timeout + rate-limit checks stay in handlers |
 | `EnterGiveaway`/`LeaveGiveaway`/`CancelGiveaway`/`RerollGiveaway`/`GetGiveaway` | handlers.rs | ditto |
+| `ListActiveWidgets` | handlers.rs | `polls::list_open_in_channel` + `giveaways::list_open_in_channel` (each `LIMIT 20`), merged by `created_at` asc, 20 combined; visibility on the requested `channel_id` with opaque `"channel not found"`; read — no limiter, no broadcasts, no per-viewer fields |
 | `DeleteMessage` on a widget card | handlers.rs hook | open poll → `close`; open giveaway → `cancel` (no draw, no announcement) |
 | 15 s tick | `spawn_widget_sweeper` | `sweep_once` |
 

@@ -477,6 +477,9 @@ pub enum ServerRequest {
     RerollGiveaway { giveaway_id: i64 },
     /// Read full giveaway state (membership-gated; visibility-checked; allowed while timed out).
     GetGiveaway { giveaway_id: i64 },
+    /// List a channel's OPEN widgets (membership-gated; visibility-checked;
+    /// allowed while timed out; not rate-limited — GetPoll-class read).
+    ListActiveWidgets { channel_id: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -545,6 +548,14 @@ pub enum ServerResponse {
     /// Full giveaway state for `GetGiveaway`. `my_entered` is requester-specific
     /// (self-only — entrant identities never leave the server in v1).
     Giveaway { giveaway: GiveawayInfo, my_entered: bool },
+    /// The requested channel's OPEN widgets for `ListActiveWidgets` — each list
+    /// oldest-first (creation order), 20 combined by `created_at`. Shared state
+    /// only: no per-viewer fields (`my_vote`/`my_entered` stay exclusive to
+    /// `GetPoll`/`GetGiveaway`).
+    ActiveWidgets {
+        polls: Vec<PollInfo>,
+        giveaways: Vec<GiveawayInfo>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

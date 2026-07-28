@@ -205,6 +205,23 @@ pub fn list_due(conn: &Connection, now: i64) -> Result<Vec<GiveawayRow>> {
     Ok(out)
 }
 
+/// Open giveaways of one channel, oldest-first (`id ASC` = creation order,
+/// AUTOINCREMENT). Belt-and-braces note: a due-but-unswept giveaway (past
+/// `ends_at`, still `status='open'`) appears for ≤15s until the sweeper draws;
+/// its Enter is still rejected by the handler's `ends_at` check.
+pub fn list_open_in_channel(conn: &Connection, channel_id: i64, limit: u32) -> Result<Vec<GiveawayRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {GIVEAWAY_SELECT} FROM giveaways \
+         WHERE channel_id = ?1 AND status = 'open' ORDER BY id ASC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![channel_id, limit as i64], row_to_giveaway)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Update the winner of an already-ended giveaway (reroll — status stays 'ended').
 pub fn reroll(conn: &Connection, giveaway_id: i64, winner: &PublicKey) -> Result<()> {
     conn.execute(
@@ -474,6 +491,50 @@ mod tests {
         let pk = Keypair::generate().public_key();
         crate::members::register_member(conn, &pk, name).unwrap();
         pk
+    }
+
+    #[test]
+    fn list_open_in_channel_filters_orders_and_limits() {
+        let (conn, cid, pk) = setup();
+        let other = crate::channels::create_channel(
+            &conn,
+            "other",
+            farder_protocol::server::ChannelType::Text,
+            None,
+            1,
+        )
+        .unwrap() as i64;
+        let g1 = create(&conn, cid, 1, &pk, "first", 10_000).unwrap();
+        let g2 = create(&conn, cid, 2, &pk, "second", 20_000).unwrap();
+        let cancelled = create(&conn, cid, 3, &pk, "cancelled", 10_000).unwrap();
+        assert!(cancel(&conn, cancelled).unwrap());
+        let ended = create(&conn, cid, 4, &pk, "ended", 10_000).unwrap();
+        conn.execute("UPDATE giveaways SET status = 'ended' WHERE id = ?1", params![ended])
+            .unwrap();
+        let elsewhere = create(&conn, other, 5, &pk, "elsewhere", 10_000).unwrap();
+
+        let ids: Vec<i64> = list_open_in_channel(&conn, cid, 20)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![g1, g2], "status='open' only, this channel only, id ASC");
+
+        // Limit respected (keeps the oldest).
+        let ids: Vec<i64> = list_open_in_channel(&conn, cid, 1)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![g1]);
+
+        // Other channel sees only its own giveaway.
+        let ids: Vec<i64> = list_open_in_channel(&conn, other, 20)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![elsewhere]);
     }
 
     #[test]

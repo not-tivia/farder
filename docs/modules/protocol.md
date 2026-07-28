@@ -216,6 +216,7 @@ A poll/giveaway is **created** by `RunCommand` on a command of kind `"poll"` / `
 | `LeaveGiveaway` | `giveaway_id: i64` | Leave an open giveaway (idempotent). Broadcasts `GiveawayUpdated`. |
 | `CancelGiveaway` | `giveaway_id: i64` | Cancel an open giveaway — no draw, no announcement. **Creator-or-MANAGE_SERVER.** Broadcasts `GiveawayUpdated` (`status = "cancelled"`). |
 | `RerollGiveaway` | `giveaway_id: i64` | Redraw the winner of an `"ended"` giveaway that has one, from the still-eligible entrants. **Creator-or-MANAGE_SERVER.** Broadcasts `GiveawayUpdated` then a winner-announcement `NewMessage`. |
+| `ListActiveWidgets` | `channel_id: u64` | List a channel's OPEN widgets (read; not rate-limited; allowed while timed out). Visibility-checked on `channel_id` itself with an opaque `Error { "channel not found" }` for both a missing channel and one the caller cannot see. Returns `ActiveWidgets { polls, giveaways }` — each list oldest-first, 20 combined by `created_at`; no per-viewer fields. No broadcasts. |
 
 ### Voice / media
 
@@ -265,6 +266,7 @@ Every request receives exactly one response.
 | `Commands` | `commands: Vec<CommandInfo>` | The slash-command list in response to `ListCommands`. Safe fields only — no `url_template` or `body_text`. |
 | `Poll` | `poll: PollInfo`, `my_vote: Option<u32>` | Full poll state in response to `GetPoll`. `my_vote` is the requester's own vote index (self-only — voter identities are never sent to anyone else). |
 | `Giveaway` | `giveaway: GiveawayInfo`, `my_entered: bool` | Full giveaway state in response to `GetGiveaway`. `my_entered` is self-only; entrant identities never leave the server. |
+| `ActiveWidgets` | `polls: Vec<PollInfo>`, `giveaways: Vec<GiveawayInfo>` | The channel's OPEN widgets in response to `ListActiveWidgets`. Each list oldest-first (creation order); at most 20 combined, chosen by `created_at` ascending. Shared state only — `my_vote`/`my_entered` stay exclusive to `Poll`/`Giveaway`. |
 
 ---
 

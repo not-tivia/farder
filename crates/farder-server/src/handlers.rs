@@ -2583,6 +2583,58 @@ pub fn handle_request(
                 ),
             }
         }
+
+        // ----------------------------------------------------------------
+        // Active widgets (read — actor is ALWAYS the authenticated
+        // connection key; membership-gated by the default-deny above;
+        // `channel_id` is the only client-supplied field)
+        // ----------------------------------------------------------------
+        ServerRequest::ListActiveWidgets { channel_id } => {
+            // Read: no timeout gate, no rate limit (GetPoll-class bounded read).
+            // Opaque visibility: the SAME "channel not found" for a nonexistent
+            // channel and a channel the caller can't see (widget_channel_visible
+            // returns false for channel-gone) — channel ids are not an
+            // existence oracle.
+            if !widget_channel_visible(conn, member, channel_id, is_owner)? {
+                return err("channel not found");
+            }
+            const ACTIVE_WIDGETS_CAP: usize = 20;
+            let now = crate::db::now() as i64;
+            let poll_rows = crate::polls::list_open_in_channel(
+                conn,
+                channel_id as i64,
+                now,
+                ACTIVE_WIDGETS_CAP as u32,
+            )?;
+            let giveaway_rows = crate::giveaways::list_open_in_channel(
+                conn,
+                channel_id as i64,
+                ACTIVE_WIDGETS_CAP as u32,
+            )?;
+            // Merge-sort by created_at ascending (each list is already id ASC =
+            // creation order; ties take the poll first — deterministic), then
+            // truncate to 20 COMBINED and split back into the two lists.
+            let (mut pi, mut gi) = (0usize, 0usize);
+            let mut polls = Vec::new();
+            let mut giveaways = Vec::new();
+            while polls.len() + giveaways.len() < ACTIVE_WIDGETS_CAP {
+                let take_poll = match (poll_rows.get(pi), giveaway_rows.get(gi)) {
+                    (Some(p), Some(g)) => p.created_at <= g.created_at,
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (None, None) => break,
+                };
+                if take_poll {
+                    polls.push(crate::polls::build_info(conn, &poll_rows[pi])?);
+                    pi += 1;
+                } else {
+                    giveaways.push(crate::giveaways::build_info(conn, &giveaway_rows[gi])?);
+                    gi += 1;
+                }
+            }
+            // No per-viewer fields; no broadcasts.
+            ok(ServerResponse::ActiveWidgets { polls, giveaways })
+        }
     }
 }
 
@@ -6777,5 +6829,165 @@ mod tests {
         let infos = crate::commands::list_infos(&conn).unwrap();
         let cmd = infos.iter().find(|c| c.trigger == "giveaway").unwrap();
         assert!(cmd.takes_arg, "giveaway commands take an arg (autocomplete trailing space)");
+    }
+
+    // -----------------------------------------------------------------------
+    // ListActiveWidgets
+    // -----------------------------------------------------------------------
+
+    fn err_reason(r: &HandleResult) -> String {
+        match &r.response {
+            ServerResponse::Error { reason } => reason.clone(),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    fn active_widgets(r: HandleResult) -> (Vec<farder_protocol::server::PollInfo>, Vec<farder_protocol::server::GiveawayInfo>) {
+        match r.response {
+            ServerResponse::ActiveWidgets { polls, giveaways } => (polls, giveaways),
+            other => panic!("expected ActiveWidgets, got {other:?}"),
+        }
+    }
+
+    fn set_poll_created_at(conn: &Connection, id: i64, t: i64) {
+        conn.execute("UPDATE polls SET created_at = ?2 WHERE id = ?1", rusqlite::params![id, t]).unwrap();
+    }
+
+    fn set_giveaway_created_at(conn: &Connection, id: i64, t: i64) {
+        conn.execute("UPDATE giveaways SET created_at = ?2 WHERE id = ?1", rusqlite::params![id, t]).unwrap();
+    }
+
+    #[test]
+    fn test_list_active_widgets_happy_open_only_and_no_per_viewer_fields() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let voter = add_member(&conn, "Voter");
+        let other = add_member(&conn, "Other");
+        let state = fake_state();
+
+        let p1 = make_poll(&conn, channel_id, &creator, None);
+        let g1 = make_giveaway(&conn, channel_id, &creator, far_future());
+        let p2 = make_poll(&conn, channel_id, &creator, Some(far_future()));
+        // Excluded: closed poll, past-closes_at unswept poll, cancelled giveaway.
+        let closed = make_poll(&conn, channel_id, &creator, None);
+        crate::polls::close(&conn, closed, 1_000).unwrap();
+        let _unswept = make_poll(&conn, channel_id, &creator, Some(1));
+        let cancelled = make_giveaway(&conn, channel_id, &creator, far_future());
+        crate::giveaways::cancel(&conn, cancelled).unwrap();
+        crate::polls::vote(&conn, p1, &voter, 0).unwrap();
+
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
+        assert!(r.events.is_empty(), "reads never broadcast");
+        let (polls, giveaways) = active_widgets(r);
+        assert_eq!(polls.iter().map(|p| p.id).collect::<Vec<_>>(), vec![p1, p2],
+            "open polls only, oldest-first");
+        assert_eq!(giveaways.iter().map(|g| g.id).collect::<Vec<_>>(), vec![g1],
+            "open giveaways only");
+        assert_eq!(polls[0].counts, vec![1, 0]);
+
+        // No per-viewer fields: a voter and a non-voter get byte-equal lists.
+        let r2 = handle_request(&conn, &other, false,
+            ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
+        let (polls2, giveaways2) = active_widgets(r2);
+        assert_eq!(polls, polls2, "response is requester-independent (no my_vote)");
+        assert_eq!(giveaways, giveaways2, "response is requester-independent (no my_entered)");
+
+        // A widget-free channel answers with empty lists, not an error.
+        let empty_channel = channels::create_channel(&conn, "empty", ChannelType::Text, None, 1).unwrap();
+        let r = handle_request(&conn, &voter, false,
+            ServerRequest::ListActiveWidgets { channel_id: empty_channel }, "", &state).unwrap();
+        let (polls, giveaways) = active_widgets(r);
+        assert!(polls.is_empty() && giveaways.is_empty());
+    }
+
+    #[test]
+    fn test_list_active_widgets_combined_cap_20_by_created_at() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let state = fake_state();
+
+        // 15 polls at t=1000,1010,…,1140 and 10 giveaways at t=1005,1015,…,1095
+        // (created_at ascending within each kind, matching production order).
+        // The 20 oldest combined are the first 10 polls + all 10 giveaways;
+        // the 5 newest polls fall past the cap.
+        let mut poll_ids = Vec::new();
+        for i in 0..15i64 {
+            let id = make_poll(&conn, channel_id, &creator, None);
+            set_poll_created_at(&conn, id, 1_000 + i * 10);
+            poll_ids.push(id);
+        }
+        let mut giveaway_ids = Vec::new();
+        for j in 0..10i64 {
+            let id = make_giveaway(&conn, channel_id, &creator, far_future());
+            set_giveaway_created_at(&conn, id, 1_005 + j * 10);
+            giveaway_ids.push(id);
+        }
+
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
+        let (polls, giveaways) = active_widgets(r);
+        assert_eq!(polls.len() + giveaways.len(), 20, "combined cap");
+        assert_eq!(
+            polls.iter().map(|p| p.id).collect::<Vec<_>>(),
+            poll_ids[..10].to_vec(),
+            "the 10 oldest polls survive the merge by created_at"
+        );
+        assert_eq!(
+            giveaways.iter().map(|g| g.id).collect::<Vec<_>>(),
+            giveaway_ids,
+            "all 10 giveaways are within the 20 oldest"
+        );
+    }
+
+    #[test]
+    fn test_list_active_widgets_hidden_and_missing_channel_identical_opaque_error() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let _ = make_poll(&conn, channel_id, &creator, None);
+        // Strip VIEW_CHANNEL from @everyone.
+        conn.execute(
+            "UPDATE roles SET permissions = ?1 WHERE name = '@everyone' AND builtin = 1",
+            rusqlite::params![(permissions::READ_MESSAGES | permissions::SEND_MESSAGES) as i64],
+        )
+        .unwrap();
+        let outsider = add_member(&conn, "Outsider");
+        let state = fake_state();
+
+        let r = handle_request(&conn, &outsider, false,
+            ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
+        let hidden_reason = err_reason(&r);
+        assert_eq!(hidden_reason, "channel not found", "opaque — no existence oracle");
+
+        // Nonexistent channel: the byte-identical error string.
+        let r = handle_request(&conn, &outsider, false,
+            ServerRequest::ListActiveWidgets { channel_id: 999_999 }, "", &state).unwrap();
+        assert_eq!(err_reason(&r), hidden_reason, "missing and invisible are indistinguishable");
+    }
+
+    #[test]
+    fn test_list_active_widgets_dm_participant_only() {
+        let (conn, _owner) = setup();
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+        let charlie = add_member(&conn, "Charlie");
+        let dm = channels::create_dm_channel(&conn, &alice, &bob).unwrap();
+        let poll_id = make_poll(&conn, dm, &alice, None);
+        let state = fake_state();
+
+        // Participant sees the DM's widgets.
+        let r = handle_request(&conn, &bob, false,
+            ServerRequest::ListActiveWidgets { channel_id: dm }, "", &state).unwrap();
+        let (polls, giveaways) = active_widgets(r);
+        assert_eq!(polls.iter().map(|p| p.id).collect::<Vec<_>>(), vec![poll_id]);
+        assert!(giveaways.is_empty());
+
+        // Non-participant gets the same opaque "channel not found".
+        let r = handle_request(&conn, &charlie, false,
+            ServerRequest::ListActiveWidgets { channel_id: dm }, "", &state).unwrap();
+        assert_eq!(err_reason(&r), "channel not found");
     }
 }
