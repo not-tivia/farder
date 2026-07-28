@@ -1,6 +1,6 @@
 # farder-mls
 
-> **File(s):** `crates/farder-mls/src/lib.rs`
+> **File(s):** `crates/farder-mls/src/lib.rs`, `crates/farder-mls/src/credential.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-07-28
 
@@ -14,8 +14,8 @@ binding. It deliberately does NOT define protocol events, fold rules, ingest
 checks, or any server/client wiring — those are later sub-projects that consume
 this crate's values.
 
-**Status:** skeleton — constants and the pinned dependency stack only. Group
-ops, credential binding, envelopes, and storage land task-by-task per
+**Status:** constants + credential binding (`credential.rs`). Group ops,
+envelopes, and storage land task-by-task per
 `docs/superpowers/plans/2026-07-27-mesh-rung2-sub1-mls-core.md`.
 
 ---
@@ -46,6 +46,29 @@ application messages (spec contract for group config).
 Client-side pre-seal caps (spec "Size caps" row): content ≤ 8000 chars AND the
 encoded envelope ≤ 32 KiB. The complementary 40 KiB *ciphertext* cap is
 server-ingest's job (sub-3), not this crate's.
+
+### `credential` module — leaf ↔ device-subkey binding
+
+- `encode_credential_identity(identity: &PublicKey, device: &DeviceId) -> Vec<u8>`
+  — the **normative** (spec M1) credential identity bytes:
+  `"farder-mls-cred-v1" || u8(len(pubkey)) || pubkey || u32_be(len(device_id)) || device_id`.
+  Bare concatenation is forbidden (`DeviceId` is a hex `String`, ambiguous
+  unprefixed).
+- `decode_credential_identity(bytes: &[u8]) -> Result<(PublicKey, DeviceId)>`
+  — **strict** decode: wrong prefix, truncation, trailing bytes, or a pubkey
+  length ≠ 32 are all errors.
+- `DeviceSigner<'a>(pub &'a Keypair)` — `openmls_traits::signatures::Signer`
+  adapter; the MLS leaf signs with the same Ed25519 device subkey that signs
+  log events (`signature_scheme()` = ED25519).
+- `generate_key_package(provider, device: &Keypair, identity: &PublicKey) -> Result<KeyPackageBundle>`
+  — builds a KeyPackage under `CIPHERSUITE` whose leaf credential is the
+  encoded `(identity, device_id)` and whose leaf signature key is the device
+  subkey.
+- `verify_leaf_binding(credential: &Credential, leaf_signature_key: &[u8], cert: &DeviceCert) -> Result<()>`
+  — checks the *cryptographic* binding only: credential identity/device match
+  the cert, leaf key == certified `device_pubkey`, and `cert.verify()` passes.
+  Fold-status checks (membership, revocation, expiry) are sub-2's job — callers
+  pass a cert they already trust per fold state.
 
 ---
 

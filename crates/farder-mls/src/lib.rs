@@ -6,6 +6,8 @@
 
 use openmls::prelude::Ciphersuite;
 
+pub mod credential;
+
 /// The one ciphersuite Farder groups use: RFC 9420's MTI suite
 /// (X25519 HPKE, AES-128-GCM, SHA-256, Ed25519 signatures).
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
