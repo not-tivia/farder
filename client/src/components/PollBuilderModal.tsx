@@ -64,6 +64,13 @@ export default function PollBuilderModal({ serverId, channelId, trigger, onClose
       if (seen.has(key)) { setError(`Duplicate option: "${o}"`); return; }
       seen.add(key);
     }
+    // A bare duration-shaped final segment is ALWAYS consumed as the duration
+    // by the server parser — a last option like "30m" with no end time chosen
+    // would silently become the poll's duration and drop an option.
+    if (!duration && /^\d{1,4}[mhd]$/i.test(opts[opts.length - 1])) {
+      setError(`"${opts[opts.length - 1]}" can't be the last option without an end time (it reads as a duration) — reorder the options or pick an end time`);
+      return;
+    }
     // Build the exact server syntax: <question> | <opt> | <opt>[ | <token>]
     const args = [q, ...opts, ...(duration ? [duration] : [])].join(" | ");
     setSubmitting(true);
