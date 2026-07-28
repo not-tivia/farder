@@ -208,6 +208,7 @@ async fn test_e2e_server_bootstrap_and_chat() {
         None,
         0,
         true,
+        false,
     )
     .unwrap();
     let templates = farder_server::templates::list_builtin_templates();
@@ -271,13 +272,17 @@ async fn test_e2e_server_bootstrap_and_chat() {
         other => panic!("expected InviteCreated, got {:?}", other),
     };
 
-    // 4. Owner gets server info, finds general channel
+    // 4. Owner gets server info, finds general channel (and the mesh
+    //    server_id — the genesis hash that stamps log events)
     send_request(&mut owner_send, 2, ServerRequest::GetServerInfo).await;
     let (_, resp) = recv_response(&mut owner_recv).await;
-    let general_channel_id = match resp {
-        ServerResponse::ServerInfo { channels, .. } => {
+    let (general_channel_id, server_id) = match resp {
+        ServerResponse::ServerInfo { channels, server_id, .. } => {
             assert!(!channels.is_empty());
-            channels[0].id
+            (
+                channels[0].id,
+                server_id.expect("setup-token claim creates a genesis"),
+            )
         }
         other => panic!("expected ServerInfo, got {:?}", other),
     };
@@ -293,10 +298,149 @@ async fn test_e2e_server_bootstrap_and_chat() {
     .await;
     let _ = recv_response(&mut owner_recv).await;
 
+    // 5b. Mesh log join plumbing. Since mesh rung 1, the event log is
+    //     authoritative for membership: the legacy invite auth alone leaves a
+    //     joiner blocked by the content gate ("not a member of this server").
+    //     Mirror the real client (create_invite's log half + join_log_server):
+    //     the owner authors DeviceAuthorized + InviteCreated for the invite
+    //     code; the joiner resolves the code and authors
+    //     DeviceAuthorized + MemberJoined citing the invite event.
+    use farder_crypto::event_log::{invite_code_hash, DeviceCert, Event, EventPayload};
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let owner_dev = Keypair::generate();
+    let owner_cert = DeviceCert::create(&owner_kp, &owner_dev.public_key(), now_secs);
+    let owner_da = Event::next(
+        &owner_dev,
+        owner_kp.public_key(),
+        server_id.clone(),
+        None,
+        0,
+        now_secs,
+        EventPayload::DeviceAuthorized { cert: owner_cert },
+    );
+    send_request(
+        &mut owner_send,
+        90,
+        ServerRequest::SubmitEvent {
+            event: owner_da.clone(),
+        },
+    )
+    .await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    assert!(
+        matches!(resp, ServerResponse::EventAccepted { .. }),
+        "owner DeviceAuthorized should be accepted, got {:?}",
+        resp
+    );
+
+    let invite_event = Event::next(
+        &owner_dev,
+        owner_kp.public_key(),
+        server_id.clone(),
+        Some(&owner_da),
+        owner_da.core.lamport,
+        now_secs,
+        EventPayload::InviteCreated {
+            code_hash: invite_code_hash(&invite_code),
+            max_uses: 5,
+            expires_at: now_secs + 3600,
+            requires_approval: false,
+        },
+    );
+    send_request(
+        &mut owner_send,
+        91,
+        ServerRequest::SubmitEvent {
+            event: invite_event.clone(),
+        },
+    )
+    .await;
+    let (_, resp) = recv_response(&mut owner_recv).await;
+    assert!(
+        matches!(resp, ServerResponse::EventAccepted { .. }),
+        "owner InviteCreated should be accepted, got {:?}",
+        resp
+    );
+
     // 6. Second user joins with invite
     let user_kp = Keypair::generate();
     let (user_conn, mut user_send, mut user_recv) =
         connect_and_auth(&client_endpoint, actual_addr, &user_kp, Some(&invite_code), None).await;
+
+    // 6b. User becomes a LOG member (the join_log_server flow): authorize the
+    //     device, resolve the invite code to its InviteCreated event, then
+    //     self-author MemberJoined citing it.
+    let user_dev = Keypair::generate();
+    let user_cert = DeviceCert::create(&user_kp, &user_dev.public_key(), now_secs);
+    let user_da = Event::next(
+        &user_dev,
+        user_kp.public_key(),
+        server_id.clone(),
+        None,
+        invite_event.core.lamport,
+        now_secs,
+        EventPayload::DeviceAuthorized { cert: user_cert },
+    );
+    send_request(
+        &mut user_send,
+        90,
+        ServerRequest::SubmitEvent {
+            event: user_da.clone(),
+        },
+    )
+    .await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    assert!(
+        matches!(resp, ServerResponse::EventAccepted { .. }),
+        "user DeviceAuthorized should be accepted, got {:?}",
+        resp
+    );
+
+    send_request(
+        &mut user_send,
+        91,
+        ServerRequest::ResolveInvite {
+            code: invite_code.clone(),
+        },
+    )
+    .await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    let invite_event_hash = match resp {
+        ServerResponse::InviteResolved {
+            invite_event: Some(h),
+        } => h,
+        other => panic!("expected a resolved invite event, got {:?}", other),
+    };
+    assert_eq!(invite_event_hash, invite_event.hash());
+
+    let user_join = Event::next(
+        &user_dev,
+        user_kp.public_key(),
+        server_id.clone(),
+        Some(&user_da),
+        user_da.core.lamport,
+        now_secs,
+        EventPayload::MemberJoined {
+            member: user_kp.public_key(),
+            invite: invite_event_hash,
+        },
+    );
+    send_request(
+        &mut user_send,
+        92,
+        ServerRequest::SubmitEvent { event: user_join },
+    )
+    .await;
+    let (_, resp) = recv_response(&mut user_recv).await;
+    assert!(
+        matches!(resp, ServerResponse::EventAccepted { .. }),
+        "user MemberJoined should be accepted, got {:?}",
+        resp
+    );
 
     // User subscribes
     send_request(
@@ -704,6 +848,7 @@ async fn test_auto_claim_first_connection() {
         None,
         0,
         true,
+        false,
     )
     .unwrap();
     let templates = farder_server::templates::list_builtin_templates();
