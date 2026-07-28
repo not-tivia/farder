@@ -2377,7 +2377,7 @@ Fetch the list of slash commands registered on a server.
 **Parameters:**
 - `server_id: String` — connection address string.
 
-**Returns:** `Vec<CommandInfo>` where each entry is `{ id: i64, trigger: String, description: String, takes_arg: bool }`. Safe-field-only view: `url_template` and `body_text` are deliberately excluded by the server so API keys are never exposed to members.
+**Returns:** `Vec<CommandInfo>` where each entry is `{ id: i64, trigger: String, description: String, takes_arg: bool, kind: String }`. Safe-field-only view: `url_template` and `body_text` are deliberately excluded by the server so API keys are never exposed to members. `kind` (`"text" | "api" | "poll" | "giveaway"`; empty from a pre-field server) is not sensitive — the frontend uses it to open the poll/giveaway builder modals.
 
 **Side effects:** sends `ServerRequest::ListCommands {}` → reads `ServerResponse::Commands { commands }`. No permission gate.
 

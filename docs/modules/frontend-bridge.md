@@ -52,6 +52,7 @@ A slash-command summary as returned by `listCommands()`. **Safe fields only** �
 | `trigger` | `string` | The trigger word (without `/`). Always lowercase. |
 | `description` | `string` | Short human-readable description shown in the autocomplete menu. |
 | `takes_arg` | `boolean` | `true` for `"api"`, `"poll"`, and `"giveaway"` commands (trailing input expected); `false` for `"text"` commands. Used by the autocomplete UI to indicate whether trailing input is expected. |
+| `kind` | `string` | The command kind (`"text"` \| `"api"` \| `"poll"` \| `"giveaway"`; empty string from an old server that predates the field). Builder-form kinds (`poll`/`giveaway`) make `MessageInput` open `PollBuilderModal`/`GiveawayBuilderModal` instead of raw text entry. |
 
 ### `PollInfo` (types.ts)
 
@@ -480,6 +481,8 @@ Four wrappers for managing and invoking server-configured slash commands. `listC
 | `runCommand(serverId, trigger, channelId, args)` | `run_command` | Invokes a command. On success the server posts the bot message (with `author_badge = "BOT"`) to `channelId` via `NewMessage`. On failure throws with the server's reason string — the caller shows this locally; no channel post occurs. Returns `Promise<void>`. |
 
 **Slash command flow in `MessageInput`:** when the user types `/`, `listCommands` has already been called on server connect and the result stored in component state. Filtering by the typed prefix populates the `mention-autocomplete` dropdown. On send, if the text matches a known trigger the client calls `runCommand`; if the trigger is unknown the message is sent as a normal message. Errors from `runCommand` are shown in a local error string, never posted to the channel.
+
+**Builder forms for structured kinds:** commands whose `CommandInfo.kind` is `"poll"` or `"giveaway"` get a form instead of raw pipe/token syntax. Two interception points in `MessageInput`, both funneling into a `builder` state slot: (a) `insertCommand` — selecting the command from the `/` autocomplete (mouse or Tab/Enter) opens `PollBuilderModal`/`GiveawayBuilderModal` instead of inserting the trigger text; (b) `handleSend` — a matched builder-kind command with an **empty** arg string opens the builder instead of sending (non-empty args keep the direct `runCommand` power-user path). The modals validate client-side (mirroring the server parse rules: poll question 1–256 chars, 2–10 unique options, optional 30m–7d duration token; giveaway prize 1–200 chars, required duration), strip literal `|` from poll question/option fields (pipe is the server's segment delimiter), build the exact arg syntax (`<question> | <opt> | <opt>[ | <token>]` / `<token> <prize>`), and call `runCommand` themselves. Server errors (usage, rate limit, the giveaway MANAGE_SERVER refusal) render inline in the modal, which stays open; on success the modal closes and the input is cleared if it still holds the slash text. Both modals reuse the `modal-*`/`connect-*` classes — no new CSS.
 
 ---
 

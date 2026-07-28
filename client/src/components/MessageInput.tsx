@@ -14,6 +14,8 @@ import BookBrowser from "./BookBrowser";
 import GifPicker from "./GifPicker";
 import GifSearchOptIn from "./GifSearchOptIn";
 import TimeoutBanner from "./TimeoutBanner";
+import PollBuilderModal from "./PollBuilderModal";
+import GiveawayBuilderModal from "./GiveawayBuilderModal";
 
 interface MessageInputProps {
   channelId: number;
@@ -44,6 +46,8 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [autocompletePos, setAutocompletePos] = useState<{ x: number; y: number } | null>(null);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [commandIndex, setCommandIndex] = useState(0);
+  // Open builder modal for structured command kinds (poll/giveaway).
+  const [builder, setBuilder] = useState<{ kind: "poll" | "giveaway"; trigger: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const textareaWrapperRef = useRef<HTMLDivElement | null>(null);
 
@@ -217,9 +221,17 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       const [word, ...rest] = text.slice(1).split(/\s+/);
       const cmd = commands.find(c => c.trigger === word.toLowerCase());
       if (cmd) {
+        const args = rest.join(" ");
+        // Builder kinds with no args: open the form instead of sending (the
+        // server would just reject an empty arg string with a usage error).
+        // Non-empty args keep the direct power-user path below.
+        if ((cmd.kind === "poll" || cmd.kind === "giveaway") && !args.trim()) {
+          setBuilder({ kind: cmd.kind, trigger: cmd.trigger });
+          return;
+        }
         setSending(true); setError(null);
         try {
-          await api.runCommand(serverId, cmd.trigger, channelId, rest.join(" "));
+          await api.runCommand(serverId, cmd.trigger, channelId, args);
           setContent("");
         } catch (e) { setError(String(e)); }        // RunCommand Error shown to invoker; no channel post
         finally { setSending(false); }
@@ -304,9 +316,25 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       : [];
 
   function insertCommand(cmd: CommandInfo) {
+    // Builder kinds: selecting from the "/" autocomplete opens the matching
+    // builder modal instead of inserting the trigger text — the modal builds
+    // the pipe/token syntax and calls runCommand itself.
+    if (cmd.kind === "poll" || cmd.kind === "giveaway") {
+      setBuilder({ kind: cmd.kind, trigger: cmd.trigger });
+      setCommandIndex(0);
+      return;
+    }
     setContent("/" + cmd.trigger + " ");
     setCommandIndex(0);
     setTimeout(() => { textareaRef.current?.focus(); }, 0);
+  }
+
+  function handleBuilderCreated() {
+    setBuilder(null);
+    // Clear the input if it still holds the slash text that opened the builder.
+    setContent((c) => (c.trim().startsWith("/") ? "" : c));
+    setTimeout(() => { textareaRef.current?.focus(); }, 0);
+    if (onSent) onSent();
   }
 
   function insertMention(member: MemberInfo) {
@@ -540,6 +568,24 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         )}
       </div>
       {showBook && <BookBrowser onClose={() => setShowBook(false)} />}
+      {builder?.kind === "poll" && (
+        <PollBuilderModal
+          serverId={serverId}
+          channelId={channelId}
+          trigger={builder.trigger}
+          onClose={() => setBuilder(null)}
+          onCreated={handleBuilderCreated}
+        />
+      )}
+      {builder?.kind === "giveaway" && (
+        <GiveawayBuilderModal
+          serverId={serverId}
+          channelId={channelId}
+          trigger={builder.trigger}
+          onClose={() => setBuilder(null)}
+          onCreated={handleBuilderCreated}
+        />
+      )}
       {showGifOptIn && (
         <GifSearchOptIn
           onCancel={() => setShowGifOptIn(false)}

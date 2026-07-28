@@ -127,6 +127,10 @@ export interface CommandInfo {
   trigger: string;
   description: string;
   takes_arg: boolean;
+  /** Command kind: "text" | "api" | "poll" | "giveaway". Empty string when
+   *  talking to an old server that predates the field (serde default).
+   *  Builder-form kinds (poll/giveaway) open a modal instead of raw text. */
+  kind: string;
 }
 
 export interface DmEntry {
