@@ -153,6 +153,72 @@ authority from here on (and is documented in `docs/modules/crypto.md`):
    The fold rule is again self-sufficient for Rung-3 fresh replay, as the spec
    claims; sub-3's `messages`-table check stays belt-and-braces.
 
+## Review round 2 — adjustments (implemented)
+
+Round 1's fixes were correct but two of them were only half the story, and one
+spec claim turned out to contradict the spec's own fold-state formula. Each is
+fixed in `fix(crypto): address sub2 review findings (round 2)`; where a fix
+narrows or overrides an earlier decision, the narrowing is the authority from
+here on (and is documented in `docs/modules/crypto.md`).
+
+1. **Round 1's monotone clock only stopped BACK-dating; FORWARD-dating was the
+   live C7 attack.** The per-identity floor is per-identity, so an attacker's
+   claimed timestamp raised only their own floor. A commit author claiming a
+   far-future `core.timestamp` had every OTHER member's expiring cert judged
+   dead, `good_standing` collapsed, and the non-selective-removal rule
+   authorized a **silent, unlogged eviction** — the exact spec C7 attack, without
+   touching the reset hatch, available to any confirmed-leaf member. The same
+   claim also made the eviction count as a drift discharge (bypassing
+   `COMMIT_RATE_MIN_EPOCH_GAP`) and shrank `member_leaf_set` enough for a partial
+   reset to pass the exact-cover check. Round 1's residual note pointed at "sub-3
+   bounds `core.timestamp` at ingest", but round 1 itself rejected that standard
+   (the FOLD must refuse it, so a Rung-3 replica replaying from genesis refuses
+   it too). **Ambiguity #4 gains a fourth clock:** `LogState.corroborated_clock`
+   — the greatest timestamp at least **two distinct identities** have claimed
+   (the second-largest `identity_clock` value, recomputed after each accepted
+   event, so a checkpoint carries it and it only moves forward). Liveness is now
+   judged at two different points depending on who is asking:
+   `self_liveness_ts = max(at_ts, floor)` for an identity's own claim (envelope
+   expiry gate, public `live_devices`), and
+   `judged_liveness_ts = max(floor, min(at_ts, corroborated_clock))` for every
+   cross-identity derivation (`member_leaf_set` → drift sets →
+   `commit_discharges_drift` → reset completeness, plus the declared add/remove
+   checks). A *lone* author cannot move the ceiling at all, so forward-dating
+   buys nothing; residual (two colluding identities) is stated in `crypto.md`.
+   Pinned by `a_forward_dated_commit_cannot_evict_a_member_in_good_standing`.
+2. **Spec C3's promise was false as implemented: an unconfirmed leaf was a
+   permanent, invisible lockout.** C3 says "a bogus Welcome leaves visible drift
+   and gets retried automatically", but the spec's own fold-state formula
+   subtracts `leaves_pending` from `pending_adds`, and a pending leaf is not in
+   `pending_removals` either — zero drift on both sets. Meanwhile a re-add was
+   refused ("already present or pending"), the removal was refused (its owner is
+   in good standing), and the victim could not author the fix (that needs a
+   CONFIRMED leaf, which is exactly what they lack). One bogus Welcome — or an
+   ordinary steward crash between commit and Welcome — locked a member out of the
+   whole generation with only the owner-only reset as recovery. Both halves of
+   the review's suggested direction are implemented: `pending_confirmations()`
+   exposes the retry obligation, and the good-standing gate on `DeclaredRemove`
+   now applies **only to confirmed leaves** — dropping an unproven leaf evicts
+   nobody, because the device reappears in `pending_adds` the instant it leaves,
+   so the Add is simply re-driven with a fresh KeyPackage. The formula stays as
+   the spec writes it; C3's prose is what was wrong, and `crypto.md` now says so.
+   Pinned by `an_unconfirmed_leaf_is_visible_and_can_be_re_driven` (and the
+   assertion in `joiner_confirmation_promotes_only_on_matching_tree_hash` now
+   names the right invariant).
+3. **The envelope cert-expiry gate judged the RAW author timestamp.** Round 1's
+   claim that "an identity cannot back-date past its own certs' expiry" held only
+   for `live_devices` queries, not for the gate itself. Since nothing in the
+   chain forces timestamp monotonicity, an identity whose floor had already
+   passed T could still author from a device whose cert died at T by claiming
+   `timestamp <= T`. `MlsCommit` authz checks only that the AUTHOR is a member
+   with a confirmed leaf — never that the AUTHORING DEVICE is live — so a dead
+   device kept full control-plane authority: it could zero
+   `events_since_last_commit` (defeating the C4 freshness ceiling indefinitely)
+   and set the chain variable at will. The gate now judges at
+   `self_liveness_ts(author, core.timestamp)`, the same monotone point
+   `live_devices` uses. Pinned by
+   `an_expired_device_cannot_author_by_back_dating`.
+
 ## Global constraints
 
 - **Old events are untouched.** New variants are APPENDED after

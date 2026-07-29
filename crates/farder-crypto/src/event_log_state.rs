@@ -227,6 +227,20 @@ pub struct LogState {
     /// back-date its way past its own certs' expiry or the live-device cap
     /// (`event.core.timestamp` is author-chosen — see `live_devices`).
     identity_clock: HashMap<PublicKey, u64>,
+    /// The log's **corroborated clock**: the greatest timestamp at least TWO
+    /// distinct identities have claimed (the second-largest `identity_clock`
+    /// value). Derived from `identity_clock` on every accepted event, so a
+    /// checkpoint carries it and it can only move forward.
+    ///
+    /// It is the CEILING the fold judges one identity's device liveness at when
+    /// ANOTHER identity's claimed timestamp asks the question — see
+    /// `judged_liveness_ts`. A plain global maximum would not do: one author
+    /// could raise it alone (with a single harmless forward-dated event) and
+    /// then declare everybody else's expiring certs dead. Requiring two distinct
+    /// identities means a lone compromised member cannot move the log's clock at
+    /// all, while an ordinary server — where several identities keep claiming
+    /// roughly-real times — tracks real time closely.
+    corroborated_clock: u64,
     /// Per-E2ee-channel MLS bookkeeping, created by `ChannelCreated { E2ee }`.
     mls_groups: HashMap<u64, MlsGroupRecord>,
     /// Live (unconsumed) KeyPackages per (identity, device): ref → expiry log
@@ -265,6 +279,7 @@ impl LogState {
             devices_by_identity: HashMap::new(),
             log_pos: 0,
             identity_clock: HashMap::new(),
+            corroborated_clock: 0,
             mls_groups: HashMap::new(),
             key_packages: HashMap::new(),
             consumed_key_packages: HashMap::new(),
@@ -324,25 +339,42 @@ impl LogState {
     pub fn log_pos(&self) -> u64 {
         self.log_pos
     }
-    /// An identity's live devices: authorized, non-revoked, and cert-unexpired
-    /// at `liveness_ts(pk, at_ts)` — NOT at the raw `at_ts`. Sorted so the
-    /// result is deterministic for every fold consumer.
+    /// An identity's live devices as judged AT ITS OWN CLOCK: authorized,
+    /// non-revoked, and cert-unexpired at `self_liveness_ts(pk, at_ts)` — NOT at
+    /// the raw `at_ts`. Sorted so the result is deterministic for every fold
+    /// consumer.
     ///
     /// `at_ts` comes from `event.core.timestamp`, which is entirely
     /// author-chosen; judging expiry there alone let an identity register past
-    /// the live-device cap (claim a future time so its own certs look dead)
-    /// and let any author hide expiry-driven drift by back-dating. Liveness is
-    /// therefore judged at a MONOTONE, log-derived point: the identity's own
+    /// the live-device cap (claim a future time so its own certs look dead).
+    /// Liveness is therefore judged at a MONOTONE point: the identity's own
     /// clock floor (`identity_clock`) can only move forward, so an identity can
-    /// never be judged at a moment earlier than one it already claimed.
-    /// **Residual (documented, not closed here):** an author can still back-date
-    /// below the expiry of a DIFFERENT identity that went silent before its
-    /// cert died. Sub-3 bounds `core.timestamp` against server time at ingest.
+    /// never be judged at a moment earlier than one it already claimed — the
+    /// cap holds at *every* timestamp.
+    ///
+    /// This is the SELF judgment (and the diagnostic query): an identity is
+    /// entitled to move its own clock forward, because doing so only kills its
+    /// own devices. When one identity's claim asks about ANOTHER identity's
+    /// devices — every `members × live_devices` derivation, every declared
+    /// add/remove — the fold uses `judged_live_devices` instead, which is
+    /// additionally capped by the log's corroborated clock.
     pub fn live_devices(&self, pk: &PublicKey, at_ts: u64) -> Vec<DeviceId> {
+        self.live_devices_at(pk, self.self_liveness_ts(pk, at_ts))
+    }
+
+    /// An identity's live devices as the FOLD judges them for cross-identity
+    /// decisions: at `judged_liveness_ts` (the identity's own floor, capped by
+    /// the log's corroborated clock).
+    fn judged_live_devices(&self, pk: &PublicKey, at_ts: u64) -> Vec<DeviceId> {
+        self.live_devices_at(pk, self.judged_liveness_ts(pk, at_ts))
+    }
+
+    /// The shared filter: devices of `pk` that are neither revoked nor
+    /// cert-expired at the already-resolved judgment point `at`.
+    fn live_devices_at(&self, pk: &PublicKey, at: u64) -> Vec<DeviceId> {
         let Some(devs) = self.devices_by_identity.get(pk) else {
             return Vec::new();
         };
-        let at = self.liveness_ts(pk, at_ts);
         let mut live: Vec<DeviceId> = devs
             .iter()
             .filter(|d| !self.revoked_devices.contains(*d))
@@ -358,18 +390,49 @@ impl LogState {
         live
     }
 
-    /// The monotone point an identity's device liveness is judged at: never
-    /// earlier than the greatest timestamp that identity itself has claimed.
-    fn liveness_ts(&self, pk: &PublicKey, at_ts: u64) -> u64 {
-        at_ts.max(self.identity_clock.get(pk).copied().unwrap_or(0))
+    /// The monotone point an identity's OWN claim is judged at: never earlier
+    /// than the greatest timestamp that identity itself has claimed.
+    fn self_liveness_ts(&self, pk: &PublicKey, at_ts: u64) -> u64 {
+        at_ts.max(self.identity_floor(pk))
     }
 
-    /// The spec's MLS target set: every full member's live devices at `at_ts`.
-    /// Pending (unapproved) members are not in `members`, so they are excluded.
+    /// The point the fold judges identity `pk`'s device liveness at when the
+    /// question is asked by someone else's claimed timestamp:
+    /// `clamp(at_ts, identity_floor(pk), corroborated_clock)` — written as
+    /// `max(floor, min(at_ts, ceiling))` because the floor may legitimately sit
+    /// above the ceiling (an identity that has run ahead of the log).
+    ///
+    /// The lower bound stops back-dating below what `pk` itself has already
+    /// claimed; the upper bound stops FORWARD-dating, which was the live hole:
+    /// a commit author claiming a far-future `core.timestamp` made every OTHER
+    /// member's expiring cert look dead, so `good_standing` collapsed and the
+    /// non-selective-removal rule (spec C7) authorized a silent eviction — and
+    /// the same claim shrank `members × live_devices` for `pending_adds`,
+    /// `commit_discharges_drift` and the reset's exact-cover check. A claimed
+    /// timestamp is now only credible for judging OTHER identities up to the
+    /// moment the log itself corroborates (`corroborated_clock`: claimed by at
+    /// least two distinct identities).
+    ///
+    /// **Residual (documented, not closed here):** two colluding identities can
+    /// still push the corroborated clock forward, and an author can still
+    /// back-date below the expiry of a different identity that went silent
+    /// before its cert died and never claimed anything after it. Sub-3 bounds
+    /// `core.timestamp` against server time at ingest.
+    fn judged_liveness_ts(&self, pk: &PublicKey, at_ts: u64) -> u64 {
+        self.identity_floor(pk).max(at_ts.min(self.corroborated_clock))
+    }
+
+    fn identity_floor(&self, pk: &PublicKey) -> u64 {
+        self.identity_clock.get(pk).copied().unwrap_or(0)
+    }
+
+    /// The spec's MLS target set: every full member's live devices, judged at
+    /// the fold's cross-identity liveness point. Pending (unapproved) members
+    /// are not in `members`, so they are excluded.
     fn member_leaf_set(&self, at_ts: u64) -> HashSet<(PublicKey, DeviceId)> {
         let mut set = HashSet::new();
         for m in &self.members {
-            for d in self.live_devices(m, at_ts) {
+            for d in self.judged_live_devices(m, at_ts) {
                 set.insert((m.clone(), d));
             }
         }
@@ -405,6 +468,21 @@ impl LogState {
                 !group.leaves_confirmed.contains(leaf) && !group.leaves_pending.contains(leaf)
             })
             .collect()
+    }
+
+    /// The group's UNCONFIRMED leaves: declared by an accepted Add-commit, never
+    /// promoted by an `MlsLeafConfirmed`. This is the retry obligation, and it
+    /// is deliberately NOT visible in `pending_adds` (a pending leaf is excluded
+    /// from that set by the spec's own formula), so a steward that only watched
+    /// `pending_adds` would never learn that a joiner's Welcome never worked.
+    /// A leaf that lingers here is re-driven by removing it (permitted for
+    /// pending-only leaves) and re-adding with a fresh KeyPackage.
+    /// Empty for channels without an MLS group.
+    pub fn pending_confirmations(&self, channel_id: u64) -> HashSet<(PublicKey, DeviceId)> {
+        self.mls_groups
+            .get(&channel_id)
+            .map(|g| g.leaves_pending.clone())
+            .unwrap_or_default()
     }
 
     /// The (generation, epoch) an E2ee channel's group is currently in — sub-3's
@@ -498,8 +576,15 @@ impl LogState {
             "device has been revoked"
         );
         // Cert-expiry gate (Rung 2): an expired cert cannot author events.
-        // Expiry is judged against `event.core.timestamp` — the untrusted
-        // author clock, the same acceptance Rung 1 made for invite expiry.
+        // Judged at the author's MONOTONE clock — `max(core.timestamp, the
+        // greatest timestamp this identity has already claimed)` — not at the
+        // raw claim. The raw claim alone let a dead device keep full
+        // control-plane authority: an identity whose clock had already passed
+        // its cert's expiry could still author `MlsCommit` / `MlsWelcome` /
+        // `MlsLeafConfirmed` from that device simply by back-dating (nothing in
+        // the chain forces timestamp monotonicity), zeroing
+        // `events_since_last_commit` — and with it the C4 freshness ceiling —
+        // and rewriting the chain variable at will.
         // For DeviceAuthorized the expiry comes from the payload cert itself
         // (self-bootstrap: registering with an already-expired cert is invalid).
         let cert_expiry = match &event.core.payload {
@@ -507,7 +592,10 @@ impl LogState {
             _ => self.devices.get(&event.core.device).and_then(|r| r.expires_at),
         };
         if let Some(t) = cert_expiry {
-            ensure!(event.core.timestamp <= t, "device cert has expired");
+            ensure!(
+                self.self_liveness_ts(&event.core.author, event.core.timestamp) <= t,
+                "device cert has expired"
+            );
         }
         // Ban gate: a banned identity cannot act from any device.
         ensure!(!self.is_banned(&event.core.author), "author is banned");
@@ -532,7 +620,28 @@ impl LogState {
         // earlier — see `live_devices`.
         let floor = self.identity_clock.entry(event.core.author.clone()).or_insert(0);
         *floor = (*floor).max(event.core.timestamp);
+        // ...and the log's corroborated clock (second-largest floor). Recomputed
+        // AFTER the event's checks, so an author's own claim never raises the
+        // ceiling its own event is judged against.
+        self.recompute_corroborated_clock();
         Ok(())
+    }
+
+    /// Refresh `corroborated_clock` = the greatest timestamp claimed by at least
+    /// two DISTINCT identities (the second-largest `identity_clock` value). One
+    /// scan of a small map per accepted event; keeping it precomputed keeps the
+    /// derived-set queries O(members) rather than O(members × identities).
+    fn recompute_corroborated_clock(&mut self) {
+        let (mut top1, mut top2) = (0u64, 0u64);
+        for &v in self.identity_clock.values() {
+            if v > top1 {
+                top2 = top1;
+                top1 = v;
+            } else if v > top2 {
+                top2 = v;
+            }
+        }
+        self.corroborated_clock = top2;
     }
 
     /// M1: the signing device's public key, derived ONLY from a verified cert.
@@ -873,7 +982,7 @@ impl LogState {
                     );
                     ensure!(!self.is_banned(&add.identity), "declared add of a banned identity");
                     ensure!(
-                        self.live_devices(&add.identity, event.core.timestamp)
+                        self.judged_live_devices(&add.identity, event.core.timestamp)
                             .contains(&add.device),
                         "declared add of a device that is not live (unknown, revoked, or cert-expired)"
                     );
@@ -907,22 +1016,41 @@ impl LogState {
                 }
                 for rem in removes {
                     let leaf = (rem.identity.clone(), rem.device.clone());
+                    let confirmed = group.leaves_confirmed.contains(&leaf);
                     ensure!(
-                        group.leaves_confirmed.contains(&leaf)
-                            || group.leaves_pending.contains(&leaf),
+                        confirmed || group.leaves_pending.contains(&leaf),
                         "declared remove of an absent leaf"
                     );
-                    // Bridge rule: a good-standing member's leaf may only be
-                    // removed by that member itself (self-removal of a device).
-                    let good_standing = self.is_member(&rem.identity)
-                        && !self.is_banned(&rem.identity)
-                        && self
-                            .live_devices(&rem.identity, event.core.timestamp)
-                            .contains(&rem.device);
-                    ensure!(
-                        !good_standing || author == &rem.identity,
-                        "cannot remove a leaf of a member in good standing (except self-removal)"
-                    );
+                    // Bridge rule: a good-standing member's CONFIRMED leaf may
+                    // only be removed by that member itself (self-removal of a
+                    // device) — that is the rule that makes an unlogged eviction
+                    // structurally impossible (spec C7).
+                    //
+                    // An UNCONFIRMED (pending-only) leaf is exempt: it is an
+                    // unproven Add, never a member of the tree. Gating it by
+                    // good standing was a permanent, invisible lockout — a
+                    // pending leaf produces no `pending_adds` drift, could not
+                    // be re-added ("already present or pending") and could not
+                    // be removed, and its owner cannot author the commit that
+                    // would fix it (that needs a confirmed leaf). One bogus
+                    // Welcome — or a steward crashing between commit and
+                    // Welcome (spec C3's ghost-Welcome) — locked the victim out
+                    // of the whole generation, recoverable only by an
+                    // owner-only reset. Removing it evicts nobody: the device
+                    // reappears immediately in `pending_adds`, so the Add is
+                    // simply re-driven. Adds are open to any member, so their
+                    // inverse must be too, or the first Add wins forever.
+                    if confirmed {
+                        let good_standing = self.is_member(&rem.identity)
+                            && !self.is_banned(&rem.identity)
+                            && self
+                                .judged_live_devices(&rem.identity, event.core.timestamp)
+                                .contains(&rem.device);
+                        ensure!(
+                            !good_standing || author == &rem.identity,
+                            "cannot remove a leaf of a member in good standing (except self-removal)"
+                        );
+                    }
                 }
                 // Commit-rate rule (spec I3): drift discharge is NEVER blocked;
                 // otherwise the author's first commit, or an epoch gap of at
@@ -2965,7 +3093,15 @@ mod tests {
 
         // Declared ≠ present: the leaf is pending, never confirmed by the add.
         assert!(!f.st.leaves_confirmed(CH).contains(&alice_leaf));
+        // The declared add is absorbed by `leaves_pending`, so it is NOT
+        // `pending_adds` drift — the retry obligation lives in
+        // `pending_confirmations` instead (spec C3's "gets retried
+        // automatically" runs on that set, not on the drift sets).
         assert!(f.st.pending_adds(CH, 500).is_empty(), "pending leaf absorbs the declared add");
+        assert!(
+            f.st.pending_confirmations(CH).contains(&alice_leaf),
+            "...and the unconfirmed leaf is the visible retry obligation instead"
+        );
 
         // A Welcome from a non-confirmed author is rejected; so is one citing
         // an unrecorded commit.
@@ -3736,6 +3872,256 @@ mod tests {
         // `sealed_post` claims t=500 — before the expiry — and is STILL refused.
         let backdated = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, 3, vec![]);
         assert_rejected_for(&f.st, &backdated, "pending removals");
+    }
+
+    // ---- Review round 2 ----
+
+    /// Extra declared authenticators / tree hashes for the round-2 tests, which
+    /// run the group past epoch 3.
+    const X3: [u8; 32] = [15u8; 32];
+    const X4: [u8; 32] = [16u8; 32];
+    const T3: [u8; 32] = [25u8; 32];
+    const T4: [u8; 32] = [26u8; 32];
+    const B_STORE_R2: [u8; 32] = [8u8; 32];
+
+    /// An `MlsCommit` with an explicit `core.timestamp` — the shared helper
+    /// always claims 500, and the claimed moment is exactly the knob the
+    /// forward-dating attack turns.
+    #[allow(clippy::too_many_arguments)]
+    fn mls_commit_at(
+        dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, epoch: u64,
+        adds: Vec<DeclaredAdd>, removes: Vec<DeclaredRemove>,
+        prev_auth: [u8; 32], post_auth: [u8; 32], post_tree: [u8; 32], store: [u8; 32], ts: u64,
+    ) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, ts,
+            EP::MlsCommit {
+                channel_id: CH, generation: 0, epoch, mls_message: vec![0xC0], adds, removes,
+                prev_epoch_authenticator: prev_auth, post_epoch_authenticator: post_auth,
+                post_tree_hash: post_tree, authz_head: "a".repeat(64), store_instance_hash: store,
+            })
+    }
+
+    /// A plaintext post at an explicit timestamp (channel 1 is unknown to the
+    /// log — the legacy carve-out — so it needs no channel setup).
+    fn post_at(dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, ts: u64) -> Ev {
+        Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, ts,
+            EP::MessagePosted { channel_id: 1, content: "hi".into(), reply_to: None, attachments: vec![] })
+    }
+
+    /// Alice registers, self-adds and confirms a SECOND device whose cert
+    /// expires at t=600. Requires the fixture at epoch 2 with alice confirmed;
+    /// leaves the group at epoch 3 (chain head X2, tree T2). Returns the
+    /// device, its id, and its chain head.
+    fn alice_adds_an_expiring_second_device(f: &mut E2eeFix) -> (Keypair, DeviceId, Ev) {
+        let alice_pk = f.alice.public_key();
+        let b_dev = Keypair::generate();
+        let b_did = device_id(&b_dev.public_key());
+        let b_da = Ev::next(&b_dev, alice_pk.clone(), f.sid.clone(), None, 0, 500,
+            EP::DeviceAuthorized {
+                cert: DeviceCert::create_expiring(&f.alice, &b_dev.public_key(), 100, 600),
+            });
+        f.st.apply(&b_da).expect("alice's second device registers");
+        let b_kp = kp_publish(&b_dev, &alice_pk, &f.sid, &b_da, B_STORE_R2, 1_000_000, 500);
+        f.st.apply(&b_kp).expect("the second device publishes a key package");
+        let add_b = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![DeclaredAdd {
+                identity: alice_pk.clone(), device: b_did.clone(), key_package: b_kp.hash(),
+            }],
+            vec![], X1, X2, T2, ALICE_STORE);
+        f.st.apply(&add_b).expect("alice's self-add commit folds");
+        f.alice_prev = add_b;
+        let cb = leaf_confirm(&b_dev, &alice_pk, &f.sid, &b_kp, 3, T2, B_STORE_R2);
+        f.st.apply(&cb).expect("the second device confirms");
+        (b_dev, b_did, cb)
+    }
+
+    /// Spec C7's non-selective-removal rule is what makes an unlogged eviction
+    /// structurally impossible — and a FORWARD-dated `core.timestamp` walked
+    /// straight through it: claim a far-future moment and every OTHER member's
+    /// expiring cert is judged dead, so `good_standing` collapses and the
+    /// Remove is authorized (and counts as a drift discharge, and shrinks the
+    /// reset's exact-cover set). The per-identity floor from round 1 only
+    /// stopped BACK-dating. Liveness of an identity the author does not own is
+    /// now capped by the log's CORROBORATED clock, which one identity cannot
+    /// move — not even by forward-dating a harmless event first.
+    #[test]
+    fn a_forward_dated_commit_cannot_evict_a_member_in_good_standing() {
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        let alice_did = device_id(&f.alice_dev.public_key());
+        let (_b_dev, b_did, _b_prev) = alice_adds_an_expiring_second_device(&mut f);
+        let b_leaf = (alice_pk.clone(), b_did.clone());
+        assert!(f.st.leaves_confirmed(CH).contains(&b_leaf), "the victim's leaf is in the group");
+
+        let evict = |prev: &Ev, ts: u64| {
+            mls_commit_at(&f.owner_dev, &owner_pk, &f.sid, prev, 3, vec![],
+                vec![DeclaredRemove { identity: alice_pk.clone(), device: b_did.clone() }],
+                X2, X3, T3, OWNER_STORE, ts)
+        };
+
+        // The honest claim is refused (the cert is live at t=500)...
+        assert_rejected_for(&f.st, &evict(&f.owner_prev, 500), "good standing");
+        // ...and so is the far-future claim, which used to be ACCEPTED.
+        let attack = evict(&f.owner_prev, 9_999_999);
+        assert_rejected_for(&f.st, &attack, "good standing");
+        assert!(
+            !f.st.commit_discharges_drift(&attack),
+            "a forward-dated eviction must not count as a drift discharge either (that bypassed the commit-rate rule)"
+        );
+
+        // Poisoning the log's clock first does not help: the corroborated clock
+        // is the timestamp TWO distinct identities have claimed, so a lone
+        // author cannot move the ceiling they are judged against.
+        let poison = post_at(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 9_999_999);
+        f.st.apply(&poison).expect("nothing stops an author claiming a wild timestamp");
+        f.owner_prev = poison;
+        assert_rejected_for(&f.st, &evict(&f.owner_prev, 9_999_999), "good standing");
+        assert!(
+            f.st.leaves_confirmed(CH).contains(&b_leaf),
+            "the victim is still in the group, and the fold still sees her there"
+        );
+
+        // The same claim also shrank `members x live_devices`, so a partial
+        // reset (the OTHER unlogged eviction, spec C7) looked like exact cover.
+        let w1 = welcome_for(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
+            "c".repeat(64), &alice_pk, &alice_did);
+        f.st.apply(&w1).expect("next-generation welcome staging folds");
+        f.owner_prev = w1.clone();
+        let partial = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 9_999_999,
+            EP::MlsGroupReset { channel_id: CH, new_generation: 1, welcomes: vec![w1.hash()] });
+        assert_rejected_for(&f.st, &partial, "non-selective reset");
+
+        // The honest expiry path still works: once the LOG's own clock (two
+        // distinct identities) has moved past t=600, the dead cert is visible
+        // drift and the removal folds.
+        let alice_later = post_at(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 700);
+        f.st.apply(&alice_later).expect("alice posts at t=700 from her live device");
+        f.alice_prev = alice_later;
+        assert!(
+            f.st.pending_removals(CH, 700).contains(&b_leaf),
+            "an expired cert is drift once the log corroborates the moment"
+        );
+        let rekey = evict(&f.owner_prev, 700);
+        f.st.apply(&rekey).expect("removing a cert-expired leaf folds when the log's clock says so");
+        assert!(f.st.pending_removals(CH, 700).is_empty(), "the drift is discharged");
+    }
+
+    /// Spec C3 promises that a bogus Welcome "leaves visible drift and gets
+    /// retried automatically". The fold-state formula says otherwise: a leaf
+    /// stuck in `leaves_pending` is subtracted from `pending_adds` AND absent
+    /// from `pending_removals`, so it produced zero drift — while a re-add was
+    /// refused ("already present or pending"), the removal was refused (its
+    /// owner is in good standing), and the victim could not author the fix
+    /// (that needs a CONFIRMED leaf). One bogus Welcome, or a steward crashing
+    /// between commit and Welcome, was a permanent invisible lockout with only
+    /// the owner-only reset as recovery. Now: the obligation is visible in
+    /// `pending_confirmations`, and an unproven leaf can be dropped and
+    /// re-driven — which evicts nobody, because the device reappears in
+    /// `pending_adds` the moment it is dropped.
+    #[test]
+    fn an_unconfirmed_leaf_is_visible_and_can_be_re_driven() {
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+
+        // Bob joins and publishes two key packages (the second is the retry's).
+        let (bob, bob_dev, bob_last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let bob_pk = bob.public_key();
+        let bob_leaf = (bob_pk.clone(), device_id(&bob_dev.public_key()));
+        let kp1 = kp_publish(&bob_dev, &bob_pk, &f.sid, &bob_last, [4u8; 32], 1_000_000, 500);
+        f.st.apply(&kp1).expect("bob's first key package publishes");
+        let kp2 = kp_publish(&bob_dev, &bob_pk, &f.sid, &kp1, [4u8; 32], 1_000_000, 500);
+        f.st.apply(&kp2).expect("bob's second key package publishes");
+
+        // The add-commit lands; bob's Welcome never works, so he never confirms.
+        let add = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
+            vec![add_of(&bob_pk, &bob_dev, &kp1.hash())], vec![], X1, X2, T2, OWNER_STORE);
+        f.st.apply(&add).expect("the add-commit folds");
+        f.owner_prev = add;
+
+        // Both derived drift sets are silent about him...
+        assert!(f.st.pending_adds(CH, 500).is_empty(), "a pending leaf is subtracted from pending_adds");
+        assert!(f.st.pending_removals(CH, 500).is_empty(), "and it is not drift to remove either");
+        // ...but the retry obligation is exposed, so a steward can see it.
+        assert_eq!(
+            f.st.pending_confirmations(CH), HashSet::from([bob_leaf.clone()]),
+            "the unconfirmed leaf is the visible obligation"
+        );
+        // A re-add is still refused (the leaf occupies the slot).
+        let re_add = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 3,
+            vec![add_of(&bob_pk, &bob_dev, &kp2.hash())], vec![], X2, X3, T3, ALICE_STORE);
+        assert_rejected_for(&f.st, &re_add, "already present or pending");
+
+        // Dropping the unproven leaf is now permitted — and it evicts nobody:
+        // bob is a member in good standing, so his device is `pending_adds`
+        // drift the instant it leaves the group.
+        let drop = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 3,
+            vec![], vec![rem_of(&bob_pk, &bob_dev)], X2, X3, T3, ALICE_STORE);
+        f.st.apply(&drop).expect("an unconfirmed leaf can be dropped");
+        f.alice_prev = drop;
+        assert!(f.st.pending_confirmations(CH).is_empty());
+        assert!(
+            f.st.pending_adds(CH, 500).contains(&bob_leaf),
+            "the dropped device is immediately visible drift — the add is simply re-driven"
+        );
+
+        // ...and the retry goes through with a fresh KeyPackage.
+        let redo = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 4,
+            vec![add_of(&bob_pk, &bob_dev, &kp2.hash())], vec![], X3, X4, T4, ALICE_STORE);
+        f.st.apply(&redo).expect("the re-add discharges the drift and folds");
+        f.alice_prev = redo;
+        let cf = leaf_confirm(&bob_dev, &bob_pk, &f.sid, &kp2, 5, T4, [4u8; 32]);
+        f.st.apply(&cf).expect("bob's confirmation folds");
+        assert!(f.st.leaves_confirmed(CH).contains(&bob_leaf), "bob is really in the group now");
+        assert!(f.st.pending_adds(CH, 500).is_empty() && f.st.pending_confirmations(CH).is_empty());
+
+        // A CONFIRMED leaf of a member in good standing is still untouchable.
+        let evict = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 5,
+            vec![], vec![rem_of(&bob_pk, &bob_dev)], X4, [17u8; 32], [27u8; 32], OWNER_STORE);
+        assert_rejected_for(&f.st, &evict, "good standing");
+    }
+
+    /// The envelope's cert-expiry gate judged the RAW author timestamp, so a
+    /// device whose cert had died kept full control-plane authority by
+    /// back-dating: nothing in the chain forces timestamp monotonicity, and
+    /// `MlsCommit` authz never checks that the AUTHORING device is live. Such a
+    /// commit zeroes `events_since_last_commit` — defeating the C4 freshness
+    /// ceiling for good — and sets the chain variable. Expiry is now judged at
+    /// the identity's monotone clock.
+    #[test]
+    fn an_expired_device_cannot_author_by_back_dating() {
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2
+        let alice_pk = f.alice.public_key();
+        let (b_dev, _b_did, b_prev) = alice_adds_an_expiring_second_device(&mut f);
+
+        // Alice's clock moves past the second device's expiry (t=600).
+        let later = post_at(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 700);
+        f.st.apply(&later).expect("alice posts at t=700 from her live device");
+        f.alice_prev = later;
+
+        // The dead device back-dates to t=500 — where its cert was still alive.
+        let backdated_post = post_at(&b_dev, &alice_pk, &f.sid, &b_prev, 500);
+        assert_rejected_for(&f.st, &backdated_post, "device cert has expired");
+        let backdated_commit = mls_commit_at(&b_dev, &alice_pk, &f.sid, &b_prev, 3, vec![], vec![],
+            X2, X3, T3, B_STORE_R2, 500);
+        assert_rejected_for(&f.st, &backdated_commit, "device cert has expired");
+        assert_eq!(
+            f.st.mls_current_epoch(CH), Some((0, 3)),
+            "the dead device moved neither the epoch nor the chain variable"
+        );
+        assert_ne!(
+            f.st.mls_groups.get(&CH).unwrap().epoch_authenticator, Some(X3),
+            "...and did not get to declare the next authenticator"
+        );
     }
 
     /// Tombstones carry unvalidated targets (the fold has no message index by

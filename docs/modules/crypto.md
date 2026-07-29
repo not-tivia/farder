@@ -388,7 +388,7 @@ sealed-content send gates plus non-selective reset (Task 4). Ingest handling
 |---|---|---|
 | `ChannelCreated` | `channel_id: u64`, `name`, `kind`, `class: ChannelClass`, `parent: Option<u64>` | Owner-only (spec M3, no new capability string); `channel_id` must be new (class is set once or the channel does not exist to the log — no class-change event exists) **and must have no plaintext history** — a channel the log has seen a legacy `MessagePosted` in can never be declared afterwards (an `E2ee` declaration over plaintext history would hang a lock icon on messages every host already read; the FOLD refuses it, so a Rung-3 replica replaying from genesis refuses it too); `parent: Some(p)` requires `p` known to the log AND the child's `class` equal to `p`'s (thread children inherit their parent's class). Effect: records the channel **and its creator** (the only identity that may author a generation's bootstrap `MlsCommit`) |
 | `MlsKeyPackagePublished` | `key_package: Vec<u8>`, `store_instance_hash: [u8;32]`, `expires_at_log_pos: u64` | Full member only; `store_instance_hash` must match/pin the device's instance pin; `expires_at_log_pos > log_pos` at publish; at most `MAX_LIVE_KEY_PACKAGES_PER_DEVICE = 10` live (unconsumed, unexpired) refs per device — expired refs stop counting and are pruned on touch. Effect: record ref → expiry log pos |
-| `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | Channel must have an E2ee group; `generation` must match; **epoch CAS**: a commit re-declaring a past epoch folds `Ok` as an **accepted no-op** (only chain head + `log_pos` advance — the Rung-3-deterministic loser); instance-hash pin; author must be a **full member** (re-checked against the authz fold on every commit — a confirmed leaf is not standing authority, since a kicked identity keeps its leaf until a Remove-commit lands) and must hold a **confirmed** leaf — except at a generation's **bootstrap**, where no confirmed leaf exists yet and the commit must instead be authored by the channel's **creator** (owner-only this rung; otherwise any log-known device could seize a fresh or post-reset group); `prev_epoch_authenticator` must equal the previous commit's declared `post_epoch_authenticator`, exempt only when there is nothing to chain to (`epoch_authenticator == None`); a bootstrap author's leaf becomes confirmed; each `DeclaredAdd` needs a full non-banned member, a live device, an unconsumed unexpired KeyPackage of exactly that `(identity, device)`, an absent leaf, and the **self-add rule** (an identity with a confirmed leaf may only be extended by itself); each `DeclaredRemove` needs a present leaf that is out of good standing OR self-removal; **commit-rate rule** (`COMMIT_RATE_MIN_EPOCH_GAP = 4`): drift-discharging commits are never blocked, others need to be the author's first or ≥ 4 epochs past their previous. `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit must chain onto (plan resolved ambiguity #1); a liar wedges the chain and cannot be built upon. `authz_head` is opaque to the fold (client head attestation) |
+| `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | Channel must have an E2ee group; `generation` must match; **epoch CAS**: a commit re-declaring a past epoch folds `Ok` as an **accepted no-op** (only chain head + `log_pos` advance — the Rung-3-deterministic loser); instance-hash pin; author must be a **full member** (re-checked against the authz fold on every commit — a confirmed leaf is not standing authority, since a kicked identity keeps its leaf until a Remove-commit lands) and must hold a **confirmed** leaf — except at a generation's **bootstrap**, where no confirmed leaf exists yet and the commit must instead be authored by the channel's **creator** (owner-only this rung; otherwise any log-known device could seize a fresh or post-reset group); `prev_epoch_authenticator` must equal the previous commit's declared `post_epoch_authenticator`, exempt only when there is nothing to chain to (`epoch_authenticator == None`); a bootstrap author's leaf becomes confirmed; each `DeclaredAdd` needs a full non-banned member, a live device, an unconsumed unexpired KeyPackage of exactly that `(identity, device)`, an absent leaf, and the **self-add rule** (an identity with a confirmed leaf may only be extended by itself); each `DeclaredRemove` needs a present leaf, and if that leaf is **confirmed** it must additionally be out of good standing OR self-removal (the rule that makes an unlogged eviction structurally impossible, spec C7) — a **pending-only** leaf is exempt, because it is an unproven Add rather than a member of the tree, and gating it by good standing was a permanent invisible lockout (see `pending_confirmations`); dropping it evicts nobody, since the device reappears in `pending_adds` immediately; **commit-rate rule** (`COMMIT_RATE_MIN_EPOCH_GAP = 4`): drift-discharging commits are never blocked, others need to be the author's first or ≥ 4 epochs past their previous. `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit must chain onto (plan resolved ambiguity #1); a liar wedges the chain and cannot be built upon. `authz_head` is opaque to the fold (client head attestation) |
 | `MlsWelcome` | `channel_id`, `generation`, `commit: EventRef`, `for_member: PublicKey`, `for_device: DeviceId`, `welcome: Vec<u8>` | Author must be a full member (same re-check as `MlsCommit`). `generation == current`: author must hold a confirmed leaf, target leaf must be pending, cited commit must be fold-recorded. `generation == current + 1`: owner-only reset staging (Welcomes precede the content-addressed reset, ambiguity #6). `for_*` unverifiable by the fold — recording a Welcome NEVER promotes a leaf; only the joiner's confirmation does |
 | `MlsLeafConfirmed` | `channel_id`, `generation`, `epoch`, `tree_hash: [u8;32]`, `store_instance_hash: [u8;32]` | Must be authored by a **full member** (a leaf whose holder was kicked between Welcome and confirmation stays pending — that is drift, and the pending-removals gate keeps the channel sealed until it is discharged) from the joining device of a **pending** leaf; instance-hash pin; `tree_hash` must equal `commits_by_epoch[epoch].post_tree_hash` — or, in a reset generation with no logged commits, seed/match `reset_expected_tree_hash` (ambiguity #7). Effect: pending → confirmed; clears `reset_pending` once confirmed = members × live devices |
 | `MlsGroupReset` | `channel_id`, `new_generation: u64`, `welcomes: Vec<EventRef>` | Owner-only (spec M3); channel must have an E2ee group; `new_generation == generation + 1`; **rate limit** — `channel_events_since_reset >= RESET_MIN_CHANNEL_EVENTS = 1000`, with two exemptions: a channel's FIRST reset (generation 0), and a reset while `reset_pending` is set (an INCOMPLETE reset accepts no sealed content, so its clock cannot advance — without the exemption one welcomed device that never confirms would lock the channel out of its only recovery; a reset that never completed is not a spam vector); **completeness (spec C7)** — every ref must resolve to a fold-recorded `MlsWelcome` staged for `new_generation`, with no duplicate refs, and the welcomed `(member, device)` set must equal EXACTLY `members × live_devices(event.timestamp)` **minus the resetter's own authoring device** (which becomes the new group's creator). Effect: `generation = new_generation`, `epoch = 1`, `leaves_confirmed = {resetter}`, `leaves_pending = welcomed`, `commit_head`/`epoch_authenticator`/`tree_hash`/`reset_expected_tree_hash` cleared (the cleared authenticator is the new generation's bootstrap marker), `commits_by_epoch` + `last_commit_epoch_by_author` cleared, older-generation `welcomes` dropped, both counters zeroed, `reset_pending = true` |
@@ -471,35 +471,62 @@ yet.
 | `revoked_devices` | `HashSet<DeviceId>` | `DeviceRevoked` effect | Dead devices. Checked at the **envelope**: a revoked device can author nothing new (not even a fresh `DeviceAuthorized`); its history stands. |
 | `devices_by_identity` | `HashMap<PublicKey, HashSet<DeviceId>>` | `DeviceAuthorized` effect | Every device ever authorized per identity; liveness is filtered by `live_devices`, never by removal. |
 | `log_pos` | `u64` | `+1` per accepted event | The pure log-position clock (drives KeyPackage lifetimes in Task 3). No wall clock enters the fold. |
-| `identity_clock` | `HashMap<PublicKey, u64>` | `max`-merged with `core.timestamp` on every accepted event | Per-identity **monotone timestamp floor**. Device liveness for an identity is judged at `max(at_ts, floor)`, never at the raw author-chosen timestamp — see `live_devices`. |
+| `identity_clock` | `HashMap<PublicKey, u64>` | `max`-merged with `core.timestamp` on every accepted event | Per-identity **monotone timestamp floor**. Device liveness for an identity is never judged earlier than its own floor — see `live_devices`. |
+| `corroborated_clock` | `u64` | recomputed from `identity_clock` after every accepted event | The log's **corroborated clock**: the greatest timestamp at least **two distinct identities** have claimed (the second-largest floor). It is the **ceiling** the fold judges one identity's liveness at when *another* identity's claim asks the question — see `judged_liveness_ts`. A lone author cannot move it at all. |
 
 `DeviceRecord` also gained `expires_at: Option<u64>` (from the `DeviceAuthorized`
 cert). Two envelope gates run right after signature verification, before the ban
-gate: **revocation** (`revoked_devices`) and **cert expiry** — judged against
-`event.core.timestamp`, the untrusted author clock (the same acceptance Rung 1
-made for invite expiry).
+gate: **revocation** (`revoked_devices`) and **cert expiry** — judged at the
+author's **monotone** clock, `self_liveness_ts(author, core.timestamp) =
+max(core.timestamp, identity_clock[author])`, not at the raw claim. The raw
+claim let a *dead* device keep full control-plane authority: nothing in the
+chain forces timestamp monotonicity, and `MlsCommit` authz checks only that the
+author is a member holding a confirmed leaf — never that the **authoring
+device** is live. An identity whose floor had already passed its cert's expiry
+could therefore keep authoring `MlsCommit` / `MlsWelcome` / `MlsLeafConfirmed`
+from that device by back-dating, zeroing `events_since_last_commit` (defeating
+the C4 freshness ceiling indefinitely) and setting the chain variable at will.
 
 Constant: `MAX_LIVE_DEVICES_PER_IDENTITY = 8` (pub). `DeviceAuthorized` is
 rejected when the author already has 8 live (non-revoked, cert-unexpired)
 devices; revoking a device frees its slot.
 
 **The author's clock is not trusted for liveness.** `event.core.timestamp` is
-chosen entirely by the author, so judging cert expiry there alone was
-exploitable: an identity could register past the 8-device cap by claiming a
-future time (its own certs then look dead, freeing slots at the *claimed*
-moment while staying live at earlier ones), and any author could hide
-expiry-driven drift by back-dating a send below a dead cert. `live_devices`
-therefore evaluates at `liveness_ts(pk, at_ts) = max(at_ts, identity_clock[pk])`
-— a **monotone, log-derived** point. An identity can only push its own floor
-forward (and only while a device of its own can still author), so it can never
-be judged at a moment it has already moved past: the cap is a hard bound at
-*every* timestamp, and drift from an identity's own expired devices cannot be
-back-dated away.
-**Residual, stated plainly:** an author can still back-date below the expiry of
-a *different* identity that went silent before its cert died. Closing that needs
-a bound on `core.timestamp` against server time, which is ingest's (sub-3) job;
-the fold cannot invent a global clock without letting one liar's timestamp
-expire everyone else's certs.
+chosen entirely by the author, so judging expiry there is exploitable in **both**
+directions, and the fold uses a different judgment point for each question:
+
+- **Self judgment — `self_liveness_ts(pk, at_ts) = max(at_ts, identity_clock[pk])`.**
+  Used by the envelope cert-expiry gate and by the public `live_devices(pk, at_ts)`
+  query. It stops **back-dating**: an identity can only push its own floor
+  forward, so it can never be judged at a moment it has already moved past. This
+  is what makes the 8-device cap a hard bound at *every* timestamp (claiming a
+  future time to make one's own certs look dead frees no slot), and what stops a
+  dead device from authoring below its own expiry. An identity is entitled to
+  move its own floor, because doing so only kills its own devices.
+- **Cross-identity judgment — `judged_liveness_ts(pk, at_ts) =
+  max(identity_floor(pk), min(at_ts, corroborated_clock))`.** Used everywhere one
+  claim decides *someone else's* liveness: `member_leaf_set` (and therefore
+  `pending_adds` / `pending_removals` / `commit_discharges_drift` / the reset's
+  exact-cover check) and the declared-add/declared-remove checks inside
+  `MlsCommit`. It adds the **forward-dating** bound, which was the live hole: a
+  commit author claiming a far-future `core.timestamp` made every *other*
+  member's expiring cert look dead, so `good_standing` collapsed and the
+  non-selective-removal rule authorized a **silent, unlogged eviction** — exactly
+  the spec C7 attack the rule exists to make structurally impossible — while the
+  same claim shrank `members × live_devices` enough for a partial reset to pass
+  as exact cover, and made the eviction count as a drift discharge (bypassing
+  `COMMIT_RATE_MIN_EPOCH_GAP`). A claimed timestamp is now credible for judging
+  *others* only up to the moment the log itself corroborates, and corroboration
+  requires **two distinct identities**, so a lone compromised member cannot move
+  the ceiling — not even by forward-dating a harmless event first. On an ordinary
+  server, where several identities keep claiming roughly-real times, the ceiling
+  tracks real time closely and honest expiry-driven drift appears as normal.
+
+**Residual, stated plainly:** two *colluding* identities can still push the
+corroborated clock forward, and an author can still back-date below the expiry of
+a *different* identity that went silent before its cert died and never claimed
+anything after it. Closing those needs a bound on `core.timestamp` against server
+time, which is ingest's (sub-3) job.
 
 ### Rung-2 MLS fold state (sub-2 Task 3)
 
@@ -575,12 +602,13 @@ The fold stays exactly what Rung 1 made it: a pure
 resume-from-any-checkpoint` over **all** the Rung-2 state above. Two rules keep
 it that way, and both are now load-bearing for MLS:
 
-- **Three deterministic clocks, never wall time.** `event.core.timestamp` (the
-  untrusted author claim) drives device-cert expiry at the envelope;
-  `identity_clock` (a per-identity monotone floor folded from those claims)
-  is what `live_devices` — and therefore every `members × live_devices`
-  derivation — actually judges liveness at; `log_pos` (count of accepted events)
-  drives KeyPackage lifetimes. All three are inputs or folded state, so a
+- **Four deterministic clocks, never wall time.** `event.core.timestamp` (the
+  untrusted author claim) is the raw input; `identity_clock` (a per-identity
+  monotone floor folded from those claims) is the **lower** bound the envelope
+  expiry gate and `live_devices` judge at; `corroborated_clock` (the timestamp
+  two distinct identities have claimed) is the **upper** bound every
+  cross-identity liveness derivation is capped at; `log_pos` (count of accepted
+  events) drives KeyPackage lifetimes. All four are inputs or folded state, so a
   checkpoint carries them.
 - **Check-then-mutate.** Every fallible check runs before any mutation, so a
   rejected event leaves the state byte-identical (no clone/rollback anywhere).
@@ -637,13 +665,19 @@ Whether the device has been killed by an accepted `DeviceRevoked`.
 
 #### `live_devices(pk: &PublicKey, at_ts: u64) -> Vec<DeviceId>`
 
-An identity's live devices: authorized, non-revoked, and cert-unexpired at
-`max(at_ts, identity_clock[pk])` — **not** at the raw, author-chosen `at_ts`
-(see "The author's clock is not trusted for liveness" above; the floor is
-monotone, so an identity can never be judged at a moment it has already moved
-past). Sorted for determinism. Feeds the device cap, the
-`members × live_devices` MLS target set (drift + reset completeness), and the
-reset-completion check.
+An identity's live devices as judged at **its own** clock: authorized,
+non-revoked, and cert-unexpired at `self_liveness_ts(pk, at_ts) =
+max(at_ts, identity_clock[pk])` — **not** at the raw, author-chosen `at_ts` (see
+"The author's clock is not trusted for liveness" above). Sorted for determinism.
+Feeds the device cap and the envelope expiry gate, and is the diagnostic query
+for callers outside the fold.
+
+Every **cross-identity** derivation inside the fold —
+`members × live_devices` (drift sets, `commit_discharges_drift`, reset
+completeness) and the declared add/remove checks — instead uses the private
+`judged_live_devices`, which additionally **caps** the judgment point at
+`corroborated_clock` so one author's forward-dated claim cannot declare everyone
+else's certs dead.
 
 #### `log_pos() -> u64`
 
@@ -661,7 +695,18 @@ Empty for channels without an MLS group.
 
 The complement: member devices the group should hold but does not —
 `(members × live_devices) \ (confirmed ∪ pending)`. Stewards read this to build
-Add-commits.
+Add-commits. Note the `\ pending`: a declared-but-unconfirmed leaf is **absorbed**
+by this set, so it is not the retry signal — `pending_confirmations` is.
+
+#### `pending_confirmations(channel_id: u64) -> HashSet<(PublicKey, DeviceId)>`
+
+The group's **unconfirmed** leaves: declared by an accepted Add-commit, never
+promoted by an `MlsLeafConfirmed`. This is the retry obligation spec C3 relies
+on, and it needs its own query precisely because a pending leaf shows up in
+*neither* drift set (subtracted from `pending_adds`, and not in `pending_removals`
+either). A leaf lingering here is re-driven by removing it (permitted for
+pending-only leaves — see the `MlsCommit` remove rule) and re-adding it with a
+fresh KeyPackage. Empty for channels without an MLS group.
 
 #### `mls_current_epoch(channel_id: u64) -> Option<(u64, u64)>`
 
@@ -670,8 +715,9 @@ pre-check. `None` = no MLS group (unknown or Plaintext channel).
 
 #### `leaves_confirmed(channel_id: u64) -> HashSet<(PublicKey, DeviceId)>`
 
-The joiner-confirmed leaves (drift detection runs on these, never on pending
-leaves — a bogus Welcome therefore leaves visible drift).
+The joiner-confirmed leaves. Drift detection runs on `confirmed ∪ pending`, so a
+bogus Welcome leaves **no** drift — its retry obligation is visible in
+`pending_confirmations` instead.
 
 #### `commit_discharges_drift(event: &Event) -> bool`
 
