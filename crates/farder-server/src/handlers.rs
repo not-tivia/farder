@@ -120,7 +120,18 @@ pub fn check_run_command_channel_auth(
         return Ok(Some(format!("timed out until {until_ms}{reason_part}")));
     }
 
-    // 2. Channel-level check (mirrors SendMessage).
+    // 2. Class gate — ONE check covering ALL SIX command kinds (`text`, `api`,
+    //    `poll`, `giveaway`, `event`, `reminder`) before any parse, outbound
+    //    fetch or DB write. `text`/`api` post a reply, `poll`/`giveaway`/`event`
+    //    post a card, and `reminder` posts nothing but stores `reminders.text`
+    //    server-side in PLAINTEXT — which is exactly the content a sealed
+    //    channel promises to hide (spec Coexistence rows 4, 5, 19, 20).
+    //    FAIL CLOSED: an unresolvable class refuses.
+    if crate::channel_class::resolve(conn, channel_id).refuses_server_authored_content() {
+        return Ok(Some(crate::channel_class::E2EE_REFUSED.to_string()));
+    }
+
+    // 3. Channel-level check (mirrors SendMessage).
     let channel = channels::get_channel(conn, channel_id)?
         .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
 
@@ -360,16 +371,41 @@ fn require_member_hierarchy(
     Ok(None)
 }
 
+/// Class gate for every request that would produce (or act on) server-readable
+/// content in a channel. `Some(denied)` must be propagated by the caller;
+/// `None` means proceed.
+///
+/// FAIL CLOSED (spec rev 2, C8/F1): an unresolvable class — no `channels` row,
+/// an unrecognised `content_class`, or a failed read — refuses exactly like a
+/// declared E2EE channel. The refusal string is the single byte-identical
+/// [`crate::channel_class::E2EE_REFUSED`], so a channel id is never an existence
+/// oracle: a sealed channel and a channel that does not exist answer the same.
+fn require_plaintext_channel(conn: &Connection, channel_id: u64) -> Option<Result<HandleResult>> {
+    if crate::channel_class::resolve(conn, channel_id).refuses_server_authored_content() {
+        return Some(err(crate::channel_class::E2EE_REFUSED));
+    }
+    None
+}
+
 /// Widget visibility: can `member` see `channel_id`? DM channels ⇒ participant;
 /// all others ⇒ VIEW_CHANNEL. Callers MUST map `false` (and a missing channel)
 /// to the same opaque "... not found" error as a missing widget row, so widget
 /// ids are not an existence oracle for invisible channels.
+///
+/// Rung 2: a channel that is not definitely plaintext is **invisible to every
+/// widget request**. No poll, giveaway or event can exist in an E2EE channel
+/// (create is refused at `RunCommand`), so this is defence in depth — and it is
+/// deliberately expressed as invisibility rather than a distinct error, so a
+/// widget id cannot be used to classify a channel.
 fn widget_channel_visible(
     conn: &Connection,
     member: &PublicKey,
     channel_id: u64,
     is_owner: bool,
 ) -> Result<bool> {
+    if crate::channel_class::resolve(conn, channel_id).refuses_server_authored_content() {
+        return Ok(false);
+    }
     let channel = match channels::get_channel(conn, channel_id)? {
         Some(c) => c,
         None => return Ok(false),
@@ -475,6 +511,13 @@ pub fn handle_request(
             if let Some(denied) = require_not_timed_out(conn, member)? {
                 return Ok(denied);
             }
+            // Class gate BEFORE any allocation-heavy work (attachment lookups,
+            // FTS insert). The choke point in `messages.rs` would also refuse,
+            // but a hard error is the wrong answer to a request — this is the
+            // clean "not available in encrypted channels".
+            if let Some(denied) = require_plaintext_channel(conn, channel_id) {
+                return denied;
+            }
             if content.len() > 8000 {
                 return err("message content too long (max 8000 characters)");
             }
@@ -547,6 +590,12 @@ pub fn handle_request(
             };
             if msg.author != *member {
                 return err("can only edit own messages");
+            }
+            // `EditMessage { new_content: String }` ships the whole body in
+            // plaintext (spec Coexistence row 10). Sealed edits ride
+            // `MessageEditedE2ee` instead.
+            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+                return denied;
             }
             messages::edit_message(conn, message_id, &new_content)?;
             let updated = messages::get_message(conn, message_id, member)?.unwrap();
@@ -1408,6 +1457,13 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::SEND_MESSAGES) {
                 return err("missing SEND_MESSAGES permission");
             }
+            // A thread off a sealed parent is created through the LEGACY path —
+            // i.e. a plaintext channel hanging under a sealed message, whose
+            // every post the host can read (spec Coexistence row 12). Refused
+            // this rung; E2EE thread groups are a later build.
+            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+                return denied;
+            }
             let parent_channel = channels::get_channel(conn, msg.channel_id)?
                 .ok_or_else(|| anyhow::anyhow!("parent channel not found"))?;
             if parent_channel.channel_type == ChannelType::Thread {
@@ -1438,6 +1494,12 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::READ_MESSAGES) {
                 return err("missing READ_MESSAGES permission");
             }
+            // `ReactionAdded { message_id, emoji, public_key }` would tell the
+            // host exactly WHO reacted WITH WHAT to WHICH sealed message — a
+            // content leak dressed as metadata (spec Coexistence row 11).
+            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+                return denied;
+            }
             let inserted = crate::reactions::add_reaction(conn, message_id, member, &emoji, file_id)?;
             // A duplicate (INSERT OR IGNORE no-op) must NOT broadcast: phantom
             // ReactionAdded events made clients stack counts for re-clicks.
@@ -1457,6 +1519,11 @@ pub fn handle_request(
         ServerRequest::RemoveReaction { message_id, emoji, file_id } => {
             let msg = messages::get_message(conn, message_id, member)?
                 .ok_or_else(|| anyhow::anyhow!("message not found"))?;
+            // Symmetric with AddReaction: `ReactionRemoved` carries the same
+            // (who, what, which sealed message) triple.
+            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+                return denied;
+            }
             crate::reactions::remove_reaction(conn, message_id, member, &emoji, file_id)?;
             ok_with(ServerResponse::Ok, vec![BroadcastEvent {
                 target: EventTarget::Subscribers(msg.channel_id),
@@ -2236,6 +2303,13 @@ pub fn handle_request(
             }
             if channels::get_channel(conn, channel_id)?.is_none() {
                 return err("channel not found");
+            }
+            // An external webhook sender has no group key, so anything it posts
+            // is host-readable by construction (spec Coexistence row 3).
+            // Refused at CREATE here and again at DELIVERY (`webhooks::deliver`)
+            // so an already-issued token cannot survive a class change.
+            if let Some(denied) = require_plaintext_channel(conn, channel_id) {
+                return denied;
             }
             let name = name.trim().to_string();
             if name.is_empty() || name.len() > 64 {
@@ -8117,5 +8191,546 @@ mod tests {
             ServerRequest::ListActiveWidgets { channel_id }, "", &fake_state()).unwrap();
         let (_p, _g, events) = active_widgets(r);
         assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![info.id]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2 — request-layer class refusals (spec rev 2, C8/F1 requirement 2)
+    //
+    // Every test here drives the REAL request path and asserts BOTH that the
+    // request is refused AND that the channel still holds zero message rows.
+    // "It returned an error" is not the claim; "no server-readable content
+    // landed" is.
+    // -----------------------------------------------------------------------
+
+    use crate::channel_class::{ChannelWriteClass, E2EE_REFUSED};
+    use farder_crypto::event_log::ChannelClass;
+
+    /// A channel whose mirrored class is `e2ee`, exactly as `ChannelCreated`
+    /// ingest will leave it (Task 3).
+    fn make_e2ee_channel(conn: &Connection) -> u64 {
+        let id = channels::create_channel(conn, "sealed", ChannelType::Text, None, 0).unwrap();
+        crate::channel_class::set_class(conn, id, ChannelClass::E2ee).unwrap();
+        assert_eq!(crate::channel_class::resolve(conn, id), ChannelWriteClass::E2ee);
+        id
+    }
+
+    fn message_count(conn: &Connection, channel_id: u64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+            rusqlite::params![channel_id as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn send_message_is_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::SendMessage {
+                channel_id: sealed,
+                content: "plaintext the host could read".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "",
+            &fake_state(),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        assert!(r.events.is_empty(), "a refused send broadcasts nothing");
+        assert_eq!(message_count(&conn, sealed), 0);
+
+        // Control: the SAME request in a plaintext channel still works, so the
+        // gate is class-driven and not a blanket break.
+        let plain = make_channel(&conn);
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::SendMessage {
+                channel_id: plain,
+                content: "fine here".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "",
+            &fake_state(),
+        )
+        .unwrap();
+        assert!(matches!(r.response, ServerResponse::MessageSent { .. }));
+        assert_eq!(message_count(&conn, plain), 1);
+    }
+
+    /// A channel that flips to E2EE with a legacy row already in it: the edit is
+    /// refused and the STORED CONTENT IS UNCHANGED (the observation that matters
+    /// — an accepted edit would have rewritten `messages.content` in place).
+    #[test]
+    fn edit_message_is_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let id = messages::insert_message(&conn, channel_id, &owner, "original", None).unwrap();
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::EditMessage {
+                message_id: id,
+                new_content: "rewritten in the clear".to_string(),
+            },
+            "",
+            &fake_state(),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        assert!(r.events.is_empty());
+
+        let stored: String = conn
+            .query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                rusqlite::params![id as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "original", "a refused edit must not touch the row");
+        let edited: Option<i64> = conn
+            .query_row(
+                "SELECT edited_at FROM messages WHERE id = ?1",
+                rusqlite::params![id as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(edited.is_none(), "no edit stamp for a refused edit");
+    }
+
+    /// `ReactionAdded { message_id, emoji, public_key }` tells the host who
+    /// reacted with what to which sealed message. Both arms refuse, and no
+    /// reaction row is stored.
+    #[test]
+    fn add_and_remove_reaction_are_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let id = messages::insert_message(&conn, channel_id, &owner, "hi", None).unwrap();
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        for req in [
+            ServerRequest::AddReaction {
+                message_id: id,
+                emoji: "🔥".to_string(),
+                file_id: None,
+            },
+            ServerRequest::RemoveReaction {
+                message_id: id,
+                emoji: "🔥".to_string(),
+                file_id: None,
+            },
+        ] {
+            let r = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
+            assert_eq!(err_reason(&r), E2EE_REFUSED);
+            assert!(r.events.is_empty(), "a refused reaction broadcasts nothing");
+        }
+        let reactions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM reactions WHERE message_id = ?1",
+                rusqlite::params![id as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reactions, 0, "no reactor is recorded against a sealed message");
+    }
+
+    /// A thread under a sealed parent would be a PLAINTEXT channel hanging off a
+    /// sealed message. Refused, and no child channel row is created.
+    #[test]
+    fn thread_create_is_refused_under_an_e2ee_parent() {
+        let (conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let id = messages::insert_message(&conn, channel_id, &owner, "parent", None).unwrap();
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0))
+            .unwrap();
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::CreateThread {
+                message_id: id,
+                name: Some("leaky thread".to_string()),
+            },
+            "",
+            &fake_state(),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        assert!(r.events.is_empty());
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, after, "no thread channel is created");
+        assert!(crate::channels::get_thread_for_message(&conn, id).unwrap().is_none());
+    }
+
+    /// All SIX `RunCommand` kinds, refused by the one gate
+    /// (`check_run_command_channel_auth`) that `connection.rs` calls before it
+    /// even looks the command up — so the refusal cannot depend on the kind.
+    ///
+    /// `reminder` is the case the spec's C8 enumeration has no idea exists: it
+    /// posts NOTHING, so the choke point would never see it, yet `reminders.text`
+    /// is stored server-side in plaintext.
+    #[test]
+    fn every_run_command_kind_is_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+        let plain = make_channel(&conn);
+
+        for kind in ["text", "api", "poll", "giveaway", "event", "reminder"] {
+            // Register a REAL command of this kind so the case is not hypothetical.
+            let r = handle_request(
+                &conn,
+                &owner,
+                true,
+                ServerRequest::AddCommand {
+                    name: format!("cmd {kind}"),
+                    trigger: kind.to_string(),
+                    description: String::new(),
+                    kind: kind.to_string(),
+                    body_text: Some("body".to_string()),
+                    url_template: Some("https://example.com/x".to_string()),
+                    value_path: Some("a.b".to_string()),
+                    response_template: None,
+                    unit: None,
+                },
+                "",
+                &fake_state(),
+            )
+            .unwrap();
+            assert!(matches!(r.response, ServerResponse::Ok), "AddCommand {kind}");
+            assert!(crate::commands::find_by_trigger(&conn, kind).unwrap().is_some());
+
+            // The gate is kind-agnostic BY CONSTRUCTION: it runs before the
+            // trigger lookup, so every kind gets the same answer.
+            assert_eq!(
+                check_run_command_channel_auth(&conn, &owner, true, sealed).unwrap(),
+                Some(E2EE_REFUSED.to_string()),
+                "/{kind} must be refused in an E2EE channel"
+            );
+            assert_eq!(
+                check_run_command_channel_auth(&conn, &owner, true, plain).unwrap(),
+                None,
+                "/{kind} must still work in a plaintext channel"
+            );
+        }
+
+        assert_eq!(message_count(&conn, sealed), 0);
+        let reminders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reminders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reminders, 0, "no plaintext reminder text is stored");
+    }
+
+    #[test]
+    fn webhook_create_is_refused_for_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::CreateWebhook {
+                channel_id: sealed,
+                name: "CI".to_string(),
+            },
+            "",
+            &fake_state(),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        let hooks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM webhooks WHERE channel_id = ?1",
+                rusqlite::params![sealed as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hooks, 0, "no token is ever minted for a sealed channel");
+    }
+
+    /// Every widget request refuses in an E2EE channel using its EXISTING opaque
+    /// not-found string. A distinguishable "encrypted channel" answer would turn
+    /// a widget id into a channel classifier, so the refusal must be
+    /// byte-identical to the answer for a widget that does not exist at all.
+    #[test]
+    fn widget_interactions_in_an_e2ee_channel_refuse_without_an_existence_oracle() {
+        let (mut conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let now = crate::db::now();
+
+        // Build one of each widget kind while the channel is still plaintext,
+        // then flip the class — the strictly harder case than "create refused".
+        let poll_id = crate::polls::create(
+            &conn,
+            channel_id as i64,
+            1,
+            &owner,
+            "q?",
+            &["a".to_string(), "b".to_string()],
+            None,
+        )
+        .unwrap();
+        let giveaway_id = crate::giveaways::create(
+            &conn,
+            channel_id as i64,
+            1,
+            &owner,
+            "prize",
+            now as i64 + 10_000,
+        )
+        .unwrap();
+        let parsed = crate::channel_events::parse_event_args("Party | 3d").unwrap();
+        let (_m, event_info) =
+            crate::channel_events::create_event_card(&mut conn, channel_id, &owner, &parsed, now)
+                .unwrap();
+        let event_id = event_info.id;
+
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        // (request, the opaque string it must return) — each is the SAME string
+        // the arm returns for a nonexistent id.
+        let cases: Vec<(ServerRequest, &str)> = vec![
+            (ServerRequest::GetPoll { poll_id }, "poll not found"),
+            (
+                ServerRequest::VotePoll { poll_id, option_index: 0 },
+                "poll not found",
+            ),
+            (ServerRequest::RetractVote { poll_id }, "poll not found"),
+            (ServerRequest::ClosePoll { poll_id }, "poll not found"),
+            (ServerRequest::GetGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::EnterGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::LeaveGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::CancelGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::RerollGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::GetEvent { event_id }, EVENT_NOT_FOUND),
+            (
+                ServerRequest::RsvpEvent { event_id, response: "going".to_string() },
+                EVENT_NOT_FOUND,
+            ),
+            (ServerRequest::ClearRsvp { event_id }, EVENT_NOT_FOUND),
+            (ServerRequest::CancelEvent { event_id }, EVENT_NOT_FOUND),
+            (
+                ServerRequest::EditEvent {
+                    event_id,
+                    title: "New".to_string(),
+                    description: None,
+                    location: None,
+                    starts_at: now + 100_000,
+                    remind_lead: None,
+                },
+                EVENT_NOT_FOUND,
+            ),
+            (ServerRequest::ListActiveWidgets { channel_id }, "channel not found"),
+        ];
+
+        for (req, opaque) in cases {
+            let label = format!("{req:?}");
+            let r = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
+            let reason = err_reason(&r);
+            assert_eq!(reason, opaque, "{label} must return its EXISTING opaque error");
+            assert!(
+                !reason.contains(E2EE_REFUSED),
+                "{label} leaked the channel class: {reason}"
+            );
+            assert!(r.events.is_empty(), "{label} must broadcast nothing");
+        }
+
+        // Nothing was mutated: no vote, no entry, no RSVP, nothing closed.
+        assert!(crate::polls::my_vote(&conn, poll_id, &owner).unwrap().is_none());
+        assert!(crate::polls::get(&conn, poll_id).unwrap().unwrap().closed_at.is_none());
+        assert_eq!(
+            crate::giveaways::get(&conn, giveaway_id).unwrap().unwrap().status,
+            "open"
+        );
+        let row = crate::channel_events::get(&conn, event_id).unwrap().unwrap();
+        assert_eq!(row.status, "upcoming");
+        assert_eq!(row.title, "Party", "a refused EditEvent rewrote nothing");
+    }
+
+    /// Default-deny, stated exhaustively. The `match` below is EXHAUSTIVE over
+    /// `ServerRequest`, so a newly added variant fails to COMPILE until someone
+    /// classifies it — which is the point: the bootstrap allow-list must never
+    /// grow by accident.
+    #[test]
+    fn no_new_request_variant_escapes_default_deny_request_requires_membership() {
+        fn expected(req: &ServerRequest) -> bool {
+            match req {
+                // THE BOOTSTRAP ALLOW-LIST — exactly four, and growing it is a
+                // deliberate, reviewed act (Task 5 adds `NegotiateProtocol` and
+                // nothing else).
+                ServerRequest::SubmitEvent { .. }
+                | ServerRequest::ResolveInvite { .. }
+                | ServerRequest::GetServerInfo
+                | ServerRequest::GetMembershipStatus => false,
+                // Everything else is gated. Enumerated, not `_`-defaulted.
+                ServerRequest::AddBot { .. }
+                | ServerRequest::AddBotAlert { .. }
+                | ServerRequest::AddCommand { .. }
+                | ServerRequest::AddCustomBot { .. }
+                | ServerRequest::AddReaction { .. }
+                | ServerRequest::AssignRole { .. }
+                | ServerRequest::BanMember { .. }
+                | ServerRequest::BlockUser { .. }
+                | ServerRequest::CancelDeletion
+                | ServerRequest::CancelEvent { .. }
+                | ServerRequest::CancelGiveaway { .. }
+                | ServerRequest::CancelReminder { .. }
+                | ServerRequest::ClearRsvp { .. }
+                | ServerRequest::ClosePoll { .. }
+                | ServerRequest::CreateCategory { .. }
+                | ServerRequest::CreateChannel { .. }
+                | ServerRequest::CreateInvite { .. }
+                | ServerRequest::CreateRole { .. }
+                | ServerRequest::CreateThread { .. }
+                | ServerRequest::CreateWebhook { .. }
+                | ServerRequest::DeleteCategory { .. }
+                | ServerRequest::DeleteChannel { .. }
+                | ServerRequest::DeleteCommand { .. }
+                | ServerRequest::DeleteMessage { .. }
+                | ServerRequest::DeleteRole { .. }
+                | ServerRequest::DeleteWebhook { .. }
+                | ServerRequest::DisableTrack { .. }
+                | ServerRequest::EditEvent { .. }
+                | ServerRequest::EditMessage { .. }
+                | ServerRequest::EnableTrack { .. }
+                | ServerRequest::EnterGiveaway { .. }
+                | ServerRequest::FetchHistory { .. }
+                | ServerRequest::FetchUrl { .. }
+                | ServerRequest::GetBotPollInterval
+                | ServerRequest::GetDeletionStatus
+                | ServerRequest::GetEvent { .. }
+                | ServerRequest::GetGiveaway { .. }
+                | ServerRequest::GetMediaState { .. }
+                | ServerRequest::GetMemberProfile { .. }
+                | ServerRequest::GetMembers
+                | ServerRequest::GetPendingMembers
+                | ServerRequest::GetPoll { .. }
+                | ServerRequest::JoinChannelMedia { .. }
+                | ServerRequest::JoinStream { .. }
+                | ServerRequest::KickMember { .. }
+                | ServerRequest::LeaveChannelMedia { .. }
+                | ServerRequest::LeaveGiveaway { .. }
+                | ServerRequest::LeaveStream
+                | ServerRequest::ListActiveWidgets { .. }
+                | ServerRequest::ListAuditEvents { .. }
+                | ServerRequest::ListBanned
+                | ServerRequest::ListBotAlerts { .. }
+                | ServerRequest::ListCommands {}
+                | ServerRequest::ListDms
+                | ServerRequest::ListMyReminders
+                | ServerRequest::ListMySubscriptions
+                | ServerRequest::ListWebhooks { .. }
+                | ServerRequest::OfferStreamKey { .. }
+                | ServerRequest::OpenDm { .. }
+                | ServerRequest::PinMessage { .. }
+                | ServerRequest::RegenerateWebhookToken { .. }
+                | ServerRequest::RemoveBot { .. }
+                | ServerRequest::RemoveBotAlert { .. }
+                | ServerRequest::RemoveReaction { .. }
+                | ServerRequest::RemoveRole { .. }
+                | ServerRequest::RemoveTimeout { .. }
+                | ServerRequest::RequestDeletion
+                | ServerRequest::RerollGiveaway { .. }
+                | ServerRequest::RetractVote { .. }
+                | ServerRequest::RsvpEvent { .. }
+                | ServerRequest::RunCommand { .. }
+                | ServerRequest::Search { .. }
+                | ServerRequest::SendMessage { .. }
+                | ServerRequest::SetBotPollInterval { .. }
+                | ServerRequest::SetCategoryOverride { .. }
+                | ServerRequest::SetChannelOverride { .. }
+                | ServerRequest::SetDeafen { .. }
+                | ServerRequest::SetMute { .. }
+                | ServerRequest::Subscribe { .. }
+                | ServerRequest::SubscribeBot { .. }
+                | ServerRequest::TimeoutMember { .. }
+                | ServerRequest::Typing { .. }
+                | ServerRequest::UnbanMember { .. }
+                | ServerRequest::UnblockUser { .. }
+                | ServerRequest::UnpinMessage { .. }
+                | ServerRequest::UnsubscribeBot { .. }
+                | ServerRequest::UpdateCategory { .. }
+                | ServerRequest::UpdateChannel { .. }
+                | ServerRequest::UpdatePresence { .. }
+                | ServerRequest::UpdateProfile { .. }
+                | ServerRequest::UpdateRole { .. }
+                | ServerRequest::VotePoll { .. } => true,
+            }
+        }
+
+        let pk = Keypair::generate().public_key();
+        // Every request this sub-project gates, plus all four bootstrap
+        // variants, checked against the classifier above.
+        let samples: Vec<ServerRequest> = vec![
+            ServerRequest::GetServerInfo,
+            ServerRequest::GetMembershipStatus,
+            ServerRequest::ResolveInvite { code: "x".into() },
+            ServerRequest::SendMessage {
+                channel_id: 1,
+                content: String::new(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            ServerRequest::EditMessage { message_id: 1, new_content: String::new() },
+            ServerRequest::AddReaction { message_id: 1, emoji: "x".into(), file_id: None },
+            ServerRequest::RemoveReaction { message_id: 1, emoji: "x".into(), file_id: None },
+            ServerRequest::CreateThread { message_id: 1, name: None },
+            ServerRequest::CreateWebhook { channel_id: 1, name: "w".into() },
+            ServerRequest::FetchUrl { url: "https://e".into(), channel_id: 1 },
+            ServerRequest::RunCommand {
+                trigger: "t".into(),
+                channel_id: 1,
+                args: String::new(),
+            },
+            ServerRequest::GetPoll { poll_id: 1 },
+            ServerRequest::VotePoll { poll_id: 1, option_index: 0 },
+            ServerRequest::RetractVote { poll_id: 1 },
+            ServerRequest::ClosePoll { poll_id: 1 },
+            ServerRequest::GetGiveaway { giveaway_id: 1 },
+            ServerRequest::EnterGiveaway { giveaway_id: 1 },
+            ServerRequest::LeaveGiveaway { giveaway_id: 1 },
+            ServerRequest::CancelGiveaway { giveaway_id: 1 },
+            ServerRequest::RerollGiveaway { giveaway_id: 1 },
+            ServerRequest::GetEvent { event_id: 1 },
+            ServerRequest::RsvpEvent { event_id: 1, response: "going".into() },
+            ServerRequest::ClearRsvp { event_id: 1 },
+            ServerRequest::CancelEvent { event_id: 1 },
+            ServerRequest::ListActiveWidgets { channel_id: 1 },
+            ServerRequest::ListMyReminders,
+            ServerRequest::CancelReminder { reminder_id: 1 },
+            ServerRequest::GetMembers,
+            ServerRequest::AssignRole { member_key: pk.clone(), role_id: 1 },
+        ];
+        for req in &samples {
+            assert_eq!(
+                request_requires_membership(req),
+                expected(req),
+                "default-deny drift for {req:?}"
+            );
+        }
+        // The allow-list is exactly four, stated positively.
+        assert_eq!(
+            samples.iter().filter(|r| !request_requires_membership(r)).count(),
+            3,
+            "only the three bootstrap variants in this sample may be ungated \
+             (SubmitEvent is the fourth and is not sampled here)"
+        );
     }
 }

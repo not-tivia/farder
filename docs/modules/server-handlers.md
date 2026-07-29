@@ -400,6 +400,50 @@ All three are added by the idempotent `PRAGMA table_info` migration pattern, so
 existing databases pick them up on the next open with legacy rows defaulting to
 plaintext (Q8's carve-out: a channel the log never knew stays plaintext forever).
 
+### Request-layer refusals
+
+The choke point hard-**errors**, which is the right answer for a programming
+mistake but the wrong answer to a user request. So every request that would
+produce (or act on) server-readable content in a channel is refused *first*, at
+the request layer, with a clean message. The choke point remains as the
+backstop; neither is load-bearing alone.
+
+`handlers::require_plaintext_channel(conn, channel_id) -> Option<Result<HandleResult>>`
+is the shared gate: `Some(denied)` to propagate, `None` to proceed. It returns
+the byte-identical `E2EE_REFUSED` and fails closed on `Unresolvable`, so a
+sealed channel and a nonexistent one are indistinguishable.
+
+| request | where the gate sits | refusal |
+|---|---|---|
+| `SendMessage` | after the timeout check, before any attachment/FTS work | `E2EE_REFUSED` |
+| `EditMessage` | after the authorship check, via `msg.channel_id` | `E2EE_REFUSED` |
+| `AddReaction` / `RemoveReaction` | after the permission check, via `msg.channel_id` | `E2EE_REFUSED` |
+| `CreateThread` | after the permission check, via the parent's `channel_id` | `E2EE_REFUSED` |
+| `CreateWebhook` | after the channel-exists check | `E2EE_REFUSED` |
+| `RunCommand` (all six kinds) | inside `check_run_command_channel_auth`, before the trigger is even looked up | `E2EE_REFUSED` |
+| `FetchUrl` | `connection::handle_fetch_url`, before the outbound HTTP fetch | `E2EE_REFUSED` |
+| every widget request | inside `widget_channel_visible`, which now answers `false` for any non-plaintext class | that arm's **existing opaque** string (`"poll not found"`, `"giveaway not found"`, `EVENT_NOT_FOUND`, `"channel not found"`) |
+| incoming webhook delivery | `webhooks::deliver`, after `find_by_token` | `WebhookAck::Unauthorized` (the existing opaque ack) |
+| giveaway draw + event start announcements | `widgets::sweep_once`, before the guarded UPDATE | skip and `continue`, logged at `warn!` |
+
+Two deliberate choices in that table:
+
+- **Widget arms keep their own opaque errors.** A distinguishable "encrypted
+  channel" answer would let a widget id classify a channel, so the gate is
+  expressed as *invisibility* — the same answer the arm gives for a widget that
+  does not exist. No widget can exist in an E2EE channel anyway (create is
+  refused at `RunCommand`); this is defence in depth.
+- **`RunCommand`'s gate is kind-agnostic by construction.** It sits in
+  `check_run_command_channel_auth`, which `connection.rs` calls before the
+  command lookup, so `text`, `api`, `poll`, `giveaway`, `event` and `reminder`
+  are all covered by one check. `reminder` matters even though it posts nothing:
+  `reminders.text` is stored server-side in plaintext.
+
+`request_requires_membership` keeps its default-deny shape — the bootstrap
+allow-list is still exactly `SubmitEvent`, `ResolveInvite`, `GetServerInfo`,
+`GetMembershipStatus`, pinned by an exhaustive-`match` test that fails to
+compile when a new `ServerRequest` variant is added without being classified.
+
 ---
 
 ## Event ingest helpers (`crates/farder-server/src/event_ingest.rs`)

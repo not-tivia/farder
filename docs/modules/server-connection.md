@@ -132,6 +132,11 @@ Both are handled over auxiliary QUIC bidirectional streams, not over the primary
 
 **URL fetch** (`handle_fetch_url`): the server fetches a URL on the client's behalf (max 10 MB, 10-second timeout, HTTP/HTTPS only), stores it as an attachment, and returns the `file_id`. Permission is checked (requires `SEND_MESSAGES` on the target channel). The DB lock is held only for the brief store step — the HTTP fetch runs without any lock.
 
+**Rung-2 class gates (`FetchUrl`, `RunCommand`).** Both are handled here rather than in `handlers.rs`, so both carry their own channel-content-class check (`docs/modules/server-handlers.md` → "Channel content class + the message write choke point"). Fail closed: an unresolvable class refuses exactly like a declared E2EE one, and the refusal string is the byte-identical `channel_class::E2EE_REFUSED`, so a channel id is not an existence oracle.
+
+- `handle_fetch_url` checks the class in the same scoped lock as the `SEND_MESSAGES` check and **before the outbound HTTP request** — the blob the server downloads is server-visible by construction, and refusing early also means a sealed channel cannot be used to make the server fetch a URL at all (spec Coexistence row 6b).
+- `RunCommand` inherits its gate from `handlers::check_run_command_channel_auth`, which the dispatch arm already calls before the command lookup. One check therefore covers **all six kinds** (`text`, `api`, `poll`, `giveaway`, `event`, `reminder`) before any parse, outbound fetch or DB write — including `reminder`, which posts nothing but would store `reminders.text` server-side in plaintext.
+
 ---
 
 ## Media stream routing (`media_stream.rs`)

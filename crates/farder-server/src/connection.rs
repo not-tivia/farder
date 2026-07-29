@@ -321,13 +321,22 @@ async fn handle_fetch_url(
     url: &str,
     channel_id: u64,
 ) -> Result<u64, String> {
-    // Permission check
+    // Permission + class check (one scoped lock, dropped before any await).
     {
         let db = state.db.lock().unwrap();
         let perms = handlers::resolve_member_perms_pub(&db, member, channel_id, is_owner)
             .map_err(|e| e.to_string())?;
         if !permissions::has(perms, permissions::SEND_MESSAGES) {
             return Err("missing SEND_MESSAGES permission".to_string());
+        }
+        // Class gate BEFORE the outbound HTTP fetch: the blob the server
+        // downloads and stores is server-visible by construction, and the
+        // client's legacy auto-attach fallback would put it in the channel
+        // (spec Coexistence row 6b). Refusing here also means an E2EE channel
+        // cannot be used to make the server fetch a URL at all.
+        // FAIL CLOSED: an unresolvable class refuses.
+        if crate::channel_class::resolve(&db, channel_id).refuses_server_authored_content() {
+            return Err(crate::channel_class::E2EE_REFUSED.to_string());
         }
     }
 
@@ -1615,6 +1624,88 @@ pub(crate) async fn process_inbound_voice_frame(
         crate::media_stream::IngressDecision::Drop(_reason) => {
             tracing::trace!("[media] datagram dropped: {:?}", _reason);
         }
+    }
+}
+
+#[cfg(test)]
+mod class_gate_tests {
+    use super::*;
+
+    /// `FetchUrl` makes the SERVER download a URL and store the blob — in the
+    /// clear, on the host's disk — and the shipped client falls back to
+    /// attaching it (spec Coexistence row 6b). Refused for an E2EE channel
+    /// BEFORE the outbound request, so a sealed channel cannot even be used as
+    /// a fetch trigger.
+    ///
+    /// The URL here is unroutable on purpose: if the gate ever regressed, the
+    /// test would fail on a network error rather than silently pass.
+    #[tokio::test]
+    async fn fetch_url_is_refused_in_an_e2ee_channel() {
+        let state = std::sync::Arc::new(crate::state::ServerState::new_for_test().unwrap());
+        let member = farder_crypto::identity::Keypair::generate().public_key();
+        let (sealed, plain) = {
+            let conn = state.db.lock().unwrap();
+            let everyone = crate::members::create_role(
+                &conn,
+                "@everyone",
+                crate::permissions::DEFAULT_EVERYONE,
+                None,
+                0,
+                true,
+                false,
+            )
+            .unwrap();
+            crate::members::register_member(&conn, &member, "M").unwrap();
+            crate::members::assign_role(&conn, &member, everyone).unwrap();
+            let sealed = crate::channels::create_channel(
+                &conn, "sealed", farder_protocol::server::ChannelType::Text, None, 0,
+            )
+            .unwrap();
+            let plain = crate::channels::create_channel(
+                &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
+            )
+            .unwrap();
+            crate::channel_class::set_class(
+                &conn,
+                sealed,
+                farder_crypto::event_log::ChannelClass::E2ee,
+            )
+            .unwrap();
+            (sealed, plain)
+        };
+
+        let e = handle_fetch_url(&state, &member, false, "http://192.0.2.1/x.png", sealed)
+            .await
+            .expect_err("a sealed channel must refuse");
+        assert_eq!(e, crate::channel_class::E2EE_REFUSED);
+
+        // Fail closed: a channel that does not exist answers IDENTICALLY, so
+        // the refusal is not an existence oracle.
+        let e2 = handle_fetch_url(&state, &member, false, "http://192.0.2.1/x.png", 999_999)
+            .await
+            .expect_err("an unresolvable channel must refuse too");
+        assert_eq!(e2, e);
+
+        // No file record was created for either attempt.
+        {
+            let conn = state.db.lock().unwrap();
+            let files: i64 = conn
+                .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(files, 0, "a refused fetch stores no blob");
+        }
+
+        // Control: the SAME call in a plaintext channel gets PAST the class gate
+        // and reaches the next check (the scheme validation immediately after
+        // it), proving the gate is class-driven — and that it sits BEFORE the
+        // outbound fetch, since the sealed case never got this far.
+        let plain_err = handle_fetch_url(&state, &member, false, "ftp://example.com/x.png", plain)
+            .await
+            .expect_err("scheme check, i.e. past the class gate");
+        assert_eq!(
+            plain_err, "invalid URL",
+            "a plaintext channel must fall through to the NEXT check, not be class-refused"
+        );
     }
 }
 
