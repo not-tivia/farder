@@ -226,7 +226,12 @@ pub enum EventPayload {
     MlsLeafConfirmed { channel_id: u64, generation: u64, epoch: u64, tree_hash: [u8; 32], store_instance_hash: [u8; 32] },
     /// Owner-only recovery hatch; valid only if `welcomes` covers exactly the
     /// fold's members × live_devices (non-selective reset, spec C7).
-    MlsGroupReset { channel_id: u64, new_generation: u64, welcomes: Vec<EventRef> },
+    /// `post_tree_hash` is the new generation's real tree hash: the resetter IS
+    /// the new group's creator by construction, so it is the one party that
+    /// knows it, and every post-reset `MlsLeafConfirmed` is validated against
+    /// THIS value (the reset generation's add-commit is never a log event, so
+    /// there is no `commits_by_epoch` entry to check against).
+    MlsGroupReset { channel_id: u64, new_generation: u64, welcomes: Vec<EventRef>, post_tree_hash: [u8; 32] },
     /// Sealed channel content. ciphertext = MLS PrivateMessage of a padded
     /// MessageEnvelope; reply_to + caps stay OUTSIDE the seal (blind threading
     /// and cap-vs-blob validation).
@@ -548,6 +553,7 @@ mod tests {
             },
             EventPayload::MlsGroupReset {
                 channel_id: 7, new_generation: 1, welcomes: vec![some_ref.clone(), sha256_hex(b"w2")],
+                post_tree_hash: [4u8; 32],
             },
             EventPayload::MessagePostedE2ee {
                 channel_id: 7, generation: 0, epoch: 4, ciphertext: vec![0xAA; 64],

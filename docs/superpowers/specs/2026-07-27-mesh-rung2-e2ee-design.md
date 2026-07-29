@@ -183,10 +183,16 @@ The signed event log **is the Delivery Service**: it stores/hands out KeyPackage
     // cadence by any online member, so a quiet channel still cross-checks log views
     // inside the group where the host can neither forge nor omit.
 
-| MlsGroupReset { channel_id, new_generation, welcomes: Vec<EventRef> }
+| MlsGroupReset { channel_id, new_generation, welcomes: Vec<EventRef>,
+                 post_tree_hash: [u8;32] }
     // Recovery hatch, owner-only this rung. Valid ONLY if `welcomes` covers exactly
     // the fold's current members×devices set for the channel — no more, no fewer
     // (see Non-selective reset). Rate-limited by the fold.
+    // post_tree_hash: the new generation's real tree hash. The reset generation's
+    // add-commit is never a log event, so post-reset MlsLeafConfirmed has no
+    // commit to check against; the resetter IS the new group's creator, so its
+    // declaration is the anchor (never first-writer-wins by the first confirmer,
+    // which one malicious welcomed device could poison for everyone).
 
 | MessagePostedE2ee { channel_id, generation, epoch, ciphertext: Vec<u8>,
                       reply_to: Option<EventRef>, attachments: Vec<AttachmentCap>,
@@ -306,7 +312,7 @@ Rev 1's Risks said a malicious `manage_channels` holder "can nuke a group's cont
 Rev 2:
 
 - `MlsGroupReset { channel_id, new_generation, welcomes }` is valid **only if `welcomes` covers exactly the fold's current `members × live_devices` set** for that channel — no more, no fewer. Enforced by the blind fold.
-- The fold refuses `MessagePostedE2ee` in the new generation until `leaves_confirmed` equals the fold's member set. A partial reset is therefore a **dead channel, loudly**, not a silent partition.
+- The fold refuses `MessagePostedE2ee` in the new generation until every leaf the reset staged is accounted for — confirmed, or dropped by a Remove-commit (the bridge's answer when a welcomed device is banned or lost before confirming). Post-reset confirmations are validated against the `post_tree_hash` the **resetter** declared. A partial reset is therefore a **dead channel, loudly**, not a silent partition.
 - Reset is **owner-only this rung** (see M3 disposition), fold-rate-limited (one per channel per 1000 channel events), and gated behind a UI confirmation wall that names what is lost.
 - Second-order honesty: reset is asymmetric evidence destruction — members with a local store keep plaintext; reinstallers and later investigators do not.
 

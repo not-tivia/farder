@@ -61,8 +61,11 @@ struct DeviceRecord {
     identity: PublicKey,
     device_pubkey: PublicKey,
     /// Cert expiry (unix seconds) from the `DeviceAuthorized` cert, if any.
-    /// Judged against `event.core.timestamp` — the untrusted author clock,
-    /// the same acceptance Rung 1 made for invite expiry.
+    /// NOT judged against the raw `event.core.timestamp` (which is entirely
+    /// author-chosen): the envelope gate and `live_devices` judge it at
+    /// `self_liveness_ts` (the identity's monotone floor), and every
+    /// cross-identity derivation judges it at `judged_liveness_ts` (that floor,
+    /// capped by the log's corroborated clock).
     expires_at: Option<u64>,
 }
 
@@ -116,17 +119,21 @@ struct MlsGroupRecord {
     commit_head: Option<EventHash>,
     /// The last accepted commit's declared `post_epoch_authenticator` — the
     /// value the NEXT commit's `prev_epoch_authenticator` must equal. `None` =
-    /// no commit accepted yet in this generation (bootstrap: chain + confirmed
-    /// -leaf checks are exempt for the generation's first commit, resolved
-    /// ambiguity #5).
+    /// no commit accepted yet in this generation, which exempts that commit from
+    /// the CHAIN check (there is nothing to chain to). It does NOT exempt the
+    /// confirmed-leaf check: that one is keyed to `leaves_confirmed` being empty
+    /// and is then creator-only, so a post-reset generation — whose
+    /// `leaves_confirmed` already holds the resetter — is not up for grabs.
     epoch_authenticator: Option<[u8; 32]>,
     #[allow(dead_code)] // read by sub-3 (derive/diagnostics)
     tree_hash: Option<[u8; 32]>,
     leaves_confirmed: HashSet<(PublicKey, DeviceId)>,
     leaves_pending: HashSet<(PublicKey, DeviceId)>,
-    /// Freshness-ceiling counter (spec C4): channel events (sealed content and
-    /// tombstones) since the last accepted commit. Reset to 0 by every accepted
-    /// commit and by a reset; `>= FRESHNESS_CEILING_EVENTS` seals the channel.
+    /// Freshness-ceiling counter (spec C4): SEALED CONTENT ONLY since the last
+    /// accepted commit — never tombstones, whose targets are opaque to the fold
+    /// (spending the ceiling on them let any member seal an E2ee channel on
+    /// demand with fabricated tombstones). Reset to 0 by every accepted commit
+    /// and by a reset; `>= FRESHNESS_CEILING_EVENTS` seals the channel.
     events_since_last_commit: u32,
     /// Commit-rate clock (spec I3): the DECLARED epoch of each author's last
     /// accepted commit in this channel.
@@ -140,9 +147,13 @@ struct MlsGroupRecord {
     /// (`reset_incomplete`). See that method for why this is a derived set and
     /// not the latch it replaced.
     reset_welcomed: HashSet<(PublicKey, DeviceId)>,
-    /// The tree hash seeded by the FIRST `MlsLeafConfirmed` of a reset
-    /// generation (its add-commit is never a log event, so there is no
-    /// `commits_by_epoch` entry to check against — resolved ambiguity #7).
+    /// The reset generation's expected tree hash, as DECLARED by the resetter
+    /// on `MlsGroupReset` (its add-commit is never a log event, so there is no
+    /// `commits_by_epoch` entry to check against — resolved ambiguity #7). The
+    /// resetter is the new group's creator by construction, so it is the one
+    /// party that knows the real value; anchoring here rather than on the first
+    /// confirmation stops one malicious welcomed device from poisoning every
+    /// honest confirmation with a first-writer-wins bogus hash.
     reset_expected_tree_hash: Option<[u8; 32]>,
     /// Accepted commits keyed by the epoch each CREATED (declared + 1).
     commits_by_epoch: HashMap<u64, CommitRecord>,
@@ -1225,20 +1236,21 @@ impl LogState {
                         rec.post_tree_hash == *tree_hash,
                         "confirmed tree hash does not match the cited epoch's commit"
                     );
-                } else if group
-                    .reset_welcomed
-                    .contains(&(author.clone(), event.core.device.clone()))
-                {
+                } else if let Some(expected) = group.reset_expected_tree_hash {
                     // Reset generation (resolved ambiguity #7): its add-commit
-                    // is never a log event, so the FIRST confirmation seeds the
-                    // expected tree hash; every later one must match it. Only a
-                    // leaf the reset itself staged may take this path.
-                    if let Some(expected) = group.reset_expected_tree_hash {
-                        ensure!(
-                            expected == *tree_hash,
-                            "confirmed tree hash does not match the reset generation's seeded tree hash"
-                        );
-                    }
+                    // is never a log event, so there is no `commits_by_epoch`
+                    // entry to check against. The anchor is the tree hash the
+                    // RESETTER declared on `MlsGroupReset` — it is the new
+                    // group's creator by construction, so it is the one party
+                    // that knows the real value. (This replaces first-writer-
+                    // wins seeding by the first confirmation, under which one
+                    // malicious welcomed device could confirm a bogus hash first
+                    // and every honest confirmation would then be rejected,
+                    // wedging the generation.)
+                    ensure!(
+                        expected == *tree_hash,
+                        "confirmed tree hash does not match the tree hash the reset declared"
+                    );
                 } else {
                     bail!("leaf confirmation cites an epoch with no recorded commit");
                 }
@@ -1264,7 +1276,7 @@ impl LogState {
                 Ok(Authorized::Apply)
             }
 
-            EventPayload::MlsGroupReset { channel_id, new_generation, welcomes } => {
+            EventPayload::MlsGroupReset { channel_id, new_generation, welcomes, .. } => {
                 // Owner-only this rung (spec M3), same as ChannelCreated.
                 ensure!(self.is_owner(author), "only the owner may reset an MLS group");
                 let group = self
@@ -1601,25 +1613,18 @@ impl LogState {
                 );
             }
 
-            EventPayload::MlsLeafConfirmed { channel_id, epoch, tree_hash, store_instance_hash, .. } => {
+            EventPayload::MlsLeafConfirmed { channel_id, store_instance_hash, .. } => {
                 self.pin_instance(&event.core.device, store_instance_hash);
                 let group = self
                     .mls_groups
                     .get_mut(channel_id)
                     .expect("authz verified the group exists");
                 let leaf = (event.core.author.clone(), event.core.device.clone());
-                // Mirrors the authz branch: a confirmation that cites no logged
-                // commit is a reset-generation confirmation, and the first one
-                // seeds the tree hash every later one must match (ambiguity #7).
-                if !group.commits_by_epoch.contains_key(epoch)
-                    && group.reset_welcomed.contains(&leaf)
-                    && group.reset_expected_tree_hash.is_none()
-                {
-                    group.reset_expected_tree_hash = Some(*tree_hash);
-                }
-                // Nothing clears a latch here any more: promoting the leaf out
-                // of `leaves_pending` IS what completes the reset, via the
-                // derived `reset_incomplete` predicate.
+                // Nothing clears a latch here, and nothing seeds a tree hash:
+                // promoting the leaf out of `leaves_pending` IS what completes
+                // the reset (via the derived `reset_incomplete` predicate), and
+                // the reset generation's expected tree hash was declared by the
+                // resetter itself.
                 group.leaves_pending.remove(&leaf);
                 group.leaves_confirmed.insert(leaf);
             }
@@ -1639,7 +1644,7 @@ impl LogState {
                 self.bump_channel_counters(*channel_id);
             }
 
-            EventPayload::MlsGroupReset { channel_id, new_generation, welcomes } => {
+            EventPayload::MlsGroupReset { channel_id, new_generation, welcomes, post_tree_hash } => {
                 let creator = (event.core.author.clone(), event.core.device.clone());
                 let group = self
                     .mls_groups
@@ -1673,7 +1678,9 @@ impl LogState {
                 group.commits_by_epoch.clear();
                 // Stale (older-generation) Welcomes can never be cited again.
                 group.welcomes.retain(|_, w| w.generation >= *new_generation);
-                group.reset_expected_tree_hash = None;
+                // The resetter knows the new group's real tree hash (it created
+                // it): every post-reset confirmation is validated against this.
+                group.reset_expected_tree_hash = Some(*post_tree_hash);
             }
         }
     }
@@ -3391,10 +3398,10 @@ mod tests {
 
     fn group_reset(
         dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev,
-        new_generation: u64, welcomes: Vec<EventRef>,
+        new_generation: u64, welcomes: Vec<EventRef>, post_tree_hash: [u8; 32],
     ) -> Ev {
         Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, 500,
-            EP::MlsGroupReset { channel_id: CH, new_generation, welcomes })
+            EP::MlsGroupReset { channel_id: CH, new_generation, welcomes, post_tree_hash })
     }
 
     /// Assert the fold rejects `event` for the EXPECTED reason (a bare
@@ -3631,6 +3638,7 @@ mod tests {
 
     #[test]
     fn reset_must_welcome_exactly_the_folds_member_set() {
+        const TR: [u8; 32] = [77u8; 32];
         let (mut f, bob, bob_dev, _bob_last) = reset_fixture();
         let owner_pk = f.owner.public_key();
         let owner_did = device_id(&f.owner_dev.public_key());
@@ -3643,7 +3651,7 @@ mod tests {
 
         // Missing bob's device ⇒ rejected (the unbounded unlogged eviction the
         // completeness rule exists to make structurally impossible, spec C7).
-        let missing = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice.clone()]);
+        let missing = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice.clone()], TR);
         assert_rejected_for(&f.st, &missing, "cover exactly");
 
         let w_bob = stage_welcome(&mut f, 1, &bob_pk, &bob_did);
@@ -3652,26 +3660,26 @@ mod tests {
         let stranger = Keypair::generate().public_key();
         let w_stranger = stage_welcome(&mut f, 1, &stranger, &"f".repeat(64));
         let extra = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
-            vec![w_alice.clone(), w_bob.clone(), w_stranger]);
+            vec![w_alice.clone(), w_bob.clone(), w_stranger], TR);
         assert_rejected_for(&f.st, &extra, "cover exactly");
 
         // Duplicate refs ⇒ rejected; the resetter's own device ⇒ rejected (it
         // is the new generation's creator, never a welcomed leaf).
         let dup = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
-            vec![w_alice.clone(), w_alice.clone(), w_bob.clone()]);
+            vec![w_alice.clone(), w_alice.clone(), w_bob.clone()], TR);
         assert_rejected_for(&f.st, &dup, "duplicate reference");
         let w_owner = stage_welcome(&mut f, 1, &owner_pk, &owner_did);
         let self_too = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1,
-            vec![w_alice.clone(), w_bob.clone(), w_owner]);
+            vec![w_alice.clone(), w_bob.clone(), w_owner], TR);
         assert_rejected_for(&f.st, &self_too, "cover exactly");
 
         // A wrong-generation ref ⇒ rejected (staging is per generation).
         let stale_gen = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
-            vec![w_alice.clone(), w_bob.clone()]);
+            vec![w_alice.clone(), w_bob.clone()], TR);
         assert_rejected_for(&f.st, &stale_gen, "advance the generation");
 
         // Exact cover folds.
-        let ok = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob]);
+        let ok = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob], TR);
         f.st.apply(&ok).expect("an exact-cover reset folds");
         assert_eq!(f.st.mls_current_epoch(CH), Some((1, 1)), "the new generation starts at epoch 1");
         let g = f.st.mls_groups.get(&CH).unwrap();
@@ -3682,7 +3690,10 @@ mod tests {
         assert!(g.commits_by_epoch.is_empty() && g.last_commit_epoch_by_author.is_empty());
         assert_eq!(g.events_since_last_commit, 0);
         assert_eq!(g.channel_events_since_reset, 0);
-        assert!(g.reset_expected_tree_hash.is_none());
+        assert_eq!(
+            g.reset_expected_tree_hash, Some(TR),
+            "the resetter declared the new generation's tree hash; confirmations are judged against it"
+        );
     }
 
     #[test]
@@ -3697,7 +3708,7 @@ mod tests {
 
         let w_alice = stage_welcome(&mut f, 1, &alice_pk, &alice_did);
         let w_bob = stage_welcome(&mut f, 1, &bob_pk, &bob_did);
-        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob]);
+        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob], TR);
         f.st.apply(&reset).expect("the exact-cover reset folds");
         f.owner_prev = reset;
 
@@ -3713,21 +3724,28 @@ mod tests {
             vec![], vec![], [0u8; 32], X1, T1, ALICE_STORE);
         assert_rejected_for(&f.st, &grab, "confirmed leaf");
 
-        // The FIRST confirmation seeds the tree hash every later one must match
-        // (the reset generation's add-commit is never a log event, ambiguity #7).
+        // First-writer-wins is gone: a malicious welcomed device that confirms a
+        // bogus tree hash FIRST is simply rejected, so it can no longer poison
+        // every honest confirmation that follows it.
+        let poison = leaf_confirm_gen(&bob_dev, &bob_pk, &f.sid, &bob_last, 1, 1, [78u8; 32], [4u8; 32]);
+        assert_rejected_for(&f.st, &poison, "the tree hash the reset declared");
+
+        // Confirmations are judged against the tree hash the RESETTER declared
+        // (the reset generation's add-commit is never a log event, ambiguity #7)
+        // — not against whichever welcomed device happens to confirm first.
+        assert_eq!(f.st.mls_groups.get(&CH).unwrap().reset_expected_tree_hash, Some(TR));
         let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1, TR, ALICE_STORE);
         f.st.apply(&ca).expect("alice's post-reset confirmation folds");
         f.alice_prev = ca;
-        assert_eq!(f.st.mls_groups.get(&CH).unwrap().reset_expected_tree_hash, Some(TR));
         assert_rejected_for(&f.st, &blocked, "reset is incomplete");
 
         // A confirmation on a DIFFERENT tree is rejected: everyone must land on
-        // the same tree or the reset never completes.
+        // the tree the resetter really built, or the reset never completes.
         let bad = leaf_confirm_gen(&bob_dev, &bob_pk, &f.sid, &bob_last, 1, 1, [78u8; 32], [4u8; 32]);
-        assert_rejected_for(&f.st, &bad, "seeded tree hash");
+        assert_rejected_for(&f.st, &bad, "the tree hash the reset declared");
 
         let cb = leaf_confirm_gen(&bob_dev, &bob_pk, &f.sid, &bob_last, 1, 1, TR, [4u8; 32]);
-        f.st.apply(&cb).expect("bob's confirmation on the seeded tree folds");
+        f.st.apply(&cb).expect("bob's confirmation on the declared tree folds");
         assert!(!f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "the reset completes");
         let unlocked = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 1, vec![]);
         f.st.apply(&unlocked).expect("sends unlock once every welcomed leaf confirms");
@@ -3745,11 +3763,11 @@ mod tests {
         let w_alice = stage_welcome(&mut f, 1, &alice_pk, &alice_did);
 
         // Owner-only this rung (spec M3): a confirmed-leaf member cannot reset.
-        let by_alice = group_reset(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, vec![w_alice.clone()]);
+        let by_alice = group_reset(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, vec![w_alice.clone()], T1);
         assert_rejected_for(&f.st, &by_alice, "only the owner");
 
         // A channel's FIRST reset is always allowed.
-        let r1 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice]);
+        let r1 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice], T1);
         f.st.apply(&r1).expect("the owner's first reset folds");
         f.owner_prev = r1;
 
@@ -3761,7 +3779,7 @@ mod tests {
         // recovery. A reset that never completed is not a spam vector.
         assert!(f.st.mls_groups.get(&CH).unwrap().reset_incomplete());
         let w2 = stage_welcome(&mut f, 2, &alice_pk, &alice_did);
-        let r2 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2, vec![w2]);
+        let r2 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2, vec![w2], T2);
         f.st.apply(&r2).expect("a stuck reset can always be re-run");
         f.owner_prev = r2;
 
@@ -3772,7 +3790,7 @@ mod tests {
         assert!(!f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "the reset completed");
 
         let w3 = stage_welcome(&mut f, 3, &alice_pk, &alice_did);
-        let early = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3, vec![w3.clone()]);
+        let early = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3, vec![w3.clone()], T3);
         assert_rejected_for(&f.st, &early, "rate limit");
 
         // ...and it clears only through REAL channel events (500 sealed posts,
@@ -3797,7 +3815,7 @@ mod tests {
             f.st.mls_groups.get(&CH).unwrap().channel_events_since_reset,
             RESET_MIN_CHANNEL_EVENTS
         );
-        let r3 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3, vec![w3]);
+        let r3 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3, vec![w3], T3);
         f.st.apply(&r3).expect("the rate limit clears after enough channel events");
         assert_eq!(f.st.mls_current_epoch(CH), Some((3, 1)));
     }
@@ -4086,7 +4104,9 @@ mod tests {
         f.owner_prev = w1.clone();
         let partial = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
             f.owner_prev.core.lamport + 1, 9_999_999,
-            EP::MlsGroupReset { channel_id: CH, new_generation: 1, welcomes: vec![w1.hash()] });
+            EP::MlsGroupReset {
+                channel_id: CH, new_generation: 1, welcomes: vec![w1.hash()], post_tree_hash: T3,
+            });
         assert_rejected_for(&f.st, &partial, "non-selective reset");
 
         // The honest expiry path still works: once the LOG's own clock (two
@@ -4569,7 +4589,7 @@ mod tests {
 
         let w_alice = stage_welcome(&mut f, 1, &alice_pk, &alice_did);
         let w_bob = stage_welcome(&mut f, 1, &bob_pk, &bob_did);
-        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob]);
+        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob], TR);
         f.st.apply(&reset).expect("the exact-cover reset folds");
         f.owner_prev = reset;
 
@@ -4644,6 +4664,7 @@ mod tests {
             "{ctx}: plaintext_history_channels"
         );
         assert_eq!(a.identity_clock, b.identity_clock, "{ctx}: identity_clock");
+        assert_eq!(a.corroborated_clock, b.corroborated_clock, "{ctx}: corroborated_clock");
         assert_eq!(a.tombstones, b.tombstones, "{ctx}: tombstones");
         assert_eq!(a.revoked_devices, b.revoked_devices, "{ctx}: revoked_devices");
         assert_eq!(a.devices_by_identity, b.devices_by_identity, "{ctx}: devices_by_identity");
@@ -4779,7 +4800,7 @@ mod tests {
         let cf_alice = leaf_confirm(&ad, &alice_pk, &sid, &kp_a, 2, T1, ALICE_STORE);
 
         // --- Sealed content (post + edit), a moderation tombstone in the E2ee
-        // channel (which spends freshness budget). ---
+        // channel (which spends the RESET clock only, never freshness). ---
         let cap = AttachmentCap {
             content_hash: "d".repeat(64), declared_type: "image/png".into(),
             size: 3, uploader: owner_pk.clone(),
@@ -4794,7 +4815,7 @@ mod tests {
         // both post-reset confirmations, then a send that proves the unlock. ---
         let w1_alice = welcome_for(&od, &owner_pk, &sid, &del_e2ee, 1, "c".repeat(64), &alice_pk, &alice_did);
         let w1_bob = welcome_for(&od, &owner_pk, &sid, &w1_alice, 1, "c".repeat(64), &bob_pk, &bob_did);
-        let reset = group_reset(&od, &owner_pk, &sid, &w1_bob, 1, vec![w1_alice.hash(), w1_bob.hash()]);
+        let reset = group_reset(&od, &owner_pk, &sid, &w1_bob, 1, vec![w1_alice.hash(), w1_bob.hash()], TR);
         let cfa1 = leaf_confirm_gen(&ad, &alice_pk, &sid, &se, 1, 1, TR, ALICE_STORE);
         let cfb1 = leaf_confirm_gen(&bd, &bob_pk, &sid, &kp_b, 1, 1, TR, BOB_STORE);
         let sp3 = sealed_post(&od, &owner_pk, &sid, &reset, CH, 1, 1, vec![]);

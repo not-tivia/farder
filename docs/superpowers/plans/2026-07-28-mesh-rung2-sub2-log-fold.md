@@ -283,6 +283,26 @@ the narrowing is the authority from here on (and is documented in
    `reset_welcomed` membership rather than to the latch. Pinned by
    `a_reset_completes_when_a_stuck_leaf_is_removed_not_only_when_it_confirms`
    (both halves: discharge-by-removal, and an ordinary join not re-sealing).
+3. **Minors.** (a) `corroborated_clock` was missing from the checkpoint-
+   composability deep-equality helper — a hole in the very test that proves
+   composability; added. (b) Four comments that round 1/2 had made false were
+   corrected (cert expiry is no longer judged at the raw `core.timestamp`;
+   `events_since_last_commit` counts sealed content only, never tombstones —
+   twice, once in the field doc and once in the composability log's narration;
+   and `epoch_authenticator == None` exempts only the CHAIN check, never the
+   confirmed-leaf check, which round 1 re-keyed to "`leaves_confirmed` empty,
+   then creator-only"). (c) **The reset-generation tree hash is no longer
+   first-writer-wins** (overriding resolved ambiguity #7's seeding rule): one
+   malicious welcomed device could confirm a bogus hash first and every honest
+   confirmation would then be rejected, wedging the generation. `MlsGroupReset`
+   now carries `post_tree_hash` — the resetter IS the new group's creator by
+   construction, so it is the one party that knows the real value — and
+   `MlsGroupReset`'s effect sets `reset_expected_tree_hash` from it, with every
+   post-reset `MlsLeafConfirmed` validated against THAT. The change stayed
+   contained (dormant schema; one variant, one fold arm, one test helper — no
+   other event reshaped), so it is implemented rather than deferred; the spec's
+   variant listing and C7 section are updated to match. Poisoning is pinned
+   inside `partial_reset_leaves_the_channel_dead_until_all_leaves_confirm`.
 
 ## Global constraints
 
