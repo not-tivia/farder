@@ -279,6 +279,21 @@ pub struct GiveawayInfo {
     pub winner_name: Option<String>,
 }
 
+/// One of the caller's own pending reminders (`ServerResponse::MyReminders`).
+/// Owner-scoped by the connection key — `ListMyReminders` carries no owner
+/// field, so there is nothing to forge and no other member's reminder can ever
+/// appear here.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReminderInfo {
+    pub id: i64,
+    pub text: String,
+    /// Absolute unix secs (no timezone stored anywhere; clients render locally).
+    pub due_at: u64,
+    pub created_at: u64,
+    /// Where it was set — link-back context only.
+    pub channel_id: u64,
+}
+
 /// A slash-command summary returned by `ListCommands`. Deliberately omits
 /// `url_template` and `body_text` — those fields may hold API keys and must
 /// never be exposed to members via this response.
@@ -480,6 +495,13 @@ pub enum ServerRequest {
     /// List a channel's OPEN widgets (membership-gated; visibility-checked;
     /// allowed while timed out; not rate-limited — GetPoll-class read).
     ListActiveWidgets { channel_id: u64 },
+    /// List the CALLER's own pending reminders. Owner-scoped by the authenticated
+    /// connection key — the request carries no owner field, so there is nothing to
+    /// forge. Membership-gated by default-deny; no timeout gate (a read).
+    ListMyReminders,
+    /// Cancel one of the caller's own pending reminders. A foreign, already-fired
+    /// or nonexistent id all return the same opaque "reminder not found".
+    CancelReminder { reminder_id: i64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -556,6 +578,12 @@ pub enum ServerResponse {
         polls: Vec<PollInfo>,
         giveaways: Vec<GiveawayInfo>,
     },
+    /// Invoker-only confirmation delivered on the request's own `request_id`: no
+    /// broadcast, no message row. The `Ok`-but-say-something case (used by the
+    /// `/remind` dispatch, which deliberately posts nothing in the channel).
+    Notice { text: String },
+    /// The caller's own pending reminders (`ListMyReminders`), soonest first.
+    MyReminders { reminders: Vec<ReminderInfo> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

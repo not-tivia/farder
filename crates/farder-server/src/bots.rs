@@ -9,6 +9,12 @@ use std::sync::Arc;
 use crate::state::ServerState;
 use crate::events::EventTarget;
 
+/// `bots.kind` discriminator for the server's OWN identity (exactly one row,
+/// enforced by the `idx_bots_system` partial unique index).
+pub const SYSTEM_BOT_KIND: &str = "system";
+/// Display name + `author_name_override` used for every system-sent DM.
+pub const SYSTEM_BOT_LABEL: &str = "Farder";
+
 pub struct BotRecord {
     pub public_key: PublicKey,
     pub coin_id: String,
@@ -37,9 +43,53 @@ pub fn register_custom_bot(conn: &Connection, pk: &PublicKey, secret: &[u8], nam
     Ok(())
 }
 
+/// The server's own identity: lazily created on first use, then reused forever.
+/// Never created at boot / in `init_schema` — a server that never fires a
+/// reminder or starts an event never mints one.
+///
+/// Both rows are required: the `bots` row holds the secret used to encrypt
+/// system DMs, and the `members` row (is_bot = 1) is what
+/// `handlers::build_member_info` needs to build `DmCreated.participant`. The
+/// identity is excluded from every member/bot listing (`list_bots`,
+/// `members::list_members_visible`) and cannot be removed via `RemoveBot`.
+pub fn get_or_create_system_identity(conn: &Connection) -> Result<PublicKey> {
+    use rusqlite::OptionalExtension;
+    let existing: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT public_key FROM bots WHERE kind = ?1 LIMIT 1",
+            params![SYSTEM_BOT_KIND],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(bytes) = existing {
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("bad system identity pk: wrong length"))?;
+        return Ok(PublicKey::from_bytes(arr));
+    }
+    let kp = farder_crypto::identity::Keypair::generate();
+    let pk = kp.public_key();
+    crate::members::register_bot_member(conn, &pk, SYSTEM_BOT_LABEL)?;
+    conn.execute(
+        "INSERT INTO bots (public_key, secret_key, kind, coin_id, label, created_at) \
+         VALUES (?1, ?2, 'system', '', ?3, ?4)",
+        params![
+            pk.as_bytes().as_slice(),
+            kp.signing_key_bytes().as_slice(),
+            SYSTEM_BOT_LABEL,
+            crate::db::now() as i64
+        ],
+    )?;
+    Ok(pk)
+}
+
+/// List the server's ticker/custom bots. The system identity is excluded: it has
+/// an empty `coin_id` (the poller must never poll it) and no bot UI should ever
+/// enumerate it.
 pub fn list_bots(conn: &Connection) -> Result<Vec<BotRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT public_key, coin_id, label, kind, source_url, value_path, unit FROM bots"
+        "SELECT public_key, coin_id, label, kind, source_url, value_path, unit FROM bots \
+         WHERE kind != 'system'"
     )?;
     let rows = stmt.query_map([], |r| {
         let pk_bytes: Vec<u8> = r.get(0)?;
@@ -494,6 +544,24 @@ pub async fn send_bot_dm(
     recipient_pk: &PublicKey,
     text: &str,
 ) -> Result<()> {
+    send_bot_dm_as(state, bot_pk, recipient_pk, text, None, None).await
+}
+
+/// `send_bot_dm` with an explicit author name/badge override, so a sender that is
+/// deliberately absent from the client's member map (the system identity) still
+/// renders with a name and a badge.
+///
+/// # No DB lock across `.await`
+/// All DB and crypto work is done inside a scoped block that drops the
+/// `MutexGuard` before the first `broadcast_event` call.
+pub async fn send_bot_dm_as(
+    state: &Arc<ServerState>,
+    bot_pk: &PublicKey,
+    recipient_pk: &PublicKey,
+    text: &str,
+    name_override: Option<&str>,
+    badge: Option<&str>,
+) -> Result<()> {
     // --- all DB + crypto work under the lock; collect what broadcasts need ---
     let (channel_info, was_created, message, bot_member) = {
         let conn = state.db.lock().unwrap();
@@ -508,8 +576,15 @@ pub async fn send_bot_dm(
 
         let hex_ct = encrypt_bot_dm(&bot_sk, recipient_pk.as_bytes(), text)?;
 
-        let msg_id =
-            crate::messages::insert_message(&conn, channel_id, bot_pk, &hex_ct, None)?;
+        let msg_id = crate::messages::insert_message_with_author_name(
+            &conn,
+            channel_id,
+            bot_pk,
+            &hex_ct,
+            None,
+            name_override,
+            badge,
+        )?;
 
         let message = crate::messages::get_message(&conn, msg_id, recipient_pk)?
             .ok_or_else(|| anyhow::anyhow!("bot dm message vanished after insert"))?;
@@ -542,6 +617,91 @@ pub async fn send_bot_dm(
     )
     .await;
     Ok(())
+}
+
+/// Send a DM as the server itself, lazily minting the system identity on first
+/// use. The identity lookup takes its own scoped lock and drops it before
+/// delegating — the caller (e.g. the widget sweeper) must NOT hold the DB mutex.
+///
+/// Badge `"BOT"` is reused deliberately: a `"SYSTEM"` badge would need CSS in
+/// three themes for no product gain.
+pub async fn send_system_dm(
+    state: &Arc<ServerState>,
+    recipient_pk: &PublicKey,
+    text: &str,
+) -> Result<()> {
+    let system_pk = {
+        let conn = state.db.lock().unwrap();
+        get_or_create_system_identity(&conn)?
+    }; // MutexGuard dropped here — before any .await
+    send_bot_dm_as(
+        state,
+        &system_pk,
+        recipient_pk,
+        text,
+        Some(SYSTEM_BOT_LABEL),
+        Some("BOT"),
+    )
+    .await
+}
+
+#[cfg(test)]
+mod system_identity_tests {
+    use super::*;
+
+    #[test]
+    fn get_or_create_system_identity_is_idempotent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = get_or_create_system_identity(&conn).unwrap();
+        let b = get_or_create_system_identity(&conn).unwrap();
+        let c = get_or_create_system_identity(&conn).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bots WHERE kind = 'system'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "exactly one system row after three calls");
+        // The members row (is_bot = 1) is REQUIRED — build_member_info errors without it.
+        let member = crate::members::get_member(&conn, &a).unwrap().expect("member row");
+        assert!(member.is_bot, "system identity is a bot member");
+        assert_eq!(member.display_name, SYSTEM_BOT_LABEL);
+    }
+
+    #[test]
+    fn list_bots_excludes_system_identity() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let system = get_or_create_system_identity(&conn).unwrap();
+        let ticker_kp = farder_crypto::identity::Keypair::generate();
+        crate::members::register_bot_member(&conn, &ticker_kp.public_key(), "BTC").unwrap();
+        register_bot(
+            &conn,
+            &ticker_kp.public_key(),
+            ticker_kp.signing_key_bytes().as_slice(),
+            "bitcoin",
+            "BTC",
+        )
+        .unwrap();
+
+        let bots = list_bots(&conn).unwrap();
+        assert_eq!(bots.len(), 1, "only the ticker bot is listed");
+        assert_eq!(bots[0].public_key, ticker_kp.public_key());
+        assert!(!bots.iter().any(|b| b.public_key == system));
+    }
+
+    #[test]
+    fn list_members_visible_excludes_system_while_list_members_includes_it() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let human = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &human, "Alice").unwrap();
+        let system = get_or_create_system_identity(&conn).unwrap();
+
+        let all = crate::members::list_members(&conn).unwrap();
+        assert!(all.iter().any(|m| m.public_key == system), "raw list includes it");
+
+        let visible = crate::members::list_members_visible(&conn).unwrap();
+        assert!(!visible.iter().any(|m| m.public_key == system), "roster hides it");
+        assert!(visible.iter().any(|m| m.public_key == human), "humans still listed");
+    }
 }
 
 #[cfg(test)]

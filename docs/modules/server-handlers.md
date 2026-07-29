@@ -248,7 +248,7 @@ WebRTC session.
 |---|---|
 | `CreateInvite` | Generate an invite code; requires `CREATE_INVITES` (base). Returns `InviteCreated { code }`. No events. |
 | `GetServerInfo` | Return channel list, category list, roles, and member count. No permission check. `name` and `owner_public_key` fields are patched by `connection.rs` after this returns. |
-| `GetMembers` | Return full `MemberInfo` list including role IDs and active timeout data. No permission check. `MemberInfo` now includes `profile_hash: Option<String>` (the SHA-256 hex of the member's last pushed profile, or `null` if none). |
+| `GetMembers` | Return full `MemberInfo` list including role IDs and active timeout data. Sourced from `members::list_members_visible` — the server's own system identity is filtered out in SQL, **before** the mesh `is_bot ||` whitelist below can re-admit it. No permission check. `MemberInfo` now includes `profile_hash: Option<String>` (the SHA-256 hex of the member's last pushed profile, or `null` if none). |
 | `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs`. |
 | `FetchUrl` | Returns an immediate `Error`; this variant must be intercepted and handled asynchronously by `connection.rs` before reaching this function. |
 
@@ -258,7 +258,7 @@ WebRTC session.
 |---|---|---|---|---|
 | `AddBot` | Trims and lowercases `coin_id`; validates charset `[a-z0-9-]` and length ≤64 (returns `Error` on violation). Trims `label`; validates 1–64 chars (returns `Error` on violation). Generates a fresh Ed25519 keypair; inserts a `bots` row (stores the coin id and secret key) and a `members` row with `is_bot=1`; `label` becomes the bot's `display_name`. The price-poller starts broadcasting its presence within the next poll cycle. | Owner only (`is_owner` gate; `MANAGE_SERVER` check reused) | `members::register_bot_member`, `bots::register_bot` | `MemberJoined { public_key, display_name: label }` → `All` |
 | `AddCustomBot` | Trims `name` (1–64 chars), `source_url` (must start with `http://` or `https://`, ≤2048 chars), `value_path` (1–256 chars). Trims and caps `unit` at 24 chars; `None`/empty is stored as `NULL`. Validates each field and returns `Error` on violation. Generates a fresh Ed25519 keypair; calls `members::register_bot_member` and `bots::register_custom_bot`. `name` becomes the bot's `display_name`. The poll loop begins fetching the API on the next cycle. | MANAGE_SERVER | `members::register_bot_member`, `bots::register_custom_bot` | `MemberJoined { public_key, display_name: name }` → `All` |
-| `RemoveBot` | Deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. Cascade: `bots::remove_bot` first deletes all `bot_alerts` and `bot_subscriptions` for this bot. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
+| `RemoveBot` | **Refuses the system identity** (`kind='system'` → `Error { "that identity can't be removed" }`) before doing anything — defense in depth, since the key is never listed but a modified client could name it. Otherwise deletes the bot from `bots` and `members`; evicts the in-memory `Presence` from `state.presences`. Cascade: `bots::remove_bot` first deletes all `bot_alerts` and `bot_subscriptions` for this bot. | Owner only | `bots::remove_bot`, `members::remove_member_row` | `MemberLeft { public_key }` → `All` |
 | `SetBotPollInterval` | Clamps `secs` to ≥30, then writes the value to `server_settings` via `bots::set_poll_interval`. The poll loop reads the interval live each cycle, so the change takes effect immediately after the current sleep expires (no restart). | MANAGE_SERVER (owner or role holders) | `bots::set_poll_interval` → `server_settings` KV (`key="bot_poll_interval"`) | — |
 | `GetBotPollInterval` | Reads the poll interval via `bots::get_poll_interval` and returns `BotPollInterval { secs }`. No permission gate — any connected member may query this. | None | `bots::get_poll_interval` (read-only) | — |
 | `AddBotAlert` | Validates `metric` (`"price_usd"`, `"change_24h"`, or `"value"`) and `comparator` (`"above"` or `"below"`); rejects invalid values with `Error`. Inserts a `bot_alerts` row with `armed=1`. Returns `Ok`. | MANAGE_SERVER | `bots::add_alert` → `bot_alerts` | — |
@@ -267,6 +267,17 @@ WebRTC session.
 | `SubscribeBot` | Idempotent subscribe: `INSERT OR IGNORE` into `bot_subscriptions` with the authenticated caller as subscriber (client cannot supply a different key). Returns `Ok`. | None (any authenticated member) | `bots::subscribe` → `bot_subscriptions` | — |
 | `UnsubscribeBot` | Removes the `(bot_public_key, caller)` row from `bot_subscriptions`. No-op if not subscribed. Returns `Ok`. | None (any authenticated member) | `bots::unsubscribe` | — |
 | `ListMySubscriptions` | Returns `MySubscriptions { bot_public_keys }` — the bot public keys the authenticated caller is subscribed to. | None (any authenticated member) | `bots::list_subscriptions_for_user` (read-only) | — |
+
+---
+
+### Personal reminders
+
+Owner is **always** the authenticated connection key — neither variant carries an owner field, and both scope by `owner = ?` in SQL. Neither is added to `request_requires_membership`'s allow-list, so mesh log-membership gating is automatic. Creation is not a request at all: it is the `"reminder"` `RunCommand` kind (connection.rs), which runs after every existing dispatch gate and replies with an invoker-only `Notice` — nothing is posted or broadcast.
+
+| `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
+|---|---|---|---|---|
+| `ListMyReminders` | Returns `MyReminders { reminders }` — the caller's own pending reminders, soonest first (`LIMIT 20`). Read: no timeout gate, not rate-limited, no channel visibility (a reminder is not channel content). | Membership only (default-deny) | `reminders::list_pending_for` (read-only) | — |
+| `CancelReminder` | Cancels one of the caller's own pending reminders. Rows-affected 0 → `Error { "reminder not found" }`, byte-identical for a foreign id, an already-fired one and a nonexistent one (no existence oracle). No timeout gate — managing your own private nudges is not channel content. | Membership + `widget_limiter` (10/10 s) | `reminders::cancel` → `reminders.status='cancelled'` | — |
 
 ---
 
@@ -383,7 +394,8 @@ Read via `db::get_setting`; written via `db::set_setting` (upsert semantics).
 |---|---|---|
 | `register_bot` | `(conn, pk, secret, coin_id, label) -> Result<()>` | Inserts a `crypto_ticker` row into `bots` (`source_url`/`value_path`/`unit` left `NULL`). |
 | `register_custom_bot` | `(conn, pk, secret, name, source_url, value_path, unit: Option<&str>) -> Result<()>` | Inserts a `custom_api` row into `bots` with `coin_id=''` and the custom-monitor fields populated. |
-| `list_bots` | `(conn) -> Result<Vec<BotRecord>>` | Returns all `BotRecord { public_key, coin_id, label, kind, source_url, value_path, unit }` rows. |
+| `list_bots` | `(conn) -> Result<Vec<BotRecord>>` | Returns every `BotRecord { public_key, coin_id, label, kind, source_url, value_path, unit }` row **except the system identity** (`WHERE kind != 'system'`) — the poller must never poll it (empty `coin_id`) and no bot UI should enumerate it. |
+| `get_or_create_system_identity` | `(conn) -> Result<PublicKey>` | The server's OWN identity, **lazily** created on first use (never at boot / in `init_schema`) and reused forever. Inserts a `bots` row with `kind='system'`, `label='Farder'` **and** a `members` row via `register_bot_member` (required — `build_member_info` errors without it). Idempotent: callers hold the single `state.db` mutex, plus the `idx_bots_system` partial unique index as belt-and-braces. |
 | `remove_bot` | `(conn, pk) -> Result<()>` | Deletes all `bot_alerts` and `bot_subscriptions` rows for `pk` (cascade), then deletes from `bots`. The `members` row is deleted separately by `handlers.rs` via `members::remove_member_row`. |
 | `get_poll_interval` | `(conn) -> u64` | Reads `"bot_poll_interval"` from `server_settings`; floors at `POLL_INTERVAL_FLOOR` (30); returns `POLL_INTERVAL_DEFAULT` (60) when unset. |
 | `set_poll_interval` | `(conn, secs: u64) -> Result<()>` | Writes `secs.max(POLL_INTERVAL_FLOOR)` to `server_settings` under `"bot_poll_interval"`. |
@@ -436,7 +448,7 @@ On each poll cycle:
 
 **Note on fetch-failure behavior:** crypto bots keep their last presence on a network error (no `"unknown coin"` flip); `"unknown coin"` only appears when the batch call succeeded but a specific coin id was absent from the response. Custom bots show `"unavailable"` on any per-bot fetch or extract failure.
 
-**Roster whitelist for mesh servers:** when `GetMembers` is handled for a log-mode server, the member list is filtered to `m.is_bot || ls.is_member(&m.public_key)` so bots always appear alongside confirmed log-space members.
+**Roster whitelist for mesh servers:** when `GetMembers` is handled for a log-mode server, the member list is filtered to `m.is_bot || ls.is_member(&m.public_key)` so bots always appear alongside confirmed log-space members. The system identity is already gone by then (`list_members_visible`), so the `is_bot ||` clause cannot leak it.
 
 ### Alert engine
 
@@ -542,6 +554,18 @@ Sends a full E2EE DM from a server-managed bot to a recipient member. All DB and
 
 `EventTarget::Members([recipient])` ensures the DM is delivered only to the intended recipient, not broadcast to all connected clients. The message persists in the DM channel so the recipient sees it even if they were offline during the poll cycle.
 
+Since the system identity landed, `send_bot_dm` is a thin wrapper: it delegates to `send_bot_dm_as(state, bot_pk, recipient_pk, text, None, None)`.
+
+#### `send_bot_dm_as(state, bot_pk, recipient_pk, text, name_override: Option<&str>, badge: Option<&str>) -> Result<()>`
+
+The body described above, with `messages::insert_message` swapped for `messages::insert_message_with_author_name` so a sender that is deliberately **absent from the client's member map** still renders with a name and a badge. Lock discipline is unchanged.
+
+#### `send_system_dm(state, recipient_pk, text) -> Result<()>`
+
+Sends a DM as the server itself. Takes its own scoped lock to resolve/mint the system identity (`get_or_create_system_identity`), **drops it**, then delegates to `send_bot_dm_as(.., Some("Farder"), Some("BOT"))`. The caller must NOT hold the DB mutex — this is why `widgets::sweep_once` returns DMs as `PendingDm` data instead of sending them inline. Badge `"BOT"` is reused deliberately: a `"SYSTEM"` badge would need CSS in three themes for no product gain.
+
+**Roster invisibility.** The system identity holds no roles, is excluded from `GetMembers` (which calls `members::list_members_visible`, filtering in SQL **before** the mesh `is_bot ||` whitelist can re-admit it), is excluded from `bots::list_bots`, cannot be removed via `RemoveBot`, and cannot authenticate a connection (no auth path reads `bots.secret_key`). Because `BotsTab` and `MemberSidebar` both derive from `activeServer.members`, that one filter removes it from both — no client change needed.
+
 ---
 
 ## `webhooks.rs` — incoming webhook delivery
@@ -627,7 +651,7 @@ Implements CRUD for server-configured `/trigger` slash commands plus the utility
 | `create` | `(conn, name, trigger, description, kind, body_text, url_template, value_path, response_template, unit) -> Result<i64>` | Inserts a command row. Generates a fresh Ed25519 keypair; stores the public key as the command's author identity. Returns the new row id. |
 | `delete` | `(conn, id) -> Result<()>` | Deletes a command row by id. |
 | `list_rows` | `(conn) -> Result<Vec<CommandRow>>` | Full rows ordered by trigger. Includes secrets — server-internal only. |
-| `list_infos` | `(conn) -> Result<Vec<CommandInfo>>` | Safe-fields-only list for clients. `takes_arg` is `true` for kinds `"api"`, `"poll"`, `"giveaway"`; `kind` is passed through verbatim. |
+| `list_infos` | `(conn) -> Result<Vec<CommandInfo>>` | Safe-fields-only list for clients. `takes_arg` is `true` for kinds `"api"`, `"poll"`, `"giveaway"`, `"event"`, `"reminder"`; `kind` is passed through verbatim. |
 | `find_by_trigger` | `(conn, trigger) -> Result<Option<CommandRow>>` | Look up a command by its trigger string. `None` if not found. Used by the `RunCommand` dispatch in `connection.rs`. |
 
 ### Dispatch utilities
@@ -643,8 +667,8 @@ CRUD arms run synchronously inside the standard `handle_request` dispatch. `RunC
 
 | `ServerRequest` | Permission | Action |
 |---|---|---|
-| `ListCommands {}` | none (any member) | Calls `commands::list_infos(conn)`; returns `Commands { commands }`. `takes_arg` is `true` for kinds `"api"`, `"poll"`, `"giveaway"`. |
-| `AddCommand { ... }` | `MANAGE_SERVER` | Validates all fields; checks trigger uniqueness via `find_by_trigger`; calls `commands::create`; returns `Ok`. Kinds `"poll"`/`"giveaway"` accept no kind-specific fields ("kind must be 'text', 'api', 'poll' or 'giveaway'" otherwise). |
+| `ListCommands {}` | none (any member) | Calls `commands::list_infos(conn)`; returns `Commands { commands }`. `takes_arg` is `true` for kinds `"api"`, `"poll"`, `"giveaway"`, `"event"`, `"reminder"`. |
+| `AddCommand { ... }` | `MANAGE_SERVER` | Validates all fields; checks trigger uniqueness via `find_by_trigger`; calls `commands::create`; returns `Ok`. Interactive kinds (`"poll"`, `"giveaway"`, `"reminder"`) accept no kind-specific fields — the arg string is parsed at dispatch ("kind must be 'text', 'api', 'poll', 'giveaway', 'event' or 'reminder'" otherwise). |
 | `DeleteCommand { id }` | `MANAGE_SERVER` | Calls `commands::delete(conn, id)`; returns `Ok`. |
 | `RunCommand { .. }` | — | Stub arm — returns `Error("RunCommand must be handled at the connection level")`. See the `RunCommand` dispatch note below. |
 
@@ -676,6 +700,7 @@ The `DeleteMessage` arm additionally parses the deleted message's `widget` JSON:
    - `"api"` commands: call `commands::build_command_url(url_template, args)`, then `bots::fetch_json(&url)` (SSRF-guarded via `ssrf::resolves_to_global`; rejects private/loopback IPs, 10 s timeout, redirects disabled, 256 KiB cap); on success call `bots::extract_dot_path(&json, value_path)` to get the numeric leaf, then `commands::format_response(response_template, args, value, unit)`.
    - `"poll"` commands: `polls::parse_poll_args(args)` (pure), then `polls::create_poll_card` under one scoped DB lock (card message + `polls` row + widget JSON in one transaction); broadcasts `NewMessage` then `PollUpdated`.
    - `"giveaway"` commands: **MANAGE_SERVER re-checked at dispatch** ("giveaways can only be started by moderators (missing MANAGE_SERVER)"), then `giveaways::parse_giveaway_args(args)` and `giveaways::create_giveaway_card`; broadcasts `NewMessage` then `GiveawayUpdated`.
+   - `"reminder"` commands: **private** — `reminders::parse_reminder_args(args)` (pure), then one scoped DB lock doing `count_pending` (20/user cap) + `create`. Replies `ServerResponse::Notice { text: "\u23f0 Reminder set for <humanized> \u2014 I'll DM you." }` to the invoker on the request's own `request_id`. **Nothing is posted, nothing is broadcast**; the nudge arrives later as a DM from the system identity via the widget sweeper.
    - Unknown `kind`: returns `Error { reason: "command misconfigured" }`.
    - Any fetch/extract/parse failure: returns `Error { reason }`. No message is posted.
 5. **Message insert and broadcast** (DB lock scoped off the broadcast `.await`): for `"text"`/`"api"`, calls `messages::insert_message_with_author_name(conn, channel_id, &cmd.public_key, &content, None, Some(&cmd.name), Some("BOT"))` — `author_name_override = cmd.name`, `author_badge = "BOT"`. Broadcasts `ServerEvent::NewMessage { message }` to `EventTarget::Subscribers(channel_id)`. Returns `Ok`.

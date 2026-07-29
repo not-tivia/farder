@@ -8,7 +8,7 @@ use anyhow::Result;
 use farder_crypto::event_log::EventPayload;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -1211,7 +1211,10 @@ pub fn handle_request(
         }
 
         ServerRequest::GetMembers => {
-            let mut all_members = members::list_members(conn)?;
+            // list_members_visible (not list_members): the server's own system
+            // identity is filtered out in SQL, BEFORE the mesh `is_bot ||`
+            // whitelist below can re-admit it.
+            let mut all_members = members::list_members_visible(conn)?;
             // Mesh server: the log is authoritative — hide anyone not yet a log member
             // (e.g. a pending-approval join). Legacy servers keep the full list.
             {
@@ -2080,6 +2083,18 @@ pub fn handle_request(
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
                 return Ok(denied);
             }
+            // Defense in depth: the system identity is never listed, so a stock
+            // client cannot name it — but a modified one could.
+            let kind: Option<String> = conn
+                .query_row(
+                    "SELECT kind FROM bots WHERE public_key = ?1",
+                    rusqlite::params![bot_public_key.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if kind.as_deref() == Some(crate::bots::SYSTEM_BOT_KIND) {
+                return err("that identity can't be removed");
+            }
             crate::bots::remove_bot(conn, &bot_public_key)?;
             members::remove_member_row(conn, &bot_public_key)?;
             {
@@ -2280,8 +2295,12 @@ pub fn handle_request(
                 }
                 // Interactive widget kinds need no kind-specific fields — the arg
                 // string is parsed at dispatch.
-                "poll" | "giveaway" => {}
-                _ => return err("kind must be 'text', 'api', 'poll' or 'giveaway'"),
+                "poll" | "giveaway" | "reminder" => {}
+                _ => {
+                    return err(
+                        "kind must be 'text', 'api', 'poll', 'giveaway', 'event' or 'reminder'",
+                    )
+                }
             }
             crate::commands::create(
                 conn,
@@ -2634,6 +2653,33 @@ pub fn handle_request(
             }
             // No per-viewer fields; no broadcasts.
             ok(ServerResponse::ActiveWidgets { polls, giveaways })
+        }
+
+        // ----------------------------------------------------------------
+        // Personal reminders (owner is ALWAYS the authenticated connection
+        // key — no request carries an owner field; membership-gated by
+        // default-deny above; not channel content, so no visibility check)
+        // ----------------------------------------------------------------
+        ServerRequest::ListMyReminders => {
+            // Read: no timeout gate (reads are allowed while timed out), no rate
+            // limit (GetPoll-class bounded read — LIMIT 20 in SQL).
+            let rows = crate::reminders::list_pending_for(conn, member)?;
+            let reminders = rows.iter().map(crate::reminders::to_info).collect();
+            ok(ServerResponse::MyReminders { reminders })
+        }
+
+        ServerRequest::CancelReminder { reminder_id } => {
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
+            // No timeout gate: managing your own private nudges is not channel
+            // content, and a timed-out member is not silenced from doing it.
+            if !crate::reminders::cancel(conn, reminder_id, member)? {
+                // Byte-identical for a foreign id, an already-fired one and a
+                // nonexistent one — no oracle for other members' reminder ids.
+                return err("reminder not found");
+            }
+            ok(ServerResponse::Ok)
         }
     }
 }
@@ -6455,7 +6501,7 @@ mod tests {
                 body_text: None, url_template: None, value_path: None, response_template: None, unit: None,
             },
             "", &fake_state()).unwrap();
-        expect_err(&r, "kind must be 'text', 'api', 'poll' or 'giveaway'");
+        expect_err(&r, "kind must be 'text', 'api', 'poll', 'giveaway', 'event' or 'reminder'");
     }
 
     // -----------------------------------------------------------------------
@@ -6989,5 +7035,206 @@ mod tests {
         let r = handle_request(&conn, &charlie, false,
             ServerRequest::ListActiveWidgets { channel_id: dm }, "", &state).unwrap();
         assert_eq!(err_reason(&r), "channel not found");
+    }
+
+    // -----------------------------------------------------------------------
+    // System identity + personal reminders
+    // -----------------------------------------------------------------------
+
+    fn member_keys(r: &HandleResult) -> Vec<PublicKey> {
+        match &r.response {
+            ServerResponse::Members { members } => {
+                members.iter().map(|m| m.public_key.clone()).collect()
+            }
+            other => panic!("expected Members, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_get_members_hides_system_identity_legacy_and_mesh() {
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        let state = fake_state();
+        let conn = state.db.lock().unwrap();
+        let everyone_id = members::create_role(
+            &conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false,
+        )
+        .unwrap();
+        let owner_kp = Keypair::generate();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner_kp.public_key(), everyone_id).unwrap();
+        let owner_pk = owner_kp.public_key();
+        let system = crate::bots::get_or_create_system_identity(&conn).unwrap();
+
+        // Legacy server (no event log): hidden.
+        let r = handle_request(&conn, &owner_pk, true, ServerRequest::GetMembers, "", &state)
+            .unwrap();
+        let keys = member_keys(&r);
+        assert!(keys.contains(&owner_pk), "humans still listed");
+        assert!(!keys.contains(&system), "system identity hidden on a legacy server");
+
+        // Mesh server: the `is_bot ||` whitelist must NOT re-admit it.
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_pk.clone(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let r = handle_request(&conn, &owner_pk, true, ServerRequest::GetMembers, "", &state)
+            .unwrap();
+        let keys = member_keys(&r);
+        assert!(!keys.contains(&system), "system identity hidden on a mesh server too");
+    }
+
+    #[test]
+    fn test_remove_bot_refuses_system_identity() {
+        let (conn, owner_pk) = setup();
+        let system = crate::bots::get_or_create_system_identity(&conn).unwrap();
+        let state = fake_state();
+
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::RemoveBot { bot_public_key: system.clone() }, "", &state).unwrap();
+        expect_err(&r, "that identity can't be removed");
+
+        // Both rows survive.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bots WHERE kind = 'system'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(members::get_member(&conn, &system).unwrap().is_some());
+
+        // A real bot is still removable (the guard is not a blanket refusal).
+        let kp = Keypair::generate();
+        members::register_bot_member(&conn, &kp.public_key(), "BTC").unwrap();
+        crate::bots::register_bot(
+            &conn, &kp.public_key(), kp.signing_key_bytes().as_slice(), "bitcoin", "BTC",
+        )
+        .unwrap();
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::RemoveBot { bot_public_key: kp.public_key() }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok), "{:?}", r.response);
+    }
+
+    #[test]
+    fn test_list_my_reminders_returns_only_callers_rows() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+        let state = fake_state();
+        crate::reminders::create(&conn, &alice, channel_id as i64, "mine-late", 900, 0).unwrap();
+        let soon =
+            crate::reminders::create(&conn, &alice, channel_id as i64, "mine-soon", 100, 0).unwrap();
+        crate::reminders::create(&conn, &bob, channel_id as i64, "theirs", 50, 0).unwrap();
+
+        let r = handle_request(&conn, &alice, false, ServerRequest::ListMyReminders, "", &state)
+            .unwrap();
+        match r.response {
+            ServerResponse::MyReminders { reminders } => {
+                assert_eq!(reminders.len(), 2, "only Alice's rows");
+                assert_eq!(reminders[0].id, soon, "soonest first");
+                assert!(!reminders.iter().any(|x| x.text == "theirs"));
+                assert_eq!(reminders[0].channel_id, channel_id);
+            }
+            other => panic!("expected MyReminders, got {other:?}"),
+        }
+        assert!(r.events.is_empty(), "a read broadcasts nothing");
+    }
+
+    #[test]
+    fn test_cancel_reminder_foreign_id_is_opaque_not_found() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+        let state = fake_state();
+        let hers = crate::reminders::create(&conn, &alice, channel_id as i64, "hers", 100, 0)
+            .unwrap();
+
+        // Bob cancelling Alice's reminder and Bob cancelling a nonexistent id
+        // produce the BYTE-IDENTICAL error — no existence oracle.
+        let foreign = handle_request(&conn, &bob, false,
+            ServerRequest::CancelReminder { reminder_id: hers }, "", &state).unwrap();
+        let missing = handle_request(&conn, &bob, false,
+            ServerRequest::CancelReminder { reminder_id: 999_999 }, "", &state).unwrap();
+        assert_eq!(err_reason(&foreign), "reminder not found");
+        assert_eq!(err_reason(&foreign), err_reason(&missing));
+
+        // Alice's row is untouched, and she can still cancel it herself.
+        let status: String = conn
+            .query_row("SELECT status FROM reminders WHERE id = ?1", rusqlite::params![hers], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "pending");
+        let r = handle_request(&conn, &alice, false,
+            ServerRequest::CancelReminder { reminder_id: hers }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok), "{:?}", r.response);
+        // Cancelling twice is the same opaque error (already-fired class).
+        let r = handle_request(&conn, &alice, false,
+            ServerRequest::CancelReminder { reminder_id: hers }, "", &state).unwrap();
+        assert_eq!(err_reason(&r), "reminder not found");
+    }
+
+    #[test]
+    fn test_reminder_requests_are_membership_gated_by_default_deny() {
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        let state = fake_state();
+        let conn = state.db.lock().unwrap();
+        let owner_kp = Keypair::generate();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        let outsider = Keypair::generate().public_key();
+        members::register_member(&conn, &outsider, "Outsider").unwrap();
+        // Mesh server: the event log is authoritative for membership.
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        // Neither variant is in request_requires_membership's allow-list, so a
+        // non-log member is refused before the arm ever runs.
+        for req in [
+            ServerRequest::ListMyReminders,
+            ServerRequest::CancelReminder { reminder_id: 1 },
+        ] {
+            let r = handle_request(&conn, &outsider, false, req, "", &state).unwrap();
+            expect_err(&r, "not a member of this server");
+        }
+        // The log member is not blocked by the gate.
+        let r = handle_request(&conn, &owner_kp.public_key(), true,
+            ServerRequest::ListMyReminders, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::MyReminders { .. }));
+    }
+
+    #[test]
+    fn test_add_command_accepts_reminder_kind_and_takes_arg() {
+        let (conn, owner_pk) = setup();
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::AddCommand {
+                name: "Remind".into(),
+                trigger: "remind".into(),
+                description: "set a reminder".into(),
+                kind: "reminder".into(),
+                body_text: None,
+                url_template: None,
+                value_path: None,
+                response_template: None,
+                unit: None,
+            },
+            "", &fake_state()).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok), "{:?}", r.response);
+        let infos = crate::commands::list_infos(&conn).unwrap();
+        let cmd = infos.iter().find(|c| c.trigger == "remind").unwrap();
+        assert!(cmd.takes_arg, "reminder commands take an arg");
+        assert_eq!(cmd.kind, "reminder");
     }
 }

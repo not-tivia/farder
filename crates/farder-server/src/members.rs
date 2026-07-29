@@ -149,6 +149,47 @@ pub fn list_members(conn: &Connection) -> Result<Vec<MemberRecord>> {
     Ok(members)
 }
 
+/// `list_members` minus the server's own system identity — the roster query used
+/// by `GetMembers`. The exclusion runs BEFORE the mesh `is_bot ||` whitelist so
+/// that clause (which keeps ticker bots visible on mesh servers) can never
+/// re-admit it.
+pub fn list_members_visible(conn: &Connection) -> Result<Vec<MemberRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT public_key, display_name, joined_at, banned, revoked, profile_hash, is_bot \
+         FROM members WHERE banned = 0 AND revoked = 0 \
+           AND public_key NOT IN (SELECT public_key FROM bots WHERE kind = 'system')",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        let key_bytes: Vec<u8> = row.get(0)?;
+        let display_name: String = row.get(1)?;
+        let joined_at: i64 = row.get(2)?;
+        let banned: i64 = row.get(3)?;
+        let revoked: i64 = row.get(4)?;
+        let profile_hash: Option<String> = row.get(5)?;
+        let is_bot: i64 = row.get(6)?;
+        Ok((key_bytes, display_name, joined_at, banned, revoked, profile_hash, is_bot))
+    })?;
+
+    let mut members = Vec::new();
+    for row in rows {
+        let (key_bytes, display_name, joined_at, banned, revoked, profile_hash, is_bot) = row?;
+        let arr: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidColumnType(0, "public_key".into(), rusqlite::types::Type::Blob))?;
+        members.push(MemberRecord {
+            public_key: PublicKey::from_bytes(arr),
+            display_name,
+            joined_at: joined_at as u64,
+            banned: banned != 0,
+            revoked: revoked != 0,
+            profile_hash,
+            is_bot: is_bot != 0,
+        });
+    }
+    Ok(members)
+}
+
 pub fn ban_member(conn: &Connection, pk: &PublicKey, reason: Option<&str>) -> Result<()> {
     conn.execute(
         "UPDATE members SET banned = 1, ban_reason = ?2 WHERE public_key = ?1",

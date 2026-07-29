@@ -1165,6 +1165,65 @@ pub(crate) async fn main_loop(
                                     }
                                     continue;
                                 }
+                                // Interactive `reminder` kind: PRIVATE — nothing is
+                                // posted in the channel, no broadcast, no message row.
+                                // Every gate above has already run unchanged
+                                // (content_block_reason → command_limiter →
+                                // check_run_command_channel_auth), so a timed-out,
+                                // blocked, non-SEND_MESSAGES or non-log member cannot
+                                // set one. The owner is the authenticated connection
+                                // key; the only reply is an invoker-only Notice.
+                                if cmd.kind.as_str() == "reminder" {
+                                    let parsed = match crate::reminders::parse_reminder_args(&args) {
+                                        Err(reason) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error { reason },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                            continue;
+                                        }
+                                        Ok(p) => p,
+                                    };
+                                    let now = crate::db::now();
+                                    let created = {
+                                        let conn = state.db.lock().unwrap();
+                                        match crate::reminders::count_pending(&conn, &member_key) {
+                                            Err(e) => Err(format!("internal error: {e}")),
+                                            Ok(n) if n >= crate::reminders::MAX_PENDING_PER_USER => {
+                                                Err("you already have 20 reminders pending — cancel one first".to_string())
+                                            }
+                                            Ok(_) => crate::reminders::create(
+                                                &conn,
+                                                &member_key,
+                                                channel_id as i64,
+                                                &parsed.text,
+                                                (now + parsed.delay_secs) as i64,
+                                                now as i64,
+                                            )
+                                            .map_err(|e| format!("internal error: {e}")),
+                                        }
+                                    }; // MutexGuard dropped here — before any .await
+                                    let response = match created {
+                                        Err(reason) => ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error { reason },
+                                        },
+                                        Ok(_) => ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Notice {
+                                                text: format!(
+                                                    "⏰ Reminder set for {} — I'll DM you.",
+                                                    crate::reminders::humanize_delay(
+                                                        parsed.delay_secs
+                                                    )
+                                                ),
+                                            },
+                                        },
+                                    };
+                                    send_server_frame(send, &response).await?;
+                                    continue;
+                                }
                                 // Build the message content. For `api` commands this involves
                                 // an async HTTP fetch — no DB lock is held here.
                                 let content: Option<String> = match cmd.kind.as_str() {

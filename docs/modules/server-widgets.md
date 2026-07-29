@@ -1,8 +1,8 @@
-# Widget substrate: polls & giveaways
+# Widget substrate: polls, giveaways & reminders
 
-> **File(s):** `crates/farder-server/src/widgets.rs`, `crates/farder-server/src/polls.rs`, `crates/farder-server/src/giveaways.rs`
+> **File(s):** `crates/farder-server/src/widgets.rs`, `crates/farder-server/src/polls.rs`, `crates/farder-server/src/giveaways.rs`, `crates/farder-server/src/reminders.rs`
 > **Layer:** Server crate
-> **Last reviewed:** 2026-07-27
+> **Last reviewed:** 2026-07-28
 
 ## Purpose
 
@@ -16,20 +16,24 @@ Interactive **message widgets**: a slash command of kind `"poll"` or `"giveaway"
 
 Fixed tick interval. A due poll closes / a due giveaway draws at most ~15 s late.
 
-### `sweep_once(conn: &Connection, now: u64) -> Vec<PendingBroadcast>`
+### `sweep_once(conn: &Connection, now: u64) -> SweepOutcome`
 
-**What it does:** the sync tick body servicing BOTH halves: `polls::close_due` (every due timed poll → `PollUpdated`), then `giveaways::list_due` + `close_and_draw` per row (→ `GiveawayUpdated` + winner-announcement `NewMessage`).
-**Returns / emits:** the broadcasts to send; each half's errors are `tracing::warn!`ed per-item and never panic the sweeper.
-**Side effects:** persists every state change (close / draw / announcement insert) BEFORE returning — i.e. under the caller's DB lock, before any broadcast. Persist-then-broadcast by construction: a crash between persist and broadcast can never re-close or redraw.
+**What it does:** the sync tick body servicing every half: `polls::close_due` (every due timed poll → `PollUpdated`), then `giveaways::list_due` + `close_and_draw` per row (→ `GiveawayUpdated` + winner-announcement `NewMessage`), then `reminders::list_due` + `mark_sent` per row (→ one `PendingDm`, **zero broadcasts**).
+**Returns / emits:** `SweepOutcome { broadcasts, dms }`; each half's errors are `tracing::warn!`ed per-item and never panic the sweeper.
+**Side effects:** persists every state change (close / draw / announcement insert / reminder `sent` flip) BEFORE returning — i.e. under the caller's DB lock, before any broadcast or DM, and always behind a guarded `UPDATE` whose rows-affected decides whether the notification is produced at all. Persist-then-notify by construction: a crash in between can never re-close, redraw or re-fire. The accepted cost is **at-most-once** delivery (a crash in the persist→notify window loses that one notification; the durable state is still correct).
 **Connects to:** `spawn_widget_sweeper` (the only production caller); tests call it directly without tokio.
 
 ### `spawn_widget_sweeper(state: Arc<ServerState>) -> JoinHandle<()>`
 
-**What it does:** spawns the single background loop (started in `main.rs` next to the bot poller): every 15 s it takes a scoped `state.db` lock, runs `sweep_once`, drops the guard, then `broadcast_event`s each `PendingBroadcast` (no DB MutexGuard is ever held across an `.await` — the bots.rs `spawn_bot_poll_task` lock discipline).
+**What it does:** spawns the single background loop (started in `main.rs` next to the bot poller): every 15 s it takes a scoped `state.db` lock, runs `sweep_once`, drops the guard, then `broadcast_event`s each `PendingBroadcast` and `bots::send_system_dm`s each `PendingDm` (no DB MutexGuard is ever held across an `.await` — the bots.rs `spawn_bot_poll_task` lock discipline). DMs **must** happen after the guard drops: `send_system_dm` re-acquires the same mutex internally, which is exactly why they are returned as data rather than sent inline. A failed DM is logged and dropped.
 
 ### `PendingBroadcast { target: EventTarget, event: ServerEvent }`
 
 A broadcast computed under the DB lock, sent after the guard drops.
+
+### `PendingDm { recipient: PublicKey, text: String }` / `SweepOutcome { broadcasts, dms }`
+
+A DM computed under the DB lock, sent after the guard drops, and the tick's whole output.
 
 ---
 
@@ -91,6 +95,32 @@ Redraw for an `ended` giveaway with a winner; `None` when the eligible set is em
 
 ---
 
+## `reminders.rs` — personal reminders
+
+**Private by construction.** A reminder is never posted in a channel and is never visible to anyone but its owner: the only artifacts are an invoker-only `Notice` at creation and a DM from the server system identity when it comes due. Every read and mutation is scoped by `owner = ?` in SQL, and the owner is always the authenticated connection key (no request carries an owner field).
+
+Bounds: `MAX_REMINDER_TEXT = 500`, `MAX_PENDING_PER_USER = 20`, duration 1 m–30 d, `REMINDER_DUE_BATCH = 200` rows per tick (the remainder drains next tick).
+
+### `parse_reminder_args(args: &str) -> Result<ParsedReminder, String>`
+
+Parses the `RunCommand` arg string `<duration> <text>` — `args.trim().splitn(2, whitespace)`; the first token must match `^(\d{1,4})(m|h|d)$` case-insensitively. Pure. Text is preserved **verbatim** (pipes and all — the grammar has no delimiter past the first space). Errors are the exact user-facing strings (`REMINDER_USAGE` const, `"duration must be between 1m and 30d"`, `"reminder text must be 1-500 characters"`).
+
+### `humanize_delay(secs: u64) -> String`
+
+`"45m"` / `"1h 30m"` / `"3 days 4h"` — used in the creation `Notice`.
+
+### Row-level fns
+
+- `create(conn, owner, channel_id: i64, text, due_at: i64, now: i64) -> Result<i64>` — insert, `status='pending'`.
+- `count_pending(conn, owner) -> Result<i64>` — the per-user cap check.
+- `list_pending_for(conn, owner) -> Result<Vec<ReminderRow>>` — owner's pending rows, `due_at ASC`, `LIMIT 20`. For `ListMyReminders`.
+- `cancel(conn, id: i64, owner) -> Result<bool>` — `UPDATE … WHERE id=? AND owner=? AND status='pending'`; `false` = nothing to cancel (foreign / already-fired / nonexistent are indistinguishable — the handler maps all three to the same opaque `"reminder not found"`).
+- `list_due(conn, now: i64) -> Result<Vec<ReminderRow>>` — `status='pending' AND due_at <= now`, `due_at ASC`, batch-capped. Sweeper half.
+- `mark_sent(conn, id: i64, now: i64) -> Result<bool>` — single-shot guard, `pending` → `sent`; `false` ⇒ the caller must NOT DM.
+- `to_info(row) -> ReminderInfo` — protocol projection.
+
+---
+
 ## Events emitted
 
 | Event name | Payload shape | Who listens |
@@ -108,6 +138,8 @@ Redraw for an `ended` giveaway with a winner; `None` when the eligible set is em
 | `EnterGiveaway`/`LeaveGiveaway`/`CancelGiveaway`/`RerollGiveaway`/`GetGiveaway` | handlers.rs | ditto |
 | `ListActiveWidgets` | handlers.rs | `polls::list_open_in_channel` + `giveaways::list_open_in_channel` (each `LIMIT 20`), merged by `created_at` asc, 20 combined; visibility on the requested `channel_id` with opaque `"channel not found"`; read — no limiter, no broadcasts, no per-viewer fields |
 | `DeleteMessage` on a widget card | handlers.rs hook | open poll → `close`; open giveaway → `cancel` (no draw, no announcement) |
+| `RunCommand` (kind `reminder`) | connection.rs dispatch | after every existing gate (`content_block_reason` → `command_limiter` → `check_run_command_channel_auth`): pure `parse_reminder_args`, one scoped lock doing `count_pending` (cap) + `create`, then an invoker-only `ServerResponse::Notice`. Nothing posts, nothing broadcasts. |
+| `ListMyReminders` / `CancelReminder` | handlers.rs | `list_pending_for` / `cancel`, both owner-scoped in SQL; `CancelReminder` shares the `widget_limiter` |
 | 15 s tick | `spawn_widget_sweeper` | `sweep_once` |
 
 ## Integration map

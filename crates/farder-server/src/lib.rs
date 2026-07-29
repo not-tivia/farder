@@ -20,6 +20,7 @@ pub mod permissions;
 pub mod polls;
 pub mod reactions;
 pub mod relay;
+pub mod reminders;
 pub mod retention;
 pub mod ssrf;
 pub mod state;

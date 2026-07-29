@@ -218,6 +218,15 @@ A poll/giveaway is **created** by `RunCommand` on a command of kind `"poll"` / `
 | `RerollGiveaway` | `giveaway_id: i64` | Redraw the winner of an `"ended"` giveaway that has one, from the still-eligible entrants. **Creator-or-MANAGE_SERVER.** Broadcasts `GiveawayUpdated` then a winner-announcement `NewMessage`. |
 | `ListActiveWidgets` | `channel_id: u64` | List a channel's OPEN widgets (read; not rate-limited; allowed while timed out). Visibility-checked on `channel_id` itself with an opaque `Error { "channel not found" }` for both a missing channel and one the caller cannot see. Returns `ActiveWidgets { polls, giveaways }` — each list oldest-first, 20 combined by `created_at`; no per-viewer fields. No broadcasts. |
 
+### Personal reminders
+
+A reminder is **created** by `RunCommand` on a command of kind `"reminder"` (`/<trigger> <duration> <text>`, 1 m–30 d, text 1–500 chars, ≤20 outstanding per member). Nothing is posted in the channel: the dispatch replies `Notice { text }` to the invoker only, and the due reminder arrives as a DM from the server system identity. Both variants below are membership-gated (default-deny `request_requires_membership`) and **owner-scoped by the authenticated connection key** — neither carries an owner field, so there is nothing to forge.
+
+| Variant | Fields | What it asks the server to do |
+|---|---|---|
+| `ListMyReminders` | — | List the CALLER's own pending reminders, soonest first (`LIMIT 20`). Read: no timeout gate, not rate-limited. Returns `MyReminders { reminders }`. No broadcasts. |
+| `CancelReminder` | `reminder_id: i64` | Cancel one of the caller's own pending reminders. Shares the `widget_limiter` (10/10 s). No timeout gate — managing your own private nudges is not channel content. A foreign id, an already-fired one and a nonexistent one all return the byte-identical `Error { "reminder not found" }` (no existence oracle). No broadcasts. |
+
 ### Voice / media
 
 | Variant | Fields | What it asks the server to do |
@@ -267,6 +276,8 @@ Every request receives exactly one response.
 | `Poll` | `poll: PollInfo`, `my_vote: Option<u32>` | Full poll state in response to `GetPoll`. `my_vote` is the requester's own vote index (self-only — voter identities are never sent to anyone else). |
 | `Giveaway` | `giveaway: GiveawayInfo`, `my_entered: bool` | Full giveaway state in response to `GetGiveaway`. `my_entered` is self-only; entrant identities never leave the server. |
 | `ActiveWidgets` | `polls: Vec<PollInfo>`, `giveaways: Vec<GiveawayInfo>` | The channel's OPEN widgets in response to `ListActiveWidgets`. Each list oldest-first (creation order); at most 20 combined, chosen by `created_at` ascending. Shared state only — `my_vote`/`my_entered` stay exclusive to `Poll`/`Giveaway`. |
+| `Notice` | `text: String` | Invoker-only confirmation delivered on the request's own `request_id` — no broadcast, no message row. The `Ok`-but-say-something case (used by the `"reminder"` `RunCommand` kind, which deliberately posts nothing). |
+| `MyReminders` | `reminders: Vec<ReminderInfo>` | The caller's own pending reminders in response to `ListMyReminders`, soonest first. Owner-scoped in SQL — another member's reminder can never appear here. |
 
 ---
 
@@ -444,6 +455,18 @@ Live giveaway state, broadcast whole on every change (`GiveawayUpdated`) and ret
 | `entry_count` | `u32` | Live entry count; identities stay server-side. |
 | `winner` | `Option<PublicKey>` | Set on a drawn `"ended"` giveaway; `None` if winnerless/cancelled/open. The Tauri bridge converts it to a `"vk_<hex>"` string for the frontend. |
 | `winner_name` | `Option<String>` | Server-resolved display name, set when ended with a winner still on the roster (`None` → clients fall back to the short key form). |
+
+### `ReminderInfo`
+
+One of the caller's **own** pending reminders, returned only inside `MyReminders`. Never broadcast, never sent to anyone but the owner.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `i64` | Reminder id — used by `CancelReminder`. Not an oracle: a foreign id is indistinguishable from a nonexistent one. |
+| `text` | `String` | 1–500 chars, preserved verbatim (the grammar has no delimiter past the first space). |
+| `due_at` | `u64` | Absolute unix **seconds**; no timezone is stored anywhere (clients render locally). |
+| `created_at` | `u64` | Unix secs. |
+| `channel_id` | `u64` | Where it was set — link-back context only; the reminder is not channel content. |
 
 ### `AttachmentInfo`
 

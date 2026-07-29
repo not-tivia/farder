@@ -334,6 +334,15 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // Exactly one server system identity (`bots.kind = 'system'`, see
+    // `bots::get_or_create_system_identity`). The single `state.db` mutex already
+    // serializes lookup-then-insert; this partial unique index is belt-and-braces
+    // so no future concurrent path can ever mint a second one.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_bots_system ON bots(kind) WHERE kind = 'system'",
+        [],
+    )?;
+
     // Bots: add source_url, value_path, unit columns for custom_api bots.
     for col in ["source_url", "value_path", "unit"] {
         let has = {
@@ -528,6 +537,32 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             entered_at  INTEGER NOT NULL,
             PRIMARY KEY (giveaway_id, member)
         )",
+        [],
+    )?;
+
+    // Personal reminders: private, per-owner nudges delivered as a DM from the
+    // server system identity when they come due (`reminders.rs`, swept by
+    // `widgets::sweep_once`). Nothing is ever posted in a channel; `owner` is the
+    // only recipient AND the only reader. Timestamps are unix seconds.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reminders (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner      BLOB    NOT NULL,
+            channel_id INTEGER NOT NULL,
+            text       TEXT    NOT NULL,
+            created_at INTEGER NOT NULL,
+            due_at     INTEGER NOT NULL,
+            status     TEXT    NOT NULL DEFAULT 'pending',
+            sent_at    INTEGER
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reminders_owner ON reminders(owner, status, due_at)",
         [],
     )?;
 
