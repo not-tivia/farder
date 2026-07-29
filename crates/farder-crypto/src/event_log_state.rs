@@ -58,7 +58,7 @@ struct DeviceRecord {
 #[derive(Clone, Debug, PartialEq)]
 struct ChannelRecord {
     /// name/kind/parent are recorded for sub-3's derive path; the fold itself
-    /// reads only `class` (and resolves `parent` at creation time).
+    /// reads only `class`, `creator` (and resolves `parent` at creation time).
     #[allow(dead_code)]
     name: String,
     #[allow(dead_code)]
@@ -66,6 +66,10 @@ struct ChannelRecord {
     class: ChannelClass,
     #[allow(dead_code)]
     parent: Option<u64>,
+    /// The identity that authored `ChannelCreated` (owner-only this rung). The
+    /// ONLY identity allowed to author a generation's bootstrap `MlsCommit`,
+    /// where no confirmed leaf exists to check against.
+    creator: PublicKey,
 }
 
 /// One accepted `MlsCommit`, keyed in `MlsGroupRecord.commits_by_epoch` by the
@@ -198,6 +202,13 @@ pub struct LogState {
     /// Channels known to the log, from `ChannelCreated` (Rung 2). Absence =
     /// legacy plaintext channel.
     channels: HashMap<u64, ChannelRecord>,
+    /// Channel ids the log has seen plaintext `MessagePosted` events in while
+    /// they were UNKNOWN to it (the legacy carve-out). Such a channel can never
+    /// be declared afterwards: a `ChannelCreated { E2ee }` over plaintext
+    /// history would hang a lock icon on messages every host already read, and
+    /// the fold — not just sub-3's `messages`-table check — must refuse it, so
+    /// a Rung-3 replica replaying from genesis refuses it too.
+    plaintext_history_channels: HashSet<u64>,
     /// Durable deletion tombstones (spec F2): targets of accepted `MessageDeleted`
     /// events — derive/reconcile consult these so deletions cannot resurrect.
     tombstones: HashSet<EventRef>,
@@ -210,6 +221,12 @@ pub struct LogState {
     /// Count of accepted events — the pure log-position clock (drives KeyPackage
     /// lifetimes; never wall time).
     log_pos: u64,
+    /// Per-identity monotone timestamp floor: the greatest `core.timestamp` any
+    /// accepted event of that identity has claimed. Device liveness/expiry for
+    /// an identity is judged at `max(at_ts, floor)`, so an identity can never
+    /// back-date its way past its own certs' expiry or the live-device cap
+    /// (`event.core.timestamp` is author-chosen — see `live_devices`).
+    identity_clock: HashMap<PublicKey, u64>,
     /// Per-E2ee-channel MLS bookkeeping, created by `ChannelCreated { E2ee }`.
     mls_groups: HashMap<u64, MlsGroupRecord>,
     /// Live (unconsumed) KeyPackages per (identity, device): ref → expiry log
@@ -242,10 +259,12 @@ impl LogState {
             attachment_uploaders: HashMap::new(),
             redacted_attachments: HashSet::new(),
             channels: HashMap::new(),
+            plaintext_history_channels: HashSet::new(),
             tombstones: HashSet::new(),
             revoked_devices: HashSet::new(),
             devices_by_identity: HashMap::new(),
             log_pos: 0,
+            identity_clock: HashMap::new(),
             mls_groups: HashMap::new(),
             key_packages: HashMap::new(),
             consumed_key_packages: HashMap::new(),
@@ -305,13 +324,25 @@ impl LogState {
     pub fn log_pos(&self) -> u64 {
         self.log_pos
     }
-    /// An identity's live devices at `at_ts`: authorized, non-revoked, and
-    /// cert-unexpired at that (untrusted, author-claimed) timestamp. Sorted so
-    /// the result is deterministic for every fold consumer.
+    /// An identity's live devices: authorized, non-revoked, and cert-unexpired
+    /// at `liveness_ts(pk, at_ts)` — NOT at the raw `at_ts`. Sorted so the
+    /// result is deterministic for every fold consumer.
+    ///
+    /// `at_ts` comes from `event.core.timestamp`, which is entirely
+    /// author-chosen; judging expiry there alone let an identity register past
+    /// the live-device cap (claim a future time so its own certs look dead)
+    /// and let any author hide expiry-driven drift by back-dating. Liveness is
+    /// therefore judged at a MONOTONE, log-derived point: the identity's own
+    /// clock floor (`identity_clock`) can only move forward, so an identity can
+    /// never be judged at a moment earlier than one it already claimed.
+    /// **Residual (documented, not closed here):** an author can still back-date
+    /// below the expiry of a DIFFERENT identity that went silent before its
+    /// cert died. Sub-3 bounds `core.timestamp` against server time at ingest.
     pub fn live_devices(&self, pk: &PublicKey, at_ts: u64) -> Vec<DeviceId> {
         let Some(devs) = self.devices_by_identity.get(pk) else {
             return Vec::new();
         };
+        let at = self.liveness_ts(pk, at_ts);
         let mut live: Vec<DeviceId> = devs
             .iter()
             .filter(|d| !self.revoked_devices.contains(*d))
@@ -319,12 +350,18 @@ impl LogState {
                 self.devices
                     .get(*d)
                     .and_then(|r| r.expires_at)
-                    .is_none_or(|t| at_ts <= t)
+                    .is_none_or(|t| at <= t)
             })
             .cloned()
             .collect();
         live.sort();
         live
+    }
+
+    /// The monotone point an identity's device liveness is judged at: never
+    /// earlier than the greatest timestamp that identity itself has claimed.
+    fn liveness_ts(&self, pk: &PublicKey, at_ts: u64) -> u64 {
+        at_ts.max(self.identity_clock.get(pk).copied().unwrap_or(0))
     }
 
     /// The spec's MLS target set: every full member's live devices at `at_ts`.
@@ -489,6 +526,12 @@ impl LogState {
         }
         self.advance_chain(event);
         self.log_pos += 1;
+        // Envelope accounting (runs for the stale-commit no-op too): the
+        // author's monotone timestamp floor. Once an identity has claimed a
+        // moment, none of its later events can be judged as if they were
+        // earlier — see `live_devices`.
+        let floor = self.identity_clock.entry(event.core.author.clone()).or_insert(0);
+        *floor = (*floor).max(event.core.timestamp);
         Ok(())
     }
 
@@ -661,6 +704,16 @@ impl LogState {
                     !self.channels.contains_key(channel_id),
                     "channel_id already exists (channel identity is immutable)"
                 );
+                // ...and a channel that already carried plaintext history under
+                // the legacy carve-out can never be declared afterwards. Without
+                // this the fold would accept `ChannelCreated { E2ee }` over a
+                // plaintext log — a lock icon on messages every host already
+                // read. The fold rule is self-sufficient (Rung-3 fresh replay),
+                // not just sub-3's `messages`-table belt-and-braces.
+                ensure!(
+                    !self.plaintext_history_channels.contains(channel_id),
+                    "channel already has plaintext history in the log (a legacy channel is permanently plaintext)"
+                );
                 // Thread children inherit their parent's class (spec coexistence
                 // row 12): an unknown or class-mismatched parent is rejected.
                 if let Some(p) = parent {
@@ -770,20 +823,44 @@ impl LogState {
                     return Ok(Authorized::StaleCommitNoOp);
                 }
                 self.check_instance_pin(&event.core.device, store_instance_hash)?;
-                // Bootstrap (resolved ambiguity #5): the first commit of a
-                // generation has nothing to chain to and no confirmed tree yet —
-                // both the chain check and the confirmed-leaf requirement are
-                // exempt. `epoch_authenticator` is None exactly then.
-                if let Some(expected) = group.epoch_authenticator {
+                // Control-plane authority is re-checked against the authz fold
+                // on EVERY commit, never inferred from leaf membership alone: a
+                // kicked or departed identity keeps its confirmed leaf until a
+                // Remove-commit lands, and must not be able to advance the
+                // epoch, rewrite the chain variable or reset the freshness
+                // budget in the meantime.
+                ensure!(
+                    self.is_member(author) && !self.is_pending(author),
+                    "only full members may author MLS commits"
+                );
+                let leaf = (author.clone(), event.core.device.clone());
+                if group.leaves_confirmed.is_empty() {
+                    // Generation bootstrap (resolved ambiguity #5): nobody holds
+                    // a confirmed leaf yet, so the confirmed-leaf rule cannot
+                    // apply — the channel's CREATOR (owner-only this rung) is
+                    // then the only identity that may author it. Without this,
+                    // ANY identity that can register a device could seize a
+                    // fresh `ChannelCreated { E2ee }` group (or any post-reset
+                    // generation), brick it for its real creator, and hold a
+                    // confirmed leaf in it.
+                    let creator = self.channels.get(channel_id).map(|c| &c.creator);
                     ensure!(
-                        group
-                            .leaves_confirmed
-                            .contains(&(author.clone(), event.core.device.clone())),
+                        creator == Some(author),
+                        "a generation's bootstrap commit must be authored by the channel's creator"
+                    );
+                } else {
+                    ensure!(
+                        group.leaves_confirmed.contains(&leaf),
                         "commit author does not hold a confirmed leaf"
                     );
-                    // Chain (spec C3): a commit must chain onto the authenticator
-                    // the previously accepted commit DECLARED. A liar therefore
-                    // cannot be built upon — the next honest commit fails here.
+                }
+                // Chain (spec C3): a commit must chain onto the authenticator
+                // the previously accepted commit DECLARED. A liar therefore
+                // cannot be built upon — the next honest commit fails here.
+                // Exempt only when there is nothing to chain to
+                // (`epoch_authenticator` is None exactly at a generation's
+                // first commit).
+                if let Some(expected) = group.epoch_authenticator {
                     ensure!(
                         *prev_epoch_authenticator == expected,
                         "commit does not chain onto the previous commit's declared authenticator"
@@ -867,6 +944,13 @@ impl LogState {
                     .mls_groups
                     .get(channel_id)
                     .context("MlsWelcome cites a channel with no E2ee group")?;
+                // Same re-check as `MlsCommit`: a confirmed leaf is not standing
+                // authority — a kicked identity keeps its leaf until a
+                // Remove-commit lands and must not be able to welcome joiners.
+                ensure!(
+                    self.is_member(author) && !self.is_pending(author),
+                    "only full members may author MLS welcomes"
+                );
                 if *generation == group.generation {
                     // Normal join flow: only a confirmed-leaf holder can welcome,
                     // the target leaf must be pending, and the cited commit must
@@ -906,6 +990,15 @@ impl LogState {
                     .mls_groups
                     .get(channel_id)
                     .context("MlsLeafConfirmed cites a channel with no E2ee group")?;
+                // A leaf may only be promoted to confirmed while its holder is
+                // still a full member (a pending leaf of someone kicked between
+                // Welcome and confirmation stays pending — it is drift, and the
+                // pending-removals gate keeps the channel sealed until a
+                // Remove-commit discharges it).
+                ensure!(
+                    self.is_member(author) && !self.is_pending(author),
+                    "only full members may confirm an MLS leaf"
+                );
                 ensure!(
                     *generation == group.generation,
                     "leaf confirmation generation does not match the group"
@@ -971,9 +1064,17 @@ impl LogState {
                     "a reset must advance the generation by exactly one"
                 );
                 // Rate limit (spec C7). Generation 0 ⇒ no reset has ever
-                // occurred here ⇒ the first reset is always allowed.
+                // occurred here ⇒ the first reset is always allowed. An
+                // INCOMPLETE reset is exempt too: while `reset_pending` is set
+                // the channel accepts no sealed content, so its rate-limit
+                // clock cannot advance — without this exemption a single
+                // welcomed device that never confirms (lost device, poisoned
+                // MLS store — exactly what the hatch exists for) would lock the
+                // channel out of the only recovery it has. A reset that never
+                // completed is not a spam vector.
                 ensure!(
                     group.generation == 0
+                        || group.reset_pending
                         || group.channel_events_since_reset >= RESET_MIN_CHANNEL_EVENTS,
                     "reset rate limit: at most one reset per {RESET_MIN_CHANNEL_EVENTS} channel events"
                 );
@@ -1116,11 +1217,17 @@ impl LogState {
                 self.pending.remove(member);
                 self.members.insert(member.clone());
             }
-            EventPayload::MessagePosted { attachments, .. } => {
+            EventPayload::MessagePosted { channel_id, attachments, .. } => {
                 for cap in attachments {
                     self.attachment_uploaders
                         .entry(cap.content_hash.clone())
                         .or_insert_with(|| cap.uploader.clone());
+                }
+                // A plaintext post into a channel the log does not know is the
+                // legacy carve-out: record the id so the channel can never be
+                // declared (E2ee or otherwise) over its plaintext history.
+                if !self.channels.contains_key(channel_id) {
+                    self.plaintext_history_channels.insert(*channel_id);
                 }
             }
             EventPayload::MemberRemoved { member } => {
@@ -1152,6 +1259,7 @@ impl LogState {
                         kind: kind.clone(),
                         class: *class,
                         parent: *parent,
+                        creator: event.core.author.clone(),
                     },
                 );
                 // An E2ee channel is born with its MLS group bookkeeping:
@@ -1163,9 +1271,14 @@ impl LogState {
             }
             EventPayload::MessageDeleted { channel_id, target, .. } => {
                 self.tombstones.insert(target.clone());
-                // A tombstone is a channel event: in an E2ee channel it spends
-                // freshness budget like sealed content does (no-op elsewhere).
-                self.bump_channel_counters(*channel_id);
+                // A tombstone is a channel event for the RESET clock, but it
+                // does NOT spend forward-secrecy budget: only sealed content
+                // does (spec C4 — the ceiling exists so key material stops
+                // covering unbounded plaintext). `MessageDeleted` targets are
+                // opaque to the fold, so spending freshness here let ANY member
+                // seal an E2ee channel on demand with FRESHNESS_CEILING_EVENTS
+                // fabricated tombstones.
+                self.bump_reset_counter(*channel_id);
             }
             EventPayload::DeviceRevoked { device } => {
                 // The device stays in `devices`/`devices_by_identity` — its
@@ -1215,7 +1328,12 @@ impl LogState {
                     .mls_groups
                     .get_mut(channel_id)
                     .expect("authz verified the group exists");
-                let bootstrap = group.epoch_authenticator.is_none();
+                // A bootstrap commit's author IS the tree by construction. The
+                // authz rule that let it through is either "nothing to chain
+                // to" or "no confirmed leaf exists yet, so the creator speaks";
+                // both are captured here, before any mutation.
+                let bootstrap =
+                    group.epoch_authenticator.is_none() || group.leaves_confirmed.is_empty();
                 group.epoch = *epoch + 1;
                 group.commit_head = Some(event_hash.clone());
                 group.epoch_authenticator = Some(*post_epoch_authenticator);
@@ -1338,12 +1456,20 @@ impl LogState {
         }
     }
 
-    /// Spend one channel event of an E2ee channel's freshness and reset budgets
-    /// (saturating — a jammed counter stays jammed, which fails closed). No-op
-    /// for channels without an MLS group.
+    /// Spend one channel event of an E2ee channel's freshness AND reset budgets
+    /// (saturating — a jammed counter stays jammed, which fails closed). Sealed
+    /// content only. No-op for channels without an MLS group.
     fn bump_channel_counters(&mut self, channel_id: u64) {
         if let Some(group) = self.mls_groups.get_mut(&channel_id) {
             group.events_since_last_commit = group.events_since_last_commit.saturating_add(1);
+        }
+        self.bump_reset_counter(channel_id);
+    }
+
+    /// Spend one channel event of an E2ee channel's RESET rate-limit budget
+    /// only, leaving the forward-secrecy ceiling untouched (tombstones).
+    fn bump_reset_counter(&mut self, channel_id: u64) {
+        if let Some(group) = self.mls_groups.get_mut(&channel_id) {
             group.channel_events_since_reset = group.channel_events_since_reset.saturating_add(1);
         }
     }
@@ -2396,9 +2522,19 @@ mod tests {
         adds: Vec<DeclaredAdd>, removes: Vec<DeclaredRemove>,
         prev_auth: [u8; 32], post_auth: [u8; 32], post_tree: [u8; 32], store: [u8; 32],
     ) -> Ev {
+        mls_commit_gen(dev, author, sid, prev, 0, epoch, adds, removes, prev_auth, post_auth,
+            post_tree, store)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mls_commit_gen(
+        dev: &Keypair, author: &PublicKey, sid: &str, prev: &Ev, generation: u64, epoch: u64,
+        adds: Vec<DeclaredAdd>, removes: Vec<DeclaredRemove>,
+        prev_auth: [u8; 32], post_auth: [u8; 32], post_tree: [u8; 32], store: [u8; 32],
+    ) -> Ev {
         Ev::next(dev, author.clone(), sid.to_string(), Some(prev), prev.core.lamport + 1, 500,
             EP::MlsCommit {
-                channel_id: CH, generation: 0, epoch, mls_message: vec![0xC0],
+                channel_id: CH, generation, epoch, mls_message: vec![0xC0],
                 adds, removes,
                 prev_epoch_authenticator: prev_auth, post_epoch_authenticator: post_auth,
                 post_tree_hash: post_tree, authz_head: "a".repeat(64), store_instance_hash: store,
@@ -3231,7 +3367,9 @@ mod tests {
         f.owner_prev = after;
 
         // A tombstoned target can never be edited again (deletions cannot be
-        // resurrected), and the tombstone itself spends freshness budget.
+        // resurrected). The tombstone spends the RESET clock but NOT freshness
+        // budget — only sealed content does, so tombstones can never be used to
+        // seal a channel (see `tombstone_spam_cannot_seal_an_e2ee_channel`).
         let del = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
             f.owner_prev.core.lamport + 1, 500,
             EP::MessageDeleted { channel_id: CH, target: target.clone(), reason: DeleteReason::Author });
@@ -3239,9 +3377,14 @@ mod tests {
         f.owner_prev = del;
         let dead = sealed_edit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 0, 3, target);
         assert_rejected_for(&f.st, &dead, "tombstoned");
+        let g = f.st.mls_groups.get(&CH).unwrap();
         assert_eq!(
-            f.st.mls_groups.get(&CH).unwrap().events_since_last_commit, 2,
-            "the resumed edit and the tombstone each spent one channel event"
+            g.events_since_last_commit, 1,
+            "only the resumed edit spent freshness budget; the tombstone did not"
+        );
+        assert_eq!(
+            g.channel_events_since_reset, 4,
+            "the tombstone still counts toward the reset rate-limit clock"
         );
     }
 
@@ -3333,6 +3476,13 @@ mod tests {
         let blocked = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 1, vec![]);
         assert_rejected_for(&f.st, &blocked, "reset is incomplete");
 
+        // The new generation is NOT up for grabs: its `epoch_authenticator` is
+        // cleared (bootstrap marker), but the resetter's leaf is confirmed, so
+        // only a confirmed-leaf holder may commit into it.
+        let grab = mls_commit_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1,
+            vec![], vec![], [0u8; 32], X1, T1, ALICE_STORE);
+        assert_rejected_for(&f.st, &grab, "confirmed leaf");
+
         // The FIRST confirmation seeds the tree hash every later one must match
         // (the reset generation's add-commit is never a log event, ambiguity #7).
         let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1, TR, ALICE_STORE);
@@ -3373,16 +3523,275 @@ mod tests {
         f.st.apply(&r1).expect("the owner's first reset folds");
         f.owner_prev = r1;
 
-        // A second reset before RESET_MIN_CHANNEL_EVENTS further channel events
-        // is rate-limited.
+        // An INCOMPLETE reset is exempt from the rate limit: while
+        // `reset_pending` is set the channel accepts no sealed content, so its
+        // rate-limit clock CANNOT advance. Without the exemption, one welcomed
+        // device that never confirms (lost device, poisoned MLS store — exactly
+        // what the hatch exists for) would lock the channel out of its only
+        // recovery. A reset that never completed is not a spam vector.
+        assert!(f.st.mls_groups.get(&CH).unwrap().reset_pending);
         let w2 = stage_welcome(&mut f, 2, &alice_pk, &alice_did);
         let r2 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2, vec![w2]);
-        let err = f.st.clone().apply(&r2).expect_err("a second reset must be rate-limited");
-        assert!(err.to_string().contains("rate limit"), "unexpected rejection: {err}");
+        f.st.apply(&r2).expect("a stuck reset can always be re-run");
+        f.owner_prev = r2;
 
-        f.st.mls_groups.get_mut(&CH).unwrap().channel_events_since_reset = RESET_MIN_CHANNEL_EVENTS;
-        f.st.apply(&r2).expect("the rate limit clears after enough channel events");
-        assert_eq!(f.st.mls_current_epoch(CH), Some((2, 1)));
+        // Completing the generation re-arms the limit.
+        let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2, 1, T2, ALICE_STORE);
+        f.st.apply(&ca).expect("alice's post-reset confirmation folds");
+        f.alice_prev = ca;
+        assert!(!f.st.mls_groups.get(&CH).unwrap().reset_pending, "the reset completed");
+
+        let w3 = stage_welcome(&mut f, 3, &alice_pk, &alice_did);
+        let early = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3, vec![w3.clone()]);
+        assert_rejected_for(&f.st, &early, "rate limit");
+
+        // ...and it clears only through REAL channel events (500 sealed posts,
+        // a rekey to refresh the freshness budget, 500 more) — a valid event
+        // sequence reaches the unlocked state, so nothing here pokes private
+        // fold state to get there.
+        for i in 0..FRESHNESS_CEILING_EVENTS {
+            let e = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 2, 1, vec![]);
+            f.st.apply(&e).unwrap_or_else(|err| panic!("post {} should fold: {err}", i + 1));
+            f.owner_prev = e;
+        }
+        let rekey = mls_commit_gen(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2, 1,
+            vec![], vec![], [0u8; 32], X1, T1, OWNER_STORE);
+        f.st.apply(&rekey).expect("the generation's first logged commit folds");
+        f.owner_prev = rekey;
+        for i in 0..FRESHNESS_CEILING_EVENTS {
+            let e = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 2, 2, vec![]);
+            f.st.apply(&e).unwrap_or_else(|err| panic!("post {} should fold: {err}", i + 501));
+            f.owner_prev = e;
+        }
+        assert_eq!(
+            f.st.mls_groups.get(&CH).unwrap().channel_events_since_reset,
+            RESET_MIN_CHANNEL_EVENTS
+        );
+        let r3 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3, vec![w3]);
+        f.st.apply(&r3).expect("the rate limit clears after enough channel events");
+        assert_eq!(f.st.mls_current_epoch(CH), Some((3, 1)));
+    }
+
+    // ---- Review round 1: control-plane authority + clock hardening ----
+
+    /// The generation-bootstrap commit is the one commit with no confirmed leaf
+    /// to check against — so it is CREATOR-only. Anything weaker lets any
+    /// log-known device seize a fresh E2ee group (brick it for its real creator
+    /// and hold a confirmed leaf in it) for the price of one event.
+    #[test]
+    fn bootstrap_commit_is_creator_only_and_never_a_strangers() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let owner_did = device_id(&f.owner_dev.public_key());
+
+        // A stranger who never joined registers a device (Rung 1 requires no
+        // membership for that) and tries to seize the fresh group at epoch 0.
+        let stranger = Keypair::generate();
+        let s_dev = Keypair::generate();
+        let s_da = Ev::next(&s_dev, stranger.public_key(), f.sid.clone(), None, 0, 500,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&stranger, &s_dev.public_key(), 1) });
+        f.st.apply(&s_da).expect("device registration needs no membership (Rung-1 behavior)");
+        let seize = mls_commit(&s_dev, &stranger.public_key(), &f.sid, &s_da, 0,
+            vec![], vec![], [0u8; 32], X0, T0, [7u8; 32]);
+        assert_rejected_for(&f.st, &seize, "only full members may author MLS commits");
+
+        // A plain member cannot bootstrap it either.
+        let by_alice = mls_commit(&f.alice_dev, &f.alice.public_key(), &f.sid, &f.alice_prev, 0,
+            vec![], vec![], [0u8; 32], X0, T0, ALICE_STORE);
+        assert_rejected_for(&f.st, &by_alice, "authored by the channel's creator");
+
+        // Only the creator's bootstrap folds — and it leaves exactly one leaf,
+        // so no stranger leaf can strand the channel in permanent drift.
+        apply_bootstrap(&mut f);
+        assert_eq!(
+            f.st.leaves_confirmed(CH),
+            HashSet::from([(owner_pk, owner_did)]),
+            "the creator's leaf is the whole tree after the bootstrap"
+        );
+        assert!(f.st.pending_removals(CH, 500).is_empty());
+    }
+
+    /// A confirmed leaf is not standing authority: it survives a kick until a
+    /// Remove-commit lands, and in that window its holder must not be able to
+    /// drive the control plane.
+    #[test]
+    fn kicked_member_cannot_drive_the_mls_control_plane() {
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2, both leaves confirmed
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        let alice_did = device_id(&f.alice_dev.public_key());
+
+        let kick = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 500, EP::MemberRemoved { member: alice_pk.clone() });
+        f.st.apply(&kick).expect("the kick folds");
+        f.owner_prev = kick;
+        assert!(!f.st.is_member(&alice_pk));
+        assert!(
+            f.st.leaves_confirmed(CH).contains(&(alice_pk.clone(), alice_did.clone())),
+            "her leaf survives until a Remove-commit lands — that is the drift the gate covers"
+        );
+
+        // She can no longer advance the epoch / rewrite the chain variable /
+        // zero the freshness budget, welcome anyone, or confirm a leaf.
+        let commit = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![], vec![], X1, X2, T2, ALICE_STORE);
+        assert_rejected_for(&f.st, &commit, "only full members may author MLS commits");
+        let welcome = welcome_for(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 0,
+            "c".repeat(64), &alice_pk, &"f".repeat(64));
+        assert_rejected_for(&f.st, &welcome, "only full members may author MLS welcomes");
+        let confirm = leaf_confirm(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2, T1, ALICE_STORE);
+        assert_rejected_for(&f.st, &confirm, "only full members may confirm an MLS leaf");
+
+        // The members who are left repair the drift.
+        let rekey = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
+            vec![], vec![rem_of(&alice_pk, &f.alice_dev)], X1, X2, T2, OWNER_STORE);
+        f.st.apply(&rekey).expect("the owner's remove-commit folds");
+        assert!(f.st.pending_removals(CH, 500).is_empty());
+    }
+
+    /// `event.core.timestamp` is author-chosen, so device liveness is judged at
+    /// a MONOTONE per-identity floor. Neither half of the old bypass survives:
+    /// the live-device cap cannot be pumped, and expiry drift cannot be hidden
+    /// by back-dating a send.
+    #[test]
+    fn a_chosen_timestamp_cannot_pump_the_device_cap_or_hide_expiry_drift() {
+        // (a) Device cap.
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, _da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let mallory = Keypair::generate();
+        let mal_pk = mallory.public_key();
+        for i in 0..MAX_LIVE_DEVICES_PER_IDENTITY {
+            let d = Keypair::generate();
+            let e = Ev::next(&d, mal_pk.clone(), sid.clone(), None, 0, 100,
+                EP::DeviceAuthorized {
+                    cert: DeviceCert::create_expiring(&mallory, &d.public_key(), 1, 100),
+                });
+            st.apply(&e).unwrap_or_else(|err| panic!("device {} should fold: {err}", i + 1));
+        }
+        assert_eq!(st.live_devices(&mal_pk, 100).len(), MAX_LIVE_DEVICES_PER_IDENTITY);
+        let ninth = Keypair::generate();
+        let at_100 = Ev::next(&ninth, mal_pk.clone(), sid.clone(), None, 0, 100,
+            EP::DeviceAuthorized {
+                cert: DeviceCert::create_expiring(&mallory, &ninth.public_key(), 1, 100),
+            });
+        assert!(st.clone().apply(&at_100).is_err(), "the 9th live device is rejected");
+
+        // Claiming t=200 (where the first eight certs are dead) does buy a slot
+        // — but the claim is MONOTONE: mallory can never be judged at an
+        // earlier moment again, so the cap holds at every timestamp.
+        let future = Ev::next(&ninth, mal_pk.clone(), sid.clone(), None, 0, 200,
+            EP::DeviceAuthorized {
+                cert: DeviceCert::create_expiring(&mallory, &ninth.public_key(), 150, 300),
+            });
+        st.apply(&future).expect("registering after the old certs died is legitimate");
+        assert_eq!(
+            st.live_devices(&mal_pk, 100).len(), 1,
+            "back-dating cannot resurrect the expired eight (the cap is a hard blast-radius bound)"
+        );
+        assert!(st.live_devices(&mal_pk, 0).len() <= MAX_LIVE_DEVICES_PER_IDENTITY);
+
+        // (b) Expiry drift in an E2ee channel cannot be hidden by back-dating.
+        const B_STORE: [u8; 32] = [8u8; 32];
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // epoch 2
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+
+        // Alice adds a SECOND device whose cert expires at 600 (self-add rule:
+        // only she may), and it confirms into the group.
+        let b_dev = Keypair::generate();
+        let b_did = device_id(&b_dev.public_key());
+        let b_da = Ev::next(&b_dev, alice_pk.clone(), f.sid.clone(), None, 0, 500,
+            EP::DeviceAuthorized {
+                cert: DeviceCert::create_expiring(&f.alice, &b_dev.public_key(), 100, 600),
+            });
+        f.st.apply(&b_da).expect("alice's second device registers");
+        let b_kp = kp_publish(&b_dev, &alice_pk, &f.sid, &b_da, B_STORE, 1_000_000, 500);
+        f.st.apply(&b_kp).expect("the second device publishes a key package");
+        let add_b = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2,
+            vec![DeclaredAdd { identity: alice_pk.clone(), device: b_did.clone(), key_package: b_kp.hash() }],
+            vec![], X1, X2, T2, ALICE_STORE);
+        f.st.apply(&add_b).expect("alice's self-add commit folds");
+        f.alice_prev = add_b;
+        let cb = leaf_confirm(&b_dev, &alice_pk, &f.sid, &b_kp, 3, T2, B_STORE);
+        f.st.apply(&cb).expect("the second device confirms");
+        assert!(f.st.pending_removals(CH, 500).is_empty(), "no drift while the cert is live");
+
+        // Alice authors anything at t=700 — past that cert's expiry. Her own
+        // clock floor moves, so device B is dead from now on at EVERY claimed
+        // timestamp, and the drift it creates seals the channel.
+        let later = Ev::next(&f.alice_dev, alice_pk.clone(), f.sid.clone(), Some(&f.alice_prev),
+            f.alice_prev.core.lamport + 1, 700,
+            EP::MessagePosted { channel_id: 1, content: "hi".into(), reply_to: None, attachments: vec![] });
+        f.st.apply(&later).expect("alice posts at t=700 from her live device");
+        assert!(
+            f.st.pending_removals(CH, 500).contains(&(alice_pk.clone(), b_did)),
+            "an expired leaf is drift even when the query claims an earlier moment"
+        );
+        // `sealed_post` claims t=500 — before the expiry — and is STILL refused.
+        let backdated = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, 3, vec![]);
+        assert_rejected_for(&f.st, &backdated, "pending removals");
+    }
+
+    /// Tombstones carry unvalidated targets (the fold has no message index by
+    /// design), so they must never spend forward-secrecy budget — otherwise any
+    /// member seals any E2ee channel on demand for the price of 500 events.
+    #[test]
+    fn tombstone_spam_cannot_seal_an_e2ee_channel() {
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f);
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+
+        for i in 0..=FRESHNESS_CEILING_EVENTS {
+            let e = Ev::next(&f.alice_dev, alice_pk.clone(), f.sid.clone(), Some(&f.alice_prev),
+                f.alice_prev.core.lamport + 1, 500,
+                EP::MessageDeleted {
+                    channel_id: CH, target: format!("{i:064x}"), reason: DeleteReason::Author,
+                });
+            f.st.apply(&e).unwrap_or_else(|err| panic!("tombstone {i} should fold: {err}"));
+            f.alice_prev = e;
+        }
+        let g = f.st.mls_groups.get(&CH).unwrap();
+        assert_eq!(g.events_since_last_commit, 0, "tombstones spend no freshness budget");
+        assert_eq!(
+            g.channel_events_since_reset, FRESHNESS_CEILING_EVENTS + 1,
+            "they do count toward the reset rate-limit clock"
+        );
+        let post = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, 2, vec![]);
+        f.st.apply(&post).expect("the channel is still writable after tombstone spam");
+    }
+
+    /// The legacy carve-out is one-way: a channel that already carried
+    /// plaintext can never be declared afterwards. The FOLD refuses it, so a
+    /// Rung-3 replica replaying from genesis refuses it too — sub-3's
+    /// `messages`-table check is belt-and-braces, not the only defense.
+    #[test]
+    fn a_channel_with_plaintext_history_can_never_be_declared() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let owner_pk = owner.public_key();
+
+        let legacy = post_in(&owner_dev, &owner_pk, &sid, &da, 9);
+        st.apply(&legacy).expect("legacy plaintext post folds (the carve-out)");
+
+        let upgrade = channel(&owner_dev, &owner_pk, &sid, &legacy, 9, ChannelClass::E2ee, None);
+        assert_rejected_for(&st, &upgrade, "plaintext history");
+        let redeclare = channel(&owner_dev, &owner_pk, &sid, &legacy, 9, ChannelClass::Plaintext, None);
+        assert_rejected_for(&st, &redeclare, "plaintext history");
+        assert_eq!(st.channel_class(9), None, "channel 9 stays a legacy plaintext channel");
+
+        // An unused channel id is unaffected.
+        let fresh = channel(&owner_dev, &owner_pk, &sid, &legacy, 10, ChannelClass::E2ee, None);
+        st.apply(&fresh).expect("an unused channel id can still be created as E2ee");
     }
 
     // ---- Rung 2, Task 5: checkpoint composability over ALL the new state ----
@@ -3402,6 +3811,11 @@ mod tests {
         assert_eq!(a.attachment_uploaders, b.attachment_uploaders, "{ctx}: attachment_uploaders");
         assert_eq!(a.redacted_attachments, b.redacted_attachments, "{ctx}: redacted_attachments");
         assert_eq!(a.channels, b.channels, "{ctx}: channels");
+        assert_eq!(
+            a.plaintext_history_channels, b.plaintext_history_channels,
+            "{ctx}: plaintext_history_channels"
+        );
+        assert_eq!(a.identity_clock, b.identity_clock, "{ctx}: identity_clock");
         assert_eq!(a.tombstones, b.tombstones, "{ctx}: tombstones");
         assert_eq!(a.revoked_devices, b.revoked_devices, "{ctx}: revoked_devices");
         assert_eq!(a.devices_by_identity, b.devices_by_identity, "{ctx}: devices_by_identity");

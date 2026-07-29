@@ -107,6 +107,52 @@ a literal shape:
    and gates by class/membership/reason, ingest verifies target authorship
    against the derived `messages` table. Each is documented at the rule site.
 
+## Review round 1 — adjustments to the resolved ambiguities (implemented)
+
+The code review of the landed sub-2 branch found six holes in the rules as
+written above. Each is fixed in `fix(crypto): address sub2 review findings
+(round 1)`; where the fix narrows a decision made above, the narrowing is the
+authority from here on (and is documented in `docs/modules/crypto.md`):
+
+1. **Ambiguity #5 is now enforced literally: the bootstrap commit is
+   CREATOR-only.** "The creator authors the first logged `MlsCommit` at epoch 0"
+   was prose, not a rule — the implemented exemption skipped the confirmed-leaf
+   check for a generation's first commit with no author check at all, so any
+   identity that could register a device could seize a fresh `ChannelCreated
+   { E2ee }` group (or any post-reset generation, whose `epoch_authenticator` is
+   `None` again), brick it for its real creator, and hold a confirmed leaf in
+   it. `ChannelRecord` now stores `creator`; the confirmed-leaf exemption
+   applies only while `leaves_confirmed` is EMPTY, and then only to the creator.
+   The chain-check exemption stays keyed to `epoch_authenticator == None`.
+2. **MLS control-plane authority is re-checked against the authz fold.**
+   `MlsCommit`, `MlsWelcome` and `MlsLeafConfirmed` all require
+   `is_member(author) && !is_pending(author)`, like `check_sealed_send`. Leaf
+   membership is not standing authority: `MemberRemoved` does not touch leaf
+   sets, so a kicked identity keeps its confirmed leaf until a Remove-commit
+   lands and could otherwise still drive the group.
+3. **Ambiguity #4 (clocks) gains a third, monotone clock.**
+   `event.core.timestamp` is author-chosen, and three fold gates were
+   load-bearing on it. `LogState.identity_clock` (per-identity max claimed
+   timestamp) is now the floor `live_devices` judges liveness at, so the
+   live-device cap cannot be pumped with a future timestamp and an identity
+   cannot back-date past its own certs' expiry. Residual (cross-identity
+   back-dating below a silent identity's expiry) is stated in `crypto.md` and
+   is sub-3's to bound at ingest.
+4. **Tombstones no longer spend freshness budget.** `MessageDeleted` targets are
+   opaque to the fold (ambiguity #9), so spending the C4 ceiling on them let any
+   member seal any E2ee channel on demand with 500 fabricated tombstones. They
+   still advance `channel_events_since_reset`. Spec C4 only requires sealed
+   content to spend the ceiling.
+5. **An incomplete reset is exempt from the reset rate limit.** While
+   `reset_pending` is set the channel accepts no sealed content, so its
+   rate-limit clock cannot advance — a welcomed device that never confirms would
+   otherwise lock the channel out of the only recovery hatch it has.
+6. **The legacy carve-out (ambiguity #2) is one-way.** `LogState` records channel
+   ids that carried plaintext under the carve-out and refuses `ChannelCreated`
+   for them, so a channel with plaintext history can never be declared `E2ee`.
+   The fold rule is again self-sufficient for Rung-3 fresh replay, as the spec
+   claims; sub-3's `messages`-table check stays belt-and-braces.
+
 ## Global constraints
 
 - **Old events are untouched.** New variants are APPENDED after
