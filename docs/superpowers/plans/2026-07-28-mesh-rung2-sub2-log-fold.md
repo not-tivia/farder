@@ -257,6 +257,32 @@ the narrowing is the authority from here on (and is documented in
    `small_channels_can_rekey_on_cadence_not_only_at_the_ceiling`,
    `a_lone_rekeyer_can_always_answer_the_freshness_ceiling`, with anti-spam held
    by `commit_rate_rule_still_blocks_spam_in_a_large_channel`.
+2. **`reset_pending` was a latch cleared inside ONE event type, so ordinary
+   sequences were terminal.** It was set by `MlsGroupReset` and cleared only
+   inside `MlsLeafConfirmed`, on `leaves_confirmed == members × live_devices`.
+   Ban a welcomed device before it confirms and the bridge's own answer — a
+   Remove-commit dropping the unproven leaf (permitted since round 2) — emptied
+   `pending_removals`, `pending_adds` AND `pending_confirmations`, yet sealed
+   sends stayed refused and **no `MlsLeafConfirmed` could ever arrive**; a member
+   joining after the reset grew `members × live_devices`, so the equality never
+   held either. Escape required another owner-only reset, destroying continuity —
+   the recurring "over-conservative guard creates an unexitable state" class.
+   **The gate is now DERIVED** (overriding resolved ambiguity #7's "`reset_pending`
+   clears only when `leaves_confirmed` equals the fold's `members × live_devices`"
+   and the `reset_pending: bool` field in Task 3's record): `MlsGroupRecord`
+   stores `reset_welcomed` (the leaves the reset staged) and
+   `reset_incomplete() = !reset_welcomed.is_disjoint(&leaves_pending)`. Every
+   path that can discharge the obligation heals the gate — a confirmation
+   promotes the leaf out of `leaves_pending`, a Remove-commit drops it — and the
+   predicate stays a pure function of state, so it composes from any checkpoint.
+   The commit effect prunes `reset_welcomed` to the still-pending staged leaves,
+   which keeps the gate scoped to the reset's OWN obligations: an ordinary
+   pending join (before or after the reset) never seals the channel, and a
+   dropped-then-re-added leaf is an ordinary join rather than a resurrected reset
+   obligation. `MlsLeafConfirmed`'s tree-hash seeding path is likewise keyed to
+   `reset_welcomed` membership rather than to the latch. Pinned by
+   `a_reset_completes_when_a_stuck_leaf_is_removed_not_only_when_it_confirms`
+   (both halves: discharge-by-removal, and an ordinary join not re-sealing).
 
 ## Global constraints
 

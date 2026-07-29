@@ -134,10 +134,12 @@ struct MlsGroupRecord {
     /// Reset rate-limit clock (spec C7): channel events since the last accepted
     /// `MlsGroupReset`. A channel's first reset ignores it (generation 0).
     channel_events_since_reset: u32,
-    /// True from an accepted `MlsGroupReset` until every welcomed leaf confirms.
-    /// While set, sealed content is invalid — a partial reset is a dead channel,
-    /// loudly, never a silent partition.
-    reset_pending: bool,
+    /// The leaves an accepted `MlsGroupReset` STAGED (its Welcome set), minus
+    /// those already accounted for. The reset generation is incomplete — and
+    /// sealed content invalid — exactly while one of them is still unconfirmed
+    /// (`reset_incomplete`). See that method for why this is a derived set and
+    /// not the latch it replaced.
+    reset_welcomed: HashSet<(PublicKey, DeviceId)>,
     /// The tree hash seeded by the FIRST `MlsLeafConfirmed` of a reset
     /// generation (its add-commit is never a log event, so there is no
     /// `commits_by_epoch` entry to check against — resolved ambiguity #7).
@@ -162,7 +164,7 @@ impl MlsGroupRecord {
             events_since_last_commit: 0,
             last_commit_epoch_by_author: HashMap::new(),
             channel_events_since_reset: 0,
-            reset_pending: false,
+            reset_welcomed: HashSet::new(),
             reset_expected_tree_hash: None,
             commits_by_epoch: HashMap::new(),
             welcomes: HashMap::new(),
@@ -193,6 +195,32 @@ impl MlsGroupRecord {
     /// nobody to bounce, so its gap is 1 (rekey freely).
     fn commit_rate_gap(&self) -> u64 {
         COMMIT_RATE_MIN_EPOCH_GAP.min(self.committing_identities().max(1))
+    }
+
+    /// Whether a group reset is still incomplete (spec C7) — the gate that makes
+    /// a partial reset a dead channel, loudly, rather than a silent partition.
+    ///
+    /// DERIVED, deliberately: it is true exactly while a leaf the reset STAGED
+    /// is still unconfirmed. The predecessor was a `bool` latch set by
+    /// `MlsGroupReset` and cleared in ONE place — inside `MlsLeafConfirmed`,
+    /// when `leaves_confirmed` reached `members × live_devices` — which made
+    /// several ordinary sequences TERMINAL. Ban a welcomed device before it
+    /// confirms and the bridge's own answer (a Remove-commit dropping the
+    /// unproven leaf) emptied `pending_removals`, `pending_adds` and
+    /// `pending_confirmations`, yet sealed sends stayed refused and no
+    /// confirmation could ever arrive again; a member joining after the reset
+    /// grew `members × live_devices` so the equality never held either. Escape
+    /// required another owner-only reset, destroying continuity.
+    ///
+    /// As a predicate over leaf state it self-heals on every path that can
+    /// discharge the obligation — confirmation promotes the leaf out of
+    /// `leaves_pending`, a Remove-commit drops it — and it stays a pure function
+    /// of state, so it composes from any checkpoint. `reset_welcomed` is pruned
+    /// to the still-pending staged leaves by the commit effect, so a leaf that
+    /// was dropped and later re-added is an ORDINARY pending join (which never
+    /// seals the channel), not a resurrected reset obligation.
+    fn reset_incomplete(&self) -> bool {
+        !self.reset_welcomed.is_disjoint(&self.leaves_pending)
     }
 
     /// Whether the freshness ceiling is close enough to demand a rekey NOW
@@ -1197,10 +1225,14 @@ impl LogState {
                         rec.post_tree_hash == *tree_hash,
                         "confirmed tree hash does not match the cited epoch's commit"
                     );
-                } else if group.reset_pending {
+                } else if group
+                    .reset_welcomed
+                    .contains(&(author.clone(), event.core.device.clone()))
+                {
                     // Reset generation (resolved ambiguity #7): its add-commit
                     // is never a log event, so the FIRST confirmation seeds the
-                    // expected tree hash; every later one must match it.
+                    // expected tree hash; every later one must match it. Only a
+                    // leaf the reset itself staged may take this path.
                     if let Some(expected) = group.reset_expected_tree_hash {
                         ensure!(
                             expected == *tree_hash,
@@ -1245,7 +1277,7 @@ impl LogState {
                 );
                 // Rate limit (spec C7). Generation 0 ⇒ no reset has ever
                 // occurred here ⇒ the first reset is always allowed. An
-                // INCOMPLETE reset is exempt too: while `reset_pending` is set
+                // INCOMPLETE reset is exempt too: while the reset is incomplete
                 // the channel accepts no sealed content, so its rate-limit
                 // clock cannot advance — without this exemption a single
                 // welcomed device that never confirms (lost device, poisoned
@@ -1254,7 +1286,7 @@ impl LogState {
                 // completed is not a spam vector.
                 ensure!(
                     group.generation == 0
-                        || group.reset_pending
+                        || group.reset_incomplete()
                         || group.channel_events_since_reset >= RESET_MIN_CHANNEL_EVENTS,
                     "reset rate limit: at most one reset per {RESET_MIN_CHANNEL_EVENTS} channel events"
                 );
@@ -1344,10 +1376,12 @@ impl LogState {
             group.events_since_last_commit < FRESHNESS_CEILING_EVENTS,
             "freshness ceiling reached: the channel is sealed until somebody rekeys"
         );
-        // Partial reset (spec C7) = dead channel, loudly.
+        // Partial reset (spec C7) = dead channel, loudly. Derived from the
+        // staged leaves, so discharging the obligation by REMOVAL reopens the
+        // channel exactly as confirmation does — see `reset_incomplete`.
         ensure!(
-            !group.reset_pending,
-            "group reset is incomplete: the channel is sealed until every welcomed leaf confirms"
+            !group.reset_incomplete(),
+            "group reset is incomplete: the channel is sealed until every welcomed leaf confirms or is removed"
         );
         Ok(())
     }
@@ -1537,6 +1571,14 @@ impl LogState {
                     group.leaves_pending.remove(&leaf);
                     group.leaves_confirmed.insert(leaf);
                 }
+                // Keep the reset's outstanding-obligation set honest: a staged
+                // leaf that this commit REMOVED is discharged (that is the
+                // bridge's answer for a welcomed device that is banned or lost
+                // before confirming), and dropping it here means a later re-add
+                // is an ordinary pending join rather than a resurrected reset
+                // obligation. See `MlsGroupRecord::reset_incomplete`.
+                let (staged, pending) = (&mut group.reset_welcomed, &group.leaves_pending);
+                staged.retain(|leaf| pending.contains(leaf));
                 group.events_since_last_commit = 0;
                 group
                     .last_commit_epoch_by_author
@@ -1559,30 +1601,27 @@ impl LogState {
                 );
             }
 
-            EventPayload::MlsLeafConfirmed { channel_id, tree_hash, store_instance_hash, .. } => {
+            EventPayload::MlsLeafConfirmed { channel_id, epoch, tree_hash, store_instance_hash, .. } => {
                 self.pin_instance(&event.core.device, store_instance_hash);
-                // Computed before the mutable group borrow; only consulted on
-                // the reset path.
-                let full_set = self.member_leaf_set(event.core.timestamp);
                 let group = self
                     .mls_groups
                     .get_mut(channel_id)
                     .expect("authz verified the group exists");
                 let leaf = (event.core.author.clone(), event.core.device.clone());
+                // Mirrors the authz branch: a confirmation that cites no logged
+                // commit is a reset-generation confirmation, and the first one
+                // seeds the tree hash every later one must match (ambiguity #7).
+                if !group.commits_by_epoch.contains_key(epoch)
+                    && group.reset_welcomed.contains(&leaf)
+                    && group.reset_expected_tree_hash.is_none()
+                {
+                    group.reset_expected_tree_hash = Some(*tree_hash);
+                }
+                // Nothing clears a latch here any more: promoting the leaf out
+                // of `leaves_pending` IS what completes the reset, via the
+                // derived `reset_incomplete` predicate.
                 group.leaves_pending.remove(&leaf);
                 group.leaves_confirmed.insert(leaf);
-                if group.reset_pending {
-                    // First confirmation of a reset generation seeds the tree
-                    // hash every later confirmation must match (ambiguity #7).
-                    if group.reset_expected_tree_hash.is_none() {
-                        group.reset_expected_tree_hash = Some(*tree_hash);
-                    }
-                    // A reset stops being pending only when EVERY member device
-                    // holds a confirmed leaf (partial reset = dead channel).
-                    if group.leaves_confirmed == full_set {
-                        group.reset_pending = false;
-                    }
-                }
             }
 
             EventPayload::MessagePostedE2ee { channel_id, attachments, .. } => {
@@ -1623,14 +1662,17 @@ impl LogState {
                 group.epoch_authenticator = None;
                 group.tree_hash = None;
                 group.leaves_confirmed = HashSet::from([creator]);
-                group.leaves_pending = welcomed;
+                group.leaves_pending = welcomed.clone();
+                // The reset's outstanding obligations: while any of these is
+                // still pending the generation is incomplete and the channel
+                // accepts no sealed content (derived, not latched).
+                group.reset_welcomed = welcomed;
                 group.events_since_last_commit = 0;
                 group.channel_events_since_reset = 0;
                 group.last_commit_epoch_by_author.clear();
                 group.commits_by_epoch.clear();
                 // Stale (older-generation) Welcomes can never be cited again.
                 group.welcomes.retain(|_, w| w.generation >= *new_generation);
-                group.reset_pending = true;
                 group.reset_expected_tree_hash = None;
             }
         }
@@ -3633,7 +3675,7 @@ mod tests {
         f.st.apply(&ok).expect("an exact-cover reset folds");
         assert_eq!(f.st.mls_current_epoch(CH), Some((1, 1)), "the new generation starts at epoch 1");
         let g = f.st.mls_groups.get(&CH).unwrap();
-        assert!(g.reset_pending);
+        assert!(g.reset_incomplete(), "every staged leaf is still outstanding");
         assert_eq!(g.leaves_confirmed, HashSet::from([(owner_pk.clone(), owner_did)]));
         assert_eq!(g.leaves_pending, HashSet::from([(alice_pk, alice_did), (bob_pk, bob_did)]));
         assert!(g.epoch_authenticator.is_none(), "the new generation's first commit is a bootstrap");
@@ -3659,8 +3701,8 @@ mod tests {
         f.st.apply(&reset).expect("the exact-cover reset folds");
         f.owner_prev = reset;
 
-        // While the reset is pending the channel is DEAD, loudly — not a silent
-        // partition (spec C7).
+        // While a staged leaf is outstanding the channel is DEAD, loudly — not
+        // a silent partition (spec C7).
         let blocked = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 1, vec![]);
         assert_rejected_for(&f.st, &blocked, "reset is incomplete");
 
@@ -3686,7 +3728,7 @@ mod tests {
 
         let cb = leaf_confirm_gen(&bob_dev, &bob_pk, &f.sid, &bob_last, 1, 1, TR, [4u8; 32]);
         f.st.apply(&cb).expect("bob's confirmation on the seeded tree folds");
-        assert!(!f.st.mls_groups.get(&CH).unwrap().reset_pending, "the reset completes");
+        assert!(!f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "the reset completes");
         let unlocked = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 1, vec![]);
         f.st.apply(&unlocked).expect("sends unlock once every welcomed leaf confirms");
     }
@@ -3711,13 +3753,13 @@ mod tests {
         f.st.apply(&r1).expect("the owner's first reset folds");
         f.owner_prev = r1;
 
-        // An INCOMPLETE reset is exempt from the rate limit: while
-        // `reset_pending` is set the channel accepts no sealed content, so its
+        // An INCOMPLETE reset is exempt from the rate limit: while the reset is
+        // incomplete the channel accepts no sealed content, so its
         // rate-limit clock CANNOT advance. Without the exemption, one welcomed
         // device that never confirms (lost device, poisoned MLS store — exactly
         // what the hatch exists for) would lock the channel out of its only
         // recovery. A reset that never completed is not a spam vector.
-        assert!(f.st.mls_groups.get(&CH).unwrap().reset_pending);
+        assert!(f.st.mls_groups.get(&CH).unwrap().reset_incomplete());
         let w2 = stage_welcome(&mut f, 2, &alice_pk, &alice_did);
         let r2 = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2, vec![w2]);
         f.st.apply(&r2).expect("a stuck reset can always be re-run");
@@ -3727,7 +3769,7 @@ mod tests {
         let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 2, 1, T2, ALICE_STORE);
         f.st.apply(&ca).expect("alice's post-reset confirmation folds");
         f.alice_prev = ca;
-        assert!(!f.st.mls_groups.get(&CH).unwrap().reset_pending, "the reset completed");
+        assert!(!f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "the reset completed");
 
         let w3 = stage_welcome(&mut f, 3, &alice_pk, &alice_did);
         let early = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 3, vec![w3.clone()]);
@@ -4501,6 +4543,83 @@ mod tests {
         // Four epochs on, alice's turn comes round again.
         try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev, 8, prev_auth, ALICE_STORE)
             .expect("alice may commit again once the full gap has passed");
+    }
+
+    /// THE round-3 IMPORTANT: `reset_pending` was a latch cleared inside ONE
+    /// event type (`MlsLeafConfirmed`), so a welcomed device that is BANNED
+    /// before it confirms left the channel in a terminal state — the bridge's
+    /// own answer (a Remove-commit dropping the unproven leaf) emptied
+    /// `pending_removals`, `pending_adds` AND `pending_confirmations`, yet
+    /// sealed sends stayed refused and no confirmation could ever arrive. Only
+    /// another owner reset escaped, destroying continuity. The gate is now
+    /// DERIVED — the reset generation is incomplete iff a leaf the reset STAGED
+    /// is still unconfirmed — so it self-heals on removal exactly as it does on
+    /// confirmation. (Recurring bug class: an over-conservative guard creating
+    /// an unexitable state.)
+    #[test]
+    fn a_reset_completes_when_a_stuck_leaf_is_removed_not_only_when_it_confirms() {
+        const TR: [u8; 32] = [77u8; 32];
+        let (mut f, bob, bob_dev, _bob_last) = reset_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        let alice_did = device_id(&f.alice_dev.public_key());
+        let bob_pk = bob.public_key();
+        let bob_did = device_id(&bob_dev.public_key());
+        let bob_leaf = (bob_pk.clone(), bob_did.clone());
+
+        let w_alice = stage_welcome(&mut f, 1, &alice_pk, &alice_did);
+        let w_bob = stage_welcome(&mut f, 1, &bob_pk, &bob_did);
+        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob]);
+        f.st.apply(&reset).expect("the exact-cover reset folds");
+        f.owner_prev = reset;
+
+        // Alice confirms; bob is banned before he ever does.
+        let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1, TR, ALICE_STORE);
+        f.st.apply(&ca).expect("alice's post-reset confirmation folds");
+        f.alice_prev = ca;
+        ban_of(&mut f, &bob_pk);
+        assert!(f.st.pending_removals(CH, 500).contains(&bob_leaf), "the banned joiner is drift");
+        let sealed = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 1, vec![]);
+        assert_rejected_for(&f.st, &sealed, "pending removals");
+
+        // The bridge's own answer: a Remove-commit drops the unproven leaf. No
+        // `MlsLeafConfirmed` for bob can ever arrive after this — he is banned,
+        // and his leaf is gone.
+        let rekey = mls_commit_gen(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, 1,
+            vec![], vec![rem_of(&bob_pk, &bob_dev)], [0u8; 32], X1, T1, OWNER_STORE);
+        f.st.apply(&rekey).expect("the remove-commit folds");
+        f.owner_prev = rekey;
+
+        // Every drift set the fold exposes is now empty...
+        assert!(f.st.pending_removals(CH, 500).is_empty());
+        assert!(f.st.pending_adds(CH, 500).is_empty());
+        assert!(f.st.pending_confirmations(CH).is_empty());
+        assert_eq!(
+            f.st.leaves_confirmed(CH),
+            HashSet::from([(owner_pk.clone(), device_id(&f.owner_dev.public_key())), (alice_pk, alice_did)]),
+            "the confirmed leaves are exactly the fold's member devices"
+        );
+        // ...so the channel must be sendable. (This is the assertion that failed
+        // before the gate was derived: the latch stayed set forever.)
+        let after = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 2, vec![]);
+        f.st.apply(&after).expect("a reset generation whose drift was discharged by REMOVAL is complete");
+        f.owner_prev = after;
+
+        // And the derived gate is scoped to the reset's OWN staged leaves: an
+        // ordinary join into the completed generation leaves a pending leaf
+        // behind, and that must NOT re-seal the channel (which a naive
+        // "any pending leaf ⇒ incomplete" derivation would do).
+        let (dave, dave_dev, dave_last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let dkp = kp_publish(&dave_dev, &dave.public_key(), &f.sid, &dave_last, [6u8; 32], 1_000_000, 500);
+        f.st.apply(&dkp).expect("dave's key package publishes");
+        let add = mls_commit_gen(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, 2,
+            vec![add_of(&dave.public_key(), &dave_dev, &dkp.hash())], vec![], X1, X2, T2, OWNER_STORE);
+        f.st.apply(&add).expect("dave's add-commit folds");
+        f.owner_prev = add;
+        assert_eq!(f.st.pending_confirmations(CH).len(), 1, "dave's leaf is the outstanding obligation");
+        let still_open = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 3, vec![]);
+        f.st.apply(&still_open).expect("an ordinary pending join never seals the channel");
     }
 
     // ---- Rung 2, Task 5: checkpoint composability over ALL the new state ----
