@@ -10,6 +10,8 @@
 
 **Tech stack:** Rust (`farder-server`, `farder-protocol`, `farder-crypto`), rusqlite, Tauri, React/TS.
 
+**STATUS: SHIPPED.** All five tasks are built, reviewed and merged on `events-reminders` (T1 `80d80c8`, T2 `6cc7579`, T3 `bd095f5`, T4 `59634da`, T5 `2aa97dd`, review round 1 `4d9cc7b`, review polish this pass). Every step box below is ticked against landed code + tests; the gates are green (`cargo test -p farder-server`, `cargo build --workspace`, client crate build, `npx tsc --noEmit`). The one thing still **outstanding** is the *Owner runtime verification* section at the bottom — it needs a display + two clients, which WSL cannot provide, so it has not been run.
+
 ---
 
 ## Global constraints (every task ends green on the gates it touches)
@@ -77,7 +79,7 @@ Run everything from **`/home/deez/farder-events`** (isolated worktree, branch `e
 
 **Interfaces produced:** `bots::{SYSTEM_BOT_KIND, SYSTEM_BOT_LABEL, get_or_create_system_identity, send_bot_dm_as, send_system_dm}`; `members::list_members_visible`; the `reminders` module; `ReminderInfo`; `ServerRequest::{ListMyReminders, CancelReminder}`; `ServerResponse::{Notice, MyReminders}`; `widgets::{PendingDm, SweepOutcome}` + the new `sweep_once` signature; RunCommand kind `"reminder"`.
 
-- [ ] **Step 1: DDL + the system-identity index.** `db.rs` `init_schema`, immediately **after** the `giveaway_entries` block (`db.rs:~525-532`), guarded `CREATE TABLE IF NOT EXISTS` (covered by the existing `test_schema_init_idempotent` by construction):
+- [x] **Step 1: DDL + the system-identity index.** `db.rs` `init_schema`, immediately **after** the `giveaway_entries` block (`db.rs:~525-532`), guarded `CREATE TABLE IF NOT EXISTS` (covered by the existing `test_schema_init_idempotent` by construction):
 
 ```sql
 CREATE TABLE IF NOT EXISTS reminders (
@@ -100,7 +102,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bots_system ON bots(kind) WHERE kind = 'sy
 ```
 (Belt-and-braces: the single `state.db` mutex already serializes lookup-then-insert.)
 
-- [ ] **Step 2: `bots.rs` — the system identity.** Add near the top of the file:
+- [x] **Step 2: `bots.rs` — the system identity.** Add near the top of the file:
 
 ```rust
 /// `bots.kind` discriminator for the server's own identity (exactly one row).
@@ -124,7 +126,7 @@ conn.execute(
 ```
 Return `pk`.
 
-- [ ] **Step 3: `bots.rs` — DRY DM refactor (no second copy of the plumbing).**
+- [x] **Step 3: `bots.rs` — DRY DM refactor (no second copy of the plumbing).**
 
 ```rust
 pub async fn send_bot_dm(state: &Arc<ServerState>, bot_pk: &PublicKey,
@@ -147,7 +149,7 @@ pub async fn send_system_dm(state: &Arc<ServerState>, recipient_pk: &PublicKey,
 **Lock discipline unchanged** — all DB + crypto inside the scoped block; the `MutexGuard` is dropped before the first `broadcast_event`; the doc-comment at `bots.rs:485` stays true.
 `send_system_dm`: `let pk = { let conn = state.db.lock().unwrap(); get_or_create_system_identity(&conn)? };` (guard dropped) then `send_bot_dm_as(state, &pk, recipient_pk, text, Some(SYSTEM_BOT_LABEL), Some("BOT")).await`. **Badge `"BOT"` is reused deliberately** — a `"SYSTEM"` badge would need CSS in three themes for no product gain.
 
-- [ ] **Step 4: `bots.rs` + `members.rs` + `handlers.rs` — exclusion from every list.**
+- [x] **Step 4: `bots.rs` + `members.rs` + `handlers.rs` — exclusion from every list.**
   1. `bots::list_bots` → add `WHERE kind != 'system'` to its SELECT (the ticker poller must never poll it; its `coin_id` is empty).
   2. `members.rs`, new fn beside `list_members`:
 ```rust
@@ -169,7 +171,7 @@ if kind.as_deref() == Some(crate::bots::SYSTEM_BOT_KIND) {
 }
 ```
 
-- [ ] **Step 5: `reminders.rs` (new module; `pub mod reminders;` in `lib.rs`, alphabetically after `reactions`).**
+- [x] **Step 5: `reminders.rs` (new module; `pub mod reminders;` in `lib.rs`, alphabetically after `reactions`).**
 
 ```rust
 pub const MAX_REMINDER_TEXT: usize = 500;
@@ -206,7 +208,7 @@ Semantics (exact):
 - `list_due`: `WHERE status='pending' AND due_at <= ?1 ORDER BY due_at ASC LIMIT 200` (bounded batch; the remainder drains next tick).
 - `mark_sent`: `UPDATE reminders SET status='sent', sent_at=?2 WHERE id=?1 AND status='pending'` → rows-affected > 0 (**single-shot guard**).
 
-- [ ] **Step 6: Protocol (`crates/farder-protocol/src/server.rs`, appended).**
+- [x] **Step 6: Protocol (`crates/farder-protocol/src/server.rs`, appended).**
 
 ```rust
 /// One of the caller's own pending reminders (owner-scoped by the connection key —
@@ -231,7 +233,7 @@ Notice { text: String },
 MyReminders { reminders: Vec<ReminderInfo> },
 ```
 
-- [ ] **Step 7: `widgets.rs` — `SweepOutcome` + the reminder pass.**
+- [x] **Step 7: `widgets.rs` — `SweepOutcome` + the reminder pass.**
 
 ```rust
 /// A DM computed under the DB lock, sent after the guard drops (send_system_dm
@@ -274,7 +276,7 @@ tokio::time::sleep(std::time::Duration::from_secs(WIDGET_SWEEP_SECS)).await;
 ```
 Update both shipped tests: `let out = sweep_once(&conn, now); let pending = out.broadcasts;` + `assert!(out.dms.is_empty())`; the idempotence assertions become `sweep_once(&conn, now).broadcasts.is_empty()`.
 
-- [ ] **Step 8: Dispatch kind `"reminder"` + `AddCommand` + `takes_arg`.**
+- [x] **Step 8: Dispatch kind `"reminder"` + `AddCommand` + `takes_arg`.**
   - `commands.rs:136` → `takes_arg: matches!(r.kind.as_str(), "api" | "poll" | "giveaway" | "event" | "reminder")` (**both new kinds now — T2 does not touch this line**).
   - `handlers.rs:2283` → `"poll" | "giveaway" | "reminder" => {}` and `:2284` error text → `"kind must be 'text', 'api', 'poll', 'giveaway', 'event' or 'reminder'"` (the `"event"` arm itself lands in T2; the text is widened once, here).
   - `connection.rs` `RunCommand` — a new `if cmd.kind.as_str() == "reminder" { … }` branch **beside** the `"poll"` branch (`connection.rs:1025`), i.e. **after every existing gate runs unchanged**: `content_block_reason` → `command_limiter` → `check_run_command_channel_auth` → trigger lookup.
@@ -282,18 +284,18 @@ Update both shipped tests: `let out = sweep_once(&conn, now); let pending = out.
     2. One scoped `state.db.lock()`: `count_pending(&conn, &member_key)? >= MAX_PENDING_PER_USER` → error `"you already have 20 reminders pending — cancel one first"`; else `create(&conn, &member_key, channel_id as i64, &parsed.text, (now + parsed.delay_secs) as i64, now as i64)`. Guard drops (no `.await` inside).
     3. Reply `ServerResponse::Notice { text: format!("⏰ Reminder set for {} — I'll DM you.", humanize(parsed.delay_secs)) }` where `humanize` is a small local helper producing `"90m"`-style → `"1h 30m"` / `"3 days"`; keep it in `reminders.rs` as `pub fn humanize_delay(secs: u64) -> String` so it is unit-testable.
 
-- [ ] **Step 9: Handler arms (`handlers.rs`, sync).** Neither is added to `request_requires_membership`'s allow-list (default-deny does the mesh gating).
+- [x] **Step 9: Handler arms (`handlers.rs`, sync).** Neither is added to `request_requires_membership`'s allow-list (default-deny does the mesh gating).
   - **`ListMyReminders`** — no timeout gate (read), no channel visibility (a reminder is not channel content). `ok(ServerResponse::MyReminders { reminders: reminders::list_pending_for(conn, member)?.iter().map(reminders::to_info).collect() })`.
   - **`CancelReminder { reminder_id }`** — `state.widget_limiter.allow(&caller_bytes)` (consistency with other mutations; over-limit → `err("slow down")`), **no** timeout gate (managing your own private state is not channel content) → `reminders::cancel(conn, reminder_id, member)?`; `false` → **`err("reminder not found")`** — the byte-identical string for a foreign id, an already-fired one, and a nonexistent one (no oracle) → `true` → `ok(ServerResponse::Ok)`.
 
-- [ ] **Step 10: Tests.**
+- [x] **Step 10: Tests.**
   `reminders.rs mod tests` (pure): `parse_happy_90m_taco`; `parse_units_case_insensitive` (`2H`, `3D`); `parse_rejects_zero_and_over_bounds` (`0m`, `31d` → the duration message); `parse_rejects_garbage_and_missing_text` (`banana x`, `90m`, `""` → `REMINDER_USAGE`); `parse_rejects_501_char_text`; `parse_preserves_pipes_verbatim`; `humanize_delay_forms`.
   `reminders.rs` (in-memory conn via `crate::db::open_in_memory()`): `create_and_count_pending_is_per_owner`; `list_pending_for_never_returns_another_owner`; `cancel_guarded_by_owner` (foreign id → `false`, row still `pending`); `list_due_respects_status_due_at_and_batch_cap` (create 205 due → 200 returned); `mark_sent_is_single_shot` (second call `false`).
   `bots.rs mod tests`: `get_or_create_system_identity_is_idempotent` (call 3× → same pk, `SELECT COUNT(*) FROM bots WHERE kind='system'` == 1, and a `members` row exists with `is_bot`); `list_bots_excludes_system_identity`; `list_members_visible_excludes_system_while_list_members_includes_it`.
   `handlers.rs mod tests`: `test_get_members_hides_system_identity_legacy_and_mesh` (assert absent on a legacy server **and** with a mesh `log_state` present — the `is_bot ||` whitelist path); `test_remove_bot_refuses_system_identity` (error + the `bots` row survives); `test_list_my_reminders_returns_only_callers_rows`; `test_cancel_reminder_foreign_id_is_opaque_not_found` (error string == the one for a nonexistent id, and the foreign row is untouched); `test_add_command_accepts_reminder_kind_and_takes_arg`.
   `widgets.rs mod tests`: `sweep_once_due_reminder_produces_one_dm_and_flips_sent` (exactly one `PendingDm`, zero broadcasts, row `status='sent'`); `sweep_once_reminder_is_idempotent` (second `sweep_once` at the same `now` → `dms.is_empty()`); `sweep_once_ignores_cancelled_reminder`; plus the two shipped tests updated to the `SweepOutcome` shape.
 
-- [ ] **Step 11: Gates + commit.**
+- [x] **Step 11: Gates + commit.**
 ```bash
 cd /home/deez/farder-events
 cargo test -p farder-server 2>&1 | tail -30
@@ -315,7 +317,7 @@ git commit -m "feat(reminders): server system identity + reminders table/module 
 
 **Interfaces produced:** the `channel_events` module; `EventInfo`; `ServerRequest::{GetEvent, RsvpEvent, ClearRsvp, CancelEvent, EditEvent}`; `ServerResponse::Event`; `ActiveWidgets.events`; `ServerEvent::EventUpdated`; RunCommand kind `"event"`; the sweeper's three event passes.
 
-- [ ] **Step 1: DDL.** `db.rs` `init_schema`, after the T1 `reminders` block:
+- [x] **Step 1: DDL.** `db.rs` `init_schema`, after the T1 `reminders` block:
 
 ```sql
 CREATE TABLE IF NOT EXISTS channel_events (
@@ -347,7 +349,7 @@ CREATE TABLE IF NOT EXISTS channel_event_rsvps (
 ```
 No FK to `messages` (deleting the card **cancels**; rows retained for audit). The three nullable `*_at` guard columns are what make each sweeper action exactly-once.
 
-- [ ] **Step 2: Protocol (`crates/farder-protocol/src/server.rs`, appended).**
+- [x] **Step 2: Protocol (`crates/farder-protocol/src/server.rs`, appended).**
 
 ```rust
 /// Live event state, broadcast whole on every change (`EventUpdated`) and returned
@@ -399,7 +401,7 @@ EventUpdated { event: EventInfo },   // -> EventTarget::Subscribers(channel_id)
 ```
 `EditEvent` is a **full replace** of the editable fields (same validation as creation) — no partial-patch ambiguity. No request ever carries an actor field; the actor is always the authenticated connection key. Terminal states fold into `status` (no `EventStarted`/`EventCancelled` variants).
 
-- [ ] **Step 3: `channel_events.rs` (new module; `pub mod channel_events;` in `lib.rs`, after `channels`).** Mirrors `polls.rs`/`giveaways.rs` style, including a `const EVENT_SELECT: &str` + `fn row_to_event(row) -> rusqlite::Result<EventRow>` pair.
+- [x] **Step 3: `channel_events.rs` (new module; `pub mod channel_events;` in `lib.rs`, after `channels`).** Mirrors `polls.rs`/`giveaways.rs` style, including a `const EVENT_SELECT: &str` + `fn row_to_event(row) -> rusqlite::Result<EventRow>` pair.
 
 ```rust
 pub const ATTENDEE_NAME_CAP: usize = 10;
@@ -489,13 +491,13 @@ fn utc_stamp(conn: &Connection, secs: i64) -> String {
   3. Build `EventInfo` + `MessageInfo`, commit, return `Ok(Some((info, msg)))`.
 - **`list_upcoming_in_channel`** — `WHERE channel_id=?1 AND status='upcoming' AND starts_at > ?2 ORDER BY id ASC LIMIT ?3` (the `starts_at > now` half excludes due-but-unswept events, matching the RSVP cutoff's exactness).
 
-- [ ] **Step 4: Dispatch — kind `"event"` (`connection.rs`).** New `if cmd.kind.as_str() == "event" { … }` branch beside `"poll"`/`"giveaway"`/`"reminder"`, **after every existing gate runs unchanged**: `content_block_reason` → `command_limiter` (5/10 s) → `check_run_command_channel_auth` (not-timed-out + DM-participant/blocked + `SEND_MESSAGES`). **That is the creation permission — NO MANAGE_SERVER gate.** Events are social: anyone who can post in the channel can plan one. (Deliberate divergence from `/giveaway`, which resolves MANAGE_SERVER at dispatch; giveaways hand out prizes, events do not.)
+- [x] **Step 4: Dispatch — kind `"event"` (`connection.rs`).** New `if cmd.kind.as_str() == "event" { … }` branch beside `"poll"`/`"giveaway"`/`"reminder"`, **after every existing gate runs unchanged**: `content_block_reason` → `command_limiter` (5/10 s) → `check_run_command_channel_auth` (not-timed-out + DM-participant/blocked + `SEND_MESSAGES`). **That is the creation permission — NO MANAGE_SERVER gate.** Events are social: anyone who can post in the channel can plan one. (Deliberate divergence from `/giveaway`, which resolves MANAGE_SERVER at dispatch; giveaways hand out prizes, events do not.)
   1. `channel_events::parse_event_args(&args)` — pure, no lock. `Err(reason)` → `Error { reason }` to the invoker; nothing posts.
   2. One scoped `state.db.lock()` calling `channel_events::create_event_card(&mut conn, channel_id, &member_key, &parsed, crate::db::now())` (which resolves the start time internally via `resolve_start`, returning its `Err(reason)` as a user-facing error — mirror the `"poll"` branch's error mapping so a bounds violation is a plain `Error`, not `internal error:`). **Guard drops before any `.await`.**
   3. `broadcast_event(Subscribers(channel_id), NewMessage { message }).await`, then `broadcast_event(Subscribers(channel_id), EventUpdated { event }).await` (pre-seeds connected reducers so the widget mounts with state, no `GetEvent` round-trip), then `ServerResponse::Ok`.
   - `handlers.rs` `AddCommand`: add `"event"` to the no-extra-fields arm (T1 already widened the error text and `takes_arg`).
 
-- [ ] **Step 5: Handler arms (`handlers.rs`, sync).** All five are membership-gated automatically — **do not touch `request_requires_membership`.**
+- [x] **Step 5: Handler arms (`handlers.rs`, sync).** All five are membership-gated automatically — **do not touch `request_requires_membership`.**
   **Shared preamble** (write it once as a local closure/helper and use it in all five):
 ```rust
 let row = match crate::channel_events::get(conn, event_id)? { Some(r) => r, None => return err("event not found") };
@@ -508,7 +510,7 @@ if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? { ret
   - **`CancelEvent { event_id }`** — `require_not_timed_out` → preamble → `row.status == "upcoming"` else `err("event already ended or cancelled")` → **authz: creator OR MANAGE_SERVER**: `if row.creator != *member { if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? { return Ok(denied); } }` → `channel_events::cancel(conn, event_id, now)` → `ok_with(Ok, [EventUpdated])`. **The DMs to the Going list are NOT sent here** — a sync handler cannot `.await`; the sweeper's cancel-notify pass drains `cancel_notified_at IS NULL` within ≤15 s. One DM code path, one crash-safety guard.
   - **`EditEvent { … }`** — `require_not_timed_out` → preamble → `row.status == "upcoming"` else `err("only an upcoming event can be edited")` → creator-or-MANAGE_SERVER (same expression as Cancel) → re-run **the same field validation as creation**: title `1..=120`, location `<=120`, description `<=500`, `now + 60 <= starts_at <= now + 365d`, `remind_lead` ∈ `{None} ∪ REMIND_LEADS` else `err("invalid reminder lead")` → `channel_events::edit(..., rearm_reminder = (starts_at as i64 != row.starts_at))` → `ok_with(Ok, [EventUpdated])`. If the new lead moment is already past but the start is still future, the next sweep fires the reminder immediately — **documented and deliberate**, better than silently skipping.
 
-- [ ] **Step 6: `DeleteMessage` hook (`handlers.rs`, extend the shipped `match v.get("type")`).** Add:
+- [x] **Step 6: `DeleteMessage` hook (`handlers.rs`, extend the shipped `match v.get("type")`).** Add:
 ```rust
 Some("event") => {
     if let Some(eid) = v.get("id").and_then(|i| i.as_i64()) {
@@ -529,11 +531,11 @@ Some("event") => {
 ```
 Rows retained (audit). The cancel-notify pass then DMs the Going list — **deleting the card is a cancellation, and attendees are told.** No announcement can ever post (the `status='upcoming'` guard in `start_and_announce` fails).
 
-- [ ] **Step 7: `ListActiveWidgets` — third query + 3-WAY merge (`handlers.rs:2592-2637`).** Add
+- [x] **Step 7: `ListActiveWidgets` — third query + 3-WAY merge (`handlers.rs:2592-2637`).** Add
 `let event_rows = crate::channel_events::list_upcoming_in_channel(conn, channel_id as i64, now, ACTIVE_WIDGETS_CAP as u32)?;`
 and **rewrite the 2-way loop as a 3-way merge** over `created_at` (each list is already `id ASC` = creation order). Deterministic tie-break order: **poll, then giveaway, then event**. Keep `ACTIVE_WIDGETS_CAP = 20` **combined**, then `ok(ServerResponse::ActiveWidgets { polls, giveaways, events })`. No per-viewer fields, no rate limit (read, `GetPoll` class), no `.await`. **Also update the test helper `active_widgets(r)` (`handlers.rs:6845`) to destructure three fields and return a 3-tuple**, and fix its existing call sites.
 
-- [ ] **Step 8: Sweeper — the three event passes (`widgets.rs::sweep_once`).** Resolve the system identity **once per tick**, at the top of the event section:
+- [x] **Step 8: Sweeper — the three event passes (`widgets.rs::sweep_once`).** Resolve the system identity **once per tick**, at the top of the event section:
 ```rust
 let system_pk = match crate::bots::get_or_create_system_identity(conn) {
     Ok(pk) => Some(pk),
@@ -548,13 +550,13 @@ let system_pk = match crate::bots::get_or_create_system_identity(conn) {
   - **Cancel-notify pass (§5.4):** `for row in channel_events::list_cancel_unnotified(conn)?` → `mark_cancel_notified` false ⇒ skip → one `PendingDm` per **Going** responder: `format!("❌ \"{}\" was cancelled.", title)`. **No channel message** — the card flip is the public record (the `CancelGiveaway` precedent).
   Each pass wraps its top-level call in `match … { Err(e) => tracing::warn!(...), Ok(rows) => … }` — one bad row never panics the sweeper. `start_and_announce` needs `&mut Connection`; `sweep_once` takes `&Connection`, so either (a) change `sweep_once` to take `&mut rusqlite::Connection` and let the sweeper pass `&mut *conn` from its `MutexGuard`, **or** (b) have `start_and_announce` use explicit `conn.execute("BEGIN")` / `COMMIT` / `ROLLBACK` on `&Connection`. **Pick (a)** — it is the smaller, type-checked change; update both shipped `sweep_once` tests to `let mut conn = …`.
 
-- [ ] **Step 9: Tests.**
+- [x] **Step 9: Tests.**
   `channel_events.rs mod tests` (pure parse): `parse_positional_title_when_location_description`; `parse_remind_final_segment_is_deterministic` (`… | remind 1h` and `… | remind none`, case-insensitive); `parse_relative_forms` (`3d`, `in 3d`, `2h`); `parse_absolute_at_unix`; `parse_rejects_wall_clock_with_builder_hint` (assert the exact hint string); `parse_empty_third_segment_means_no_location`; `parse_rejects_over_length_title_location_description`; `resolve_start_bounds` (`now+30` rejected, `now+400d` rejected, `now+60` **accepted**).
   `channel_events.rs` (in-memory conn): `create_event_card_links_message_event_and_widget` (widget JSON `{"type":"event","id":N}`, message author == invoker, `author_badge` NULL, `author_name_override` NULL — the `create_poll_card_links_message_poll_and_widget` template); `rsvp_upsert_moves_member_between_options_without_changing_total`; `clear_rsvp_returns_false_when_none`; `build_info_counts_are_full_totals_while_names_cap_at_ten` (13 going ⇒ `going_count == 13 && going_names.len() == 10`); `responders_going_and_maybe_excludes_no`; `edit_changed_start_nulls_reminded_at_unchanged_does_not`; `list_upcoming_in_channel_excludes_started_cancelled_past_and_other_channels_id_asc_limit`.
   `handlers.rs mod tests` (fixtures `setup()` / `add_member` / `make_channel` / `fake_state`): `test_rsvp_event_happy_emits_event_updated_to_subscribers`; `test_rsvp_event_bogus_response_errors`; `test_rsvp_event_after_starts_at_unswept_errors`; `test_rsvp_event_on_cancelled_errors`; `test_rsvp_event_without_view_channel_is_opaque_not_found` (**assert the reason is byte-identical to the nonexistent-id reason**); `test_event_timeout_gating` (denied on RSVP/clear/cancel/edit, **allowed** on `GetEvent`); `test_clear_rsvp_with_no_rsvp_is_ok_with_no_event`; `test_cancel_event_authz_matrix` (rando → MANAGE_SERVER error, creator → cancelled, MANAGE_SERVER holder → cancelled, twice → err); `test_edit_event_validation_and_reminder_rearm`; `test_get_event_my_rsvp_is_per_requester`; `test_delete_message_on_event_card_cancels_and_emits_both`; `test_list_active_widgets_includes_upcoming_events_excludes_started_cancelled_and_caps_at_20_combined`; `test_add_command_accepts_event_kind_and_takes_arg`; `test_run_command_event_kind_creates_card_with_invoker_authorship`.
   `widgets.rs mod tests`: `sweep_once_event_lead_dms_going_and_maybe_only_then_never_again` (marks `reminded_at`; second sweep → zero); `sweep_once_event_start_and_lead_same_tick_sends_start_batch_only`; `sweep_once_event_start_flips_announces_once_and_dms_going_only` (assert `status='started'`, **exactly one** announcement with `author_badge == Some("BOT")`, `author_name_override == Some("Events")`, `reply_to == Some(card_id)`, then a second sweep leaves `SELECT COUNT(*) FROM messages` **unchanged**); `sweep_once_cancelled_event_dms_going_once_then_none`; `sweep_once_start_pass_skips_event_cancelled_first` (no announcement).
 
-- [ ] **Step 10: Gates + commit.**
+- [x] **Step 10: Gates + commit.**
 ```bash
 cd /home/deez/farder-events
 cargo test -p farder-server 2>&1 | tail -30
@@ -571,7 +573,7 @@ git commit -m "feat(events): channel_events tables + module + protocol + dispatc
 
 **Files:** `client/src-tauri/src/commands.rs`; `client/src-tauri/src/main.rs`; `client/src-tauri/src/bridge.rs`; `client/src/lib/tauri-bridge.ts`; `client/src/lib/types.ts`; `client/src/hooks/useServerEvents.ts`; `client/src/context/ServerContext.tsx`.
 
-- [ ] **Step 1: Seven new Tauri commands + one widened.** In `client/src-tauri/src/commands.rs`, standard 3-arm mapping (`ServerResponse::X => Ok(..)`, `Error { reason } => Err(reason)`, `other => Err(format!("unexpected response: {:?}", other))`). **`EventInfo` passes through raw** — it has no `Option<PublicKey>`, so no `giveaway_json`-style mapping is needed.
+- [x] **Step 1: Seven new Tauri commands + one widened.** In `client/src-tauri/src/commands.rs`, standard 3-arm mapping (`ServerResponse::X => Ok(..)`, `Error { reason } => Err(reason)`, `other => Err(format!("unexpected response: {:?}", other))`). **`EventInfo` passes through raw** — it has no `Option<PublicKey>`, so no `giveaway_json`-style mapping is needed.
 ```rust
 #[derive(serde::Serialize)] pub struct EventState { pub event: EventInfo, pub my_rsvp: Option<String> }
 
@@ -599,14 +601,14 @@ for f in get_event rsvp_event clear_rsvp cancel_event edit_event list_my_reminde
   printf "%s: " "$f"; grep -c "\b$f\b" src/main.rs; done   # each must be >= 1
 ```
 
-- [ ] **Step 2: Event bridge (`client/src-tauri/src/bridge.rs`).** Beside the `PollUpdated`/`GiveawayUpdated` arms (`:212-215`), **before** the `_ => Ok(())` catch-all:
+- [x] **Step 2: Event bridge (`client/src-tauri/src/bridge.rs`).** Beside the `PollUpdated`/`GiveawayUpdated` arms (`:212-215`), **before** the `_ => Ok(())` catch-all:
 ```rust
 ServerEvent::EventUpdated { event } =>
     app.emit("server:event_updated", serde_json::json!({ "server_id": sid, "event": event })),
 ```
 (No pubkey mapping — `EventInfo.creator` serializes as `{ bytes }`, the `PollInfo.creator` shape.)
 
-- [ ] **Step 3: TS types (`client/src/lib/types.ts`).**
+- [x] **Step 3: TS types (`client/src/lib/types.ts`).**
 ```ts
 export interface EventInfo {
   id: number; channel_id: number; message_id: number;
@@ -624,7 +626,7 @@ export interface ReminderInfo { id: number; text: string; due_at: number; create
 ```
 Update `CommandInfo.kind`'s doc comment to list `event` and `reminder`.
 
-- [ ] **Step 4: Bridge fns (`client/src/lib/tauri-bridge.ts`).**
+- [x] **Step 4: Bridge fns (`client/src/lib/tauri-bridge.ts`).**
 ```ts
 getEvent(serverId: string, eventId: number): Promise<EventState>
 rsvpEvent(serverId: string, eventId: number, response: string): Promise<void>
@@ -636,7 +638,7 @@ cancelReminder(serverId: string, reminderId: number): Promise<void>
 ```
 camelCase invoke args (`{ serverId, eventId, … }` — Tauri maps to snake_case params), snake_case response fields. Widen `runCommand(...)` (`:977`) to `Promise<string | null>` and `listActiveWidgets(...)` (`:1046`) to `Promise<{ polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] }>`. **The three existing `await api.runCommand(...)` call sites compile unchanged** (they discard the result).
 
-- [ ] **Step 5: Reducer + listener (`client/src/context/ServerContext.tsx`, `client/src/hooks/useServerEvents.ts`).**
+- [x] **Step 5: Reducer + listener (`client/src/context/ServerContext.tsx`, `client/src/hooks/useServerEvents.ts`).**
   `PerServerState` (beside `polls`/`giveaways` at `:28-36`):
 ```ts
 events: Record<number, { event: EventInfo; myRsvp: string | null }>;   // init {}
@@ -656,7 +658,7 @@ listen("server:event_updated", (e) => {
 }).then(safePush);
 ```
 
-- [ ] **Step 6: Gates + commit.**
+- [x] **Step 6: Gates + commit.**
 ```bash
 cd /home/deez/farder-events/client/src-tauri && cargo build 2>&1 | tail -20
 cd /home/deez/farder-events/client && npx tsc --noEmit
@@ -671,7 +673,7 @@ git commit -m "feat(events): client plumbing — 7 Tauri commands, Notice-aware 
 
 **Files:** `client/src/components/EventWidget.tsx` (**new**); `client/src/components/EventBuilderModal.tsx` (**new**); `client/src/components/Message.tsx`; `client/src/components/LinkedWidgetCard.tsx`; `client/src/components/ActiveWidgetsBar.tsx`; the three `client/src/themes/*/theme.css`.
 
-- [ ] **Step 1: `EventWidget.tsx`.** Props **identical in contract** to `PollWidget`/`GiveawayWidget` so `LinkedWidgetCard` and `ActiveWidgetsBar` can host it:
+- [x] **Step 1: `EventWidget.tsx`.** Props **identical in contract** to `PollWidget`/`GiveawayWidget` so `LinkedWidgetCard` and `ActiveWidgetsBar` can host it:
 ```ts
 interface EventWidgetProps {
   serverId: string;
@@ -691,7 +693,7 @@ interface EventWidgetProps {
   - `.widget-copy-link` 🔗 copies `farder://widget/event/${event.channel_id}/${event.id}` (the shipped clipboard + `toast.success` idiom).
   - Errors surface inline in `.error-text`; the next `EventUpdated`/refetch self-corrects.
 
-- [ ] **Step 2: `EventBuilderModal.tsx` (create **and** edit mode).** Modeled on `PollBuilderModal` (same `.modal-overlay` / `.modal-dialog` / `.modal-titlebar` / `.modal-body` / `.connect-section` / `.connect-label` / `.connect-input` / `.connect-actions` / `.error-text` scaffolding — **zero new CSS**).
+- [x] **Step 2: `EventBuilderModal.tsx` (create **and** edit mode).** Modeled on `PollBuilderModal` (same `.modal-overlay` / `.modal-dialog` / `.modal-titlebar` / `.modal-body` / `.connect-section` / `.connect-label` / `.connect-input` / `.connect-actions` / `.error-text` scaffolding — **zero new CSS**).
 ```ts
 interface Props {
   serverId: string; channelId: number;
@@ -716,7 +718,7 @@ const args = [title, `@${startsAt}`,
   (The location segment is emitted — possibly empty — whenever a description exists, because the grammar is positional.)
   **Edit mode** calls `api.editEvent(serverId, editing.id, title, description || null, location || null, startsAt, leadSecs)` where `leadSecs` ∈ `{null, 900, 3600, 86400}`; prefill from `editing` (`new Date(editing.starts_at * 1000)` split into local date/time strings). On success `onCreated()`; on rejection stay open with the error.
 
-- [ ] **Step 3: `Message.tsx` — widget slot, event links, and the NEW channel link.**
+- [x] **Step 3: `Message.tsx` — widget slot, event links, and the NEW channel link.**
   1. Widget slot (`:372-392`): add `case "event": return <EventWidget serverId={serverId} eventId={parsedWidget.id} onUnavailable={() => setWidgetUnavailable(true)} />;`.
   2. Widen **all four** widget-link places to the three-kind union: `WIDGET_LINK_REGEX` (`:40`) → `/farder:\/\/widget\/(poll|giveaway|event)\/(\d+)\/(\d+)/gi`; `isWidgetLink` (`:118`) → `/^farder:\/\/widget\/(poll|giveaway|event)\/\d+\/\d+$/i`; `parseWidgetLink` (`:125`) regex + its `kind` cast → `"poll" | "giveaway" | "event"`; the pill label in `renderContent` (`:191`) → a small `widgetPillLabel(seg)` helper returning `"📊 Poll link"` / `"🎉 Giveaway link"` / `"📅 Event link"`. (`isWidgetSchemeLink`'s `farder://widget/` prefix test already covers `event` — no change.)
   3. **New channel link** for the reminder DM's link-back:
@@ -730,15 +732,15 @@ function isChannelLink(s: string): boolean { return /^farder:\/\/channel\/\d+$/i
      - `isInviteLink` (`:134`): `if (isWidgetSchemeLink(s) || isChannelSchemeLink(s)) return false;`
      - the invite-embeds IIFE (`:593`): `if (isWidgetSchemeLink(m) || isChannelSchemeLink(m)) continue;`
 
-- [ ] **Step 4: `LinkedWidgetCard.tsx`.** `WidgetLink.kind` → `"poll" | "giveaway" | "event"`; the `info` lookup gains `server?.events[link.widgetId]?.event ?? null`; the unavailable label gains `"Event not available"`; the render gains an `EventWidget` branch with the **unchanged** `refetch={sameChannel ? "mount" : "interval"}` discipline and `onUnavailable={() => setUnavailable(true)}`. The channel-id consistency check is unchanged in shape.
+- [x] **Step 4: `LinkedWidgetCard.tsx`.** `WidgetLink.kind` → `"poll" | "giveaway" | "event"`; the `info` lookup gains `server?.events[link.widgetId]?.event ?? null`; the unavailable label gains `"Event not available"`; the render gains an `EventWidget` branch with the **unchanged** `refetch={sameChannel ? "mount" : "interval"}` discipline and `onUnavailable={() => setUnavailable(true)}`. The channel-id consistency check is unchanged in shape.
 
-- [ ] **Step 5: `ActiveWidgetsBar.tsx`.** `Chip.kind` → `"poll" | "giveaway" | "event"`; `open` state kind likewise; build event chips from `activeWidgets.events` looking each info up in `server.events[id]?.event` — `label = title`, `endsAt = starts_at`, `order = message_id` (message ids are one monotonically increasing sequence, so `message_id` ASC IS creation order across all three kinds); the chip prefix is 📅 and `.widget-chip-time` shows `formatChipTime(starts_at, nowSecs)` ("in 3h"). The dropdown hosts `<EventWidget serverId={serverId} eventId={id} refetch="mount" />`. Both `ACTIVE_WIDGETS` dispatches in the fetch effect gain `events: res.events` / `events: []`.
+- [x] **Step 5: `ActiveWidgetsBar.tsx`.** `Chip.kind` → `"poll" | "giveaway" | "event"`; `open` state kind likewise; build event chips from `activeWidgets.events` looking each info up in `server.events[id]?.event` — `label = title`, `endsAt = starts_at`, `order = message_id` (message ids are one monotonically increasing sequence, so `message_id` ASC IS creation order across all three kinds); the chip prefix is 📅 and `.widget-chip-time` shows `formatChipTime(starts_at, nowSecs)` ("in 3h"). The dropdown hosts `<EventWidget serverId={serverId} eventId={id} refetch="mount" />`. Both `ACTIVE_WIDGETS` dispatches in the fetch effect gain `events: res.events` / `events: []`.
 
-- [ ] **Step 6: Theme CSS (CLAUDE.md rule — ALL THREE files).** 15 new classes, modeled on the shipped `.poll-*` / `.link-embed` families, **colors only via `var(--xp-…)`** (`--xp-panel-bg`/`--xp-border` card, `--xp-blue` for `.event-rsvp-btn--mine`, `--xp-text-muted` for counts/names, `--xp-text-normal` for the title):
+- [x] **Step 6: Theme CSS (CLAUDE.md rule — ALL THREE files).** 15 new classes, modeled on the shipped `.poll-*` / `.link-embed` families, **colors only via `var(--xp-…)`** (`--xp-panel-bg`/`--xp-border` card, `--xp-blue` for `.event-rsvp-btn--mine`, `--xp-text-muted` for counts/names, `--xp-text-normal` for the title):
 `.event-widget`, `.event-title`, `.event-when`, `.event-when-rel`, `.event-location`, `.event-description`, `.event-rsvp-row`, `.event-rsvp-btn`, `.event-rsvp-btn--mine`, `.event-attendees`, `.event-attendee-group`, `.event-attendee-name`, `.event-more`, `.event-happening`, `.event-cancelled`.
 **Verified: none of these names currently exist in any theme file** (no collisions). Everything else reuses shipped classes (`.widget-link-pill`, `.widget-copy-link`, `.widget-chip-time`, `.linked-widget-unavailable`, `.error-text`, `.xp-button`, the `.modal-*`/`.connect-*` family).
 
-- [ ] **Step 7: Gates + commit.**
+- [x] **Step 7: Gates + commit.**
 ```bash
 cd /home/deez/farder-events/client && npx tsc --noEmit
 grep -l "event-rsvp-btn" /home/deez/farder-events/client/src/themes/*/theme.css   # must list all 3
@@ -754,7 +756,7 @@ git commit -m "feat(events): EventWidget + EventBuilderModal + widget/channel li
 
 **Files:** `client/src/components/ReminderBuilderModal.tsx` (**new**); `client/src/components/settings/MyReminders.tsx` (**new**); `client/src/components/MessageInput.tsx`; `client/src/components/settings/SettingsModal.tsx`; `client/src/components/BotsTab.tsx`; `docs/modules/server-widgets.md`; `docs/modules/tauri-commands.md`; `docs/modules/tauri-bridge.md`; `docs/modules/frontend-state.md`; `docs/modules/protocol.md`; `docs/modules/server-handlers.md`; `ARCHITECTURE.md`; `docs/superpowers/specs/2026-07-27-mesh-rung2-e2ee-design.md`.
 
-- [ ] **Step 1: `ReminderBuilderModal.tsx`.** Same modal scaffolding as `PollBuilderModal` (**zero new CSS**).
+- [x] **Step 1: `ReminderBuilderModal.tsx`.** Same modal scaffolding as `PollBuilderModal` (**zero new CSS**).
 ```ts
 interface Props { serverId: string; channelId: number; trigger: string;
                   onClose: () => void; onCreated: (notice: string | null) => void }
@@ -762,9 +764,9 @@ interface Props { serverId: string; channelId: number; trigger: string;
   Fields: **Remind me in** — a duration `<select class="connect-input">` (15 minutes `15m` / 30 minutes `30m` / 1 hour `1h` / 3 hours `3h` / 1 day `1d` / 3 days `3d` / 7 days `7d` / **Custom…**) plus the shared custom row copied from `PollBuilderModal` (`<input type="number" min={1} max={9999}>` + a minutes/hours/days `<select>`), resolved through a local copy of `resolveDurationToken` with `MIN_DURATION_SECS = 60` / `MAX_DURATION_SECS = 30 * 86_400`; `null` → `.error-text` "Duration must be between 1 minute and 30 days". **Reminder text** — `<textarea class="connect-input">` required, ≤500, live `{n}/500` counter.
   Submit: `const notice = await api.runCommand(serverId, trigger, channelId, `${token} ${text}`)` → `onCreated(notice)`. **No pipe-stripping** (the reminder grammar has no delimiter past the first space).
 
-- [ ] **Step 2: `MessageInput.tsx` builder wiring.** Widen the `builder` state kind to `"poll" | "giveaway" | "event" | "reminder"` and the two kind checks (`:228` in `handleSend`, `:322` in `insertCommand`) to include `"event"` and `"reminder"`. Render `<EventBuilderModal … trigger={builder.trigger} />` for `builder?.kind === "event"` and `<ReminderBuilderModal … />` for `"reminder"`, both beside the existing two (`:572`/`:581`). `handleBuilderCreated` gains an optional `notice` parameter: `if (notice) toast.success(notice);` then the existing close+clear (the shipped `toast` import already exists in this file family — add it if absent). Wire `onCreated={handleBuilderCreated}` for all four (poll/giveaway pass nothing → `notice` undefined → no toast).
+- [x] **Step 2: `MessageInput.tsx` builder wiring.** Widen the `builder` state kind to `"poll" | "giveaway" | "event" | "reminder"` and the two kind checks (`:228` in `handleSend`, `:322` in `insertCommand`) to include `"event"` and `"reminder"`. Render `<EventBuilderModal … trigger={builder.trigger} />` for `builder?.kind === "event"` and `<ReminderBuilderModal … />` for `"reminder"`, both beside the existing two (`:572`/`:581`). `handleBuilderCreated` gains an optional `notice` parameter: `if (notice) toast.success(notice);` then the existing close+clear (the shipped `toast` import already exists in this file family — add it if absent). Wire `onCreated={handleBuilderCreated}` for all four (poll/giveaway pass nothing → `notice` undefined → no toast).
 
-- [ ] **Step 3: `MyReminders.tsx` (`client/src/components/settings/`).** Mirror `AlertSubscriptions.tsx` **exactly** — `useActiveServerId()`, a `useEffect` calling `api.listMyReminders(serverId)` into local state, `<div className="settings-panel"><h2 className="settings-panel-title">Reminders</h2>`, an `.error-text` line, `<SettingsSection label="Upcoming reminders">`, one row per reminder:
+- [x] **Step 3: `MyReminders.tsx` (`client/src/components/settings/`).** Mirror `AlertSubscriptions.tsx` **exactly** — `useActiveServerId()`, a `useEffect` calling `api.listMyReminders(serverId)` into local state, `<div className="settings-panel"><h2 className="settings-panel-title">Reminders</h2>`, an `.error-text` line, `<SettingsSection label="Upcoming reminders">`, one row per reminder:
 ```tsx
 <div key={r.id} className="organizer-row">
   <span className="organizer-name">{r.text} · {new Date(r.due_at * 1000).toLocaleString()}</span>
@@ -777,11 +779,11 @@ interface Props { serverId: string; channelId: number; trigger: string;
   `handleCancel` → `api.cancelReminder(serverId, id)` → drop from local state; failure → `.error-text`. Muted `var(--xp-text-muted)` empty state ("You have no upcoming reminders.") and disconnected state ("Connect to a server to manage reminders."). **Reuses the shipped `.organizer-*` / `.settings-panel*` classes → ZERO new CSS.**
   `SettingsModal.tsx`: `SectionId` (`:13`) gains `| "reminders"`; `SECTIONS` (`:15`) gains `{ id: "reminders", label: "Reminders" }`; the render switch (`:66`) gains `{active === "reminders" && <MyReminders />}`.
 
-- [ ] **Step 4: `BotsTab.tsx` kind selector.** `cmdKind` union (`:45`) → `"text" | "api" | "poll" | "giveaway" | "event" | "reminder"`; `isWidgetKind` (`:136`) → `cmdKind === "poll" || cmdKind === "giveaway" || cmdKind === "event" || cmdKind === "reminder"` (no extra fields for any of them); two `<option>`s after `giveaway` (`:537`): `<option value="event">Event</option>`, `<option value="reminder">Reminder</option>`; the Add-button enable expression (`:619`) treats them like poll/giveaway (name + trigger + description only). Muted hint lines beside the existing poll/giveaway ones:
+- [x] **Step 4: `BotsTab.tsx` kind selector.** `cmdKind` union (`:45`) → `"text" | "api" | "poll" | "giveaway" | "event" | "reminder"`; `isWidgetKind` (`:136`) → `cmdKind === "poll" || cmdKind === "giveaway" || cmdKind === "event" || cmdKind === "reminder"` (no extra fields for any of them); two `<option>`s after `giveaway` (`:537`): `<option value="event">Event</option>`, `<option value="reminder">Reminder</option>`; the Add-button enable expression (`:619`) treats them like poll/giveaway (name + trigger + description only). Muted hint lines beside the existing poll/giveaway ones:
   - Event: `Members run /<trigger> Title | 3d [| location] [| description] [| remind 1h]` — or just pick it from "/" to open the form.
   - Reminder: `Members run /<trigger> 90m take the pizza out` — private, nothing is posted.
 
-- [ ] **Step 5: Docs (same commit — docs are treated like tests).**
+- [x] **Step 5: Docs (same commit — docs are treated like tests).**
   - **`docs/modules/server-widgets.md`** — update the `widgets.rs` section for the new `sweep_once(conn: &mut Connection, now: u64) -> SweepOutcome` signature, `SweepOutcome`/`PendingDm`, the DM loop in `spawn_widget_sweeper`, and the three event passes + the reminder pass (state persisted under a guarded UPDATE **before** the DM ⇒ **at-most-once**, never duplicated). Add full sections for **`channel_events.rs`** and **`reminders.rs`** using `docs/modules/_TEMPLATE.md` (every `pub fn` from T1 Step 5 and T2 Step 3, with its one-line contract).
   - **New file `docs/modules/server-system-identity.md`** (or a clearly-titled section appended to `server-widgets.md` — pick one and link it from `ARCHITECTURE.md`): `bots::get_or_create_system_identity` / `send_bot_dm_as` / `send_system_dm`, the `bots.kind='system'` row + unique partial index, and the **four** exclusion points (`GetMembers` via `members::list_members_visible` **before** the mesh `is_bot ||` whitelist, `bots::list_bots`, `RemoveBot`, and "no auth path reads `bots.secret_key`").
   - **`docs/modules/tauri-commands.md`** — the 7 new commands (name, params, return, side effects, matching `invoke("…")`), plus the **changed** `run_command` return (`Result<Option<String>, String>`; `Notice` → `Some(text)`) and the `ActiveWidgets.events` field.
@@ -792,7 +794,7 @@ interface Props { serverId: string; channelId: number; trigger: string;
   - **`ARCHITECTURE.md`** — add `channel_events.rs` / `reminders.rs` to the `crates/farder-server/` module line (`:46`), and extend the widget data-path paragraph (`:180`) with the event/reminder flow + the system identity.
   - **`docs/superpowers/specs/2026-07-27-mesh-rung2-e2ee-design.md`** — add the two feature-matrix rows (**events → server-features-channel-only**, **personal reminders → server-features-channel-only**). **This is the ONLY §9 deliverable: the rung-2 gate is not implemented in `farder-server` today (verified — no `e2ee` column, no "encrypted channels" refusal anywhere in the crate), so there is no code to write here. Do not invent one.**
 
-- [ ] **Step 6: Gates + commit.**
+- [x] **Step 6: Gates + commit.**
 ```bash
 cd /home/deez/farder-events/client && npx tsc --noEmit
 cd /home/deez/farder-events && cargo test -p farder-server 2>&1 | tail -20
@@ -804,19 +806,19 @@ git commit -m "feat(reminders): ReminderBuilderModal + MyReminders settings + Bo
 
 ## Security checklist (verify before calling the feature done)
 
-- [ ] All authorization is server-side against the **authenticated connection key**; no request carries an RSVP-er, creator, or reminder-owner field — ids and content only.
-- [ ] All 7 new requests are membership-gated by **default-deny** `request_requires_membership` (**nothing added to its 4-entry allow-list**) — mesh log-membership gating is automatic. One test per request asserts a non-member is refused.
-- [ ] Every channel-scoped action funnels through `handlers::widget_channel_visible` and returns the **byte-identical** `"event not found"` for missing / channel-gone / non-DM-participant / no-`VIEW_CHANNEL`. `CancelReminder` returns `"reminder not found"` for a foreign id. `ListActiveWidgets` keeps `"channel not found"`.
-- [ ] Creation gates are the RunCommand gates, unchanged: `content_block_reason` → `command_limiter` (5/10 s) → `check_run_command_channel_auth`. Events add **no** MANAGE_SERVER gate (product decision); reminders add a **20-per-user** cap.
-- [ ] `require_not_timed_out` on every mutating interaction (RSVP / clear / cancel / edit); reads (`GetEvent`, `ListMyReminders`) exempt, matching `GetPoll`. `CancelReminder` is deliberately exempt (managing your own private state is not channel content).
-- [ ] `state.widget_limiter` (10/10 s) on RSVP / clear / cancel-reminder; creation bounded by `command_limiter`.
-- [ ] **No DB `MutexGuard` across any `.await`** — dispatch arms, handlers (all sync), and the sweeper (DMs returned as **data** precisely so `send_system_dm` re-acquires the mutex only after the sweeper's guard is gone).
-- [ ] **Persist-before-notify with single-shot guards:** `reminded_at IS NULL`, `status='upcoming'` (start), `cancel_notified_at IS NULL`, `status='pending'` (reminder). A crash can never double-fire or double-announce; the accepted cost is **at-most-once**.
-- [ ] Length/enum bounds enforced **server-side** (client mirrors for UX only): title ≤120, location ≤120, description ≤500, reminder text ≤500, `response ∈ {going,maybe,no}`, `remind_lead ∈ {900,3600,86400}`, `starts_at ∈ [now+60, now+365d]`, duration ∈ [1 m, 30 d], ≤20 pending reminders per user.
-- [ ] **Attendee privacy is a deliberate divergence, not an oversight** (spec §8): the roster IS the feature; RSVPing is an affirmative public act; **display names only, never public keys**, capped at 10 per option; the visibility boundary is the channel; `EventUpdated` targets `Subscribers(channel_id)` only.
-- [ ] `reminders.text` is readable **only by its owner** (`ListMyReminders` is key-scoped in SQL, `CancelReminder` is opaque), never broadcast, and produces no channel artifact.
-- [ ] The `messages.widget` JSON is **server-written only** and parsed defensively client-side (try/catch, numeric id).
-- [ ] The system identity holds no roles, is filtered out of `GetMembers` **before** the mesh `is_bot` whitelist, is excluded from `list_bots`, cannot be removed via `RemoveBot`, and cannot authenticate a connection (no auth path reads `bots.secret_key`). Its secret is the **same trust class as the existing ticker-bot secrets** — stated openly, not implied.
+- [x] All authorization is server-side against the **authenticated connection key**; no request carries an RSVP-er, creator, or reminder-owner field — ids and content only.
+- [x] All 7 new requests are membership-gated by **default-deny** `request_requires_membership` (**nothing added to its 4-entry allow-list**) — mesh log-membership gating is automatic. One test per request asserts a non-member is refused.
+- [x] Every channel-scoped action funnels through `handlers::widget_channel_visible` and returns the **byte-identical** `"event not found"` for missing / channel-gone / non-DM-participant / no-`VIEW_CHANNEL`. `CancelReminder` returns `"reminder not found"` for a foreign id. `ListActiveWidgets` keeps `"channel not found"`.
+- [x] Creation gates are the RunCommand gates, unchanged: `content_block_reason` → `command_limiter` (5/10 s) → `check_run_command_channel_auth`. Events add **no** MANAGE_SERVER gate (product decision); reminders add a **20-per-user** cap.
+- [x] `require_not_timed_out` on every mutating interaction (RSVP / clear / cancel / edit); reads (`GetEvent`, `ListMyReminders`) exempt, matching `GetPoll`. `CancelReminder` is deliberately exempt (managing your own private state is not channel content).
+- [x] `state.widget_limiter` (10/10 s) on RSVP / clear / cancel-reminder; creation bounded by `command_limiter`.
+- [x] **No DB `MutexGuard` across any `.await`** — dispatch arms, handlers (all sync), and the sweeper (DMs returned as **data** precisely so `send_system_dm` re-acquires the mutex only after the sweeper's guard is gone).
+- [x] **Persist-before-notify with single-shot guards:** `reminded_at IS NULL`, `status='upcoming'` (start), `cancel_notified_at IS NULL`, `status='pending'` (reminder). A crash can never double-fire or double-announce; the accepted cost is **at-most-once**.
+- [x] Length/enum bounds enforced **server-side** (client mirrors for UX only): title ≤120, location ≤120, description ≤500, reminder text ≤500, `response ∈ {going,maybe,no}`, `remind_lead ∈ {900,3600,86400}`, `starts_at ∈ [now+60, now+365d]`, duration ∈ [1 m, 30 d], ≤20 pending reminders per user.
+- [x] **Attendee privacy is a deliberate divergence, not an oversight** (spec §8): the roster IS the feature; RSVPing is an affirmative public act; **display names only, never public keys**, capped at 10 per option; the visibility boundary is the channel; `EventUpdated` targets `Subscribers(channel_id)` only.
+- [x] `reminders.text` is readable **only by its owner** (`ListMyReminders` is key-scoped in SQL, `CancelReminder` is opaque), never broadcast, and produces no channel artifact.
+- [x] The `messages.widget` JSON is **server-written only** and parsed defensively client-side (try/catch, numeric id).
+- [x] The system identity holds no roles, is filtered out of `GetMembers` **before** the mesh `is_bot` whitelist, is excluded from `list_bots`, cannot be removed via `RemoveBot`, and cannot authenticate a connection (no auth path reads `bots.secret_key`). Its secret is the **same trust class as the existing ticker-bot secrets** — stated openly, not implied.
 
 ## Owner runtime verification (server changed → sidecar rebuild; two clients ideal)
 

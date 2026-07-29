@@ -2567,7 +2567,7 @@ Fetch a channel's OPEN widgets for the active-widgets bar: `ActiveWidgets { poll
 
 Seven commands backing the event card (`EventWidget.tsx`) and the reminders settings panel. An event is created by **running** a slash command of kind `"event"` (Group 25 `run_command` — the server posts a card whose `MessageInfo.widget` JSON carries `{ "type": "event", "id": <i64> }`); a reminder is created by running a kind-`"reminder"` command, which posts **nothing** and answers `Notice`. These commands only *interact* with existing rows by id.
 
-All seven are membership-gated server-side by the default-deny `request_requires_membership` rule (none of them is on its 4-entry allow-list). Authorization is **always the authenticated connection key** — no command carries an RSVP-er, creator, or reminder-owner field. `rsvp_event`, `clear_rsvp`, `cancel_event`, `edit_event`, and `cancel_reminder` are timeout-gated and share the server's widget rate limit (10 interactions / 10 s per member); `get_event` and `list_my_reminders` are reads and exempt (matching `get_poll`). Visibility failures return the opaque `"event not found"` / `"reminder not found"` — identical for missing, invisible, and forbidden, so neither is an existence oracle.
+All seven are membership-gated server-side by the default-deny `request_requires_membership` rule (none of them is on its 4-entry allow-list). Authorization is **always the authenticated connection key** — no command carries an RSVP-er, creator, or reminder-owner field. `rsvp_event`, `clear_rsvp`, `cancel_event` and `edit_event` are timeout-gated; those four **plus `cancel_reminder`** share the server's widget rate limit (10 interactions / 10 s per member). `cancel_reminder` is deliberately **not** timeout-gated — managing your own private nudges is not channel content, so a timed-out member is not silenced from doing it (handlers.rs takes `widget_limiter` and skips `require_not_timed_out`). `get_event` and `list_my_reminders` are reads and exempt from both (matching `get_poll`). Visibility failures return the opaque `"event not found"` / `"reminder not found"` — identical for missing, invisible, and forbidden, so neither is an existence oracle.
 
 ### `get_event(state, server_id, event_id) -> Result<EventState, String>`
 
@@ -2643,6 +2643,6 @@ Edit an upcoming event. **FULL REPLACE** of the editable fields — every field 
 
 Cancel one of **my** pending reminders.
 
-**Side effects:** sends `ServerRequest::CancelReminder { reminder_id }`; the server's `UPDATE` is scoped `owner = caller AND status = 'pending'`. Someone else's id (or a nonexistent one) rejects with the byte-identical opaque `"reminder not found"`. No broadcast — reminders are private.
+**Side effects:** sends `ServerRequest::CancelReminder { reminder_id }`; the server's `UPDATE` is scoped `owner = caller AND status = 'pending'`. Someone else's id (or a nonexistent one) rejects with the byte-identical opaque `"reminder not found"`. No broadcast — reminders are private. Rate-limited by `widget_limiter`, but **not** timeout-gated (see the group preamble).
 
 **invoke name:** `"cancel_reminder"` → `cancelReminder(serverId, reminderId)`.

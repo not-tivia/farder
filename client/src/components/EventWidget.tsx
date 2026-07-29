@@ -25,7 +25,8 @@ interface EventWidgetProps {
 let cachedOwnPk: string | null = null;
 
 /** How long after the start a 'started' event still reads as "Happening now"
- *  before it settles into a past-tense "Started <local time>". */
+ *  before it settles into a past-tense "Started". (The local time itself is
+ *  never repeated here — `.event-when` below always renders it, exactly once.) */
 const HAPPENING_WINDOW_SECS = 3 * 3600;
 
 /** "in 3 days"-style lead-time hint (unix-seconds delta until the start). */
@@ -195,9 +196,7 @@ export default function EventWidget({ serverId, eventId, onUnavailable, refetch 
 
       {started && (
         <div className="event-happening">
-          {nowSecs - event.starts_at < HAPPENING_WINDOW_SECS
-            ? "Happening now"
-            : `Started ${whenLocal}`}
+          {nowSecs - event.starts_at < HAPPENING_WINDOW_SECS ? "Happening now" : "Started"}
         </div>
       )}
 
