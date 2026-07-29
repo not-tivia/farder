@@ -5,8 +5,8 @@ use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
-    BotAlertInfo, CategoryInfo, ChannelInfo, CommandInfo, GiveawayInfo, MemberInfo, MessageInfo,
-    PollInfo, RoleInfo, ServerRequest, ServerResponse, WebhookInfo,
+    BotAlertInfo, CategoryInfo, ChannelInfo, CommandInfo, EventInfo, GiveawayInfo, MemberInfo,
+    MessageInfo, PollInfo, ReminderInfo, RoleInfo, ServerRequest, ServerResponse, WebhookInfo,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -2691,6 +2691,11 @@ pub async fn delete_command(
 /// Invoke a slash command. On success the server broadcasts the bot response
 /// to the channel; returns Ok. On failure (unknown trigger, rate-limit, etc.)
 /// returns Err so the invoker can display the reason without posting to the channel.
+///
+/// Returns `Some(text)` when the server answered with `Notice` — an
+/// invoker-only confirmation that posts NOTHING to the channel (the `/remind`
+/// kind); `None` for the ordinary post-to-channel kinds. Callers that don't
+/// care simply discard the value.
 #[tauri::command]
 pub async fn run_command(
     state: State<'_, Arc<AppState>>,
@@ -2698,12 +2703,13 @@ pub async fn run_command(
     trigger: String,
     channel_id: u64,
     args: String,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     match bridge::send_request(&state, &server_id, ServerRequest::RunCommand { trigger, channel_id, args })
         .await
         .map_err(|e| e.to_string())?
     {
-        ServerResponse::Ok => Ok(()),
+        ServerResponse::Ok => Ok(None),
+        ServerResponse::Notice { text } => Ok(Some(text)),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }
@@ -4831,21 +4837,179 @@ pub async fn reroll_giveaway(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Event widget interactions
+// ---------------------------------------------------------------------------
+
+/// Full event state for the widget: the shared `EventInfo` plus MY OWN RSVP
+/// (self-only — the broadcast never carries it). `EventInfo` needs no
+/// `giveaway_json`-style remapping: it has no `Option<PublicKey>`, so plain
+/// serde gives the frontend shape (`creator` as `{ bytes }`, same as
+/// `PollInfo.creator`).
+#[derive(serde::Serialize)]
+pub struct EventState {
+    pub event: EventInfo,
+    pub my_rsvp: Option<String>,
+}
+
+/// Fetch an event's current state (roster, counts, status) plus my own RSVP.
+/// The widget's state-recovery path on mount/reconnect/server switch.
+/// Missing/invisible events come back as the server's opaque "event not found".
+#[tauri::command]
+pub async fn get_event(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    event_id: i64,
+) -> Result<EventState, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetEvent { event_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Event { event, my_rsvp } => Ok(EventState { event, my_rsvp }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Set (or change) my RSVP on an upcoming event — "going" | "maybe" | "no".
+/// The server broadcasts the updated roster as `server:event_updated`.
+#[tauri::command]
+pub async fn rsvp_event(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    event_id: i64,
+    response: String,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::RsvpEvent { event_id, response })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Withdraw my RSVP entirely (the poll-retract idiom: pressing my own option).
+#[tauri::command]
+pub async fn clear_rsvp(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    event_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ClearRsvp { event_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Cancel an upcoming event (creator or MANAGE_SERVER — enforced server-side).
+/// The server DMs every responder once.
+#[tauri::command]
+pub async fn cancel_event(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    event_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::CancelEvent { event_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Edit an upcoming event. FULL REPLACE of the editable fields (no partial
+/// patch): every field is sent every time, validated exactly as on creation.
+/// Creator or MANAGE_SERVER — enforced server-side.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn edit_event(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    event_id: i64,
+    title: String,
+    description: Option<String>,
+    location: Option<String>,
+    starts_at: u64,
+    remind_lead: Option<u64>,
+) -> Result<(), String> {
+    match bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::EditEvent { event_id, title, description, location, starts_at, remind_lead },
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Personal reminders
+// ---------------------------------------------------------------------------
+
+/// My own pending reminders, soonest first. Owner-scoped server-side by the
+/// authenticated connection key — the request carries no owner field.
+#[tauri::command]
+pub async fn list_my_reminders(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<ReminderInfo>, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ListMyReminders)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::MyReminders { reminders } => Ok(reminders),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Cancel one of MY pending reminders. Someone else's id gets the same opaque
+/// "reminder not found" as a nonexistent one.
+#[tauri::command]
+pub async fn cancel_reminder(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    reminder_id: i64,
+) -> Result<(), String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::CancelReminder { reminder_id })
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
 /// The channel's OPEN widgets for the active-widgets bar. Shared state only —
-/// no per-viewer fields (`my_vote`/`my_entered` stay exclusive to `get_poll` /
-/// `get_giveaway`; the chip dropdown's widget pulls those via its own mount
-/// fetch). Giveaways go through `giveaway_json` so the frontend shape
-/// (`winner` as a "vk_<hex>" string) can never drift from the `get_giveaway`
-/// and `server:giveaway_updated` paths.
+/// no per-viewer fields (`my_vote`/`my_entered`/`my_rsvp` stay exclusive to
+/// `get_poll` / `get_giveaway` / `get_event`; the chip dropdown's widget pulls
+/// those via its own mount fetch). Giveaways go through `giveaway_json` so the
+/// frontend shape (`winner` as a "vk_<hex>" string) can never drift from the
+/// `get_giveaway` and `server:giveaway_updated` paths; events pass through raw
+/// (no optional pubkey to remap).
 #[derive(serde::Serialize)]
 pub struct ActiveWidgets {
     pub polls: Vec<PollInfo>,
     pub giveaways: Vec<serde_json::Value>,
+    pub events: Vec<EventInfo>,
 }
 
-/// Fetch a channel's open polls + giveaways (each list oldest-first, 20
-/// combined server-side). Visibility failures come back as the server's opaque
-/// "channel not found".
+/// Fetch a channel's open polls + giveaways + upcoming events (each list
+/// oldest-first, 20 combined server-side). Visibility failures come back as
+/// the server's opaque "channel not found".
 #[tauri::command]
 pub async fn list_active_widgets(
     state: State<'_, Arc<AppState>>,
@@ -4856,11 +5020,10 @@ pub async fn list_active_widgets(
         .await
         .map_err(|e| e.to_string())?
     {
-        // `events` is discarded here on purpose: T3 widens `ActiveWidgets` and
-        // wires the event chips. Until then the field is decoded and dropped.
-        ServerResponse::ActiveWidgets { polls, giveaways, events: _ } => Ok(ActiveWidgets {
+        ServerResponse::ActiveWidgets { polls, giveaways, events } => Ok(ActiveWidgets {
             polls,
             giveaways: giveaways.iter().map(giveaway_json).collect(),
+            events,
         }),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),

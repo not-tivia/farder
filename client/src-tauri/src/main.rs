@@ -291,6 +291,13 @@ fn main() {
             commands::cancel_giveaway,
             commands::reroll_giveaway,
             commands::list_active_widgets,
+            commands::get_event,
+            commands::rsvp_event,
+            commands::clear_rsvp,
+            commands::cancel_event,
+            commands::edit_event,
+            commands::list_my_reminders,
+            commands::cancel_reminder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

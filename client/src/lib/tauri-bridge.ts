@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo, PollInfo, GiveawayInfo } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo, PollInfo, GiveawayInfo, EventInfo, EventState, ReminderInfo } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -973,9 +973,13 @@ export async function deleteCommand(serverId: string, id: number): Promise<void>
 
 /** Invoke a slash command. Throws with the server's reason string if the
  *  command fails (unknown trigger, rate-limit, etc.) so the caller can show
- *  it locally without posting anything to the channel. */
-export async function runCommand(serverId: string, trigger: string, channelId: number, args: string): Promise<void> {
-  return invoke<void>("run_command", { serverId, trigger, channelId, args });
+ *  it locally without posting anything to the channel.
+ *
+ *  Resolves to a NOTICE string when the server answered with an invoker-only
+ *  confirmation that posted nothing (the `/remind` kind), else `null`. Callers
+ *  that post to the channel can ignore the value. */
+export async function runCommand(serverId: string, trigger: string, channelId: number, args: string): Promise<string | null> {
+  return invoke<string | null>("run_command", { serverId, trigger, channelId, args });
 }
 
 // ── Poll & giveaway widgets ───────────────────────────────────────────────────
@@ -1039,10 +1043,65 @@ export async function rerollGiveaway(serverId: string, giveawayId: number): Prom
   return invoke<void>("reroll_giveaway", { serverId, giveawayId });
 }
 
+// ── Event widgets ────────────────────────────────────────────────────────────
+
+/** Fetch an event's current state plus my own RSVP — the widget's
+ *  state-recovery path on mount/reconnect/server switch. Missing/invisible
+ *  events reject with the server's opaque "event not found". */
+export async function getEvent(serverId: string, eventId: number): Promise<EventState> {
+  return invoke<EventState>("get_event", { serverId, eventId });
+}
+
+/** Set (or change) my RSVP — "going" | "maybe" | "no". The updated roster
+ *  arrives via server:event_updated. */
+export async function rsvpEvent(serverId: string, eventId: number, response: string): Promise<void> {
+  return invoke<void>("rsvp_event", { serverId, eventId, response });
+}
+
+/** Withdraw my RSVP entirely (pressing my own option — the poll-retract idiom). */
+export async function clearRsvp(serverId: string, eventId: number): Promise<void> {
+  return invoke<void>("clear_rsvp", { serverId, eventId });
+}
+
+/** Cancel an upcoming event (creator or MANAGE_SERVER — enforced server-side).
+ *  The server DMs every responder once. */
+export async function cancelEvent(serverId: string, eventId: number): Promise<void> {
+  return invoke<void>("cancel_event", { serverId, eventId });
+}
+
+/** Edit an upcoming event — FULL REPLACE of the editable fields (send them all
+ *  every time; same validation as creation). Creator or MANAGE_SERVER. */
+export async function editEvent(
+  serverId: string,
+  eventId: number,
+  title: string,
+  description: string | null,
+  location: string | null,
+  startsAt: number,
+  remindLead: number | null,
+): Promise<void> {
+  return invoke<void>("edit_event", { serverId, eventId, title, description, location, startsAt, remindLead });
+}
+
+// ── Personal reminders ───────────────────────────────────────────────────────
+
+/** My own pending reminders, soonest first. Owner-scoped server-side by the
+ *  connection key — nothing here is another member's. */
+export async function listMyReminders(serverId: string): Promise<ReminderInfo[]> {
+  return invoke<ReminderInfo[]>("list_my_reminders", { serverId });
+}
+
+/** Cancel one of MY pending reminders. Someone else's id rejects with the same
+ *  opaque "reminder not found" as a nonexistent one. */
+export async function cancelReminder(serverId: string, reminderId: number): Promise<void> {
+  return invoke<void>("cancel_reminder", { serverId, reminderId });
+}
+
 /** The channel's open widgets for the active-widgets bar — each list oldest-first,
- *  20 combined server-side. Shared state only (no per-viewer my_vote/my_entered;
- *  the chip dropdown's widget pulls those via its own getPoll/getGiveaway mount
- *  fetch). Visibility failures reject with the server's opaque "channel not found". */
-export async function listActiveWidgets(serverId: string, channelId: number): Promise<{ polls: PollInfo[]; giveaways: GiveawayInfo[] }> {
-  return invoke<{ polls: PollInfo[]; giveaways: GiveawayInfo[] }>("list_active_widgets", { serverId, channelId });
+ *  20 combined server-side. Shared state only (no per-viewer my_vote/my_entered/
+ *  my_rsvp; the chip dropdown's widget pulls those via its own getPoll/
+ *  getGiveaway/getEvent mount fetch). Visibility failures reject with the
+ *  server's opaque "channel not found". */
+export async function listActiveWidgets(serverId: string, channelId: number): Promise<{ polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] }> {
+  return invoke<{ polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] }>("list_active_widgets", { serverId, channelId });
 }

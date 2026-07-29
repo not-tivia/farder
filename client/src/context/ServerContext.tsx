@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 
 export interface PerServerState {
@@ -28,12 +28,15 @@ export interface PerServerState {
   polls: Record<number, { poll: PollInfo; myVote: number | null }>;
   /** Giveaway widget state keyed by giveaway id. */
   giveaways: Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>;
+  /** Event widget state keyed by event id. `myRsvp` is self-only ("going" |
+   *  "maybe" | "no" | null) and never arrives in a broadcast. */
+  events: Record<number, { event: EventInfo; myRsvp: string | null }>;
   /** The viewed channel's open-widget id lists for the active-widgets bar
-   *  (ids only — the infos live in `polls`/`giveaways`, one source of truth
-   *  with the widgets). Replaced whole by `ACTIVE_WIDGETS` on channel
-   *  switch/reconnect; maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`.
-   *  `null` until the first fetch. */
-  activeWidgets: { channelId: number; polls: number[]; giveaways: number[] } | null;
+   *  (ids only — the infos live in `polls`/`giveaways`/`events`, one source of
+   *  truth with the widgets). Replaced whole by `ACTIVE_WIDGETS` on channel
+   *  switch/reconnect; maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`/
+   *  `EVENT_UPDATED`. `null` until the first fetch. */
+  activeWidgets: { channelId: number; polls: number[]; giveaways: number[]; events: number[] } | null;
 }
 
 export interface AppState {
@@ -72,6 +75,7 @@ const initialPerServerState: PerServerState = {
   membershipStatus: "member",
   polls: {},
   giveaways: {},
+  events: {},
   activeWidgets: null,
 };
 
@@ -152,7 +156,10 @@ export type AppAction =
   | { type: "GIVEAWAY_UPDATED"; serverId: string; payload: GiveawayInfo }
   | { type: "GIVEAWAY_STATE"; serverId: string; payload: { giveaway: GiveawayInfo; myEntered: boolean } }
   | { type: "GIVEAWAY_MY_ENTERED"; serverId: string; payload: { giveawayId: number; myEntered: boolean } }
-  | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[] } };
+  | { type: "EVENT_UPDATED"; serverId: string; payload: EventInfo }
+  | { type: "EVENT_STATE"; serverId: string; payload: { event: EventInfo; myRsvp: string | null } }
+  | { type: "EVENT_MY_RSVP"; serverId: string; payload: { eventId: number; myRsvp: string | null } }
+  | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -423,7 +430,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
           }
         } else if (
           !activeWidgets.polls.includes(poll.id) &&
-          activeWidgets.polls.length + activeWidgets.giveaways.length < ACTIVE_WIDGETS_CAP
+          activeWidgets.polls.length + activeWidgets.giveaways.length + activeWidgets.events.length < ACTIVE_WIDGETS_CAP
         ) {
           activeWidgets = { ...activeWidgets, polls: [...activeWidgets.polls, poll.id] };
         }
@@ -454,7 +461,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
           }
         } else if (
           !activeWidgets.giveaways.includes(giveaway.id) &&
-          activeWidgets.polls.length + activeWidgets.giveaways.length < ACTIVE_WIDGETS_CAP
+          activeWidgets.polls.length + activeWidgets.giveaways.length + activeWidgets.events.length < ACTIVE_WIDGETS_CAP
         ) {
           activeWidgets = { ...activeWidgets, giveaways: [...activeWidgets.giveaways, giveaway.id] };
         }
@@ -471,11 +478,43 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       if (!existing) return state;
       return { ...state, giveaways: { ...state.giveaways, [giveawayId]: { ...existing, myEntered } } };
     }
+    case "EVENT_UPDATED": {
+      // Broadcast events carry shared state only — preserve my existing RSVP.
+      const event = action.payload;
+      const myRsvp = state.events[event.id]?.myRsvp ?? null;
+      // Maintain the active-widgets bar for the viewed channel: an event
+      // created live appends its chip; started/cancelled drops it. 20-cap kept
+      // across all three widget kinds.
+      let activeWidgets = state.activeWidgets;
+      if (activeWidgets && event.channel_id === activeWidgets.channelId) {
+        if (event.status !== "upcoming") {
+          if (activeWidgets.events.includes(event.id)) {
+            activeWidgets = { ...activeWidgets, events: activeWidgets.events.filter((id) => id !== event.id) };
+          }
+        } else if (
+          !activeWidgets.events.includes(event.id) &&
+          activeWidgets.polls.length + activeWidgets.giveaways.length + activeWidgets.events.length < ACTIVE_WIDGETS_CAP
+        ) {
+          activeWidgets = { ...activeWidgets, events: [...activeWidgets.events, event.id] };
+        }
+      }
+      return { ...state, activeWidgets, events: { ...state.events, [event.id]: { event, myRsvp } } };
+    }
+    case "EVENT_STATE": {
+      const { event, myRsvp } = action.payload;
+      return { ...state, events: { ...state.events, [event.id]: { event, myRsvp } } };
+    }
+    case "EVENT_MY_RSVP": {
+      const { eventId, myRsvp } = action.payload;
+      const existing = state.events[eventId];
+      if (!existing) return state;
+      return { ...state, events: { ...state.events, [eventId]: { ...existing, myRsvp } } };
+    }
     case "ACTIVE_WIDGETS": {
       // Replace the bar's id lists whole and upsert every info into the shared
-      // polls/giveaways slices with broadcast semantics (shared state only —
-      // preserve any existing per-viewer myVote/myEntered).
-      const { channelId, polls, giveaways } = action.payload;
+      // polls/giveaways/events slices with broadcast semantics (shared state
+      // only — preserve any existing per-viewer myVote/myEntered/myRsvp).
+      const { channelId, polls, giveaways, events } = action.payload;
       const pollsSlice = { ...state.polls };
       for (const p of polls) {
         pollsSlice[p.id] = { poll: p, myVote: state.polls[p.id]?.myVote ?? null };
@@ -484,14 +523,20 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       for (const g of giveaways) {
         giveawaysSlice[g.id] = { giveaway: g, myEntered: state.giveaways[g.id]?.myEntered ?? false };
       }
+      const eventsSlice = { ...state.events };
+      for (const ev of events) {
+        eventsSlice[ev.id] = { event: ev, myRsvp: state.events[ev.id]?.myRsvp ?? null };
+      }
       return {
         ...state,
         polls: pollsSlice,
         giveaways: giveawaysSlice,
+        events: eventsSlice,
         activeWidgets: {
           channelId,
           polls: polls.map((p) => p.id),
           giveaways: giveaways.map((g) => g.id),
+          events: events.map((ev) => ev.id),
         },
       };
     }

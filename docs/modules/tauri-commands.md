@@ -2425,7 +2425,7 @@ Delete a slash command by id. **MANAGE_SERVER-gated.**
 
 ---
 
-### `run_command(state, server_id, trigger, channel_id, args) -> Result<(), String>`
+### `run_command(state, server_id, trigger, channel_id, args) -> Result<Option<String>, String>`
 
 Invoke a slash command in a channel. Available to all members; per-user rate-limited (5 runs / 10 s) server-side.
 
@@ -2435,9 +2435,9 @@ Invoke a slash command in a channel. Available to all members; per-user rate-lim
 - `channel_id: u64` — the channel in which to post the bot response message.
 - `args: String` — argument string (everything after the trigger, possibly empty). For `"api"` commands, percent-encoded by the server before URL substitution.
 
-**Returns:** `()` on success — the server posted the bot message and broadcast `ServerEvent::NewMessage`. `Err(String)` if the trigger is unknown, the rate limit fires, the API fetch fails, or the member is content-blocked; the caller shows the reason locally and does **not** post to the channel.
+**Returns:** `Ok(None)` for the posting kinds — the server posted the bot message and broadcast `ServerEvent::NewMessage`. `Ok(Some(text))` when the server answered `ServerResponse::Notice { text }`: an **invoker-only confirmation that posted nothing** (the `"reminder"` kind — e.g. `"I'll remind you in 90 minutes."`); the caller shows it as a local toast. `Err(String)` if the trigger is unknown, the rate limit fires, the API fetch fails, the args fail validation, or the member is content-blocked; the caller shows the reason locally and does **not** post to the channel.
 
-**Side effects:** sends `ServerRequest::RunCommand { trigger, channel_id, args }`. On success the server inserts a message authored by the command's synthetic Ed25519 key with `author_badge = "BOT"` and broadcasts `ServerEvent::NewMessage { message }` to channel subscribers; then responds `ServerResponse::Ok`. On any failure the server responds `ServerResponse::Error { reason }` and does NOT post a message.
+**Side effects:** sends `ServerRequest::RunCommand { trigger, channel_id, args }`. On success the server inserts a message authored by the command's synthetic Ed25519 key with `author_badge = "BOT"` and broadcasts `ServerEvent::NewMessage { message }` to channel subscribers; then responds `ServerResponse::Ok`. Widget kinds (`"poll"` / `"giveaway"` / `"event"`) additionally persist the widget row and stamp the card's `MessageInfo.widget` JSON. The `"reminder"` kind persists a row and responds `ServerResponse::Notice` **without** posting anything. On any failure the server responds `ServerResponse::Error { reason }` and does NOT post a message.
 
 **invoke name:** `"run_command"` → `runCommand(serverId, trigger, channelId, args)` in `client/src/lib/tauri-bridge.ts`.
 
@@ -2553,10 +2553,96 @@ Redraw a finished giveaway's winner from the still-eligible entrants. **Creator-
 
 ### `list_active_widgets(state, server_id, channel_id) -> Result<ActiveWidgets, String>`
 
-Fetch a channel's OPEN widgets for the active-widgets bar: `ActiveWidgets { polls: Vec<PollInfo>, giveaways: Vec<serde_json::Value> }` — each list oldest-first (creation order), 20 combined server-side. Shared state only: no per-viewer `my_vote`/`my_entered` (those stay exclusive to `get_poll`/`get_giveaway`; the chip dropdown's widget pulls them via its own mount fetch). Giveaways are mapped through `giveaway_json` so the frontend shape (`winner` as a `"vk_<hex>"` string) matches the `get_giveaway` / `server:giveaway_updated` paths.
+Fetch a channel's OPEN widgets for the active-widgets bar: `ActiveWidgets { polls: Vec<PollInfo>, giveaways: Vec<serde_json::Value>, events: Vec<EventInfo> }` — each list oldest-first (creation order), 20 combined server-side. Shared state only: no per-viewer `my_vote`/`my_entered`/`my_rsvp` (those stay exclusive to `get_poll`/`get_giveaway`/`get_event`; the chip dropdown's widget pulls them via its own mount fetch). Giveaways are mapped through `giveaway_json` so the frontend shape (`winner` as a `"vk_<hex>"` string) matches the `get_giveaway` / `server:giveaway_updated` paths; **events pass through raw** (`EventInfo` has no optional `PublicKey`, so plain serde already gives the frontend shape). `events` carries only `status = "upcoming"` events.
 
 **Parameters:** `channel_id: u64` — the viewed channel (server channel or DM).
 
 **Side effects:** sends `ServerRequest::ListActiveWidgets { channel_id }`; pure read — no broadcasts, no rate limit. Visibility failures (nonexistent channel and channel the caller can't see alike) reject with the server's opaque `"channel not found"`; the client hides the bar rather than surfacing it.
 
 **invoke name:** `"list_active_widgets"` → `listActiveWidgets(serverId, channelId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+## Group 27 — Event widgets & personal reminders
+
+Seven commands backing the event card (`EventWidget.tsx`) and the reminders settings panel. An event is created by **running** a slash command of kind `"event"` (Group 25 `run_command` — the server posts a card whose `MessageInfo.widget` JSON carries `{ "type": "event", "id": <i64> }`); a reminder is created by running a kind-`"reminder"` command, which posts **nothing** and answers `Notice`. These commands only *interact* with existing rows by id.
+
+All seven are membership-gated server-side by the default-deny `request_requires_membership` rule (none of them is on its 4-entry allow-list). Authorization is **always the authenticated connection key** — no command carries an RSVP-er, creator, or reminder-owner field. `rsvp_event`, `clear_rsvp`, `cancel_event`, `edit_event`, and `cancel_reminder` are timeout-gated and share the server's widget rate limit (10 interactions / 10 s per member); `get_event` and `list_my_reminders` are reads and exempt (matching `get_poll`). Visibility failures return the opaque `"event not found"` / `"reminder not found"` — identical for missing, invisible, and forbidden, so neither is an existence oracle.
+
+### `get_event(state, server_id, event_id) -> Result<EventState, String>`
+
+Fetch an event's current state plus my own RSVP. The widget's state-recovery path on mount/reconnect/server switch.
+
+**Parameters:** `server_id: String`; `event_id: i64` — from the card's `widget` JSON.
+
+**Returns:** `EventState { event: EventInfo, my_rsvp: Option<String> }` — `my_rsvp` is self-only (`"going"` | `"maybe"` | `"no"` | `None`) and never rides in the broadcast. `EventInfo`'s roster is **display names only** (never public keys), capped at 10 per option with counts for the rest.
+
+**Side effects:** sends `ServerRequest::GetEvent { event_id }` → reads `ServerResponse::Event { event, my_rsvp }`. Pure read.
+
+**invoke name:** `"get_event"` → `getEvent(serverId, eventId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `rsvp_event(state, server_id, event_id, response) -> Result<(), String>`
+
+Set (or change) my RSVP on an **upcoming** event. One response per member; responding again moves it.
+
+**Parameters:** `event_id: i64`; `response: String` — `"going"` | `"maybe"` | `"no"` (validated server-side).
+
+**Side effects:** sends `ServerRequest::RsvpEvent { event_id, response }`; on success the server broadcasts `EventUpdated` with the new roster to channel subscribers. Rejected once the event has started or was cancelled.
+
+**invoke name:** `"rsvp_event"` → `rsvpEvent(serverId, eventId, response)`.
+
+---
+
+### `clear_rsvp(state, server_id, event_id) -> Result<(), String>`
+
+Withdraw my RSVP entirely (pressing my own option again — the poll-retract idiom). Idempotent.
+
+**Side effects:** sends `ServerRequest::ClearRsvp { event_id }`; broadcasts `EventUpdated` on success.
+
+**invoke name:** `"clear_rsvp"` → `clearRsvp(serverId, eventId)`.
+
+---
+
+### `cancel_event(state, server_id, event_id) -> Result<(), String>`
+
+Cancel an upcoming event. **MANAGE_SERVER-gated, enforced server-side** (`"missing MANAGE_SERVER permission"`).
+
+**Side effects:** sends `ServerRequest::CancelEvent { event_id }`; on success the server flips `status = "cancelled"`, broadcasts `EventUpdated`, and the sweeper DMs every responder exactly once from the system identity (single-shot `cancel_notified_at` guard).
+
+**invoke name:** `"cancel_event"` → `cancelEvent(serverId, eventId)`.
+
+---
+
+### `edit_event(state, server_id, event_id, title, description, location, starts_at, remind_lead) -> Result<(), String>`
+
+Edit an upcoming event. **FULL REPLACE** of the editable fields — every field is sent every time and validated exactly as on creation; there is no partial-patch semantics, so "did they mean to clear the location?" cannot arise. **MANAGE_SERVER-gated, enforced server-side.**
+
+**Parameters:** `event_id: i64`; `title: String` (1–120); `description: Option<String>` (≤500); `location: Option<String>` (≤120); `starts_at: u64` — absolute unix secs in `[now + 60, now + 365 d]`; `remind_lead: Option<u64>` — `900` | `3600` | `86400`, `None` = no lead DM.
+
+**Side effects:** sends `ServerRequest::EditEvent { .. }`; on success the server rewrites the row (re-arming the reminder when the timing changed) and broadcasts `EventUpdated`.
+
+**invoke name:** `"edit_event"` → `editEvent(serverId, eventId, title, description, location, startsAt, remindLead)`.
+
+---
+
+### `list_my_reminders(state, server_id) -> Result<Vec<ReminderInfo>, String>`
+
+**My own** pending reminders, soonest first. Scoped server-side by `owner = caller` in SQL — the request carries no owner field, so there is no way to ask for anyone else's.
+
+**Returns:** `Vec<ReminderInfo { id, text, due_at, created_at, channel_id }>`. `text` is never broadcast and produces no channel artifact.
+
+**Side effects:** sends `ServerRequest::ListMyReminders` → reads `ServerResponse::MyReminders { reminders }`. Pure read.
+
+**invoke name:** `"list_my_reminders"` → `listMyReminders(serverId)` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `cancel_reminder(state, server_id, reminder_id) -> Result<(), String>`
+
+Cancel one of **my** pending reminders.
+
+**Side effects:** sends `ServerRequest::CancelReminder { reminder_id }`; the server's `UPDATE` is scoped `owner = caller AND status = 'pending'`. Someone else's id (or a nonexistent one) rejects with the byte-identical opaque `"reminder not found"`. No broadcast — reminders are private.
+
+**invoke name:** `"cancel_reminder"` → `cancelReminder(serverId, reminderId)`.

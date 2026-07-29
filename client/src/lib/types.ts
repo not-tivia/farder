@@ -122,14 +122,62 @@ export interface GiveawayInfo {
   winner_name: string | null;
 }
 
+/** Live event state, broadcast whole on every change (`server:event_updated`)
+ *  and returned by `getEvent`. Shared state only — my own RSVP rides separately
+ *  as `my_rsvp` in the `getEvent` response.
+ *
+ *  The attendee roster is DISPLAY NAMES ONLY (never public keys), capped at 10
+ *  per option server-side; render "and N more" from `count - names.length`. */
+export interface EventInfo {
+  id: number;
+  channel_id: number;
+  message_id: number;
+  /** Serde-serialized PublicKey (same shape as MessageInfo.author); use publicKeyToString(). */
+  creator: { bytes: number[] };
+  title: string;
+  description: string | null;
+  location: string | null;
+  /** Absolute unix secs — no timezone travels with it; render with toLocaleString(). */
+  starts_at: number;
+  /** Secs before start for the lead-time DM: 900 | 3600 | 86400; null = none. */
+  remind_lead: number | null;
+  status: "upcoming" | "started" | "cancelled";
+  going_count: number;
+  maybe_count: number;
+  no_count: number;
+  /** Capped at 10 each by the server. */
+  going_names: string[];
+  maybe_names: string[];
+  no_names: string[];
+}
+
+/** Full event state: shared EventInfo plus my own RSVP (self-only). */
+export interface EventState {
+  event: EventInfo;
+  my_rsvp: string | null;
+}
+
+/** One of MY pending reminders (`listMyReminders`). Owner-scoped server-side by
+ *  the connection key; the text is never broadcast and posts nothing. */
+export interface ReminderInfo {
+  id: number;
+  text: string;
+  /** Absolute unix secs; render with toLocaleString(). */
+  due_at: number;
+  created_at: number;
+  /** Where it was set — link-back context only. */
+  channel_id: number;
+}
+
 export interface CommandInfo {
   id: number;
   trigger: string;
   description: string;
   takes_arg: boolean;
-  /** Command kind: "text" | "api" | "poll" | "giveaway". Empty string when
-   *  talking to an old server that predates the field (serde default).
-   *  Builder-form kinds (poll/giveaway) open a modal instead of raw text. */
+  /** Command kind: "text" | "api" | "poll" | "giveaway" | "event" | "reminder".
+   *  Empty string when talking to an old server that predates the field (serde
+   *  default). Builder-form kinds (poll/giveaway/event/reminder) open a modal
+   *  instead of raw text. */
   kind: string;
 }
 

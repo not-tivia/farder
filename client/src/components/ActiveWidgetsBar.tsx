@@ -65,11 +65,11 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
     api.listActiveWidgets(serverId, channelId)
       .then((res) => {
         if (cancelled) return;
-        dispatch({ type: "ACTIVE_WIDGETS", serverId, payload: { channelId, polls: res.polls, giveaways: res.giveaways } });
+        dispatch({ type: "ACTIVE_WIDGETS", serverId, payload: { channelId, polls: res.polls, giveaways: res.giveaways, events: res.events } });
       })
       .catch(() => {
         if (cancelled) return;
-        dispatch({ type: "ACTIVE_WIDGETS", serverId, payload: { channelId, polls: [], giveaways: [] } });
+        dispatch({ type: "ACTIVE_WIDGETS", serverId, payload: { channelId, polls: [], giveaways: [], events: [] } });
       });
     return () => { cancelled = true; };
   }, [serverId, connected, channelId, dispatch]);

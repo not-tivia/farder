@@ -78,6 +78,7 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `MembershipChanged` | `server:membership_changed` | `public_key` | `useServerEvents` → `membership_changed` listener re-fetches caller's membership status, member list, and pending queue |
 | `PollUpdated` | `server:poll_updated` | `poll` (`PollInfo` — counts/closed state, never voter identities) | `useServerEvents` → `POLL_UPDATED` (dropped for background servers; widgets re-hydrate via `getPoll` on next mount) |
 | `GiveawayUpdated` | `server:giveaway_updated` | `giveaway` (frontend JSON shape via `commands::giveaway_json` — `winner` as `"vk_<hex>"` string/null, `entry_count`, `status`; never entrant identities) | `useServerEvents` → `GIVEAWAY_UPDATED` (dropped for background servers; widgets re-hydrate via `getGiveaway` on next mount) |
+| `EventUpdated` | `server:event_updated` | `event` (`EventInfo`, plain serde — no remapping, it has no optional `PublicKey`; carries counts + the display-name roster capped at 10 per option, never attendee public keys, never the per-viewer `my_rsvp`) | `useServerEvents` → `EVENT_UPDATED` (dropped for background servers; widgets re-hydrate via `getEvent` on next mount) |
 
 **`server:member_presence_updated` payload fields:**
 - `server_id` — the server this event came from (added by `dispatch_event`, common to all `server:*` events).

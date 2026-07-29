@@ -46,7 +46,8 @@ These three files together are the entire client-side state layer. `ServerContex
 | `highlightMessageId` | `number \| null` | Message to scroll-to-and-highlight; cleared by the UI after use |
 | `polls` | `Record<number, { poll: PollInfo; myVote: number \| null }>` | Live poll state keyed by poll id. Populated lazily by `PollWidget` (`POLL_STATE` after `getPoll` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `POLL_UPDATED` broadcasts and `POLL_MY_VOTE` |
 | `giveaways` | `Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>` | Live giveaway state keyed by giveaway id. Populated lazily by `GiveawayWidget` (`GIVEAWAY_STATE` after `getGiveaway` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `GIVEAWAY_UPDATED` broadcasts and `GIVEAWAY_MY_ENTERED` |
-| `activeWidgets` | `{ channelId: number; polls: number[]; giveaways: number[] } \| null` | The viewed channel's open-widget **id lists** for the active-widgets bar (`ActiveWidgetsBar.tsx`); the infos are upserted into `polls`/`giveaways` so chips share one source of truth with the widgets. Replaced whole by `ACTIVE_WIDGETS` (fetched via `listActiveWidgets` on channel switch/reconnect), maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED` (append on open-and-missing, remove on closed/ended/cancelled, 20 combined cap). `null` until the first fetch |
+| `events` | `Record<number, { event: EventInfo; myRsvp: string \| null }>` | Live event-card state keyed by event id. Populated lazily by `EventWidget` (`EVENT_STATE` after `getEvent` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `EVENT_UPDATED` broadcasts and `EVENT_MY_RSVP`. `myRsvp` is `"going"`/`"maybe"`/`"no"`/`null` and is **self-only** — it never arrives in a broadcast |
+| `activeWidgets` | `{ channelId: number; polls: number[]; giveaways: number[]; events: number[] } \| null` | The viewed channel's open-widget **id lists** for the active-widgets bar (`ActiveWidgetsBar.tsx`); the infos are upserted into `polls`/`giveaways`/`events` so chips share one source of truth with the widgets. Replaced whole by `ACTIVE_WIDGETS` (fetched via `listActiveWidgets` on channel switch/reconnect), maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`/`EVENT_UPDATED` (append on open/upcoming-and-missing, remove on closed/ended/cancelled/started, 20 cap **combined across all three lists**). `null` until the first fetch |
 
 ---
 
@@ -150,9 +151,9 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | `OPEN_DM_PANEL` | Sets `dmPanelChannelId` |
 | `CLOSE_DM_PANEL` | Clears `dmPanelChannelId` |
 
-### Poll / giveaway widget actions (per-server)
+### Poll / giveaway / event widget actions (per-server)
 
-Broadcast events (`POLL_UPDATED` / `GIVEAWAY_UPDATED`) carry shared state only — the reducer preserves the local user's existing `myVote` / `myEntered` (defaulting to `null` / `false` for a slice not yet hydrated). The `MY_*` patch actions no-op when the id is not in state yet, so widgets must dispatch `POLL_STATE` / `GIVEAWAY_STATE` (from the `getPoll` / `getGiveaway` fetch) before relying on them.
+Broadcast events (`POLL_UPDATED` / `GIVEAWAY_UPDATED` / `EVENT_UPDATED`) carry shared state only — the reducer preserves the local user's existing `myVote` / `myEntered` / `myRsvp` (defaulting to `null` / `false` / `null` for a slice not yet hydrated). The `MY_*` patch actions no-op when the id is not in state yet, so widgets must dispatch `POLL_STATE` / `GIVEAWAY_STATE` / `EVENT_STATE` (from the `getPoll` / `getGiveaway` / `getEvent` fetch) before relying on them.
 
 | Action type | What it mutates |
 |---|---|
@@ -162,7 +163,10 @@ Broadcast events (`POLL_UPDATED` / `GIVEAWAY_UPDATED`) carry shared state only �
 | `GIVEAWAY_UPDATED` | Upserts `giveaways[giveaway.id].giveaway` from a `server:giveaway_updated` broadcast; preserves existing `myEntered`. Also maintains `activeWidgets` when set and the giveaway is in its channel: open-and-missing → append id (20 combined cap), ended/cancelled → remove id |
 | `GIVEAWAY_STATE` | Sets `giveaways[giveaway.id]` to `{ giveaway, myEntered }` (full self-inclusive state from `getGiveaway`) |
 | `GIVEAWAY_MY_ENTERED` | Patches only `myEntered` on an already-hydrated giveaway (optimistic local update after enter/leave) |
-| `ACTIVE_WIDGETS` | Replaces `activeWidgets` whole with `{ channelId, polls: ids, giveaways: ids }` (from `listActiveWidgets`; an empty payload hides the bar) and upserts every carried info into `polls`/`giveaways` with broadcast semantics (shared state only — existing `myVote`/`myEntered` preserved) |
+| `EVENT_UPDATED` | Upserts `events[event.id].event` from a `server:event_updated` broadcast; preserves existing `myRsvp`. Also maintains `activeWidgets` when set and the event is in its channel: upcoming-and-missing → append id (20 combined cap), started/cancelled → remove id |
+| `EVENT_STATE` | Sets `events[event.id]` to `{ event, myRsvp }` (full self-inclusive state from `getEvent`) |
+| `EVENT_MY_RSVP` | Patches only `myRsvp` on an already-hydrated event (local update after a successful RSVP/clear ack) |
+| `ACTIVE_WIDGETS` | Replaces `activeWidgets` whole with `{ channelId, polls: ids, giveaways: ids, events: ids }` (from `listActiveWidgets`; an empty payload hides the bar) and upserts every carried info into `polls`/`giveaways`/`events` with broadcast semantics (shared state only — existing `myVote`/`myEntered`/`myRsvp` preserved) |
 
 ### Typing actions (per-server)
 

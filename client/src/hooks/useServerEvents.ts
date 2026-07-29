@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
-import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo } from "../lib/types";
+import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo } from "../lib/types";
 import { publicKeyToString } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
@@ -463,6 +463,13 @@ export function useServerEvents(): void {
       const serverId = data.server_id;
       if (serverId !== activeRef.current) return;
       dispatch({ type: "GIVEAWAY_UPDATED", serverId, payload: data.giveaway });
+    }).then(safePush);
+
+    listen("server:event_updated", (e) => {
+      const data = e.payload as { server_id: string; event: EventInfo };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      dispatch({ type: "EVENT_UPDATED", serverId, payload: data.event });
     }).then(safePush);
 
     // Voice events — dispatched for ALL servers so voice activity is visible across servers

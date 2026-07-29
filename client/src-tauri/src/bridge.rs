@@ -213,6 +213,12 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:poll_updated", serde_json::json!({ "server_id": sid, "poll": poll })),
         ServerEvent::GiveawayUpdated { giveaway } =>
             app.emit("server:giveaway_updated", serde_json::json!({ "server_id": sid, "giveaway": crate::commands::giveaway_json(&giveaway) })),
+        // EventInfo needs no remapping: it has no optional PublicKey, so plain
+        // serde already gives the frontend shape (`creator` as `{ bytes }`).
+        // The per-viewer `my_rsvp` is deliberately absent — it rides only in
+        // the get_event response.
+        ServerEvent::EventUpdated { event } =>
+            app.emit("server:event_updated", serde_json::json!({ "server_id": sid, "event": event })),
         _ => Ok(()),
     };
 }
