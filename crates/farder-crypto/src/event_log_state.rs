@@ -1224,10 +1224,9 @@ impl LogState {
                 );
                 // Authored BY the joining device (spec C3: the joiner itself is
                 // the only party that can prove its Welcome worked).
+                let leaf = (author.clone(), event.core.device.clone());
                 ensure!(
-                    group
-                        .leaves_pending
-                        .contains(&(author.clone(), event.core.device.clone())),
+                    group.leaves_pending.contains(&leaf),
                     "leaf confirmation must come from the joining device of a pending leaf"
                 );
                 self.check_instance_pin(&event.core.device, store_instance_hash)?;
@@ -1236,17 +1235,35 @@ impl LogState {
                         rec.post_tree_hash == *tree_hash,
                         "confirmed tree hash does not match the cited epoch's commit"
                     );
-                } else if let Some(expected) = group.reset_expected_tree_hash {
-                    // Reset generation (resolved ambiguity #7): its add-commit
-                    // is never a log event, so there is no `commits_by_epoch`
-                    // entry to check against. The anchor is the tree hash the
-                    // RESETTER declared on `MlsGroupReset` — it is the new
-                    // group's creator by construction, so it is the one party
-                    // that knows the real value. (This replaces first-writer-
-                    // wins seeding by the first confirmation, under which one
-                    // malicious welcomed device could confirm a bogus hash first
-                    // and every honest confirmation would then be rejected,
-                    // wedging the generation.)
+                } else if let (true, Some(expected)) =
+                    (group.reset_welcomed.contains(&leaf), group.reset_expected_tree_hash)
+                {
+                    // Reset generation (resolved ambiguity #7): the reset's own
+                    // add-commit is never a log event, so a leaf the reset
+                    // STAGED has no `commits_by_epoch` entry to check against.
+                    // The anchor is the tree hash the RESETTER declared on
+                    // `MlsGroupReset` — it is the new group's creator by
+                    // construction, so it is the one party that knows the real
+                    // value. (This replaces first-writer-wins seeding by the
+                    // first confirmation, under which one malicious welcomed
+                    // device could confirm a bogus hash first and every honest
+                    // confirmation would then be rejected, wedging the
+                    // generation.)
+                    //
+                    // BOTH conditions are load-bearing. `reset_expected_tree_hash`
+                    // is set once per reset and never cleared, so on its own it
+                    // would let ANY pending leaf — including an ORDINARY join
+                    // many commits later — confirm by citing an epoch with no
+                    // recorded commit and quoting the reset's long-public
+                    // `post_tree_hash`, instead of its real add-commit's epoch
+                    // and that commit's tree hash. That leaf would hold a
+                    // confirmed leaf with zero binding to the real tree, falsely
+                    // discharging `pending_confirmations` (the silent partition
+                    // C7 forbids) and unlocking sealed sends + commit authoring.
+                    // Scoping to `reset_welcomed` keeps the anchor on the leaves
+                    // the reset actually staged; a staged leaf that is still
+                    // unconfirmed survives the commit effect's prune, so a LATE
+                    // confirmation still works however many commits land first.
                     ensure!(
                         expected == *tree_hash,
                         "confirmed tree hash does not match the tree hash the reset declared"
@@ -3749,6 +3766,74 @@ mod tests {
         assert!(!f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "the reset completes");
         let unlocked = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 1, vec![]);
         f.st.apply(&unlocked).expect("sends unlock once every welcomed leaf confirms");
+    }
+
+    /// `reset_expected_tree_hash` is set once by `MlsGroupReset` and NEVER
+    /// cleared, so the confirmation path that uses it must stay scoped to the
+    /// leaves that reset actually STAGED. Unscoped, the anchor outlived its
+    /// generation's reset: for the rest of the channel's life ANY pending leaf —
+    /// including an ordinary join many commits later — could confirm by citing
+    /// an epoch with no recorded commit and quoting the reset's long-public
+    /// `post_tree_hash`, taking a confirmed leaf with ZERO binding to the real
+    /// tree (a silent partition, plus sealed-send and commit-authoring rights).
+    #[test]
+    fn the_reset_tree_hash_anchor_binds_only_the_leaves_the_reset_staged() {
+        const TR: [u8; 32] = [77u8; 32];
+        let (mut f, bob, bob_dev, bob_last) = reset_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        let alice_did = device_id(&f.alice_dev.public_key());
+        let bob_pk = bob.public_key();
+        let bob_did = device_id(&bob_dev.public_key());
+
+        let w_alice = stage_welcome(&mut f, 1, &alice_pk, &alice_did);
+        let w_bob = stage_welcome(&mut f, 1, &bob_pk, &bob_did);
+        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob], TR);
+        f.st.apply(&reset).expect("the exact-cover reset folds");
+        f.owner_prev = reset;
+
+        // Alice confirms; bob stays staged and confirms LATE, after ordinary
+        // commits have landed in the generation.
+        let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1, TR, ALICE_STORE);
+        f.st.apply(&ca).expect("alice's post-reset confirmation folds");
+        f.alice_prev = ca;
+
+        // Dave joins the generation the ORDINARY way: a real add-commit at
+        // epoch 1, which records `commits_by_epoch[2] = T1`.
+        let (dave, dave_dev, dave_last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let dave_pk = dave.public_key();
+        let dkp = kp_publish(&dave_dev, &dave_pk, &f.sid, &dave_last, [6u8; 32], 1_000_000, 500);
+        f.st.apply(&dkp).expect("dave's key package publishes");
+        let add = mls_commit_gen(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, 1,
+            vec![add_of(&dave_pk, &dave_dev, &dkp.hash())], vec![], [0u8; 32], X1, T1, OWNER_STORE);
+        f.st.apply(&add).expect("dave's add-commit folds");
+        f.owner_prev = add;
+
+        // Dave's leaf is bound to HIS add-commit: a wrong hash at its real epoch
+        // is rejected...
+        let wrong = leaf_confirm_gen(&dave_dev, &dave_pk, &f.sid, &dkp, 1, 2, [66u8; 32], [6u8; 32]);
+        assert_rejected_for(&f.st, &wrong, "does not match the cited epoch's commit");
+        // ...and so is the reset anchor: dave was never staged by the reset, so
+        // he cannot escape the commits table by naming an epoch that has no
+        // commit and quoting the reset's public tree hash.
+        let anchor_theft = leaf_confirm_gen(&dave_dev, &dave_pk, &f.sid, &dkp, 1, 999, TR, [6u8; 32]);
+        assert_rejected_for(&f.st, &anchor_theft, "cites an epoch with no recorded commit");
+        assert!(
+            f.st.pending_confirmations(CH).contains(&(dave_pk.clone(), device_id(&dave_dev.public_key()))),
+            "the rejected confirmations discharged nothing"
+        );
+
+        // The legitimate paths both still work: dave against his own commit...
+        let dave_ok = leaf_confirm_gen(&dave_dev, &dave_pk, &f.sid, &dkp, 1, 2, T1, [6u8; 32]);
+        f.st.apply(&dave_ok).expect("dave confirms against his own add-commit's tree hash");
+        // ...and bob LATE against the reset anchor, with no `commits_by_epoch`
+        // entry for the epoch his (never-logged) reset add-commit created.
+        let bob_late = leaf_confirm_gen(&bob_dev, &bob_pk, &f.sid, &bob_last, 1, 1, TR, [4u8; 32]);
+        f.st.apply(&bob_late).expect("a still-staged leaf may confirm late against the reset anchor");
+        assert!(!f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "the reset completes");
+        let unlocked = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 2, vec![]);
+        f.st.apply(&unlocked).expect("sends unlock once every staged leaf has confirmed");
     }
 
     #[test]

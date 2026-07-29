@@ -279,8 +279,9 @@ the narrowing is the authority from here on (and is documented in
    which keeps the gate scoped to the reset's OWN obligations: an ordinary
    pending join (before or after the reset) never seals the channel, and a
    dropped-then-re-added leaf is an ordinary join rather than a resurrected reset
-   obligation. `MlsLeafConfirmed`'s tree-hash seeding path is likewise keyed to
-   `reset_welcomed` membership rather than to the latch. Pinned by
+   obligation. `MlsLeafConfirmed`'s reset-anchor path is likewise keyed to
+   `reset_welcomed` membership rather than to the latch (see round 4 #1 — the
+   scoping was briefly lost when the anchor moved onto `MlsGroupReset`). Pinned by
    `a_reset_completes_when_a_stuck_leaf_is_removed_not_only_when_it_confirms`
    (both halves: discharge-by-removal, and an ordinary join not re-sealing).
 3. **Minors.** (a) `corroborated_clock` was missing from the checkpoint-
@@ -303,6 +304,31 @@ the narrowing is the authority from here on (and is documented in
    other event reshaped), so it is implemented rather than deferred; the spec's
    variant listing and C7 section are updated to match. Poisoning is pinned
    inside `partial_reset_leaves_the_channel_dead_until_all_leaves_confirm`.
+
+## Review round 4 — adjustments (implemented)
+
+Round 4 reviewed round 3's own fixes and found that two of them opened NEW holes
+(both reproduced with probe tests), plus three minors. Each is fixed in its own
+`fix(crypto): …` commit; where a fix narrows or overrides an earlier decision,
+the narrowing is the authority from here on (and is documented in
+`docs/modules/crypto.md`).
+
+1. **Round 3's minor (c) deleted round 3's own #2 scoping: the reset tree-hash
+   anchor never expires and covered ORDINARY joins.** Moving the anchor onto
+   `MlsGroupReset` replaced the `reset_welcomed`-keyed confirmation branch with a
+   bare `if let Some(expected) = group.reset_expected_tree_hash`, and that field
+   is set once per reset and NEVER cleared. So for the rest of a reset channel's
+   life, ANY pending leaf could confirm by citing an epoch with **no**
+   `commits_by_epoch` entry and quoting the reset's long-public `post_tree_hash`,
+   instead of its real add-commit's epoch and that commit's tree hash — taking a
+   confirmed leaf with zero binding to the real tree. That falsely discharges
+   `pending_confirmations` (the silent partition C7 forbids) and grants the
+   sealed-send and commit-authoring rights gated on `leaves_confirmed`. Both
+   conditions are now required (`reset_welcomed` membership **and** the declared
+   anchor); a staged leaf that is still unconfirmed survives the commit effect's
+   prune, so a LATE confirmation against the anchor still works however many
+   ordinary commits land first. Pinned by
+   `the_reset_tree_hash_anchor_binds_only_the_leaves_the_reset_staged`.
 
 ## Global constraints
 
