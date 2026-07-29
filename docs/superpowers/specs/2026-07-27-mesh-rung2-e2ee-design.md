@@ -176,7 +176,9 @@ The signed event log **is the Delivery Service**: it stores/hands out KeyPackage
                      store_instance_hash: [u8;32] }
     // Authored by the JOINING device after successfully processing its Welcome.
     // The fold promotes its leaf from `pending` to `confirmed` only on this event
-    // and only if tree_hash matches the post_tree_hash of the cited epoch's commit.
+    // and only if tree_hash matches the post_tree_hash of the cited epoch's commit
+    // — or, for a leaf the reset ITSELF staged, the reset's declared post_tree_hash
+    // (see MlsGroupReset; that anchor is scoped to those leaves and to them only).
 
 | AuthzBeacon { channel_id, authz_head: EventHash, epoch: u64 }
     // Sent as a sealed MLS application message (NOT a log event) on a jittered
@@ -312,7 +314,7 @@ Rev 1's Risks said a malicious `manage_channels` holder "can nuke a group's cont
 Rev 2:
 
 - `MlsGroupReset { channel_id, new_generation, welcomes }` is valid **only if `welcomes` covers exactly the fold's current `members × live_devices` set** for that channel — no more, no fewer. Enforced by the blind fold.
-- The fold refuses `MessagePostedE2ee` in the new generation until every leaf the reset staged is accounted for — confirmed, or dropped by a Remove-commit (the bridge's answer when a welcomed device is banned or lost before confirming). Post-reset confirmations are validated against the `post_tree_hash` the **resetter** declared. A partial reset is therefore a **dead channel, loudly**, not a silent partition.
+- The fold refuses `MessagePostedE2ee` in the new generation until every leaf the reset staged is accounted for — confirmed, or **void** because the fold no longer owes its holder a leaf at all (banned, kicked, device revoked, cert expired), which a Remove-commit then clears (the bridge's answer when a welcomed device is banned or lost before confirming). A Remove-commit dropping a staged leaf whose holder is still in **good standing** accounts for nothing: dropping a pending-only leaf is open to any member, so treating it as a discharge would let the first welcomed device to confirm evict its co-staged peers and reopen the channel around them — the very partition this rule exists to prevent. Post-reset confirmations are validated against the `post_tree_hash` the **resetter** declared, and only for the leaves that reset itself staged (the declaration never expires, so unscoped it would let any later ordinary join confirm against a stale public hash). A partial reset is therefore a **dead channel, loudly**, not a silent partition.
 - Reset is **owner-only this rung** (see M3 disposition), fold-rate-limited (one per channel per 1000 channel events), and gated behind a UI confirmation wall that names what is lost.
 - Second-order honesty: reset is asymmetric evidence destruction — members with a local store keep plaintext; reinstallers and later investigators do not.
 

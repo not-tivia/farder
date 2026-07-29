@@ -244,8 +244,10 @@ the narrowing is the authority from here on (and is documented in
    `commit_rate_gap() = min(COMMIT_RATE_MIN_EPOCH_GAP, distinct identities
    holding a confirmed leaf)`, floored at 1, which preserves the anti-spam
    property exactly (while anyone else holds a leaf the gap is >= 2, so no author
-   takes two turns in a row) while making the client rekey cadence reachable in
-   small channels; and (ii) the CEILING OVERRIDES the rule — within
+   takes two turns in a row) while making a turn-taking rekey cadence *possible*
+   in small channels, where a fixed gap of 4 was arithmetically unsatisfiable
+   (see round 4 #3(b) for the honest bound: it does not let a member keep the
+   cadence ALONE); and (ii) the CEILING OVERRIDES the rule — within
    `COMMIT_RATE_CEILING_GRACE_EVENTS = 50` events of the ceiling the rate rule
    stands aside, because a rekey the ceiling itself is demanding is never spam.
    (ii) is what saves an M >= 4 channel whose only online member has already
@@ -357,6 +359,31 @@ the narrowing is the authority from here on (and is documented in
    and `a_discharged_reset_obligation_is_not_resurrected_by_a_later_re_add`,
    with the terminal-state case still held by
    `a_reset_completes_when_a_stuck_leaf_is_removed_not_only_when_it_confirms`.
+
+3. **Minors.** (a) The `reset_welcomed` prune was completely UNPINNED — both its
+   lines could be deleted with the whole suite still green. It is now pinned
+   twice over (deleting it fails
+   `a_discharged_reset_obligation_is_not_resurrected_by_a_later_re_add` and
+   `a_reset_completes_when_a_stuck_leaf_is_removed_not_only_when_it_confirms`),
+   which lands with round 4 #2 because that fix changed what the prune means.
+   (b) **Round 3 #1 overclaimed the scaled gap.** With `gap = min(4, M)` and
+   M = 2, an author needs `epoch >= last + 2` and only a COMMIT advances the
+   epoch, so a DM with an idle or offline peer can rekey once and then not again
+   until the ceiling grace opens 450 sealed events later — the very outcome the
+   claim said the scaling eliminated.
+   `small_channels_can_rekey_on_cadence_not_only_at_the_ceiling` passes because
+   BOTH members rekey, and its own last assertion is the bound. The claim now
+   states the real property: the scaling makes a turn-taking cadence *possible*
+   in small channels (a fixed gap of 4 made it arithmetically impossible), and
+   the CEILING OVERRIDE, not the scaling, is what guarantees every channel can
+   always rekey. No code change: any relaxation letting a lone author commit
+   twice in a row is exactly the anti-spam property the rule exists for, and the
+   liveness gap it would close is already closed by the ceiling override.
+   (c) A stale comment in `commit_rate_rule_blocks_spam_but_never_drift_discharge`
+   still cited `COMMIT_RATE_MIN_EPOCH_GAP` (the enforced gap in that 2-identity
+   fixture is 2, not 4), and the test used a bare `is_err()` that would have
+   passed for any unrelated rejection; it now asserts through
+   `assert_rejected_for(..., "commit-rate rule")`.
 
 ## Global constraints
 

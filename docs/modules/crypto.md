@@ -569,9 +569,15 @@ both pure functions of fold state:
 - **The gap scales:** `commit_rate_gap() = min(COMMIT_RATE_MIN_EPOCH_GAP,
   distinct identities holding a confirmed leaf)`, floored at 1. The anti-spam
   property is preserved exactly — while anyone else holds a leaf the gap is ≥ 2,
-  so no author can take two turns in a row — and small channels can now rekey on
-  the client cadence instead of only when the ceiling bites. A one-identity group
-  has nobody to bounce, so it may rekey freely.
+  so no author can take two turns in a row — and a small channel whose members
+  are all committing can now round-robin its rekeys on the client cadence, which
+  a fixed gap of 4 made arithmetically impossible. **It does not let a member
+  keep the cadence alone:** only a commit advances the epoch, so a gap of M is
+  satisfiable only while the other M−1 identities also commit. A DM (M = 2) with
+  an idle or offline peer gets ONE cadence rekey and then waits for the ceiling
+  grace — the ceiling override below, not this scaling, is what guarantees every
+  channel can always rekey. A one-identity group has nobody to bounce, so it may
+  rekey freely.
 - **The ceiling overrides the rule:** within `COMMIT_RATE_CEILING_GRACE_EVENTS`
   of `FRESHNESS_CEILING_EVENTS`, the rate rule stands aside — a rekey the ceiling
   itself is demanding is never spam. This is what saves a channel whose only

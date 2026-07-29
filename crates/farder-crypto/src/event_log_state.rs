@@ -203,8 +203,18 @@ impl MlsGroupRecord {
     ///
     /// Scaling the gap to M keeps the property the rule exists for — an author
     /// still cannot take two turns in a row while anyone else holds a leaf — and
-    /// makes the client rekey cadence reachable in small channels instead of
-    /// leaving them dependent on the ceiling hatch. A one-identity group has
+    /// makes turn-taking rekeys POSSIBLE at all in small channels, where a fixed
+    /// gap of 4 made them arithmetically impossible.
+    ///
+    /// Be precise about what that does and does not buy. Only a commit advances
+    /// the epoch, so a gap of M is satisfiable only while the other M-1
+    /// identities are also committing. In a DM (M = 2) whose peer is idle or
+    /// offline, the present member can rekey ONCE and then not again until the
+    /// ceiling grace opens (`FRESHNESS_CEILING_EVENTS -
+    /// COMMIT_RATE_CEILING_GRACE_EVENTS` sealed events later). The scaled gap
+    /// restores the client cadence for channels whose members are all
+    /// committing; the CEILING OVERRIDE, not this scaling, is what guarantees
+    /// every channel can always rekey eventually. A one-identity group has
     /// nobody to bounce, so its gap is 1 (rekey freely).
     fn commit_rate_gap(&self) -> u64 {
         COMMIT_RATE_MIN_EPOCH_GAP.min(self.committing_identities().max(1))
@@ -3360,14 +3370,14 @@ mod tests {
         assert!(f.st.pending_adds(CH, 500).is_empty());
         assert!(f.st.pending_removals(CH, 500).is_empty());
 
-        // Same author, epochs n and n+1, discharging nothing: spam — rejected
-        // (epoch 2 < 1 + COMMIT_RATE_MIN_EPOCH_GAP, and not a first commit).
+        // Same author, epochs n and n+1, discharging nothing: spam — rejected.
+        // Two identities hold confirmed leaves here, so the enforced gap is
+        // `commit_rate_gap() = min(COMMIT_RATE_MIN_EPOCH_GAP, 2) = 2`, and the
+        // owner's declared epoch 2 < 1 + 2 (nor is it their first commit, nor is
+        // the ceiling anywhere near demanding a rekey).
         let spam = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 2,
             vec![], vec![], X1, X2, T2, OWNER_STORE);
-        assert!(
-            f.st.clone().apply(&spam).is_err(),
-            "a quick non-drift-discharging self-update must be rate-blocked"
-        );
+        assert_rejected_for(&f.st, &spam, "commit-rate rule");
 
         // Ban alice: her confirmed leaf becomes a pending removal.
         let ban = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
@@ -4588,11 +4598,17 @@ mod tests {
 
     /// Fix (c) on its own: the enforced gap is
     /// `min(COMMIT_RATE_MIN_EPOCH_GAP, committing identities)`, so a small
-    /// channel can round-robin its rekeys on the CLIENT cadence (weekly / 200
-    /// messages) instead of only when the ceiling is about to bite. Without the
-    /// scaling, a two-member channel's forward-secrecy window would silently
-    /// stretch to "whenever the ceiling grace opens", which is not the bound the
-    /// spec sells.
+    /// channel whose members are all committing can round-robin its rekeys on
+    /// the CLIENT cadence (weekly / 200 messages) instead of only when the
+    /// ceiling is about to bite. Without the scaling, a two-member channel could
+    /// not rekey on cadence at all.
+    ///
+    /// What this does NOT claim: that a member can keep the cadence ALONE. Only
+    /// a commit advances the epoch, so the turn-taking below is exactly the
+    /// requirement — see the final assertion. A DM whose peer is idle gets one
+    /// cadence rekey and then waits for the ceiling grace
+    /// (`a_lone_rekeyer_can_always_answer_the_freshness_ceiling` is the
+    /// guarantee that covers that case).
     #[test]
     fn small_channels_can_rekey_on_cadence_not_only_at_the_ceiling() {
         let mut f = e2ee_fixture();
@@ -4613,6 +4629,9 @@ mod tests {
 
         // Turn-taking, not free-for-all: neither member may take two turns in a
         // row, because the gap is still >= 2 while two identities hold leaves.
+        // This is also the honest bound on the cadence claim above — with an
+        // idle peer, nothing advances the epoch, so this rejection is where a
+        // lone member's cadence stops until the ceiling grace opens.
         let twice = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 5, vec![], vec![],
             auth_at(4), auth_at(5), tree_at(5), ALICE_STORE);
         assert_rejected_for(&f.st, &twice, "commit-rate rule");
