@@ -2084,6 +2084,36 @@ pub fn handle_request(
                 None => return err("server is not running the event log (no genesis yet)"),
             };
 
+            // 1b. INGEST CAPS, before anything allocation-heavy. `LogState::apply`
+            //     runs on a CLONE of the whole fold state, so the clone is what a
+            //     cap breach would otherwise buy; and the fold checks no size caps
+            //     at all by design (sub-2 ambiguity #9). Blind: byte counts,
+            //     vector lengths and one clock comparison, nothing else.
+            if let Err(e) = crate::event_ingest::check_ingest_caps(&event) {
+                return err(&format!("event rejected: {}", e));
+            }
+
+            // 1c. STALE-EPOCH, before the fold. A commit that lost the epoch CAS is
+            //     an ACCEPTED no-op in the fold (Rung-3 replay determinism needs
+            //     every replica to fold a converged event set identically), but the
+            //     author's client must not believe it landed. Ingest bounces it with
+            //     a distinct, machine-readable code its resync loop keys on:
+            //     process winner -> rebuild -> resubmit. Never stored, so the fold's
+            //     no-op path is unreachable through ingest.
+            //
+            //     This runs BEFORE signature/authz, so an unauthenticated submitter
+            //     can distinguish "current epoch" from "not current". That leaks
+            //     nothing: the whole commit/Welcome stream is already public
+            //     server-wide by this rung's design (spec §"What is still visible"),
+            //     so the group's epoch is public log state, not a secret.
+            if let EventPayload::MlsCommit { channel_id, generation, epoch, .. } = &event.core.payload {
+                if let Some((cur_gen, cur_epoch)) = ls.mls_current_epoch(*channel_id) {
+                    if *generation != cur_gen || *epoch != cur_epoch {
+                        return err("stale-epoch");
+                    }
+                }
+            }
+
             // 2. Validate on a CLONE — apply runs the full envelope + authz; on
             //    error nothing is mutated and we reject.
             let mut trial = ls.clone();
@@ -2118,11 +2148,19 @@ pub fn handle_request(
                 None
             };
 
-            let derived_id = {
+            let (derived_id, created_class) = {
                 let tx = conn.unchecked_transaction()
                     .map_err(|e| anyhow::anyhow!("failed to begin tx: {}", e))?;
                 crate::event_ingest::store_event(&tx, &event)
                     .map_err(|e| anyhow::anyhow!("failed to store event: {}", e))?;
+                // `ChannelCreated` materializes its `channels` row — with its
+                // content class — inside THIS transaction, so the log and its
+                // mirror can never disagree across a crash, and any refusal here
+                // rolls back the stored event too (no channel row, no log advance).
+                let created_class = match crate::event_ingest::materialize_channel_created(&tx, &event) {
+                    Ok(c) => c,
+                    Err(e) => return err(&format!("event rejected: {}", e)),
+                };
                 let id = crate::event_ingest::derive_message_row(&tx, &event)
                     .map_err(|e| anyhow::anyhow!("failed to derive message: {}", e))?;
                 if let (Some(mid), Some(owner)) = (id, owner_pk.as_ref()) {
@@ -2134,7 +2172,7 @@ pub fn handle_request(
                         .map_err(|e| anyhow::anyhow!("failed to redact attachment: {}", e))?;
                 }
                 tx.commit().map_err(|e| anyhow::anyhow!("failed to commit event: {}", e))?;
-                id
+                (id, created_class)
             };
 
             // 5. Commit the advanced authorization state in memory.
@@ -2151,6 +2189,25 @@ pub fn handle_request(
                         events.push(BroadcastEvent {
                             target: EventTarget::Subscribers(*channel_id),
                             event: ServerEvent::NewMessage { message: msg },
+                        });
+                    }
+                }
+            }
+
+            // A log-declared channel is announced to clients ONLY when it is
+            // plaintext: `ChannelInfo` has no class field and cannot gain one
+            // without breaking every un-updated client's decode of plaintext
+            // channels too (spec M2). Announcing a sealed channel through it would
+            // hand v1 clients a normal-looking channel with a working composer —
+            // worse than not seeing it. The E2EE announcement rides
+            // `ChannelInfoV2` (Task 5); until then an E2EE channel is simply not
+            // announced, which is the fail-closed side.
+            if created_class == Some(farder_crypto::event_log::ChannelClass::Plaintext) {
+                if let EventPayload::ChannelCreated { channel_id, .. } = &event.core.payload {
+                    if let Some(channel) = channels::get_channel(conn, *channel_id)? {
+                        events.push(BroadcastEvent {
+                            target: EventTarget::All,
+                            event: ServerEvent::ChannelCreated { channel },
                         });
                     }
                 }
@@ -8732,5 +8789,676 @@ mod tests {
             "only the three bootstrap variants in this sample may be ungated \
              (SubmitEvent is the fourth and is not sampled here)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2 — INGEST: caps, stale-epoch, timestamp bound, and the atomic
+    // `ChannelCreated` -> `channels` row materialization (spec "Server changes"
+    // + "Size caps" M4/F8 + Ordering + `crypto.md`'s sub-3 residual).
+    //
+    // Every test here drives the REAL `SubmitEvent` arm. A refusal is only half
+    // the claim; each also asserts what did NOT happen — no stored event, no
+    // channel row, no in-memory log advance.
+    // -----------------------------------------------------------------------
+
+    use farder_crypto::event_log::{
+        DeviceCert, Event, EventPayload as EP, Genesis, E2EE_CHANNEL_ID_FLOOR,
+        MAX_E2EE_CIPHERTEXT_BYTES, MAX_EVENT_FUTURE_SKEW_SECS,
+    };
+    use farder_crypto::event_log_state::LogState;
+    use rusqlite::OptionalExtension as _;
+
+    /// A log-mode server with the owner registered, its device authorized, and a
+    /// live `LogState` — i.e. the only shape on which Rung-2 ingest is reachable
+    /// at all (Q8: fresh servers only).
+    struct LogFixture {
+        state: Arc<ServerState>,
+        owner: Keypair,
+        dev: Keypair,
+        g: Genesis,
+        head: Event,
+    }
+
+    impl LogFixture {
+        fn new() -> Self {
+            let state = fake_state();
+            let owner = Keypair::generate();
+            let dev = Keypair::generate();
+            let g = Genesis {
+                version: 1,
+                name: "t".into(),
+                owner: owner.public_key(),
+                created_at: 1,
+                nonce: [0u8; 16],
+            };
+            {
+                let conn = state.db.lock().unwrap();
+                let everyone = members::create_role(
+                    &conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false,
+                )
+                .unwrap();
+                members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+                members::assign_role(&conn, &owner.public_key(), everyone).unwrap();
+                crate::event_ingest::save_genesis(&conn, &g).unwrap();
+            }
+            *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+            *state.genesis.lock().unwrap() = Some(g.clone());
+
+            let head = Event::next(
+                &dev,
+                owner.public_key(),
+                g.server_id(),
+                None,
+                0,
+                1,
+                EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &dev.public_key(), 1) },
+            );
+            let mut f = Self { state, owner, dev, g, head: head.clone() };
+            let state = f.state.clone();
+            let conn = state.db.lock().unwrap();
+            f.accept(&conn, &head);
+            drop(conn);
+            f
+        }
+
+        /// Sign the next event on the owner-device chain. A refused event does
+        /// not consume the chain, so `head` only advances on acceptance.
+        fn sign(&self, ts: u64, payload: EP) -> Event {
+            Event::next(
+                &self.dev,
+                self.owner.public_key(),
+                self.g.server_id(),
+                Some(&self.head),
+                self.head.core.lamport,
+                ts,
+                payload,
+            )
+        }
+
+        fn submit(&self, conn: &Connection, event: &Event) -> HandleResult {
+            handle_request(
+                conn,
+                &self.owner.public_key(),
+                true,
+                ServerRequest::SubmitEvent { event: event.clone() },
+                "",
+                &self.state,
+            )
+            .unwrap()
+        }
+
+        /// Submit and require acceptance, advancing the chain head.
+        fn accept(&mut self, conn: &Connection, event: &Event) -> HandleResult {
+            let r = self.submit(conn, event);
+            match &r.response {
+                ServerResponse::EventAccepted { .. } => {}
+                other => panic!("expected EventAccepted, got {other:?}"),
+            }
+            self.head = event.clone();
+            r
+        }
+
+        fn log_pos(&self) -> u64 {
+            self.state.log_state.lock().unwrap().as_ref().unwrap().log_pos()
+        }
+
+        fn class_in_log(&self, channel_id: u64) -> Option<ChannelClass> {
+            self.state
+                .log_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .channel_class(channel_id)
+        }
+
+        /// A `ChannelCreated` the fold will authorize (owner-authored, fresh id).
+        fn channel_created(&self, channel_id: u64, class: ChannelClass) -> Event {
+            self.sign(
+                now_ts(),
+                EP::ChannelCreated {
+                    channel_id,
+                    name: "sealed".into(),
+                    kind: "text".into(),
+                    class,
+                    parent: None,
+                },
+            )
+        }
+    }
+
+    fn now_ts() -> u64 {
+        crate::db::now()
+    }
+
+    fn event_is_stored(conn: &Connection, event: &Event) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM events WHERE event_hash = ?1",
+            rusqlite::params![event.hash()],
+            |_| Ok(true),
+        )
+        .optional()
+        .unwrap()
+        .unwrap_or(false)
+    }
+
+    fn channel_row_class(conn: &Connection, channel_id: u64) -> Option<String> {
+        conn.query_row(
+            "SELECT content_class FROM channels WHERE id = ?1",
+            rusqlite::params![channel_id as i64],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// Assert an event changed NOTHING: not stored, no log advance, and (if it
+    /// named a channel) no channel row. This is the atomicity claim, made once.
+    fn assert_ingest_left_no_trace(f: &LogFixture, conn: &Connection, event: &Event, before: u64) {
+        assert!(!event_is_stored(conn, event), "a refused event must not be stored");
+        assert_eq!(f.log_pos(), before, "a refused event must not advance the fold");
+        if let EP::ChannelCreated { channel_id, .. } = &event.core.payload {
+            assert_eq!(channel_row_class(conn, *channel_id), None);
+            assert_eq!(f.class_in_log(*channel_id), None);
+        }
+    }
+
+    #[test]
+    fn oversized_sealed_ciphertext_is_refused_before_the_fold_runs() {
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let before = f.log_pos();
+
+        let over = f.sign(
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; MAX_E2EE_CIPHERTEXT_BYTES + 1],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: f.head.hash(),
+            },
+        );
+        let r = f.submit(&conn, &over);
+        let reason = err_reason(&r);
+        assert!(reason.contains("MessagePostedE2ee.ciphertext"), "{reason}");
+        assert!(reason.contains("cap"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &over, before);
+
+        // The boundary is exact: at the cap the event gets PAST ingest and is
+        // refused by the FOLD instead (there is no such channel). If the cap were
+        // off by one in the other direction this would still say "over the cap".
+        let at_cap = f.sign(
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; MAX_E2EE_CIPHERTEXT_BYTES],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: f.head.hash(),
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &at_cap));
+        assert!(!reason.contains("over the"), "a legal maximum message must clear the cap: {reason}");
+        assert_eq!(f.log_pos(), before, "the fold still refused it, so still no advance");
+
+        // ORDERING, observed rather than asserted: the same oversized payload
+        // signed by a device the log has NEVER authorized still comes back as the
+        // cap error. The fold would have rejected that event on the device cert
+        // long before it looked at the payload — so if caps ran after `apply`
+        // (i.e. after the `LogState` clone, the allocation-heavy step a cap
+        // breach must not be able to buy) the fold's message is what we would see.
+        let stranger = Keypair::generate();
+        let rogue = Event::next(
+            &stranger,
+            stranger.public_key(),
+            f.g.server_id(),
+            None,
+            0,
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; MAX_E2EE_CIPHERTEXT_BYTES + 1],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: "h".into(),
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &rogue));
+        assert!(
+            reason.contains("MessagePostedE2ee.ciphertext"),
+            "caps must run before the fold, for an unauthenticated author too: {reason}"
+        );
+        // ...and the same event WITHIN the cap is the control: now the fold speaks.
+        let rogue_ok = Event::next(
+            &stranger,
+            stranger.public_key(),
+            f.g.server_id(),
+            None,
+            0,
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; 32],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: "h".into(),
+            },
+        );
+        assert!(err_reason(&f.submit(&conn, &rogue_ok)).starts_with("event rejected:"));
+        assert_eq!(f.log_pos(), before);
+    }
+
+    #[test]
+    fn oversized_commit_welcome_and_key_package_are_refused() {
+        use farder_crypto::event_log::{
+            DeclaredAdd, DeclaredRemove, MAX_DECLARED_LEAVES_PER_COMMIT, MAX_KEY_PACKAGE_BYTES,
+            MAX_MLS_MESSAGE_BYTES, MAX_MLS_WELCOME_BYTES, MAX_RESET_WELCOMES,
+        };
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let before = f.log_pos();
+        let pk = f.owner.public_key();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 1;
+
+        let big_commit = |mls: usize, adds: usize, removes: usize| EP::MlsCommit {
+            channel_id: ch,
+            generation: 0,
+            epoch: 0,
+            mls_message: vec![1u8; mls],
+            adds: (0..adds)
+                .map(|_| DeclaredAdd {
+                    identity: pk.clone(),
+                    device: "d".into(),
+                    key_package: "k".into(),
+                })
+                .collect(),
+            removes: (0..removes)
+                .map(|_| DeclaredRemove { identity: pk.clone(), device: "d".into() })
+                .collect(),
+            prev_epoch_authenticator: [0u8; 32],
+            post_epoch_authenticator: [0u8; 32],
+            post_tree_hash: [0u8; 32],
+            authz_head: "h".into(),
+            store_instance_hash: [0u8; 32],
+        };
+
+        let cases: Vec<(&str, EP)> = vec![
+            ("MlsCommit.mls_message", big_commit(MAX_MLS_MESSAGE_BYTES + 1, 0, 0)),
+            ("MlsCommit.adds", big_commit(0, MAX_DECLARED_LEAVES_PER_COMMIT + 1, 0)),
+            ("MlsCommit.removes", big_commit(0, 0, MAX_DECLARED_LEAVES_PER_COMMIT + 1)),
+            (
+                "MlsWelcome.welcome",
+                EP::MlsWelcome {
+                    channel_id: ch,
+                    generation: 0,
+                    commit: "c".into(),
+                    for_member: pk.clone(),
+                    for_device: "d".into(),
+                    welcome: vec![2u8; MAX_MLS_WELCOME_BYTES + 1],
+                },
+            ),
+            (
+                "MlsKeyPackagePublished.key_package",
+                EP::MlsKeyPackagePublished {
+                    key_package: vec![3u8; MAX_KEY_PACKAGE_BYTES + 1],
+                    store_instance_hash: [0u8; 32],
+                    expires_at_log_pos: 1_000,
+                },
+            ),
+            (
+                "MlsGroupReset.welcomes",
+                EP::MlsGroupReset {
+                    channel_id: ch,
+                    new_generation: 1,
+                    welcomes: vec!["w".to_string(); MAX_RESET_WELCOMES + 1],
+                    post_tree_hash: [0u8; 32],
+                },
+            ),
+        ];
+
+        for (label, payload) in cases {
+            let e = f.sign(now_ts(), payload);
+            let reason = err_reason(&f.submit(&conn, &e));
+            assert!(reason.contains(label), "{label}: got {reason:?}");
+            assert_ingest_left_no_trace(&f, &conn, &e, before);
+        }
+    }
+
+    #[test]
+    fn a_stale_epoch_commit_is_bounced_with_the_stale_epoch_code() {
+        use farder_crypto::event_log::{DeclaredAdd, DeclaredRemove};
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 7;
+        let created = f.channel_created(ch, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+
+        let before = f.log_pos();
+        let authz_head = f.head.hash();
+        let commit = |generation: u64, epoch: u64| EP::MlsCommit {
+            channel_id: ch,
+            generation,
+            epoch,
+            mls_message: vec![1, 2, 3],
+            adds: Vec::<DeclaredAdd>::new(),
+            removes: Vec::<DeclaredRemove>::new(),
+            prev_epoch_authenticator: [0u8; 32],
+            post_epoch_authenticator: [0u8; 32],
+            post_tree_hash: [0u8; 32],
+            authz_head: authz_head.clone(),
+            store_instance_hash: [0u8; 32],
+        };
+
+        // A fresh E2ee channel's group sits at generation 0 / epoch 0.
+        for (generation, epoch) in [(0u64, 7u64), (3, 0), (3, 7)] {
+            let e = f.sign(now_ts(), commit(generation, epoch));
+            let r = f.submit(&conn, &e);
+            assert_eq!(
+                err_reason(&r),
+                "stale-epoch",
+                "the bounce must be the exact machine-readable code the client's \
+                 resync loop keys on, for gen {generation} / epoch {epoch}"
+            );
+            assert!(r.events.is_empty(), "a bounced commit broadcasts nothing");
+            // Never stored: the fold's accept-as-no-op path is unreachable
+            // through ingest, so a loser can never be replayed as accepted.
+            assert_ingest_left_no_trace(&f, &conn, &e, before);
+        }
+
+        // Control: the CURRENT (generation, epoch) clears the pre-check and is
+        // judged by the fold, which accepts it (the bootstrap commit of a fresh
+        // generation, authored by the channel's creator). So this is a staleness
+        // gate, not a blanket "commits are refused" — and it moves the group on,
+        // which is what makes the NEXT epoch-0 commit stale.
+        let current = f.sign(now_ts(), commit(0, 0));
+        f.accept(&conn, &current);
+        assert_eq!(
+            state.log_state.lock().unwrap().as_ref().unwrap().mls_current_epoch(ch),
+            Some((0, 1)),
+            "the accepted commit advanced the group"
+        );
+        let now_stale = f.sign(now_ts(), commit(0, 0));
+        assert_eq!(
+            err_reason(&f.submit(&conn, &now_stale)),
+            "stale-epoch",
+            "the epoch that was current one event ago is now the stale one"
+        );
+    }
+
+    #[test]
+    fn an_event_dated_far_in_the_future_is_refused_at_ingest() {
+        let mut f = LogFixture::new();
+
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let before = f.log_pos();
+
+        let ch = E2EE_CHANNEL_ID_FLOOR + 11;
+        let future = f.sign(
+            now_ts() + MAX_EVENT_FUTURE_SKEW_SECS + 60,
+            EP::ChannelCreated {
+                channel_id: ch,
+                name: "sealed".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: None,
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &future));
+        assert!(reason.contains("ahead of server time"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &future, before);
+
+        // Inside the skew window the same event is accepted, so this bounds
+        // clock drift rather than banning any timestamp in the future.
+        let near = f.sign(
+            now_ts() + MAX_EVENT_FUTURE_SKEW_SECS - 60,
+            EP::ChannelCreated {
+                channel_id: ch,
+                name: "sealed".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: None,
+            },
+        );
+        f.accept(&conn, &near);
+        assert_eq!(channel_row_class(&conn, ch).as_deref(), Some("e2ee"));
+    }
+
+    #[test]
+    fn channel_created_materializes_the_channel_row_atomically_with_its_class() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // --- E2ee ---
+        let sealed = E2EE_CHANNEL_ID_FLOOR + 21;
+        let e = f.channel_created(sealed, ChannelClass::E2ee);
+        let r = f.accept(&conn, &e);
+        assert_eq!(channel_row_class(&conn, sealed).as_deref(), Some("e2ee"));
+        assert_eq!(f.class_in_log(sealed), Some(ChannelClass::E2ee));
+        assert_eq!(
+            crate::channel_class::resolve(&conn, sealed),
+            ChannelWriteClass::E2ee,
+            "the mirror and the log must agree the instant the event is accepted"
+        );
+        // A sealed channel is NOT announced: `ChannelInfo` has no class field, so
+        // a v1 client would get a normal-looking channel with a working composer.
+        assert!(
+            !r.events.iter().any(|b| matches!(b.event, ServerEvent::ChannelCreated { .. })),
+            "an E2EE channel must not be announced over the v1 `ChannelInfo` event"
+        );
+        // The observation that matters: the choke point is now closed for it.
+        assert!(
+            messages::insert_message(&conn, sealed, &f.owner.public_key(), "host text", None)
+                .is_err(),
+            "materialization must actually gate the message choke point"
+        );
+        assert_eq!(message_count(&conn, sealed), 0);
+
+        // --- Plaintext: same path, opposite class, and it IS announced ---
+        let plain = E2EE_CHANNEL_ID_FLOOR + 22;
+        let e = f.channel_created(plain, ChannelClass::Plaintext);
+        let r = f.accept(&conn, &e);
+        assert_eq!(channel_row_class(&conn, plain).as_deref(), Some("plaintext"));
+        assert_eq!(f.class_in_log(plain), Some(ChannelClass::Plaintext));
+        assert_eq!(crate::channel_class::resolve(&conn, plain), ChannelWriteClass::Plaintext);
+        let announced = r.events.iter().any(|b| match &b.event {
+            ServerEvent::ChannelCreated { channel } => channel.id == plain,
+            _ => false,
+        });
+        assert!(announced, "a plaintext log channel is announced normally");
+        messages::insert_message(&conn, plain, &f.owner.public_key(), "fine here", None).unwrap();
+        assert_eq!(message_count(&conn, plain), 1);
+    }
+
+    #[test]
+    fn channel_created_is_refused_for_a_channel_that_already_has_messages() {
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 31;
+
+        // A channel the LOG never saw that already carries plaintext, then loses
+        // its `channels` row (a delete, a restore, a hand-edited DB). The fold's
+        // `plaintext_history_channels` cannot see it — this is the belt-and-braces
+        // that stops a lock icon landing on messages the host already read.
+        conn.execute(
+            "INSERT INTO channels (id, name, channel_type, position) VALUES (?1, 'old', 'text', 0)",
+            rusqlite::params![ch as i64],
+        )
+        .unwrap();
+        messages::insert_message(&conn, ch, &f.owner.public_key(), "already read by the host", None)
+            .unwrap();
+        conn.execute("DELETE FROM channels WHERE id = ?1", rusqlite::params![ch as i64]).unwrap();
+
+        let before = f.log_pos();
+        let e = f.channel_created(ch, ChannelClass::E2ee);
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("message history"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &e, before);
+        // The pre-existing plaintext is untouched and still plainly readable —
+        // it was never retroactively relabelled as sealed.
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM messages WHERE channel_id = ?1",
+                rusqlite::params![ch as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "already read by the host");
+    }
+
+    #[test]
+    fn channel_created_is_refused_below_the_reserved_id_floor_or_on_a_collision() {
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // Below the floor: a client-chosen id must not be able to land on the
+        // `channels` AUTOINCREMENT space and adopt a legacy channel.
+        for id in [1u64, E2EE_CHANNEL_ID_FLOOR - 1] {
+            let before = f.log_pos();
+            let e = f.channel_created(id, ChannelClass::E2ee);
+            let reason = err_reason(&f.submit(&conn, &e));
+            assert!(reason.contains("reserved floor"), "id {id}: {reason}");
+            assert_ingest_left_no_trace(&f, &conn, &e, before);
+        }
+
+        // Collision above the floor with a row the LOG does not know about (the
+        // fold's own immutability rule cannot see legacy DB state).
+        let ch = E2EE_CHANNEL_ID_FLOOR + 41;
+        conn.execute(
+            "INSERT INTO channels (id, name, channel_type, position) VALUES (?1, 'squatter', 'text', 0)",
+            rusqlite::params![ch as i64],
+        )
+        .unwrap();
+        let before = f.log_pos();
+        let e = f.channel_created(ch, ChannelClass::E2ee);
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("already exists"), "{reason}");
+        assert!(!event_is_stored(&conn, &e));
+        assert_eq!(f.log_pos(), before);
+        assert_eq!(
+            channel_row_class(&conn, ch).as_deref(),
+            Some("plaintext"),
+            "the squatting row keeps its own class; the refused event never touched it"
+        );
+    }
+
+    #[test]
+    fn channel_created_is_refused_for_an_unsupported_shape() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // kind != "text": categories and voice channels are legacy DB state with
+        // no log representation this rung.
+        let before = f.log_pos();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 51;
+        let e = f.sign(
+            now_ts(),
+            EP::ChannelCreated {
+                channel_id: ch,
+                name: "loud".into(),
+                kind: "voice".into(),
+                class: ChannelClass::E2ee,
+                parent: None,
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("unsupported ChannelCreated shape"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &e, before);
+
+        // parent: Some(_) — the FOLD accepts this (its class-inheritance rule is
+        // live for a later rung), so the refusal is genuinely ingest's, and the
+        // spec's row 12 "threads under a sealed parent are refused" holds.
+        let parent = E2EE_CHANNEL_ID_FLOOR + 52;
+        let created = f.channel_created(parent, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+        let before = f.log_pos();
+        let child = E2EE_CHANNEL_ID_FLOOR + 53;
+        let e = f.sign(
+            now_ts(),
+            EP::ChannelCreated {
+                channel_id: child,
+                name: "thread".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: Some(parent),
+            },
+        );
+        // Prove the fold really did authorize it, so the refusal below is ingest's.
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&e).expect("the fold authorizes an inheriting thread child");
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("unsupported ChannelCreated shape"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &e, before);
+    }
+
+    #[test]
+    fn a_failed_ingest_transaction_leaves_no_channel_row_and_no_log_advance() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // The hardest atomicity case: the fold ACCEPTS the event (so `store_event`
+        // has already run inside the transaction) and ingest then refuses it. The
+        // derived write and the in-memory fold advance must stand or fall together.
+        let parent = E2EE_CHANNEL_ID_FLOOR + 61;
+        let created = f.channel_created(parent, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+        let before_pos = f.log_pos();
+        let before_events: i64 =
+            conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        let before_channels: i64 =
+            conn.query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0)).unwrap();
+
+        let child = E2EE_CHANNEL_ID_FLOOR + 62;
+        let e = f.sign(
+            now_ts(),
+            EP::ChannelCreated {
+                channel_id: child,
+                name: "thread".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: Some(parent),
+            },
+        );
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&e).expect("the fold accepted it; only ingest refuses");
+
+        let r = f.submit(&conn, &e);
+        assert!(matches!(r.response, ServerResponse::Error { .. }));
+        assert!(r.events.is_empty());
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap(),
+            before_events,
+            "store_event ran inside the transaction and must have rolled back"
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM channels", [], |r| r.get(0)).unwrap(),
+            before_channels
+        );
+        assert_eq!(f.log_pos(), before_pos, "the in-memory fold must not have advanced");
+        assert_eq!(f.class_in_log(child), None);
+        assert_eq!(crate::channel_class::resolve(&conn, child), ChannelWriteClass::Unresolvable);
+
+        // And the server is still usable afterwards: the same chain slot accepts a
+        // well-shaped event, so a rolled-back ingest wedges nothing.
+        let ok = f.channel_created(E2EE_CHANNEL_ID_FLOOR + 63, ChannelClass::E2ee);
+        f.accept(&conn, &ok);
+        assert!(f.log_pos() > before_pos);
     }
 }

@@ -117,6 +117,15 @@ async fn main() -> Result<()> {
             if repaired > 0 {
                 tracing::info!("reconciled {} event-sourced messages missing from the view", repaired);
             }
+            // Re-derive the channel-class mirror from the log. The column is only
+            // a mirror of an accepted `ChannelCreated`; this re-asserts it, and
+            // refuses (rather than resolves) any disagreement that would WIDEN a
+            // channel the DB currently treats as sealed.
+            let reclassed =
+                farder_server::channel_class::reconcile_channel_classes(&conn).unwrap_or(0);
+            if reclassed > 0 {
+                tracing::info!(count = reclassed, "repaired drifted channel class mirrors from the event log");
+            }
             let repaired_att = farder_server::event_ingest::reconcile_attachments(&conn).unwrap_or(0);
             if repaired_att > 0 {
                 tracing::info!(count = repaired_att, "reconciled missing attachment rows from the event log");

@@ -258,6 +258,15 @@ was written against these exact versions.
   and `LogState` accepts the whole chain (and rejects a tampered
   `prev_epoch_authenticator`). See `docs/modules/crypto.md` §"Rung-2 purity +
   checkpoint composability".
+- **`tests/ciphertext_cap.rs`** — the sub-3 measurement that pins
+  `farder_crypto::event_log::MAX_E2EE_CIPHERTEXT_BYTES`. The server enforces a
+  ciphertext cap it cannot compute (it never links this crate), so the cap is
+  measured here rather than assumed: a real two-member group seals a real
+  maximum-legal envelope (`MAX_CONTENT_CHARS` 4-byte characters, landing on the
+  top `PADDING_BUCKETS` entry) through the real `seal_message` path, and the
+  sealed bytes must both fit the cap and **exceed** the padding bucket — the
+  second assertion is what keeps the constant's headroom justified. Measured
+  2026-07-29: 41125 bytes for a 40960-byte bucket.
 - **Workspace note:** `openmls_sqlite_storage` requires `rusqlite 0.32`; because
   cargo allows only one `links = "sqlite3"` native lib per graph, the whole
   workspace (`farder-node`, `farder-notify`, `farder-server`) is harmonized on

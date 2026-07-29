@@ -84,6 +84,22 @@ plaintext door into a sealed channel. Details:
 `docs/modules/server-handlers.md` § "Channel content class + the message write
 choke point".
 
+**Rung-2 ingest (`SubmitEvent`):** the arm's order is log-mode check →
+`event_ingest::check_ingest_caps` (per-variant size/vector caps + a 300s
+`core.timestamp` future bound, run **before** the `LogState` clone so a cap
+breach cannot buy the allocation-heavy step) → the `stale-epoch` pre-check for
+`MlsCommit` (a lost epoch CAS is an accepted no-op *in the fold*, so ingest
+bounces it with that exact machine-readable code instead) → fold trial-apply →
+one SQLite transaction (`store_event` → `materialize_channel_created` → derive)
+→ in-memory `LogState` advance → broadcast. `ChannelCreated` materializes its
+`channels` row **and its content class** inside that transaction, so the log and
+its mirror cannot disagree across a crash; a refusal there rolls back the stored
+event too. At startup `channel_class::reconcile_channel_classes` re-derives the
+mirror from the log, repairing drift in the fail-closed direction only (it never
+widens a channel the DB currently treats as sealed). Only a Plaintext-declared
+channel is announced over the v1 `ServerEvent::ChannelCreated`; E2EE channels
+wait for `ChannelInfoV2`.
+
 **Attachment takedown (mesh-4b):** a member (uploader self-remove) or moderator (`KICK_MEMBERS`) right-clicks an attachment and chooses Remove / Take down. The UI calls `invoke("redact_attachment", { serverId, logServerId, contentHash })` → `commands.rs` builds a signed `AttachmentRedacted { content_hash }` event (same device-chain pattern as `submit_event`) and submits it via `ServerRequest::SubmitEvent`. On the server: `LogState::apply` validates authz (uploader OR `"kick"`, hash known, not already redacted), `attachments::redact_blob` sets `files.redacted_by` and deletes the on-disk bytes inside the persist TX, the in-memory `LogState` gains `content_hash` in `redacted_attachments`, and `ServerEvent::AttachmentRedacted { content_hash, by_moderator }` is broadcast to all clients. `bridge.rs` re-emits this as `server:attachment_redacted`; `useServerEvents.ts` dispatches `ATTACHMENT_REDACTED`; the `ServerContext` reducer walks `messages` and sets `redacted_by_moderator` on the matching `AttachmentInfo`. The UI replaces the attachment widget with a `Removed by the uploader` / `Removed by a moderator` placeholder. Download of a redacted blob returns uniform `"not available"` — same as not-found and access-denied — so the hash cannot be used as an existence oracle. At server startup, `event_ingest::sweep_redacted_bytes` deletes any remaining on-disk bytes for rows already marked redacted (crash-recovery).
 
 **Joining voice:** there are TWO independent tracks. (1) **Presence/roster:**

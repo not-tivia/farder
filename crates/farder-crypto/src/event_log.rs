@@ -23,6 +23,57 @@ pub type DeviceId = String; // hex SHA-256 of a device public key
 pub type EventHash = String; // hex SHA-256 of canonical signed-Event bytes
 pub type EventRef = EventHash; // content-addressed reference to another event
 
+// ---- Rung-2 INGEST caps (spec rev 2, "Size caps", M4/F8) ------------------
+//
+// These are WIRE CONSTANTS, not fold rules: `LogState::apply` never reads them
+// (sub-2 resolved ambiguity #9 — the fold's job is authorization, not framing
+// economics). They live here because both halves need them: the client must not
+// exceed them, the server enforces them at ingest before any allocation-heavy
+// work, and the cross-crate observation test that measures real OpenMLS framing
+// overhead (`farder-mls/tests/ciphertext_cap.rs`) needs a crate both
+// `farder-mls` and `farder-server` depend on — this one.
+
+/// Sealed application-message cap (`MessagePostedE2ee.ciphertext`).
+///
+/// The spec's "40 KiB" is the top `PADDING_BUCKETS` entry, which is
+/// **plaintext**; the MLS `PrivateMessage` that seals it is strictly larger, so
+/// a literal 40960-byte ciphertext cap would hard-bounce a legal maximum-size
+/// message — the exact bug rev 2 fixed when it raised the cap from 16 KiB.
+/// Framing headroom is included and **pinned by a real-OpenMLS test**
+/// (`crates/farder-mls/tests/ciphertext_cap.rs`), not assumed.
+pub const MAX_E2EE_CIPHERTEXT_BYTES: usize = 45 * 1024;
+/// Sealed-edit cap (`MessageEditedE2ee.ciphertext`) — same envelope, same cap.
+pub const MAX_E2EE_EDIT_CIPHERTEXT_BYTES: usize = MAX_E2EE_CIPHERTEXT_BYTES;
+/// `MlsCommit.mls_message` — multi-KeyPackage commits are the large case.
+pub const MAX_MLS_MESSAGE_BYTES: usize = 256 * 1024;
+/// `MlsWelcome.welcome` — O(group size) with the ratchet-tree extension; at the
+/// cap, out-of-log tree serving is the escape hatch (spec §Welcome).
+pub const MAX_MLS_WELCOME_BYTES: usize = 256 * 1024;
+/// `MlsKeyPackagePublished.key_package`.
+pub const MAX_KEY_PACKAGE_BYTES: usize = 8 * 1024;
+/// Bounds a commit's declared-leaf vectors (`adds` and `removes` each), so a
+/// single event cannot force an unbounded fold walk before it is rejected.
+pub const MAX_DECLARED_LEAVES_PER_COMMIT: usize = 256;
+/// Bounds `MlsGroupReset.welcomes` for the same reason.
+pub const MAX_RESET_WELCOMES: usize = 256;
+/// Bounds `MessagePostedE2ee.attachments` (caps are validated one blob at a
+/// time, so an unbounded vector is an unbounded blind DB walk).
+pub const MAX_E2EE_ATTACHMENTS: usize = 10;
+/// Bounds `ChannelCreated.name` / `.kind`. The fold treats both as opaque, and
+/// ingest copies the name into a `channels` row, so without a bound one signed
+/// event is an unbounded write.
+pub const MAX_CHANNEL_NAME_BYTES: usize = 256;
+/// `ChannelCreated.channel_id` is CLIENT-chosen (the channel's identity is a log
+/// fact, not a DB rowid). This floor keeps it clear of the `channels`
+/// AUTOINCREMENT space so a declared id can never collide with a legacy one.
+pub const E2EE_CHANNEL_ID_FLOOR: u64 = 1 << 32;
+/// Ingest refuses an event claiming a `core.timestamp` more than this far ahead
+/// of server time. `core.timestamp` is an UNTRUSTED device claim that the fold
+/// uses as its device-liveness/cert-expiry clock, so without an upper bound a
+/// forward-dated event walks the corroborated clock into the future and keeps a
+/// dead cert alive — the residual `crypto.md` names as sub-3's job.
+pub const MAX_EVENT_FUTURE_SKEW_SECS: u64 = 300;
+
 /// The content-addressed root that defines a server. Not signed — its hash IS
 /// its identity, so any tampering changes the id. The `owner` is cryptographically
 /// fixed here; `nonce` makes two same-name/same-owner servers distinct.
