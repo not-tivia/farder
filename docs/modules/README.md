@@ -15,7 +15,8 @@ module relevant to what you're touching. New docs use
 - [`server-handlers.md`](server-handlers.md) — request dispatch, per-request permissions + DB effects + event broadcasts.
 - [`server-connection.md`](server-connection.md) — QUIC connection lifecycle, broadcast, voice media relay, DB schema.
 - [`server-permissions.md`](server-permissions.md) — auth + the permission model (flags, role resolution, overrides).
-- [`server-widgets.md`](server-widgets.md) — interactive message widgets: polls, giveaways, and the shared sweeper (`polls.rs`, `giveaways.rs`, `widgets.rs`).
+- [`server-widgets.md`](server-widgets.md) — interactive message widgets and the shared sweeper: polls, giveaways, RSVP event cards, personal reminders (`polls.rs`, `giveaways.rs`, `channel_events.rs`, `reminders.rs`, `widgets.rs`).
+- [`server-system-identity.md`](server-system-identity.md) — the server's own lazily-created "Farder" keypair: DM senders (`send_bot_dm_as` / `send_system_dm`) and the four roster-exclusion points.
 
 ## Shared crates
 - [`protocol.md`](protocol.md) — the wire contract: `ServerRequest` / `ServerResponse` / `ServerEvent` catalogs + shared structs.

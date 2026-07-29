@@ -153,7 +153,7 @@ Webhooks let an external caller (CI system, bot, script) POST a message into a F
 
 Slash commands let a server owner configure `/trigger` shortcuts that post a bot-authored message in a channel. Commands are **not roster members** — each command has a synthetic Ed25519 keypair generated at creation time (stored in the `commands` table, never in `members`). Their messages carry `author_badge = "BOT"` and `author_name_override = cmd.name`.
 
-Four command kinds exist: **text** (posts a fixed body string), **api** (fetches a remote JSON endpoint and formats a numeric value), and the interactive **poll** and **giveaway** kinds (post a live widget card — see the "Poll & giveaway widgets" section below). The `kind` string is the extension point: the interactive kinds landed exactly as new dispatch arms in `connection.rs` with no schema change.
+Six command kinds exist: **text** (posts a fixed body string), **api** (fetches a remote JSON endpoint and formats a numeric value), the interactive **poll**, **giveaway** and **event** kinds (each posts a live widget card — see the "Poll, giveaway & event widgets" section below), and **reminder**, the odd one out: it posts **nothing at all** and answers the invoker with a private `ServerResponse::Notice`. The `kind` string is the extension point: every interactive kind landed as a new dispatch arm in `connection.rs` with no schema change.
 
 **Data path — user types `/rules` → bot message appears:**
 
@@ -175,9 +175,9 @@ Four command kinds exist: **text** (posts a fixed body string), **api** (fetches
 
 ---
 
-## Poll & giveaway widgets
+## Poll, giveaway & event widgets (and personal reminders)
 
-Interactive message widgets built on the slash-command substrate. Full reference: `docs/modules/server-widgets.md` (server), `protocol.md` (wire), `tauri-commands.md` Group 26 (client seam).
+Interactive message widgets built on the slash-command substrate. Full reference: `docs/modules/server-widgets.md` (server: `polls.rs`, `giveaways.rs`, `channel_events.rs`, `reminders.rs`, `widgets.rs`), `docs/modules/server-system-identity.md` (the server's own DM-sending key), `protocol.md` (wire), `tauri-commands.md` Groups 26–27 (client seam).
 
 **Data path — member runs `/poll Question | A | B | 2h` → live card everyone can vote on:**
 
@@ -186,7 +186,13 @@ Interactive message widgets built on the slash-command substrate. Full reference
 3. **Interaction** — nine `ServerRequest` variants (`VotePoll`, `RetractVote`, `ClosePoll`, `GetPoll`, `EnterGiveaway`, `LeaveGiveaway`, `CancelGiveaway`, `RerollGiveaway`, `GetGiveaway`), all membership-gated (default-deny), visibility-checked with opaque not-found errors, timeout-gated on mutation, and rate-limited (`widget_limiter`, 10/10 s) on vote/retract/enter/leave. Every state change broadcasts the full shared struct as `PollUpdated`/`GiveawayUpdated` → `bridge.rs` → `server:poll_updated`/`server:giveaway_updated` → reducer → every visible card updates live.
 4. **Retirement** — the single `widgets::spawn_widget_sweeper` task (15 s tick) closes due polls and draws due giveaways (`rand::thread_rng()` over eligible entrants; winner announcement posted by a fresh throwaway BOT-badged key). All sweeper work persists **before** broadcasting, so a crash can never re-close or redraw. Deleting a card closes/cancels its widget.
 
-**Privacy invariants:** broadcasts and reads carry counts/status/winner only — voter and entrant identities never leave the server; a member's own `my_vote`/`my_entered` is returned only to them.
+**Privacy invariants (polls/giveaways):** broadcasts and reads carry counts/status/winner only — voter and entrant identities never leave the server; a member's own `my_vote`/`my_entered` is returned only to them.
+
+**Event cards (`📅`, `channel_events.rs`) follow the same four steps** with three deliberate differences: creation has **no MANAGE_SERVER gate** (anyone who can post can propose an event, and the card is authored **as the invoker** — no BOT badge); the widget JSON is `{"type":"event","id":…}` and mounts `EventWidget.tsx`; and the five interaction requests (`GetEvent`, `RsvpEvent`, `ClearRsvp`, `CancelEvent`, `EditEvent`) broadcast `EventUpdated` carrying **attendee display names** (≤10 per option, plus counts) — a **deliberate divergence** from the poll/giveaway anonymity rule, because the roster is the whole feature and an RSVP is an affirmative public act. The visibility boundary is still the channel (`widget_channel_visible`, opaque `"event not found"`), and public keys are never in the payload. Retirement is three sweeper passes rather than one: a **lead-time** DM pass, a **start** pass (guarded `upcoming → started` flip + a threaded `📅 … is starting now!` announcement), and a **cancel-notify** DM pass — each behind its own single-shot column guard (`reminded_at`, `status`, `cancel_notified_at`) so a crash can never double-ping or double-announce.
+
+**Personal reminders (`reminders.rs`) ride the sweeper but not the widget substrate.** `/remind 90m take the pizza out` posts no message, creates no widget, and broadcasts nothing; it inserts a `reminders` row (≤500 chars, ≤20 outstanding per member) and replies `ServerResponse::Notice { text }` on the invoker's own request id. A fourth sweeper pass flips due rows to `sent` and returns one DM each. `ListMyReminders`/`CancelReminder` back the Settings → Reminders panel and are **owner-scoped in SQL** by the authenticated connection key; a foreign or already-fired id gets the opaque `"reminder not found"`.
+
+**The server system identity** is the enabling piece both features needed: one lazily-created keypair (`bots` row `kind='system'`, label `"Farder"`) that the sweeper uses to send DMs and author the event-start announcement. It is filtered out of `GetMembers` in SQL, excluded from `list_bots`, refused by `RemoveBot`, and cannot authenticate a connection. The sweeper returns DMs as **data** (`PendingDm`) precisely so `send_system_dm` re-acquires the DB mutex only after the sweeper's guard has been dropped. See `docs/modules/server-system-identity.md`.
 
 ---
 

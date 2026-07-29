@@ -16,6 +16,9 @@ import GifSearchOptIn from "./GifSearchOptIn";
 import TimeoutBanner from "./TimeoutBanner";
 import PollBuilderModal from "./PollBuilderModal";
 import GiveawayBuilderModal from "./GiveawayBuilderModal";
+import EventBuilderModal from "./EventBuilderModal";
+import ReminderBuilderModal from "./ReminderBuilderModal";
+import { toast } from "../lib/toast";
 
 interface MessageInputProps {
   channelId: number;
@@ -46,8 +49,8 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [autocompletePos, setAutocompletePos] = useState<{ x: number; y: number } | null>(null);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [commandIndex, setCommandIndex] = useState(0);
-  // Open builder modal for structured command kinds (poll/giveaway).
-  const [builder, setBuilder] = useState<{ kind: "poll" | "giveaway"; trigger: string } | null>(null);
+  // Open builder modal for structured command kinds (poll/giveaway/event/reminder).
+  const [builder, setBuilder] = useState<{ kind: "poll" | "giveaway" | "event" | "reminder"; trigger: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const textareaWrapperRef = useRef<HTMLDivElement | null>(null);
 
@@ -225,7 +228,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         // Builder kinds with no args: open the form instead of sending (the
         // server would just reject an empty arg string with a usage error).
         // Non-empty args keep the direct power-user path below.
-        if ((cmd.kind === "poll" || cmd.kind === "giveaway") && !args.trim()) {
+        if ((cmd.kind === "poll" || cmd.kind === "giveaway" || cmd.kind === "event" || cmd.kind === "reminder") && !args.trim()) {
           setBuilder({ kind: cmd.kind, trigger: cmd.trigger });
           return;
         }
@@ -319,7 +322,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     // Builder kinds: selecting from the "/" autocomplete opens the matching
     // builder modal instead of inserting the trigger text — the modal builds
     // the pipe/token syntax and calls runCommand itself.
-    if (cmd.kind === "poll" || cmd.kind === "giveaway") {
+    if (cmd.kind === "poll" || cmd.kind === "giveaway" || cmd.kind === "event" || cmd.kind === "reminder") {
       setBuilder({ kind: cmd.kind, trigger: cmd.trigger });
       setCommandIndex(0);
       return;
@@ -329,7 +332,10 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setTimeout(() => { textareaRef.current?.focus(); }, 0);
   }
 
-  function handleBuilderCreated() {
+  function handleBuilderCreated(notice?: string | null) {
+    // Reminder creation posts nothing, so its only confirmation is the server's
+    // Notice text (poll/giveaway/event pass nothing -> no toast).
+    if (notice) toast.success(notice);
     setBuilder(null);
     // Clear the input if it still holds the slash text that opened the builder.
     setContent((c) => (c.trim().startsWith("/") ? "" : c));
@@ -579,6 +585,24 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       )}
       {builder?.kind === "giveaway" && (
         <GiveawayBuilderModal
+          serverId={serverId}
+          channelId={channelId}
+          trigger={builder.trigger}
+          onClose={() => setBuilder(null)}
+          onCreated={handleBuilderCreated}
+        />
+      )}
+      {builder?.kind === "event" && (
+        <EventBuilderModal
+          serverId={serverId}
+          channelId={channelId}
+          trigger={builder.trigger}
+          onClose={() => setBuilder(null)}
+          onCreated={handleBuilderCreated}
+        />
+      )}
+      {builder?.kind === "reminder" && (
+        <ReminderBuilderModal
           serverId={serverId}
           channelId={channelId}
           trigger={builder.trigger}

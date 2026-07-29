@@ -5,12 +5,13 @@ import { TranslationSettingsTab } from "../TranslationSettingsTab";
 import VoiceSettings from "../VoiceSettings";
 import PrivacyDataSettings from "../PrivacyDataSettings";
 import AlertSubscriptions from "./AlertSubscriptions";
+import MyReminders from "./MyReminders";
 
 interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "gif" | "translation" | "voice" | "privacy" | "alerts";
+type SectionId = "appearance" | "gif" | "translation" | "voice" | "privacy" | "alerts" | "reminders";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
@@ -19,6 +20,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "voice", label: "Voice" },
   { id: "privacy", label: "Privacy & Data" },
   { id: "alerts", label: "Alerts" },
+  { id: "reminders", label: "Reminders" },
 ];
 
 export default function SettingsModal({ onClose }: Props) {
@@ -64,6 +66,7 @@ export default function SettingsModal({ onClose }: Props) {
             {active === "voice" && <VoiceSettings />}
             {active === "privacy" && <PrivacyDataSettings />}
             {active === "alerts" && <AlertSubscriptions />}
+            {active === "reminders" && <MyReminders />}
           </section>
         </div>
       </div>

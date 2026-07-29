@@ -42,7 +42,7 @@ export default function BotsTab({ serverId }: Props) {
   const [cmdName, setCmdName] = useState("");
   const [cmdTrigger, setCmdTrigger] = useState("");
   const [cmdDescription, setCmdDescription] = useState("");
-  const [cmdKind, setCmdKind] = useState<"text" | "api" | "poll" | "giveaway">("text");
+  const [cmdKind, setCmdKind] = useState<"text" | "api" | "poll" | "giveaway" | "event" | "reminder">("text");
   const [cmdBody, setCmdBody] = useState("");
   const [cmdUrl, setCmdUrl] = useState("");
   const [cmdPath, setCmdPath] = useState("");
@@ -133,7 +133,8 @@ export default function BotsTab({ serverId }: Props) {
 
   async function handleAddCommand() {
     setCmdError(null);
-    const isWidgetKind = cmdKind === "poll" || cmdKind === "giveaway";
+    const isWidgetKind =
+      cmdKind === "poll" || cmdKind === "giveaway" || cmdKind === "event" || cmdKind === "reminder";
     try {
       await api.addCommand(
         serverId,
@@ -529,12 +530,16 @@ export default function BotsTab({ serverId }: Props) {
                 <select
                   className="connect-input"
                   value={cmdKind}
-                  onChange={(e) => setCmdKind(e.target.value as "text" | "api" | "poll" | "giveaway")}
+                  onChange={(e) =>
+                    setCmdKind(e.target.value as "text" | "api" | "poll" | "giveaway" | "event" | "reminder")
+                  }
                 >
                   <option value="text">text</option>
                   <option value="api">api</option>
                   <option value="poll">Poll</option>
                   <option value="giveaway">Giveaway</option>
+                  <option value="event">Event</option>
+                  <option value="reminder">Reminder</option>
                 </select>
               </div>
             </div>
@@ -562,6 +567,18 @@ export default function BotsTab({ serverId }: Props) {
             {cmdKind === "giveaway" && (
               <div style={{ color: "var(--xp-text-muted)", marginTop: 6, fontSize: 12 }}>
                 Usage: <code>{"/<trigger> <duration> <prize>"}</code> — e.g. <code>/giveaway 24h Steam key</code> (moderators only)
+              </div>
+            )}
+
+            {cmdKind === "event" && (
+              <div style={{ color: "var(--xp-text-muted)", marginTop: 6, fontSize: 12 }}>
+                Members run <code>{"/<trigger> Title | 3d [| location] [| description] [| remind 1h]"}</code> — or just pick it from &quot;/&quot; to open the form.
+              </div>
+            )}
+
+            {cmdKind === "reminder" && (
+              <div style={{ color: "var(--xp-text-muted)", marginTop: 6, fontSize: 12 }}>
+                Members run <code>{"/<trigger> 90m take the pizza out"}</code> — private, nothing is posted.
               </div>
             )}
 
