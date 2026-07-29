@@ -382,6 +382,29 @@ fn widget_channel_visible(
     }
 }
 
+/// The ONE error string every event arm returns for "no such event", "channel
+/// gone", "not a DM participant" and "no VIEW_CHANNEL" — byte-identical so an
+/// event id is never an existence oracle for an invisible channel.
+const EVENT_NOT_FOUND: &str = "event not found";
+
+/// Shared preamble for every event request: load the row and enforce channel
+/// visibility. `None` ⇒ the caller MUST return `err(EVENT_NOT_FOUND)`.
+fn visible_event(
+    conn: &Connection,
+    member: &PublicKey,
+    is_owner: bool,
+    event_id: i64,
+) -> Result<Option<crate::channel_events::EventRow>> {
+    let row = match crate::channel_events::get(conn, event_id)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+        return Ok(None);
+    }
+    Ok(Some(row))
+}
+
 // ---------------------------------------------------------------------------
 // Mesh content gate
 // ---------------------------------------------------------------------------
@@ -600,6 +623,33 @@ pub fn handle_request(
                                         events.push(BroadcastEvent {
                                             target: EventTarget::Subscribers(channel_id),
                                             event: ServerEvent::GiveawayUpdated { giveaway: info },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Some("event") => {
+                            if let Some(event_id) = v.get("id").and_then(|i| i.as_i64()) {
+                                if let Some(row) = crate::channel_events::get(conn, event_id)? {
+                                    // Deleting the card CANCELS an upcoming event
+                                    // (rows retained for audit). The sweeper's
+                                    // cancel-notify pass then DMs the Going list,
+                                    // and no announcement can ever post — the
+                                    // status='upcoming' guard in start_and_announce
+                                    // fails from here on.
+                                    if row.status == "upcoming" {
+                                        crate::channel_events::cancel(
+                                            conn,
+                                            event_id,
+                                            crate::db::now() as i64,
+                                        )?;
+                                        let updated = crate::channel_events::get(conn, event_id)?
+                                            .ok_or_else(|| anyhow::anyhow!("event row vanished during cancel"))?;
+                                        let info =
+                                            crate::channel_events::build_info(conn, &updated)?;
+                                        events.push(BroadcastEvent {
+                                            target: EventTarget::Subscribers(channel_id),
+                                            event: ServerEvent::EventUpdated { event: info },
                                         });
                                     }
                                 }
@@ -2295,7 +2345,7 @@ pub fn handle_request(
                 }
                 // Interactive widget kinds need no kind-specific fields — the arg
                 // string is parsed at dispatch.
-                "poll" | "giveaway" | "reminder" => {}
+                "poll" | "giveaway" | "event" | "reminder" => {}
                 _ => {
                     return err(
                         "kind must be 'text', 'api', 'poll', 'giveaway', 'event' or 'reminder'",
@@ -2604,6 +2654,222 @@ pub fn handle_request(
         }
 
         // ----------------------------------------------------------------
+        // Events (RSVP cards — actor is ALWAYS the authenticated connection
+        // key, never a request field; membership-gated by default-deny above;
+        // every arm funnels through `visible_event`, so a missing row, a gone
+        // channel, a non-participant DM and a missing VIEW_CHANNEL all return
+        // the byte-identical EVENT_NOT_FOUND — an event id is never an
+        // existence oracle)
+        // ----------------------------------------------------------------
+        ServerRequest::GetEvent { event_id } => {
+            // Read: no timeout gate (reads are allowed while timed out, matching
+            // GetPoll), no rate limit.
+            let row = match visible_event(conn, member, is_owner, event_id)? {
+                Some(r) => r,
+                None => return err(EVENT_NOT_FOUND),
+            };
+            let info = crate::channel_events::build_info(conn, &row)?;
+            let mine = crate::channel_events::my_rsvp(conn, event_id, member)?;
+            ok(ServerResponse::Event { event: info, my_rsvp: mine })
+        }
+
+        ServerRequest::RsvpEvent { event_id, response } => {
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match visible_event(conn, member, is_owner, event_id)? {
+                Some(r) => r,
+                None => return err(EVENT_NOT_FOUND),
+            };
+            if !matches!(response.as_str(), "going" | "maybe" | "no") {
+                return err("invalid RSVP");
+            }
+            let now = crate::db::now() as i64;
+            if row.status == "cancelled" {
+                return err("this event was cancelled");
+            }
+            // The `now >= starts_at` half makes the cutoff exact even before the
+            // sweeper ticks (the RSVP-races-the-start edge case).
+            if row.status != "upcoming" || now >= row.starts_at {
+                return err("this event has already started");
+            }
+            // Upsert: an identical response rewrites the same row and still
+            // emits — harmless, and keeps one code path.
+            crate::channel_events::rsvp(conn, event_id, member, &response, now)?;
+            let info = crate::channel_events::build_info(conn, &row)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::EventUpdated { event: info },
+                }],
+            )
+        }
+
+        ServerRequest::ClearRsvp { event_id } => {
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match visible_event(conn, member, is_owner, event_id)? {
+                Some(r) => r,
+                None => return err(EVENT_NOT_FOUND),
+            };
+            let now = crate::db::now() as i64;
+            if row.status == "cancelled" {
+                return err("this event was cancelled");
+            }
+            if row.status != "upcoming" || now >= row.starts_at {
+                return err("this event has already started");
+            }
+            if !crate::channel_events::clear_rsvp(conn, event_id, member)? {
+                // Idempotent: no RSVP existed → plain Ok, no broadcast noise
+                // (the RetractVote rule).
+                return ok(ServerResponse::Ok);
+            }
+            let info = crate::channel_events::build_info(conn, &row)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::EventUpdated { event: info },
+                }],
+            )
+        }
+
+        ServerRequest::CancelEvent { event_id } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match visible_event(conn, member, is_owner, event_id)? {
+                Some(r) => r,
+                None => return err(EVENT_NOT_FOUND),
+            };
+            if row.status != "upcoming" {
+                return err("event already ended or cancelled");
+            }
+            // Authz: creator OR MANAGE_SERVER.
+            if row.creator != *member {
+                if let Some(denied) = require_base_perm(
+                    conn,
+                    member,
+                    is_owner,
+                    permissions::MANAGE_SERVER,
+                    "MANAGE_SERVER",
+                )? {
+                    return Ok(denied);
+                }
+            }
+            crate::channel_events::cancel(conn, event_id, crate::db::now() as i64)?;
+            let updated = crate::channel_events::get(conn, event_id)?
+                .ok_or_else(|| anyhow::anyhow!("event row vanished during cancel"))?;
+            let info = crate::channel_events::build_info(conn, &updated)?;
+            // The DMs to the Going list are NOT sent here — a sync handler cannot
+            // .await. The sweeper's cancel-notify pass drains
+            // `cancel_notified_at IS NULL` within one tick, so every DM keeps to
+            // one code path with one crash-safety guard.
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::EventUpdated { event: info },
+                }],
+            )
+        }
+
+        ServerRequest::EditEvent {
+            event_id,
+            title,
+            description,
+            location,
+            starts_at,
+            remind_lead,
+        } => {
+            if let Some(denied) = require_not_timed_out(conn, member)? {
+                return Ok(denied);
+            }
+            let row = match visible_event(conn, member, is_owner, event_id)? {
+                Some(r) => r,
+                None => return err(EVENT_NOT_FOUND),
+            };
+            if row.status != "upcoming" {
+                return err("only an upcoming event can be edited");
+            }
+            // Authz: creator OR MANAGE_SERVER (same expression as Cancel).
+            if row.creator != *member {
+                if let Some(denied) = require_base_perm(
+                    conn,
+                    member,
+                    is_owner,
+                    permissions::MANAGE_SERVER,
+                    "MANAGE_SERVER",
+                )? {
+                    return Ok(denied);
+                }
+            }
+            // Full replace, re-running the SAME validation as creation.
+            let title = title.trim().to_string();
+            let description = description
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let location = location
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if let Err(reason) = crate::channel_events::validate_event_fields(
+                &title,
+                description.as_deref(),
+                location.as_deref(),
+            ) {
+                return err(&reason);
+            }
+            let now = crate::db::now();
+            if let Err(reason) = crate::channel_events::resolve_start(
+                &crate::channel_events::WhenSpec::Absolute(starts_at),
+                now,
+            ) {
+                return err(&reason);
+            }
+            if let Some(lead) = remind_lead {
+                if !crate::channel_events::REMIND_LEADS.contains(&lead) {
+                    return err("invalid reminder lead");
+                }
+            }
+            // A moved start time re-arms the lead DM (reminded_at = NULL). If the
+            // new lead moment is already past but the start is still future the
+            // next sweep fires it immediately — deliberate.
+            let rearm = starts_at as i64 != row.starts_at;
+            crate::channel_events::edit(
+                conn,
+                event_id,
+                &title,
+                description.as_deref(),
+                location.as_deref(),
+                starts_at as i64,
+                remind_lead.map(|l| l as i64),
+                rearm,
+            )?;
+            let updated = crate::channel_events::get(conn, event_id)?
+                .ok_or_else(|| anyhow::anyhow!("event row vanished during edit"))?;
+            let info = crate::channel_events::build_info(conn, &updated)?;
+            ok_with(
+                ServerResponse::Ok,
+                vec![BroadcastEvent {
+                    target: EventTarget::Subscribers(row.channel_id as u64),
+                    event: ServerEvent::EventUpdated { event: info },
+                }],
+            )
+        }
+
+        // ----------------------------------------------------------------
         // Active widgets (read — actor is ALWAYS the authenticated
         // connection key; membership-gated by the default-deny above;
         // `channel_id` is the only client-supplied field)
@@ -2630,29 +2896,55 @@ pub fn handle_request(
                 channel_id as i64,
                 ACTIVE_WIDGETS_CAP as u32,
             )?;
-            // Merge-sort by created_at ascending (each list is already id ASC =
-            // creation order; ties take the poll first — deterministic), then
-            // truncate to 20 COMBINED and split back into the two lists.
-            let (mut pi, mut gi) = (0usize, 0usize);
+            // Upcoming events only: `starts_at > now` excludes a due-but-unswept
+            // event, matching the RSVP cutoff's exactness.
+            let event_rows = crate::channel_events::list_upcoming_in_channel(
+                conn,
+                channel_id as i64,
+                now,
+                ACTIVE_WIDGETS_CAP as u32,
+            )?;
+            // Three-way merge by created_at ascending (each list is already id
+            // ASC = creation order; ties take poll, then giveaway, then event —
+            // deterministic), truncated to 20 COMBINED and split back apart.
+            let (mut pi, mut gi, mut ei) = (0usize, 0usize, 0usize);
             let mut polls = Vec::new();
             let mut giveaways = Vec::new();
-            while polls.len() + giveaways.len() < ACTIVE_WIDGETS_CAP {
-                let take_poll = match (poll_rows.get(pi), giveaway_rows.get(gi)) {
-                    (Some(p), Some(g)) => p.created_at <= g.created_at,
-                    (Some(_), None) => true,
-                    (None, Some(_)) => false,
-                    (None, None) => break,
-                };
-                if take_poll {
-                    polls.push(crate::polls::build_info(conn, &poll_rows[pi])?);
-                    pi += 1;
-                } else {
-                    giveaways.push(crate::giveaways::build_info(conn, &giveaway_rows[gi])?);
-                    gi += 1;
+            let mut events = Vec::new();
+            while polls.len() + giveaways.len() + events.len() < ACTIVE_WIDGETS_CAP {
+                // 0 = poll, 1 = giveaway, 2 = event; None = all three drained.
+                let mut pick: Option<(u8, i64)> = None;
+                if let Some(p) = poll_rows.get(pi) {
+                    pick = Some((0, p.created_at));
+                }
+                if let Some(g) = giveaway_rows.get(gi) {
+                    if pick.map_or(true, |(_, c)| g.created_at < c) {
+                        pick = Some((1, g.created_at));
+                    }
+                }
+                if let Some(e) = event_rows.get(ei) {
+                    if pick.map_or(true, |(_, c)| e.created_at < c) {
+                        pick = Some((2, e.created_at));
+                    }
+                }
+                match pick {
+                    Some((0, _)) => {
+                        polls.push(crate::polls::build_info(conn, &poll_rows[pi])?);
+                        pi += 1;
+                    }
+                    Some((1, _)) => {
+                        giveaways.push(crate::giveaways::build_info(conn, &giveaway_rows[gi])?);
+                        gi += 1;
+                    }
+                    Some((2, _)) => {
+                        events.push(crate::channel_events::build_info(conn, &event_rows[ei])?);
+                        ei += 1;
+                    }
+                    _ => break,
                 }
             }
             // No per-viewer fields; no broadcasts.
-            ok(ServerResponse::ActiveWidgets { polls, giveaways })
+            ok(ServerResponse::ActiveWidgets { polls, giveaways, events })
         }
 
         // ----------------------------------------------------------------
@@ -6888,9 +7180,16 @@ mod tests {
         }
     }
 
-    fn active_widgets(r: HandleResult) -> (Vec<farder_protocol::server::PollInfo>, Vec<farder_protocol::server::GiveawayInfo>) {
+    #[allow(clippy::type_complexity)]
+    fn active_widgets(
+        r: HandleResult,
+    ) -> (
+        Vec<farder_protocol::server::PollInfo>,
+        Vec<farder_protocol::server::GiveawayInfo>,
+        Vec<farder_protocol::server::EventInfo>,
+    ) {
         match r.response {
-            ServerResponse::ActiveWidgets { polls, giveaways } => (polls, giveaways),
+            ServerResponse::ActiveWidgets { polls, giveaways, events } => (polls, giveaways, events),
             other => panic!("expected ActiveWidgets, got {other:?}"),
         }
     }
@@ -6926,7 +7225,7 @@ mod tests {
         let r = handle_request(&conn, &voter, false,
             ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
         assert!(r.events.is_empty(), "reads never broadcast");
-        let (polls, giveaways) = active_widgets(r);
+        let (polls, giveaways, _events) = active_widgets(r);
         assert_eq!(polls.iter().map(|p| p.id).collect::<Vec<_>>(), vec![p1, p2],
             "open polls only, oldest-first");
         assert_eq!(giveaways.iter().map(|g| g.id).collect::<Vec<_>>(), vec![g1],
@@ -6936,7 +7235,7 @@ mod tests {
         // No per-viewer fields: a voter and a non-voter get byte-equal lists.
         let r2 = handle_request(&conn, &other, false,
             ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
-        let (polls2, giveaways2) = active_widgets(r2);
+        let (polls2, giveaways2, _events2) = active_widgets(r2);
         assert_eq!(polls, polls2, "response is requester-independent (no my_vote)");
         assert_eq!(giveaways, giveaways2, "response is requester-independent (no my_entered)");
 
@@ -6944,7 +7243,7 @@ mod tests {
         let empty_channel = channels::create_channel(&conn, "empty", ChannelType::Text, None, 1).unwrap();
         let r = handle_request(&conn, &voter, false,
             ServerRequest::ListActiveWidgets { channel_id: empty_channel }, "", &state).unwrap();
-        let (polls, giveaways) = active_widgets(r);
+        let (polls, giveaways, _events) = active_widgets(r);
         assert!(polls.is_empty() && giveaways.is_empty());
     }
 
@@ -6974,7 +7273,7 @@ mod tests {
 
         let r = handle_request(&conn, &creator, false,
             ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
-        let (polls, giveaways) = active_widgets(r);
+        let (polls, giveaways, _events) = active_widgets(r);
         assert_eq!(polls.len() + giveaways.len(), 20, "combined cap");
         assert_eq!(
             polls.iter().map(|p| p.id).collect::<Vec<_>>(),
@@ -7027,7 +7326,7 @@ mod tests {
         // Participant sees the DM's widgets.
         let r = handle_request(&conn, &bob, false,
             ServerRequest::ListActiveWidgets { channel_id: dm }, "", &state).unwrap();
-        let (polls, giveaways) = active_widgets(r);
+        let (polls, giveaways, _events) = active_widgets(r);
         assert_eq!(polls.iter().map(|p| p.id).collect::<Vec<_>>(), vec![poll_id]);
         assert!(giveaways.is_empty());
 
@@ -7236,5 +7535,542 @@ mod tests {
         let cmd = infos.iter().find(|c| c.trigger == "remind").unwrap();
         assert!(cmd.takes_arg, "reminder commands take an arg");
         assert_eq!(cmd.kind, "reminder");
+    }
+
+    // -----------------------------------------------------------------------
+    // Events (RSVP cards)
+    // -----------------------------------------------------------------------
+
+    fn parsed_event() -> crate::channel_events::ParsedEvent {
+        crate::channel_events::parse_event_args("Party | 3d | my place | snacks").unwrap()
+    }
+
+    /// An event row with an explicit `starts_at` (card message id 1 — the tests
+    /// that need a real card use `create_event_card`).
+    fn make_event(conn: &Connection, channel_id: u64, creator: &PublicKey, starts_at: i64) -> i64 {
+        crate::channel_events::create(
+            conn, channel_id as i64, 1, creator, &parsed_event(), starts_at, 0,
+        )
+        .unwrap()
+    }
+
+    fn event_of(r: &HandleResult) -> &farder_protocol::server::EventInfo {
+        match &r.events[0] {
+            BroadcastEvent { event: ServerEvent::EventUpdated { event }, .. } => event,
+            other => panic!("expected EventUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rsvp_event_happy_emits_event_updated_to_subscribers() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let goer = add_member(&conn, "Goer");
+        let event_id = make_event(&conn, channel_id, &creator, far_future());
+
+        let r = handle_request(&conn, &goer, false,
+            ServerRequest::RsvpEvent { event_id, response: "going".into() }, "", &fake_state())
+            .unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(r.events.len(), 1);
+        match &r.events[0] {
+            BroadcastEvent {
+                target: EventTarget::Subscribers(cid),
+                event: ServerEvent::EventUpdated { event },
+            } => {
+                assert_eq!(*cid, channel_id);
+                assert_eq!(event.id, event_id);
+                assert_eq!((event.going_count, event.maybe_count, event.no_count), (1, 0, 0));
+                assert_eq!(event.going_names, vec!["Goer".to_string()]);
+                assert_eq!(event.status, "upcoming");
+            }
+            other => panic!("expected EventUpdated to Subscribers, got {other:?}"),
+        }
+        // Changing your mind moves the name, not the total.
+        let r = handle_request(&conn, &goer, false,
+            ServerRequest::RsvpEvent { event_id, response: "maybe".into() }, "", &fake_state())
+            .unwrap();
+        let info = event_of(&r);
+        assert_eq!((info.going_count, info.maybe_count), (0, 1));
+        assert_eq!(info.maybe_names, vec!["Goer".to_string()]);
+    }
+
+    #[test]
+    fn test_rsvp_event_bogus_response_errors() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let event_id = make_event(&conn, channel_id, &creator, far_future());
+
+        for bad in ["yes", "GOING", "", "going "] {
+            let r = handle_request(&conn, &creator, false,
+                ServerRequest::RsvpEvent { event_id, response: bad.into() }, "", &fake_state())
+                .unwrap();
+            expect_err(&r, "invalid RSVP");
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM channel_event_rsvps", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "a rejected response writes nothing");
+    }
+
+    #[test]
+    fn test_rsvp_event_after_starts_at_unswept_errors() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        // Still 'upcoming' in the DB (the sweeper has not ticked) but past its
+        // start: the cutoff is exact anyway.
+        let event_id = make_event(&conn, channel_id, &creator, crate::db::now() as i64 - 1);
+        let state = fake_state();
+
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::RsvpEvent { event_id, response: "going".into() }, "", &state).unwrap();
+        expect_err(&r, "already started");
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::ClearRsvp { event_id }, "", &state).unwrap();
+        expect_err(&r, "already started");
+    }
+
+    #[test]
+    fn test_rsvp_event_on_cancelled_errors() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let event_id = make_event(&conn, channel_id, &creator, far_future());
+        assert!(crate::channel_events::cancel(&conn, event_id, 1).unwrap());
+
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::RsvpEvent { event_id, response: "going".into() }, "", &fake_state())
+            .unwrap();
+        expect_err(&r, "this event was cancelled");
+    }
+
+    #[test]
+    fn test_rsvp_event_without_view_channel_is_opaque_not_found() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let event_id = make_event(&conn, channel_id, &creator, far_future());
+        // Strip VIEW_CHANNEL from @everyone.
+        conn.execute(
+            "UPDATE roles SET permissions = ?1 WHERE name = '@everyone' AND builtin = 1",
+            rusqlite::params![(permissions::READ_MESSAGES | permissions::SEND_MESSAGES) as i64],
+        )
+        .unwrap();
+        let outsider = add_member(&conn, "Outsider");
+        let state = fake_state();
+
+        // The reason for an INVISIBLE event is byte-identical to the reason for a
+        // nonexistent id — an event id is never an existence oracle.
+        let missing = handle_request(&conn, &outsider, false,
+            ServerRequest::GetEvent { event_id: 999_999 }, "", &state).unwrap();
+        let baseline = err_reason(&missing);
+        assert_eq!(baseline, "event not found");
+        for req in [
+            ServerRequest::GetEvent { event_id },
+            ServerRequest::RsvpEvent { event_id, response: "going".into() },
+            ServerRequest::ClearRsvp { event_id },
+            ServerRequest::CancelEvent { event_id },
+            ServerRequest::EditEvent {
+                event_id,
+                title: "T".into(),
+                description: None,
+                location: None,
+                starts_at: far_future() as u64,
+                remind_lead: None,
+            },
+        ] {
+            let r = handle_request(&conn, &outsider, false, req, "", &state).unwrap();
+            assert_eq!(err_reason(&r), baseline, "invisible must look exactly like missing");
+        }
+        assert_eq!(crate::channel_events::my_rsvp(&conn, event_id, &outsider).unwrap(), None);
+    }
+
+    #[test]
+    fn test_event_timeout_gating() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let event_id = make_event(&conn, channel_id, &creator, far_future());
+        members::set_timeout(&conn, &creator, current_unix_ms() + 60_000, None).unwrap();
+        let state = fake_state();
+
+        for req in [
+            ServerRequest::RsvpEvent { event_id, response: "going".into() },
+            ServerRequest::ClearRsvp { event_id },
+            ServerRequest::CancelEvent { event_id },
+            ServerRequest::EditEvent {
+                event_id,
+                title: "T".into(),
+                description: None,
+                location: None,
+                starts_at: far_future() as u64,
+                remind_lead: None,
+            },
+        ] {
+            let r = handle_request(&conn, &creator, false, req, "", &state).unwrap();
+            expect_err(&r, "timed out");
+        }
+        // Reads stay allowed while timed out (the GetPoll rule).
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::GetEvent { event_id }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Event { .. }));
+    }
+
+    #[test]
+    fn test_clear_rsvp_with_no_rsvp_is_ok_with_no_event() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let goer = add_member(&conn, "Goer");
+        let event_id = make_event(&conn, channel_id, &creator, far_future());
+        let state = fake_state();
+
+        // Nothing to clear → plain Ok, NO broadcast noise (the RetractVote rule).
+        let r = handle_request(&conn, &goer, false,
+            ServerRequest::ClearRsvp { event_id }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert!(r.events.is_empty(), "idempotent clear broadcasts nothing");
+
+        handle_request(&conn, &goer, false,
+            ServerRequest::RsvpEvent { event_id, response: "going".into() }, "", &state).unwrap();
+        let r = handle_request(&conn, &goer, false,
+            ServerRequest::ClearRsvp { event_id }, "", &state).unwrap();
+        assert_eq!(r.events.len(), 1, "a real clear does broadcast");
+        assert_eq!(event_of(&r).going_count, 0);
+        assert_eq!(crate::channel_events::my_rsvp(&conn, event_id, &goer).unwrap(), None);
+    }
+
+    #[test]
+    fn test_cancel_event_authz_matrix() {
+        let (conn, owner_pk) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let rando = add_member(&conn, "Rando");
+        let state = fake_state();
+        let e1 = make_event(&conn, channel_id, &creator, far_future());
+        let e2 = make_event(&conn, channel_id, &creator, far_future());
+
+        // A rando with neither creatorship nor MANAGE_SERVER is refused.
+        let r = handle_request(&conn, &rando, false,
+            ServerRequest::CancelEvent { event_id: e1 }, "", &state).unwrap();
+        expect_err(&r, "MANAGE_SERVER");
+        assert_eq!(crate::channel_events::get(&conn, e1).unwrap().unwrap().status, "upcoming");
+
+        // The creator can cancel.
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::CancelEvent { event_id: e1 }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(event_of(&r).status, "cancelled");
+        // No channel message is posted — the card flip is the record.
+        assert_eq!(r.events.len(), 1);
+        // Cancelling twice errors.
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::CancelEvent { event_id: e1 }, "", &state).unwrap();
+        expect_err(&r, "event already ended or cancelled");
+
+        // A MANAGE_SERVER holder (owner) can cancel someone else's event.
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::CancelEvent { event_id: e2 }, "", &state).unwrap();
+        assert_eq!(event_of(&r).status, "cancelled");
+        // Still pending notification: the sweeper's cancel pass DMs the Going list.
+        let ids: Vec<i64> = crate::channel_events::list_cancel_unnotified(&conn)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![e1, e2]);
+    }
+
+    #[test]
+    fn test_edit_event_validation_and_reminder_rearm() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let rando = add_member(&conn, "Rando");
+        let state = fake_state();
+        let starts_at = far_future();
+        let event_id = make_event(&conn, channel_id, &creator, starts_at);
+        conn.execute(
+            "UPDATE channel_events SET remind_lead = 900, reminded_at = 5 WHERE id = ?1",
+            rusqlite::params![event_id],
+        )
+        .unwrap();
+        let edit = |title: &str, at: u64, lead: Option<u64>| ServerRequest::EditEvent {
+            event_id,
+            title: title.into(),
+            description: None,
+            location: None,
+            starts_at: at,
+            remind_lead: lead,
+        };
+
+        // Authz: creator or MANAGE_SERVER only.
+        let r = handle_request(&conn, &rando, false, edit("Nope", starts_at as u64, None), "", &state).unwrap();
+        expect_err(&r, "MANAGE_SERVER");
+
+        // The SAME validation as creation.
+        let r = handle_request(&conn, &creator, false,
+            edit(&"x".repeat(121), starts_at as u64, None), "", &state).unwrap();
+        expect_err(&r, "title must be 1-120 characters");
+        let r = handle_request(&conn, &creator, false, edit("", starts_at as u64, None), "", &state).unwrap();
+        expect_err(&r, "title must be 1-120 characters");
+        let r = handle_request(&conn, &creator, false,
+            edit("T", crate::db::now() - 10, None), "", &state).unwrap();
+        expect_err(&r, "at least a minute from now");
+        let r = handle_request(&conn, &creator, false,
+            edit("T", crate::db::now() + 400 * 86_400, None), "", &state).unwrap();
+        expect_err(&r, "at most a year out");
+        let r = handle_request(&conn, &creator, false,
+            edit("T", starts_at as u64, Some(1_234)), "", &state).unwrap();
+        expect_err(&r, "invalid reminder lead");
+        // Nothing above touched the row.
+        let row = crate::channel_events::get(&conn, event_id).unwrap().unwrap();
+        assert_eq!(row.title, "Party");
+        assert_eq!(row.reminded_at, Some(5));
+
+        // Same start time → edited, reminder guard NOT re-armed.
+        let r = handle_request(&conn, &creator, false,
+            edit("Renamed", starts_at as u64, Some(900)), "", &state).unwrap();
+        assert_eq!(event_of(&r).title, "Renamed");
+        let row = crate::channel_events::get(&conn, event_id).unwrap().unwrap();
+        assert_eq!(row.reminded_at, Some(5), "unchanged start keeps the guard");
+
+        // Moved start time → re-armed so the lead DM fires against the new time.
+        let moved = starts_at as u64 + 3_600;
+        let r = handle_request(&conn, &creator, false, edit("Renamed", moved, Some(3_600)), "", &state)
+            .unwrap();
+        assert_eq!(event_of(&r).starts_at, moved);
+        let row = crate::channel_events::get(&conn, event_id).unwrap().unwrap();
+        assert_eq!(row.reminded_at, None, "moved start re-arms the reminder");
+        assert_eq!(row.remind_lead, Some(3_600));
+
+        // A cancelled event is not editable.
+        assert!(crate::channel_events::cancel(&conn, event_id, 1).unwrap());
+        let r = handle_request(&conn, &creator, false, edit("Later", moved, None), "", &state).unwrap();
+        expect_err(&r, "only an upcoming event can be edited");
+    }
+
+    #[test]
+    fn test_get_event_my_rsvp_is_per_requester() {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let alice = add_member(&conn, "Alice");
+        let bob = add_member(&conn, "Bob");
+        let event_id = make_event(&conn, channel_id, &alice, far_future());
+        let state = fake_state();
+        handle_request(&conn, &alice, false,
+            ServerRequest::RsvpEvent { event_id, response: "going".into() }, "", &state).unwrap();
+
+        let my = |who: &PublicKey| -> (farder_protocol::server::EventInfo, Option<String>) {
+            let r = handle_request(&conn, who, false, ServerRequest::GetEvent { event_id }, "", &state)
+                .unwrap();
+            assert!(r.events.is_empty(), "a read broadcasts nothing");
+            match r.response {
+                ServerResponse::Event { event, my_rsvp } => (event, my_rsvp),
+                other => panic!("expected Event, got {other:?}"),
+            }
+        };
+        let (a_event, a_mine) = my(&alice);
+        let (b_event, b_mine) = my(&bob);
+        assert_eq!(a_mine.as_deref(), Some("going"));
+        assert_eq!(b_mine, None, "my_rsvp is per requester");
+        assert_eq!(a_event, b_event, "the roster itself is requester-independent");
+        assert_eq!(a_event.going_names, vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn test_delete_message_on_event_card_cancels_and_emits_both() {
+        let (mut conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let now = crate::db::now();
+        let parsed = parsed_event();
+        let (msg, info) =
+            crate::channel_events::create_event_card(&mut conn, channel_id, &creator, &parsed, now)
+                .unwrap();
+        let state = fake_state();
+        handle_request(&conn, &creator, false,
+            ServerRequest::RsvpEvent { event_id: info.id, response: "going".into() }, "", &state)
+            .unwrap();
+
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::DeleteMessage { message_id: msg.id }, "", &state).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok));
+        assert_eq!(r.events.len(), 2, "MessageDeleted + EventUpdated");
+        assert!(matches!(&r.events[0].event, ServerEvent::MessageDeleted { .. }));
+        match &r.events[1] {
+            BroadcastEvent {
+                target: EventTarget::Subscribers(cid),
+                event: ServerEvent::EventUpdated { event },
+            } => {
+                assert_eq!(*cid, channel_id);
+                assert_eq!(event.id, info.id);
+                assert_eq!(event.status, "cancelled", "deleting the card cancels the event");
+            }
+            other => panic!("expected EventUpdated, got {other:?}"),
+        }
+        // Row retained for audit, and queued for the cancellation DMs.
+        let row = crate::channel_events::get(&conn, info.id).unwrap().unwrap();
+        assert!(row.cancelled_at.is_some() && row.cancel_notified_at.is_none());
+        // No announcement can ever post now (the start guard fails).
+        let system = crate::bots::get_or_create_system_identity(&conn).unwrap();
+        assert!(crate::channel_events::start_and_announce(&mut conn, &row, &system, far_future())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_list_active_widgets_includes_upcoming_events_excludes_started_cancelled_and_caps_at_20_combined()
+    {
+        let (conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let creator = add_member(&conn, "Creator");
+        let state = fake_state();
+        let upcoming = make_event(&conn, channel_id, &creator, far_future());
+        let cancelled = make_event(&conn, channel_id, &creator, far_future());
+        crate::channel_events::cancel(&conn, cancelled, 1).unwrap();
+        let started = make_event(&conn, channel_id, &creator, far_future());
+        conn.execute(
+            "UPDATE channel_events SET status = 'started' WHERE id = ?1",
+            rusqlite::params![started],
+        )
+        .unwrap();
+        // Due but unswept: excluded (the cutoff is exact).
+        let _past = make_event(&conn, channel_id, &creator, crate::db::now() as i64 - 1);
+
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::ListActiveWidgets { channel_id }, "", &state).unwrap();
+        let (_polls, _giveaways, events) = active_widgets(r);
+        assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![upcoming]);
+
+        // Combined cap across all THREE kinds, merged by created_at.
+        let other = channels::create_channel(&conn, "cap", ChannelType::Text, None, 1).unwrap();
+        let mut poll_ids = Vec::new();
+        for i in 0..12i64 {
+            let id = make_poll(&conn, other, &creator, None);
+            set_poll_created_at(&conn, id, 1_000 + i * 10);
+            poll_ids.push(id);
+        }
+        let mut event_ids = Vec::new();
+        for j in 0..12i64 {
+            let id = make_event(&conn, other, &creator, far_future());
+            conn.execute(
+                "UPDATE channel_events SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![id, 1_005 + j * 10],
+            )
+            .unwrap();
+            event_ids.push(id);
+        }
+        let r = handle_request(&conn, &creator, false,
+            ServerRequest::ListActiveWidgets { channel_id: other }, "", &state).unwrap();
+        let (polls, giveaways, events) = active_widgets(r);
+        assert_eq!(polls.len() + giveaways.len() + events.len(), 20, "combined cap");
+        assert_eq!(polls.iter().map(|p| p.id).collect::<Vec<_>>(), poll_ids[..10].to_vec());
+        assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), event_ids[..10].to_vec());
+    }
+
+    #[test]
+    fn test_event_requests_are_membership_gated_by_default_deny() {
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+
+        let state = fake_state();
+        let conn = state.db.lock().unwrap();
+        let owner_kp = Keypair::generate();
+        members::register_member(&conn, &owner_kp.public_key(), "Owner").unwrap();
+        let outsider = Keypair::generate().public_key();
+        members::register_member(&conn, &outsider, "Outsider").unwrap();
+        let g = Genesis {
+            version: 1,
+            name: "t".into(),
+            owner: owner_kp.public_key(),
+            created_at: 1,
+            nonce: [0u8; 16],
+        };
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+
+        // None of the five is in request_requires_membership's allow-list, so a
+        // non-log member is refused before the arm ever runs.
+        for req in [
+            ServerRequest::GetEvent { event_id: 1 },
+            ServerRequest::RsvpEvent { event_id: 1, response: "going".into() },
+            ServerRequest::ClearRsvp { event_id: 1 },
+            ServerRequest::CancelEvent { event_id: 1 },
+            ServerRequest::EditEvent {
+                event_id: 1,
+                title: "T".into(),
+                description: None,
+                location: None,
+                starts_at: far_future() as u64,
+                remind_lead: None,
+            },
+        ] {
+            let r = handle_request(&conn, &outsider, false, req, "", &state).unwrap();
+            expect_err(&r, "not a member of this server");
+        }
+    }
+
+    #[test]
+    fn test_add_command_accepts_event_kind_and_takes_arg() {
+        let (conn, owner_pk) = setup();
+        let r = handle_request(&conn, &owner_pk, true,
+            ServerRequest::AddCommand {
+                name: "Event".into(),
+                trigger: "event".into(),
+                description: "plan an event".into(),
+                kind: "event".into(),
+                body_text: None,
+                url_template: None,
+                value_path: None,
+                response_template: None,
+                unit: None,
+            },
+            "", &fake_state()).unwrap();
+        assert!(matches!(r.response, ServerResponse::Ok), "{:?}", r.response);
+        let infos = crate::commands::list_infos(&conn).unwrap();
+        let cmd = infos.iter().find(|c| c.trigger == "event").unwrap();
+        assert!(cmd.takes_arg, "event commands take an arg");
+        assert_eq!(cmd.kind, "event");
+    }
+
+    /// The RunCommand `event` body (connection.rs) is: parse → resolve_start →
+    /// create_event_card. This drives that exact sequence and asserts the card is
+    /// authored by the INVOKER with no override and no badge.
+    #[test]
+    fn test_run_command_event_kind_creates_card_with_invoker_authorship() {
+        let (mut conn, _owner) = setup();
+        let channel_id = make_channel(&conn);
+        let invoker = add_member(&conn, "Invoker");
+        let now = crate::db::now();
+
+        // Bounds violations never reach the DB (an absolute stamp in the past).
+        let parsed = crate::channel_events::parse_event_args("Too soon | @1000000000").unwrap();
+        assert!(crate::channel_events::resolve_start(&parsed.when, now).is_err());
+
+        let parsed =
+            crate::channel_events::parse_event_args("Party | 3d | my place | snacks | remind 1h")
+                .unwrap();
+        crate::channel_events::resolve_start(&parsed.when, now).unwrap();
+        let (msg, info) =
+            crate::channel_events::create_event_card(&mut conn, channel_id, &invoker, &parsed, now)
+                .unwrap();
+        assert_eq!(msg.author, invoker, "the card is authored by the invoker");
+        assert_eq!(msg.author_name_override, None);
+        assert_eq!(msg.author_badge, None, "no BOT badge on a member-created card");
+        assert_eq!(
+            msg.widget.as_deref(),
+            Some(format!(r#"{{"type":"event","id":{}}}"#, info.id).as_str())
+        );
+        assert_eq!(info.channel_id, channel_id);
+        assert_eq!(info.remind_lead, Some(3_600));
+        assert_eq!(info.status, "upcoming");
+        // It is immediately visible in the active-widgets bar.
+        let r = handle_request(&conn, &invoker, false,
+            ServerRequest::ListActiveWidgets { channel_id }, "", &fake_state()).unwrap();
+        let (_p, _g, events) = active_widgets(r);
+        assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![info.id]);
     }
 }

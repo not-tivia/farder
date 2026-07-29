@@ -197,9 +197,9 @@ File upload and download use separate side-channel protocols (`UploadRequest` / 
 | Variant | Fields | What it asks the server to do |
 |---|---|---|
 | `ListCommands {}` | — | List all slash commands registered on the server. **No permission gate** — any connected member may call this. Returns `Commands { commands: Vec<CommandInfo> }`. Only safe fields are returned (`id`, `trigger`, `description`, `takes_arg`); `url_template` and `body_text` are never exposed. |
-| `AddCommand` | `name: String`, `trigger: String`, `description: String`, `kind: String`, `body_text: Option<String>`, `url_template: Option<String>`, `value_path: Option<String>`, `response_template: Option<String>`, `unit: Option<String>` | Register a new slash command. **MANAGE_SERVER-gated.** `name` trimmed, 1–48 chars; `trigger` trimmed/lowercased, 1–32 chars of `[a-z0-9_-]`, must be unique; `description` ≤160 chars. `kind` must be `"text"` (requires `body_text`), `"api"` (requires `url_template` starting with `http(s)://` and ≤2048 chars, and non-empty `value_path`), `"poll"`, or `"giveaway"` (the last two take **no** kind-specific fields). A fresh Ed25519 keypair is generated per command — that key is never a roster member; it is only used to author the command's response messages with `author_badge = "BOT"`. Returns `Ok`. |
+| `AddCommand` | `name: String`, `trigger: String`, `description: String`, `kind: String`, `body_text: Option<String>`, `url_template: Option<String>`, `value_path: Option<String>`, `response_template: Option<String>`, `unit: Option<String>` | Register a new slash command. **MANAGE_SERVER-gated.** `name` trimmed, 1–48 chars; `trigger` trimmed/lowercased, 1–32 chars of `[a-z0-9_-]`, must be unique; `description` ≤160 chars. `kind` must be `"text"` (requires `body_text`), `"api"` (requires `url_template` starting with `http(s)://` and ≤2048 chars, and non-empty `value_path`), `"poll"`, `"giveaway"`, `"event"`, or `"reminder"` (the last four take **no** kind-specific fields). A fresh Ed25519 keypair is generated per command — that key is never a roster member; it is only used to author the command's response messages with `author_badge = "BOT"`. Returns `Ok`. |
 | `DeleteCommand` | `id: i64` | Delete a slash command by id. **MANAGE_SERVER-gated.** No-op if the id does not exist. Returns `Ok`. |
-| `RunCommand` | `trigger: String`, `channel_id: u64`, `args: String` | Invoke a slash command. **No create-gate** for `"text"`/`"api"`/`"poll"` — any connected member may call these; `"giveaway"` is **MANAGE_SERVER-gated at dispatch**. Subject to content-block check (`content_block_reason`) and a per-user rate limit of 5 runs / 10 s (`command_limiter`). Handled asynchronously at the connection level (not in `handlers.rs`) because `"api"` commands require an HTTP fetch. On success: `"text"`/`"api"` insert a message authored by the command's synthetic public key with `author_name_override = cmd.name` and `author_badge = "BOT"` and broadcast `ServerEvent::NewMessage`; `"poll"`/`"giveaway"` parse `args`, create the widget card + feature row in one transaction (`polls::create_poll_card` / `giveaways::create_giveaway_card` — see `server-widgets.md`), and broadcast `NewMessage` then `PollUpdated`/`GiveawayUpdated`. On any failure (unknown trigger, rate-limited, `"api"` fetch error, parse error, missing permission): returns `Error { reason }` and does NOT post a message to the channel. |
+| `RunCommand` | `trigger: String`, `channel_id: u64`, `args: String` | Invoke a slash command. **No create-gate** for `"text"`/`"api"`/`"poll"` — any connected member may call these; `"giveaway"` is **MANAGE_SERVER-gated at dispatch**; `"event"` and `"reminder"` are ungated (an event is social — anyone who can post in the channel can plan one). Subject to content-block check (`content_block_reason`) and a per-user rate limit of 5 runs / 10 s (`command_limiter`). Handled asynchronously at the connection level (not in `handlers.rs`) because `"api"` commands require an HTTP fetch. On success: `"text"`/`"api"` insert a message authored by the command's synthetic public key with `author_name_override = cmd.name` and `author_badge = "BOT"` and broadcast `ServerEvent::NewMessage`; `"poll"`/`"giveaway"` parse `args`, create the widget card + feature row in one transaction (`polls::create_poll_card` / `giveaways::create_giveaway_card` — see `server-widgets.md`), and broadcast `NewMessage` then `PollUpdated`/`GiveawayUpdated`; `"event"` does the same via `channel_events::create_event_card` and broadcasts `NewMessage` then `EventUpdated`; `"reminder"` writes a private row and posts NOTHING, replying `Notice { text }` to the invoker only. On any failure (unknown trigger, rate-limited, `"api"` fetch error, parse error, missing permission): returns `Error { reason }` and does NOT post a message to the channel. |
 
 ### Polls & giveaways (widget interactions)
 
@@ -216,7 +216,20 @@ A poll/giveaway is **created** by `RunCommand` on a command of kind `"poll"` / `
 | `LeaveGiveaway` | `giveaway_id: i64` | Leave an open giveaway (idempotent). Broadcasts `GiveawayUpdated`. |
 | `CancelGiveaway` | `giveaway_id: i64` | Cancel an open giveaway — no draw, no announcement. **Creator-or-MANAGE_SERVER.** Broadcasts `GiveawayUpdated` (`status = "cancelled"`). |
 | `RerollGiveaway` | `giveaway_id: i64` | Redraw the winner of an `"ended"` giveaway that has one, from the still-eligible entrants. **Creator-or-MANAGE_SERVER.** Broadcasts `GiveawayUpdated` then a winner-announcement `NewMessage`. |
-| `ListActiveWidgets` | `channel_id: u64` | List a channel's OPEN widgets (read; not rate-limited; allowed while timed out). Visibility-checked on `channel_id` itself with an opaque `Error { "channel not found" }` for both a missing channel and one the caller cannot see. Returns `ActiveWidgets { polls, giveaways }` — each list oldest-first, 20 combined by `created_at`; no per-viewer fields. No broadcasts. |
+| `ListActiveWidgets` | `channel_id: u64` | List a channel's OPEN widgets (read; not rate-limited; allowed while timed out). Visibility-checked on `channel_id` itself with an opaque `Error { "channel not found" }` for both a missing channel and one the caller cannot see. Returns `ActiveWidgets { polls, giveaways, events }` — each list oldest-first, **20 combined** by `created_at` (three-way merge, ties ordered poll → giveaway → event); no per-viewer fields. No broadcasts. |
+
+### Events (RSVP cards)
+
+An event is **created** by `RunCommand` on a command of kind `"event"` (`/<trigger> Title | <when> [| location] [| description] [| remind 15m|1h|1d]`; `<when>` is `3d`/`in 3d`/`2h`/`90m` or the builder's absolute `@<unix-secs>` — a wall-clock string is refused because the server cannot know the invoker's timezone). **No MANAGE_SERVER gate** — the creation permission is exactly the `RunCommand` gates. The variants below only interact with an existing event by id. All are membership-gated (default-deny `request_requires_membership`), never carry an actor field (the actor is always the authenticated connection key), and funnel through the same visibility preamble: a missing row, a gone channel, a non-participant DM and a missing VIEW_CHANNEL all return the byte-identical `Error { "event not found" }` — an event id is not an existence oracle.
+
+| Variant | Fields | What it asks the server to do |
+|---|---|---|
+| `GetEvent` | `event_id: i64` | Fetch full event state. Read: no timeout gate (allowed while timed out, matching `GetPoll`), not rate-limited. Returns `Event { event: EventInfo, my_rsvp: Option<String> }` — `my_rsvp` is the caller's own RSVP only. |
+| `RsvpEvent` | `event_id: i64`, `response: String` | Set or change the caller's RSVP (`"going"` \| `"maybe"` \| `"no"`; anything else → `"invalid RSVP"`). Upsert — one RSVP per member. Rejected on a cancelled event and once `now >= starts_at` (exact even before the sweeper ticks). Timeout-gated, shares the `widget_limiter` (10/10 s). Broadcasts `EventUpdated` to channel subscribers. |
+| `ClearRsvp` | `event_id: i64` | Remove the caller's RSVP. Same gates minus the response check. **Idempotent:** no row deleted → plain `Ok` with NO event (no broadcast noise). |
+| `CancelEvent` | `event_id: i64` | Cancel an upcoming event. **Creator-or-MANAGE_SERVER**, timeout-gated. Broadcasts `EventUpdated` (`status = "cancelled"`); **no channel message** — the card flip is the record. The DMs to the Going list are sent by the sweeper's cancel-notify pass within one tick, not here. |
+| `EditEvent` | `event_id: i64`, `title: String`, `description: Option<String>`, `location: Option<String>`, `starts_at: u64`, `remind_lead: Option<u64>` | **Full replace** of the editable fields (no partial-patch ambiguity), upcoming events only. **Creator-or-MANAGE_SERVER**, timeout-gated. Re-runs the creation validation (title 1–120, location ≤120, description ≤500, `now+60 <= starts_at <= now+365d`, `remind_lead ∈ {900, 3600, 86400}`). A changed `starts_at` re-arms the lead reminder (`reminded_at = NULL`). Broadcasts `EventUpdated`. |
+| `DeleteMessage` (existing) | `message_id: u64` | Deleting an event **card** cancels an upcoming event and pushes `EventUpdated` alongside `MessageDeleted`. The row is retained for audit; no announcement can ever post afterwards. |
 
 ### Personal reminders
 
@@ -275,8 +288,9 @@ Every request receives exactly one response.
 | `Commands` | `commands: Vec<CommandInfo>` | The slash-command list in response to `ListCommands`. Safe fields only — no `url_template` or `body_text`. |
 | `Poll` | `poll: PollInfo`, `my_vote: Option<u32>` | Full poll state in response to `GetPoll`. `my_vote` is the requester's own vote index (self-only — voter identities are never sent to anyone else). |
 | `Giveaway` | `giveaway: GiveawayInfo`, `my_entered: bool` | Full giveaway state in response to `GetGiveaway`. `my_entered` is self-only; entrant identities never leave the server. |
-| `ActiveWidgets` | `polls: Vec<PollInfo>`, `giveaways: Vec<GiveawayInfo>` | The channel's OPEN widgets in response to `ListActiveWidgets`. Each list oldest-first (creation order); at most 20 combined, chosen by `created_at` ascending. Shared state only — `my_vote`/`my_entered` stay exclusive to `Poll`/`Giveaway`. |
+| `ActiveWidgets` | `polls: Vec<PollInfo>`, `giveaways: Vec<GiveawayInfo>`, `events: Vec<EventInfo>` (`#[serde(default)]`) | The channel's OPEN widgets in response to `ListActiveWidgets`. Each list oldest-first (creation order); at most 20 combined, chosen by `created_at` ascending (three-way merge). `events` holds UPCOMING events only — started/cancelled ones drop out of the bar. Shared state only — `my_vote`/`my_entered` stay exclusive to `Poll`/`Giveaway`. |
 | `Notice` | `text: String` | Invoker-only confirmation delivered on the request's own `request_id` — no broadcast, no message row. The `Ok`-but-say-something case (used by the `"reminder"` `RunCommand` kind, which deliberately posts nothing). |
+| `Event` | `event: EventInfo`, `my_rsvp: Option<String>` | Full event state in response to `GetEvent`. `my_rsvp` is requester-specific and never rides in the `EventUpdated` broadcast. |
 | `MyReminders` | `reminders: Vec<ReminderInfo>` | The caller's own pending reminders in response to `ListMyReminders`, soonest first. Owner-scoped in SQL — another member's reminder can never appear here. |
 
 ---
@@ -363,13 +377,14 @@ These events fall into two categories in `bridge.rs`: some are re-emitted to the
 | `StreamCallEnded` | `channel_id: u64` | An incoming DM call ended or was declined. Currently a no-op in `bridge.rs`. |
 | `StreamKeyOffer` | `channel_id: u64`, `sender: PublicKey`, `session_id: [u8; 16]`, `kind: TrackKind`, `wrapped_key: Vec<u8>` | A peer is distributing their per-session E2EE media key, wrapped for this client. Routed to `VoiceController::on_stream_key_offer`. |
 
-### Widget events (polls & giveaways)
+### Widget events (polls, giveaways & events)
 
-Broadcast to the widget's channel subscribers on every state change (vote, retract, close, enter, leave, cancel, draw, reroll — including sweeper-driven closes/draws). Both carry the full shared state struct, never per-member data.
+Broadcast to the widget's channel subscribers on every state change (vote, retract, close, enter, leave, RSVP, cancel, edit, draw, reroll, start — including sweeper-driven closes/draws/starts). All three carry the full shared state struct, never per-member data.
 
 | Variant | Fields | When the server broadcasts it |
 |---|---|---|
 | `PollUpdated` | `poll: PollInfo` | A poll's counts or closed state changed. Maps to `server:poll_updated`. |
+| `EventUpdated` | `event: EventInfo` | An event's RSVP roster, fields or status changed (RSVP set/cleared, edited, cancelled, started). Terminal states fold into `status` — there is no separate `EventStarted`/`EventCancelled`. Targets `Subscribers(channel_id)` only, so the roster reaches exactly the audience that can read the channel. A sweeper-driven start is followed by an announcement `NewMessage`. |
 | `GiveawayUpdated` | `giveaway: GiveawayInfo` | A giveaway's entry count, status, or winner changed. Maps to `server:giveaway_updated` (bridge maps `winner` to its `"vk_<hex>"` string form). A draw/reroll is followed by a winner-announcement `NewMessage`. |
 
 ---
@@ -455,6 +470,25 @@ Live giveaway state, broadcast whole on every change (`GiveawayUpdated`) and ret
 | `entry_count` | `u32` | Live entry count; identities stay server-side. |
 | `winner` | `Option<PublicKey>` | Set on a drawn `"ended"` giveaway; `None` if winnerless/cancelled/open. The Tauri bridge converts it to a `"vk_<hex>"` string for the frontend. |
 | `winner_name` | `Option<String>` | Server-resolved display name, set when ended with a winner still on the roster (`None` → clients fall back to the short key form). |
+
+### `EventInfo`
+
+Live event state, broadcast whole on every change (`EventUpdated`) and returned by `GetEvent`. The RSVP roster travels as **server-resolved display names only**, capped at 10 per option — attendee public keys never leave the server and the payload stays bounded (worst case 30 short strings) at any RSVP volume. A member's own RSVP arrives separately as `Event.my_rsvp`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `i64` | Event id (also in the card message's `widget` JSON, `{"type":"event","id":N}`). |
+| `channel_id` | `u64` | Channel of the card message. |
+| `message_id` | `u64` | The card message's id (the start announcement replies to it). |
+| `creator` | `PublicKey` | The member who ran the command; serializes as `{ bytes }` like `PollInfo.creator`. |
+| `title` | `String` | 1–120 chars. |
+| `description` | `Option<String>` | ≤500 chars. |
+| `location` | `Option<String>` | ≤120 chars. |
+| `starts_at` | `u64` | Absolute unix **seconds**. **No timezone is stored or transmitted anywhere** — every client renders it in its own local time. |
+| `remind_lead` | `Option<u64>` | Secs before start for the lead-time DM: `900` \| `3600` \| `86400`; `None` = no reminder. |
+| `status` | `String` | `"upcoming"` \| `"started"` \| `"cancelled"`. |
+| `going_count` / `maybe_count` / `no_count` | `u32` | **Full** totals per option. |
+| `going_names` / `maybe_names` / `no_names` | `Vec<String>` | The first 10 responders' display names in RSVP order; clients render "and N more" from `count - names.len()`. Members no longer on the roster are skipped in the names but still counted. |
 
 ### `ReminderInfo`
 

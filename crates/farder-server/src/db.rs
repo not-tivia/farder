@@ -566,6 +566,51 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // Channel events: RSVP event cards (widget messages point here via
+    // messages.widget = {"type":"event","id":N}). NOTE the name — the `events`
+    // table is the mesh signed log; these are the product's event cards.
+    // `starts_at` is an ABSOLUTE unix second: no timezone is stored anywhere,
+    // every client renders it in its own local time. The three nullable `*_at`
+    // guard columns (`reminded_at`, `started_at`, `cancel_notified_at`) are what
+    // make each sweeper action exactly-once. No FK to messages: deleting the card
+    // CANCELS the event via the DeleteMessage hook, rows retained (audit).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS channel_events (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id          INTEGER NOT NULL,
+            message_id          INTEGER NOT NULL,
+            creator             BLOB    NOT NULL,
+            title               TEXT    NOT NULL,
+            description         TEXT,
+            location            TEXT,
+            starts_at           INTEGER NOT NULL,
+            remind_lead         INTEGER,
+            reminded_at         INTEGER,
+            status              TEXT    NOT NULL DEFAULT 'upcoming',
+            started_at          INTEGER,
+            cancelled_at        INTEGER,
+            cancel_notified_at  INTEGER,
+            created_at          INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_channel_events_due ON channel_events(status, starts_at)",
+        [],
+    )?;
+    // One RSVP per member at the schema level (the poll_votes idiom); changing
+    // your mind is an upsert, clearing it is a DELETE.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS channel_event_rsvps (
+            event_id   INTEGER NOT NULL,
+            member     BLOB    NOT NULL,
+            response   TEXT    NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (event_id, member)
+        )",
+        [],
+    )?;
+
     // Bot alerts + subscriptions (price-alert engine, Task 2).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS bot_alerts (

@@ -1165,6 +1165,83 @@ pub(crate) async fn main_loop(
                                     }
                                     continue;
                                 }
+                                // Interactive `event` kind: pure parse (no lock),
+                                // then one scoped lock + transaction posting the
+                                // card + channel_events row + widget cross-link
+                                // atomically; broadcasts happen after the guard
+                                // drops. The card is authored by the INVOKER (no
+                                // override, no badge). NO MANAGE_SERVER gate —
+                                // events are social; the creation permission is
+                                // exactly the RunCommand gates above
+                                // (content_block_reason → command_limiter →
+                                // check_run_command_channel_auth = not-timed-out +
+                                // SEND_MESSAGES + DM participation/is_blocked).
+                                if cmd.kind.as_str() == "event" {
+                                    let parsed = match crate::channel_events::parse_event_args(&args) {
+                                        Err(reason) => {
+                                            // Parse failure → error to the invoker only; nothing posts.
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error { reason },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                            continue;
+                                        }
+                                        Ok(p) => p,
+                                    };
+                                    let now = crate::db::now();
+                                    // Resolve the start time BEFORE taking the lock so a
+                                    // bounds violation is a plain user-facing Error rather
+                                    // than an "internal error:" (create_event_card resolves
+                                    // it again from the same `now`).
+                                    if let Err(reason) =
+                                        crate::channel_events::resolve_start(&parsed.when, now)
+                                    {
+                                        let response = ServerFrame::Response {
+                                            request_id: id,
+                                            body: ServerResponse::Error { reason },
+                                        };
+                                        send_server_frame(send, &response).await?;
+                                        continue;
+                                    }
+                                    let created = {
+                                        let mut conn = state.db.lock().unwrap();
+                                        crate::channel_events::create_event_card(
+                                            &mut conn, channel_id, &member_key, &parsed, now,
+                                        )
+                                    }; // MutexGuard dropped here — before any .await
+                                    match created {
+                                        Err(e) => {
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Error {
+                                                    reason: format!("internal error: {e}"),
+                                                },
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                        }
+                                        Ok((msg, info)) => {
+                                            broadcast_event(
+                                                &state,
+                                                EventTarget::Subscribers(channel_id),
+                                                ServerEvent::NewMessage { message: msg },
+                                            ).await;
+                                            // Pre-seed connected clients' reducers so the widget
+                                            // mounts with state (no GetEvent round-trip).
+                                            broadcast_event(
+                                                &state,
+                                                EventTarget::Subscribers(channel_id),
+                                                ServerEvent::EventUpdated { event: info },
+                                            ).await;
+                                            let response = ServerFrame::Response {
+                                                request_id: id,
+                                                body: ServerResponse::Ok,
+                                            };
+                                            send_server_frame(send, &response).await?;
+                                        }
+                                    }
+                                    continue;
+                                }
                                 // Interactive `reminder` kind: PRIVATE — nothing is
                                 // posted in the channel, no broadcast, no message row.
                                 // Every gate above has already run unchanged

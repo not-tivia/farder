@@ -1,12 +1,12 @@
-# Widget substrate: polls, giveaways & reminders
+# Widget substrate: polls, giveaways, events & reminders
 
-> **File(s):** `crates/farder-server/src/widgets.rs`, `crates/farder-server/src/polls.rs`, `crates/farder-server/src/giveaways.rs`, `crates/farder-server/src/reminders.rs`
+> **File(s):** `crates/farder-server/src/widgets.rs`, `crates/farder-server/src/polls.rs`, `crates/farder-server/src/giveaways.rs`, `crates/farder-server/src/channel_events.rs`, `crates/farder-server/src/reminders.rs`
 > **Layer:** Server crate
 > **Last reviewed:** 2026-07-28
 
 ## Purpose
 
-Interactive **message widgets**: a slash command of kind `"poll"` or `"giveaway"` (run via `RunCommand`) posts a normal card message whose `messages.widget` TEXT column carries `{"type":"poll"|"giveaway","id":<i64>}`; the feature's own table (`polls` / `giveaways` + their per-member vote/entry tables) holds the live state; interaction requests mutate it and broadcast a `PollUpdated` / `GiveawayUpdated` event; a single shared **sweeper task** (`widgets.rs`) retires timed widgets. These modules own storage and state transitions only — all authorization, rate limiting, and visibility checks live in `handlers.rs` dispatch; old clients that don't understand `widget` just render the card's plain-text content.
+Interactive **message widgets**: a slash command of kind `"poll"`, `"giveaway"` or `"event"` (run via `RunCommand`) posts a normal card message whose `messages.widget` TEXT column carries `{"type":"poll"|"giveaway"|"event","id":<i64>}`; the feature's own table (`polls` / `giveaways` + their per-member vote/entry tables) holds the live state; interaction requests mutate it and broadcast a `PollUpdated` / `GiveawayUpdated` event; a single shared **sweeper task** (`widgets.rs`) retires timed widgets. These modules own storage and state transitions only — all authorization, rate limiting, and visibility checks live in `handlers.rs` dispatch; old clients that don't understand `widget` just render the card's plain-text content.
 
 ---
 
@@ -16,9 +16,15 @@ Interactive **message widgets**: a slash command of kind `"poll"` or `"giveaway"
 
 Fixed tick interval. A due poll closes / a due giveaway draws at most ~15 s late.
 
-### `sweep_once(conn: &Connection, now: u64) -> SweepOutcome`
+### `sweep_once(conn: &mut Connection, now: u64) -> SweepOutcome`
 
-**What it does:** the sync tick body servicing every half: `polls::close_due` (every due timed poll → `PollUpdated`), then `giveaways::list_due` + `close_and_draw` per row (→ `GiveawayUpdated` + winner-announcement `NewMessage`), then `reminders::list_due` + `mark_sent` per row (→ one `PendingDm`, **zero broadcasts**).
+**What it does:** the sync tick body servicing every half: `polls::close_due` (every due timed poll → `PollUpdated`), then `giveaways::list_due` + `close_and_draw` per row (→ `GiveawayUpdated` + winner-announcement `NewMessage`), then `reminders::list_due` + `mark_sent` per row (→ one `PendingDm`, **zero broadcasts**), then the three **event passes** (`sweep_events`; the system identity is resolved via `bots::get_or_create_system_identity` once per tick and ONLY when the start pass actually has rows, so a server that never starts an event never mints one):
+
+1. **Lead-time pass** — `channel_events::list_reminder_due` + `mark_reminded` (single-shot) → one `PendingDm` per **going + maybe** responder (`⏰ "<title>" starts soon.` + optional location + `farder://widget/event/<channel>/<id>`). An event whose start is also due this tick is excluded by the query, so it gets the start DM only — no double-ping.
+2. **Start pass** — `channel_events::list_start_due` + `start_and_announce` (one transaction: guarded `upcoming → started` flip + the `📅 <title> is starting now!` announcement authored by the system identity, `author_name_override = "Events"`, `author_badge = "BOT"`, `reply_to` = the card). `Ok(None)` (a Cancel won the guard) ⇒ announce nothing. Emits `EventUpdated` + `NewMessage`, plus one `PendingDm` per **going** responder.
+3. **Cancel-notify pass** — `channel_events::list_cancel_unnotified` + `mark_cancel_notified` (single-shot) → one `PendingDm` per **going** responder (`❌ "<title>" was cancelled.`). **No channel message** — the card flip is the public record.
+
+It takes `&mut Connection` (not `&Connection`) purely because the start pass opens a real `conn.transaction()`.
 **Returns / emits:** `SweepOutcome { broadcasts, dms }`; each half's errors are `tracing::warn!`ed per-item and never panic the sweeper.
 **Side effects:** persists every state change (close / draw / announcement insert / reminder `sent` flip) BEFORE returning — i.e. under the caller's DB lock, before any broadcast or DM, and always behind a guarded `UPDATE` whose rows-affected decides whether the notification is produced at all. Persist-then-notify by construction: a crash in between can never re-close, redraw or re-fire. The accepted cost is **at-most-once** delivery (a crash in the persist→notify window loses that one notification; the durable state is still correct).
 **Connects to:** `spawn_widget_sweeper` (the only production caller); tests call it directly without tokio.
@@ -95,6 +101,42 @@ Redraw for an `ended` giveaway with a winner; `None` when the eligible set is em
 
 ---
 
+## `channel_events.rs` — event cards (RSVP)
+
+**Naming:** the `events` table is the mesh signed log and `events.rs` is `EventTarget`/`BroadcastEvent`, so the product's event cards live in `channel_events` / `channel_event_rsvps` and in THIS module. Protocol/client names stay product-facing (`EventInfo`, `GetEvent`, `EventUpdated`).
+
+`starts_at` is an ABSOLUTE unix second — nothing timezone-shaped is stored or transmitted; every client renders it locally. Bounds: `MAX_TITLE = 120`, `MAX_LOCATION = 120`, `MAX_DESCRIPTION = 500`, `MIN_LEAD_SECS = 60`, `MAX_AHEAD_SECS = 365 d`, `REMIND_LEADS = [900, 3600, 86400]`, `ATTENDEE_NAME_CAP = 10`.
+
+### `parse_event_args(args: &str) -> Result<ParsedEvent, String>`
+
+`Title | <when> [| location] [| description] [| remind 15m|1h|1d|none]` — split on `|`, each segment trimmed (the `/poll` idiom). A **final** `remind …` segment is always consumed as the lead (deterministic); the rest are strictly POSITIONAL (an empty third segment means "no location"). `<when>` accepts only `^(\d{1,4})(m|h|d)$` (a leading `in ` is stripped) → `WhenSpec::Relative`, or `^@(\d{9,12})$` → `WhenSpec::Absolute` (what the builder emits). A wall-clock string is **refused** with `WHEN_HINT` — the server cannot know the invoker's timezone, and assuming UTC is the bug class that lands an event 8 hours off. Pure, no DB.
+
+### `resolve_start(when: &WhenSpec, now: u64) -> Result<u64, String>` / `validate_event_fields(title, description, location)`
+
+The two pure validators. **Creation and `EditEvent` both call them**, so the two paths cannot drift.
+
+### `create_event_card(conn: &mut Connection, channel_id: u64, invoker: &PublicKey, parsed: &ParsedEvent, now: u64) -> Result<(MessageInfo, EventInfo)>`
+
+One transaction: fallback-content message (`📅 <title> — <UTC stamp>` + optional location/description; the stamp borrows SQLite's `strftime` since the crate has no date dependency) with **plain invoker authorship — no name override, no badge** → `create` → `messages::set_widget(… {"type":"event","id":N})` → `get_message` + `build_info`.
+
+### `build_info(conn, &EventRow) -> Result<EventInfo>`
+
+One RSVP query (`ORDER BY updated_at, rowid`), bucketed by response: `*_count` are the **full** totals, `*_names` the first `ATTENDEE_NAME_CAP` resolved via `members::get_member` (departed members are skipped in the names but still counted). Attendee public keys never leave the server.
+
+### `start_and_announce(conn: &mut Connection, row, system_pk, now) -> Result<Option<(EventInfo, MessageInfo)>>`
+
+Guarded `status='upcoming'` flip + the announcement insert in ONE transaction. Rows-affected 0 ⇒ rollback + `Ok(None)`, announcing nothing — this is what makes the announcement exactly-once across crashes and restarts.
+
+### Row-level fns
+
+- `create(conn, channel_id: i64, message_id: i64, creator, parsed, starts_at: i64, now: i64) -> Result<i64>`, `get(conn, id) -> Result<Option<EventRow>>`.
+- `rsvp(conn, event_id, member, response, now)` — `INSERT … ON CONFLICT(event_id, member) DO UPDATE` (the `poll_votes` idiom); `clear_rsvp(…) -> Result<bool>` (rows-affected); `my_rsvp(…) -> Result<Option<String>>`; `responders(conn, event_id, responses: &[&str]) -> Result<Vec<PublicKey>>` (the DM audiences).
+- `cancel(conn, id, now) -> Result<bool>` — guarded on `status='upcoming'`; `edit(conn, id, title, description, location, starts_at, remind_lead, rearm_reminder)` — upcoming only, NULLs `reminded_at` when `rearm_reminder`.
+- `list_reminder_due(conn, now)` / `list_start_due(conn, now)` / `list_cancel_unnotified(conn)` — the three sweeper queries; `list_upcoming_in_channel(conn, channel_id, now, limit)` — the active-bar query (`starts_at > now` excludes a due-but-unswept event).
+- `mark_reminded(conn, id, now)` / `mark_cancel_notified(conn, id, now)` — guarded single-shot `UPDATE … WHERE x IS NULL`; `false` ⇒ the caller must NOT DM.
+
+---
+
 ## `reminders.rs` — personal reminders
 
 **Private by construction.** A reminder is never posted in a channel and is never visible to anyone but its owner: the only artifacts are an invoker-only `Notice` at creation and a DM from the server system identity when it comes due. Every read and mutation is scoped by `owner = ?` in SQL, and the owner is always the authenticated connection key (no request carries an owner field).
@@ -126,6 +168,7 @@ Parses the `RunCommand` arg string `<duration> <text>` — `args.trim().splitn(2
 | Event name | Payload shape | Who listens |
 |---|---|---|
 | `ServerEvent::PollUpdated` | `{ poll: PollInfo }` | bridge.rs → `server:poll_updated` → `useServerEvents` → `POLL_UPDATED` |
+| `ServerEvent::EventUpdated` | `{ event: EventInfo }` | bridge.rs → `server:event_updated` → `useServerEvents` → `EVENT_UPDATED` |
 | `ServerEvent::GiveawayUpdated` | `{ giveaway: GiveawayInfo }` | bridge.rs → `server:giveaway_updated` (winner mapped to `"vk_<hex>"` via `commands::giveaway_json`) → `GIVEAWAY_UPDATED` |
 | `ServerEvent::NewMessage` | winner announcement / card message | normal message flow |
 
@@ -140,6 +183,9 @@ Parses the `RunCommand` arg string `<duration> <text>` — `args.trim().splitn(2
 | `DeleteMessage` on a widget card | handlers.rs hook | open poll → `close`; open giveaway → `cancel` (no draw, no announcement) |
 | `RunCommand` (kind `reminder`) | connection.rs dispatch | after every existing gate (`content_block_reason` → `command_limiter` → `check_run_command_channel_auth`): pure `parse_reminder_args`, one scoped lock doing `count_pending` (cap) + `create`, then an invoker-only `ServerResponse::Notice`. Nothing posts, nothing broadcasts. |
 | `ListMyReminders` / `CancelReminder` | handlers.rs | `list_pending_for` / `cancel`, both owner-scoped in SQL; `CancelReminder` shares the `widget_limiter` |
+| `RunCommand` (kind `event`) | connection.rs dispatch | pure `parse_event_args` + `resolve_start`, then `create_event_card` under one scoped lock; broadcasts `NewMessage` then `EventUpdated`. No MANAGE_SERVER gate. |
+| `GetEvent`/`RsvpEvent`/`ClearRsvp`/`CancelEvent`/`EditEvent` | handlers.rs | row fns above; visibility (opaque `"event not found"`), timeout and rate-limit checks stay in handlers |
+| `DeleteMessage` on an event card | handlers.rs hook | upcoming event → `cancel` (+`EventUpdated`); rows retained, no announcement ever posts |
 | 15 s tick | `spawn_widget_sweeper` | `sweep_once` |
 
 ## Integration map
@@ -152,6 +198,7 @@ Parses the `RunCommand` arg string `<duration> <text>` — `args.trim().splitn(2
 ## Known gotchas
 
 - `sweep_once` takes `now: u64` (from `db::now()`) but the tables store `i64` — cast at the boundary, everywhere.
+- `sweep_once` takes `&mut Connection` (the event start pass opens a transaction); the sweeper passes `&mut *conn` from its `MutexGuard`, still inside the scoped lock block.
 - `close_and_draw` / `reroll_and_announce` take `&Connection` (`unchecked_transaction`) because the sweeper and handlers only hold `&Connection`; the two `create_*_card` fns take `&mut Connection` (`transaction()`).
 - Never broadcast from inside the DB lock scope: collect `PendingBroadcast`s, drop the guard, then await.
 - The card's `widget` JSON is server-written only; the client still parses it as untrusted (try/catch + numeric-id check in `Message.tsx`).

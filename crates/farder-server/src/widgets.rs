@@ -36,7 +36,11 @@ pub struct SweepOutcome {
 /// State is persisted inside each half BEFORE this returns (i.e. under the caller's
 /// lock, before any broadcast or DM) — persist-then-notify by construction, under a
 /// status guard, so a crash can never double-close, double-draw or double-fire.
-pub fn sweep_once(conn: &rusqlite::Connection, now: u64) -> SweepOutcome {
+///
+/// Takes `&mut Connection` because the event start pass opens a transaction
+/// (`channel_events::start_and_announce`) — the flip and its announcement must
+/// commit together or not at all.
+pub fn sweep_once(conn: &mut rusqlite::Connection, now: u64) -> SweepOutcome {
     let mut out = SweepOutcome { broadcasts: Vec::new(), dms: Vec::new() };
     // Poll half: close every due timed poll; fold the terminal state into PollUpdated.
     match crate::polls::close_due(conn, now as i64) {
@@ -110,7 +114,140 @@ pub fn sweep_once(conn: &rusqlite::Connection, now: u64) -> SweepOutcome {
         }
         Err(e) => tracing::warn!("widget sweeper: reminder list_due failed: {e}"),
     }
+    sweep_events(conn, now, &mut out);
     out
+}
+
+/// Event half: lead-time DMs, the start flip + announcement, and the
+/// cancellation DMs. Each pass persists its guard column BEFORE producing any
+/// notification, so a crash between the two loses at most one nudge and can
+/// never double-fire.
+fn sweep_events(conn: &mut rusqlite::Connection, now: u64, out: &mut SweepOutcome) {
+    let now_i = now as i64;
+    // 1. Lead-time reminder pass — Going + Maybe (a "Maybe" is undecided and the
+    //    nudge is what converts it; "Can't make it" gets nothing).
+    match crate::channel_events::list_reminder_due(conn, now_i) {
+        Ok(rows) => {
+            for row in rows {
+                match crate::channel_events::mark_reminded(conn, row.id, now_i) {
+                    Ok(false) => continue, // already reminded — never DM twice
+                    Err(e) => {
+                        tracing::warn!("widget sweeper: event {} mark_reminded failed: {e}", row.id);
+                        continue;
+                    }
+                    Ok(true) => {}
+                }
+                let text = event_dm_text(&format!("⏰ \"{}\" starts soon.", row.title), &row);
+                push_event_dms(conn, out, &row, &["going", "maybe"], &text);
+            }
+        }
+        Err(e) => tracing::warn!("widget sweeper: event list_reminder_due failed: {e}"),
+    }
+
+    // 2. Start pass — flip + announce (one transaction, single-shot) + DM Going.
+    match crate::channel_events::list_start_due(conn, now_i) {
+        Ok(rows) => {
+            // Resolved ONCE per tick, and only when something actually starts —
+            // a server that never starts an event (and never fires a reminder)
+            // never mints a system identity at all.
+            let system_pk = if rows.is_empty() {
+                None
+            } else {
+                match crate::bots::get_or_create_system_identity(conn) {
+                    Ok(pk) => Some(pk),
+                    Err(e) => {
+                        tracing::warn!("widget sweeper: system identity unavailable: {e}");
+                        None
+                    }
+                }
+            };
+            for row in rows {
+                let Some(system_pk) = system_pk.as_ref() else { break };
+                match crate::channel_events::start_and_announce(conn, &row, system_pk, now_i) {
+                    // A Cancel (or a card delete) won the guard — announce nothing.
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!("widget sweeper: event {} start failed: {e}", row.id);
+                        continue;
+                    }
+                    Ok(Some((info, msg))) => {
+                        let channel_id = info.channel_id;
+                        out.broadcasts.push(PendingBroadcast {
+                            target: crate::events::EventTarget::Subscribers(channel_id),
+                            event: farder_protocol::server::ServerEvent::EventUpdated {
+                                event: info,
+                            },
+                        });
+                        out.broadcasts.push(PendingBroadcast {
+                            target: crate::events::EventTarget::Subscribers(channel_id),
+                            event: farder_protocol::server::ServerEvent::NewMessage {
+                                message: msg,
+                            },
+                        });
+                        let text =
+                            event_dm_text(&format!("📅 \"{}\" is starting now.", row.title), &row);
+                        push_event_dms(conn, out, &row, &["going"], &text);
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!("widget sweeper: event list_start_due failed: {e}"),
+    }
+
+    // 3. Cancel-notify pass — Going only, no channel message (the card flip is
+    //    the public record, the CancelGiveaway precedent).
+    match crate::channel_events::list_cancel_unnotified(conn) {
+        Ok(rows) => {
+            for row in rows {
+                match crate::channel_events::mark_cancel_notified(conn, row.id, now_i) {
+                    Ok(false) => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            "widget sweeper: event {} mark_cancel_notified failed: {e}",
+                            row.id
+                        );
+                        continue;
+                    }
+                    Ok(true) => {}
+                }
+                let text = format!("❌ \"{}\" was cancelled.", row.title);
+                push_event_dms(conn, out, &row, &["going"], &text);
+            }
+        }
+        Err(e) => tracing::warn!("widget sweeper: event list_cancel_unnotified failed: {e}"),
+    }
+}
+
+/// Body + optional location + the widget deep link.
+fn event_dm_text(head: &str, row: &crate::channel_events::EventRow) -> String {
+    let mut text = head.to_string();
+    if let Some(loc) = &row.location {
+        text.push_str(&format!("\n📍 {loc}"));
+    }
+    text.push_str(&format!(
+        "\nfarder://widget/event/{}/{}",
+        row.channel_id, row.id
+    ));
+    text
+}
+
+/// One `PendingDm` per responder in `responses` (never a broadcast — an RSVP
+/// roster is not public mail).
+fn push_event_dms(
+    conn: &rusqlite::Connection,
+    out: &mut SweepOutcome,
+    row: &crate::channel_events::EventRow,
+    responses: &[&str],
+    text: &str,
+) {
+    match crate::channel_events::responders(conn, row.id, responses) {
+        Ok(pks) => {
+            for pk in pks {
+                out.dms.push(PendingDm { recipient: pk, text: text.to_string() });
+            }
+        }
+        Err(e) => tracing::warn!("widget sweeper: event {} responders failed: {e}", row.id),
+    }
 }
 
 #[cfg(test)]
@@ -119,7 +256,7 @@ mod tests {
 
     #[test]
     fn sweep_once_closes_due_poll_once() {
-        let conn = crate::db::open_in_memory().unwrap();
+        let mut conn = crate::db::open_in_memory().unwrap();
         let channel_id = crate::channels::create_channel(
             &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
         )
@@ -133,7 +270,7 @@ mod tests {
         )
         .unwrap();
 
-        let out = sweep_once(&conn, now);
+        let out = sweep_once(&mut conn, now);
         assert!(out.dms.is_empty(), "polls never DM");
         let pending = out.broadcasts;
         assert_eq!(pending.len(), 1, "one due poll → one PendingBroadcast");
@@ -148,12 +285,12 @@ mod tests {
         // Persisted: closed even though the broadcasts are merely collected.
         assert!(crate::polls::get(&conn, poll_id).unwrap().unwrap().closed_at.is_some());
         // Idempotent: a second sweep returns nothing (never re-closes).
-        assert!(sweep_once(&conn, now).broadcasts.is_empty());
+        assert!(sweep_once(&mut conn, now).broadcasts.is_empty());
     }
 
     #[test]
     fn sweep_once_draws_due_giveaway_exactly_once() {
-        let conn = crate::db::open_in_memory().unwrap();
+        let mut conn = crate::db::open_in_memory().unwrap();
         let channel_id = crate::channels::create_channel(
             &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
         )
@@ -169,7 +306,7 @@ mod tests {
         .unwrap();
         crate::giveaways::enter(&conn, gid, &entrant, 1).unwrap();
 
-        let out = sweep_once(&conn, now);
+        let out = sweep_once(&mut conn, now);
         assert!(out.dms.is_empty(), "giveaway draws never DM in v1");
         let pending = out.broadcasts;
         assert_eq!(pending.len(), 2, "draw → GiveawayUpdated + NewMessage announcement");
@@ -192,7 +329,7 @@ mod tests {
         // announcement — crash-safety idempotence).
         let msg_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
-        assert!(sweep_once(&conn, now).broadcasts.is_empty());
+        assert!(sweep_once(&mut conn, now).broadcasts.is_empty());
         let msg_count_after: i64 =
             conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
         assert_eq!(msg_count, msg_count_after, "sweep pass twice → zero new announcements");
@@ -200,7 +337,7 @@ mod tests {
 
     #[test]
     fn sweep_once_due_reminder_produces_one_dm_and_flips_sent() {
-        let conn = crate::db::open_in_memory().unwrap();
+        let mut conn = crate::db::open_in_memory().unwrap();
         let channel_id = crate::channels::create_channel(
             &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
         )
@@ -213,7 +350,7 @@ mod tests {
         )
         .unwrap();
 
-        let out = sweep_once(&conn, now);
+        let out = sweep_once(&mut conn, now);
         assert!(out.broadcasts.is_empty(), "a reminder produces ZERO broadcasts");
         assert_eq!(out.dms.len(), 1, "one due reminder → one DM");
         assert_eq!(out.dms[0].recipient, owner);
@@ -231,7 +368,7 @@ mod tests {
 
     #[test]
     fn sweep_once_reminder_is_idempotent() {
-        let conn = crate::db::open_in_memory().unwrap();
+        let mut conn = crate::db::open_in_memory().unwrap();
         let channel_id = crate::channels::create_channel(
             &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
         )
@@ -242,14 +379,14 @@ mod tests {
         crate::reminders::create(&conn, &owner, channel_id as i64, "ping", now as i64 - 5, 0)
             .unwrap();
 
-        assert_eq!(sweep_once(&conn, now).dms.len(), 1);
+        assert_eq!(sweep_once(&mut conn, now).dms.len(), 1);
         // Crash-safety idempotence: a second sweep at the same `now` fires nothing.
-        assert!(sweep_once(&conn, now).dms.is_empty());
+        assert!(sweep_once(&mut conn, now).dms.is_empty());
     }
 
     #[test]
     fn sweep_once_ignores_cancelled_reminder() {
-        let conn = crate::db::open_in_memory().unwrap();
+        let mut conn = crate::db::open_in_memory().unwrap();
         let channel_id = crate::channels::create_channel(
             &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
         )
@@ -263,7 +400,7 @@ mod tests {
         .unwrap();
         assert!(crate::reminders::cancel(&conn, id, &owner).unwrap());
 
-        let out = sweep_once(&conn, now);
+        let out = sweep_once(&mut conn, now);
         assert!(out.dms.is_empty(), "a cancelled reminder never fires");
         let status: String = conn
             .query_row("SELECT status FROM reminders WHERE id = ?1", rusqlite::params![id], |r| {
@@ -271,6 +408,208 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "cancelled", "sweeper does not touch it");
+    }
+    // ---------------------------- events ---------------------------------
+
+    /// conn + channel + a creator member.
+    fn ev_setup() -> (rusqlite::Connection, u64, farder_crypto::identity::PublicKey) {
+        let conn = crate::db::open_in_memory().unwrap();
+        let channel_id = crate::channels::create_channel(
+            &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
+        )
+        .unwrap();
+        let creator = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &creator, "Creator").unwrap();
+        (conn, channel_id, creator)
+    }
+
+    fn ev_member(conn: &rusqlite::Connection, name: &str) -> farder_crypto::identity::PublicKey {
+        let pk = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(conn, &pk, name).unwrap();
+        pk
+    }
+
+    fn parsed(lead: Option<u64>, location: Option<&str>) -> crate::channel_events::ParsedEvent {
+        crate::channel_events::ParsedEvent {
+            title: "Party".to_string(),
+            when: crate::channel_events::WhenSpec::Relative(3_600),
+            location: location.map(str::to_string),
+            description: None,
+            remind_lead: lead,
+        }
+    }
+
+    /// An event row with an explicit `starts_at` (message id 1 — tests needing a
+    /// real card use `create_event_card`).
+    fn make_ev(
+        conn: &rusqlite::Connection,
+        channel_id: u64,
+        creator: &farder_crypto::identity::PublicKey,
+        starts_at: i64,
+        lead: Option<u64>,
+        location: Option<&str>,
+    ) -> i64 {
+        crate::channel_events::create(
+            conn, channel_id as i64, 1, creator, &parsed(lead, location), starts_at, 0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sweep_once_event_lead_dms_going_and_maybe_only_then_never_again() {
+        let (mut conn, channel_id, creator) = ev_setup();
+        let now = 1_000_000u64;
+        // Lead moment reached (starts_at - 900 <= now), start still ahead.
+        let id = make_ev(&conn, channel_id, &creator, now as i64 + 300, Some(900), Some("my place"));
+        let going = ev_member(&conn, "Going");
+        let maybe = ev_member(&conn, "Maybe");
+        let nope = ev_member(&conn, "Nope");
+        crate::channel_events::rsvp(&conn, id, &going, "going", 1).unwrap();
+        crate::channel_events::rsvp(&conn, id, &maybe, "maybe", 2).unwrap();
+        crate::channel_events::rsvp(&conn, id, &nope, "no", 3).unwrap();
+
+        let out = sweep_once(&mut conn, now);
+        assert!(out.broadcasts.is_empty(), "a lead-time nudge is DM-only");
+        let recipients: Vec<_> = out.dms.iter().map(|d| d.recipient.clone()).collect();
+        assert_eq!(recipients, vec![going, maybe], "Going + Maybe only — never 'no'");
+        assert!(out.dms[0].text.contains("\"Party\" starts soon."));
+        assert!(out.dms[0].text.contains("📍 my place"));
+        assert!(out.dms[0]
+            .text
+            .contains(&format!("farder://widget/event/{channel_id}/{id}")));
+        // Persisted BEFORE the DM leaves the process, under the single-shot guard.
+        let row = crate::channel_events::get(&conn, id).unwrap().unwrap();
+        assert_eq!(row.reminded_at, Some(now as i64));
+        // Crash-safety idempotence: a second sweep at the same `now` nudges nobody.
+        assert!(sweep_once(&mut conn, now).dms.is_empty());
+    }
+
+    #[test]
+    fn sweep_once_event_start_and_lead_same_tick_sends_start_batch_only() {
+        let (mut conn, channel_id, creator) = ev_setup();
+        let now = 1_000_000u64;
+        // Both the lead moment AND the start are due in this tick.
+        let id = make_ev(&conn, channel_id, &creator, now as i64 - 1, Some(900), None);
+        let going = ev_member(&conn, "Going");
+        let maybe = ev_member(&conn, "Maybe");
+        crate::channel_events::rsvp(&conn, id, &going, "going", 1).unwrap();
+        crate::channel_events::rsvp(&conn, id, &maybe, "maybe", 2).unwrap();
+
+        let out = sweep_once(&mut conn, now);
+        // No "starts soon" nudge at all — only the start batch (no double-ping).
+        assert!(out.dms.iter().all(|d| d.text.contains("is starting now.")));
+        assert_eq!(
+            out.dms.iter().map(|d| d.recipient.clone()).collect::<Vec<_>>(),
+            vec![going],
+            "the start DM is Going-only"
+        );
+        let row = crate::channel_events::get(&conn, id).unwrap().unwrap();
+        assert_eq!(row.status, "started");
+        assert_eq!(row.reminded_at, None, "the lead DM was skipped, not sent");
+    }
+
+    #[test]
+    fn sweep_once_event_start_flips_announces_once_and_dms_going_only() {
+        let (mut conn, channel_id, creator) = ev_setup();
+        let now = 1_000_000u64;
+        // A real card so the announcement can thread under it.
+        let (card, info) = crate::channel_events::create_event_card(
+            &mut conn, channel_id, &creator, &parsed(None, None), now,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE channel_events SET starts_at = ?2 WHERE id = ?1",
+            rusqlite::params![info.id, now as i64 - 5],
+        )
+        .unwrap();
+        let going = ev_member(&conn, "Going");
+        let maybe = ev_member(&conn, "Maybe");
+        crate::channel_events::rsvp(&conn, info.id, &going, "going", 1).unwrap();
+        crate::channel_events::rsvp(&conn, info.id, &maybe, "maybe", 2).unwrap();
+
+        let out = sweep_once(&mut conn, now);
+        assert_eq!(out.broadcasts.len(), 2, "EventUpdated + the announcement");
+        match &out.broadcasts[0].event {
+            farder_protocol::server::ServerEvent::EventUpdated { event } => {
+                assert_eq!(event.id, info.id);
+                assert_eq!(event.status, "started");
+            }
+            other => panic!("expected EventUpdated, got {other:?}"),
+        }
+        match &out.broadcasts[1].event {
+            farder_protocol::server::ServerEvent::NewMessage { message } => {
+                assert_eq!(message.author_badge.as_deref(), Some("BOT"));
+                assert_eq!(message.author_name_override.as_deref(), Some("Events"));
+                assert_eq!(message.reply_to, Some(card.id), "threads under the card");
+                assert!(message.content.contains("Party is starting now!"));
+            }
+            other => panic!("expected NewMessage announcement, got {other:?}"),
+        }
+        assert_eq!(
+            out.dms.iter().map(|d| d.recipient.clone()).collect::<Vec<_>>(),
+            vec![going],
+            "start DMs go to Going only — a Maybe never committed"
+        );
+        assert_eq!(
+            crate::channel_events::get(&conn, info.id).unwrap().unwrap().status,
+            "started"
+        );
+        // Persisted before broadcast: a second sweep announces NOTHING.
+        let msg_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        let out2 = sweep_once(&mut conn, now);
+        assert!(out2.broadcasts.is_empty() && out2.dms.is_empty());
+        let msg_count_after: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(msg_count, msg_count_after, "sweep twice → zero new announcements");
+    }
+
+    #[test]
+    fn sweep_once_cancelled_event_dms_going_once_then_none() {
+        let (mut conn, channel_id, creator) = ev_setup();
+        let now = 1_000_000u64;
+        let id = make_ev(&conn, channel_id, &creator, now as i64 + 3_600, None, None);
+        let going = ev_member(&conn, "Going");
+        let nope = ev_member(&conn, "Nope");
+        crate::channel_events::rsvp(&conn, id, &going, "going", 1).unwrap();
+        crate::channel_events::rsvp(&conn, id, &nope, "no", 2).unwrap();
+        assert!(crate::channel_events::cancel(&conn, id, now as i64).unwrap());
+
+        let out = sweep_once(&mut conn, now);
+        assert!(out.broadcasts.is_empty(), "no channel message — the card flip is the record");
+        assert_eq!(out.dms.len(), 1);
+        assert_eq!(out.dms[0].recipient, going);
+        assert!(out.dms[0].text.contains("\"Party\" was cancelled."));
+        let row = crate::channel_events::get(&conn, id).unwrap().unwrap();
+        assert_eq!(row.cancel_notified_at, Some(now as i64));
+        // Single-shot.
+        assert!(sweep_once(&mut conn, now).dms.is_empty());
+    }
+
+    #[test]
+    fn sweep_once_start_pass_skips_event_cancelled_first() {
+        let (mut conn, channel_id, creator) = ev_setup();
+        let now = 1_000_000u64;
+        // Due to start, but cancelled first (a Cancel or a card delete won).
+        let id = make_ev(&conn, channel_id, &creator, now as i64 - 5, None, None);
+        let going = ev_member(&conn, "Going");
+        crate::channel_events::rsvp(&conn, id, &going, "going", 1).unwrap();
+        assert!(crate::channel_events::cancel(&conn, id, now as i64).unwrap());
+        let msg_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+
+        let out = sweep_once(&mut conn, now);
+        assert!(
+            out.broadcasts.is_empty(),
+            "a cancelled event can never announce (the status guard fails)"
+        );
+        // It still gets its cancellation DM from the cancel-notify pass.
+        assert_eq!(out.dms.len(), 1);
+        assert!(out.dms[0].text.contains("was cancelled."));
+        let msg_count_after: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(msg_count, msg_count_after, "no announcement row was written");
+        assert_eq!(crate::channel_events::get(&conn, id).unwrap().unwrap().status, "cancelled");
     }
 }
 
@@ -281,8 +620,8 @@ pub fn spawn_widget_sweeper(state: std::sync::Arc<crate::state::ServerState>) ->
         tracing::info!("widget sweeper started");
         loop {
             let out: SweepOutcome = {
-                let conn = state.db.lock().unwrap();
-                sweep_once(&conn, crate::db::now())
+                let mut conn = state.db.lock().unwrap();
+                sweep_once(&mut conn, crate::db::now())
             }; // MutexGuard dropped here — before any .await
             for pb in out.broadcasts {
                 crate::connection::broadcast_event(&state, pb.target, pb.event).await;

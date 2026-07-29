@@ -4856,7 +4856,9 @@ pub async fn list_active_widgets(
         .await
         .map_err(|e| e.to_string())?
     {
-        ServerResponse::ActiveWidgets { polls, giveaways } => Ok(ActiveWidgets {
+        // `events` is discarded here on purpose: T3 widens `ActiveWidgets` and
+        // wires the event chips. Until then the field is decoded and dropped.
+        ServerResponse::ActiveWidgets { polls, giveaways, events: _ } => Ok(ActiveWidgets {
             polls,
             giveaways: giveaways.iter().map(giveaway_json).collect(),
         }),

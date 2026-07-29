@@ -279,6 +279,38 @@ pub struct GiveawayInfo {
     pub winner_name: Option<String>,
 }
 
+/// Live event state, broadcast whole on every change (`EventUpdated`) and
+/// returned by `GetEvent`. Carries the RSVP roster as SERVER-RESOLVED DISPLAY
+/// NAMES ONLY, capped at 10 per option — attendee public keys never leave the
+/// server and the payload stays bounded (worst case 30 short strings) at any
+/// RSVP volume. The per-viewer `my_rsvp` rides solely in `ServerResponse::Event`.
+/// Terminal states fold into `status`; there is no separate EventStarted event.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EventInfo {
+    pub id: i64,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub creator: PublicKey,
+    pub title: String,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    /// Absolute unix secs — no timezone is stored or transmitted anywhere;
+    /// every client renders it in ITS OWN local time.
+    pub starts_at: u64,
+    /// Secs before start for the lead-time DM: 900 | 3600 | 86400; None = none.
+    pub remind_lead: Option<u64>,
+    /// "upcoming" | "started" | "cancelled"
+    pub status: String,
+    pub going_count: u32,
+    pub maybe_count: u32,
+    pub no_count: u32,
+    /// Display names of the first 10 responders per option (creation order);
+    /// the client renders "and N more" from `count - names.len()`.
+    pub going_names: Vec<String>,
+    pub maybe_names: Vec<String>,
+    pub no_names: Vec<String>,
+}
+
 /// One of the caller's own pending reminders (`ServerResponse::MyReminders`).
 /// Owner-scoped by the connection key — `ListMyReminders` carries no owner
 /// field, so there is nothing to forge and no other member's reminder can ever
@@ -502,6 +534,28 @@ pub enum ServerRequest {
     /// Cancel one of the caller's own pending reminders. A foreign, already-fired
     /// or nonexistent id all return the same opaque "reminder not found".
     CancelReminder { reminder_id: i64 },
+    /// Read full event state (membership-gated; visibility-checked; allowed while
+    /// timed out). Returns the roster + the requester's own `my_rsvp`.
+    GetEvent { event_id: i64 },
+    /// Set or change the caller's RSVP: "going" | "maybe" | "no" (one per member;
+    /// upsert = change of mind). Rejected once the event started or was cancelled.
+    RsvpEvent { event_id: i64, response: String },
+    /// Remove the caller's RSVP (idempotent — no event when there was none).
+    ClearRsvp { event_id: i64 },
+    /// Cancel an upcoming event (creator or MANAGE_SERVER). The sweeper DMs the
+    /// Going list within one tick; no channel message is posted.
+    CancelEvent { event_id: i64 },
+    /// Full replace of the editable fields (creator or MANAGE_SERVER, upcoming
+    /// only) — same validation as creation, no partial-patch ambiguity. Changing
+    /// `starts_at` re-arms the reminder.
+    EditEvent {
+        event_id: i64,
+        title: String,
+        description: Option<String>,
+        location: Option<String>,
+        starts_at: u64,
+        remind_lead: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -577,6 +631,9 @@ pub enum ServerResponse {
     ActiveWidgets {
         polls: Vec<PollInfo>,
         giveaways: Vec<GiveawayInfo>,
+        /// Upcoming events only (started/cancelled drop out of the bar).
+        #[serde(default)]
+        events: Vec<EventInfo>,
     },
     /// Invoker-only confirmation delivered on the request's own `request_id`: no
     /// broadcast, no message row. The `Ok`-but-say-something case (used by the
@@ -584,6 +641,9 @@ pub enum ServerResponse {
     Notice { text: String },
     /// The caller's own pending reminders (`ListMyReminders`), soonest first.
     MyReminders { reminders: Vec<ReminderInfo> },
+    /// Full event state for `GetEvent`. `my_rsvp` is requester-specific and never
+    /// rides in the `EventUpdated` broadcast.
+    Event { event: EventInfo, my_rsvp: Option<String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -694,6 +754,11 @@ pub enum ServerEvent {
     /// Giveaway state changed (enter/leave/cancel/draw/reroll — terminal states
     /// fold into `status` + `winner`; there is no separate GiveawayEnded).
     GiveawayUpdated { giveaway: GiveawayInfo },
+    /// Event state changed (RSVP set/cleared, edited, cancelled, or started —
+    /// terminal states fold into `status`; there is no separate EventStarted /
+    /// EventCancelled). Targets `Subscribers(channel_id)` only: the roster is
+    /// visible to exactly the audience that can read the channel.
+    EventUpdated { event: EventInfo },
 }
 
 #[cfg(test)]
