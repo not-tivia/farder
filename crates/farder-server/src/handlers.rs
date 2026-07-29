@@ -360,11 +360,17 @@ fn require_member_hierarchy(
     Ok(None)
 }
 
-/// Widget visibility: can `member` see `channel_id`? DM channels ⇒ participant;
-/// all others ⇒ VIEW_CHANNEL. Callers MUST map `false` (and a missing channel)
-/// to the same opaque "... not found" error as a missing widget row, so widget
-/// ids are not an existence oracle for invisible channels.
-fn widget_channel_visible(
+/// Channel visibility: can `member` see `channel_id`? DM channels ⇒ participant;
+/// all others ⇒ VIEW_CHANNEL. A missing (or soft-deleted) channel ⇒ `false`.
+///
+/// Two kinds of caller, and both matter for privacy:
+/// - **Widget/event request arms** MUST map `false` (and a missing channel) to
+///   the same opaque "... not found" error as a missing row, so an id is never
+///   an existence oracle for an invisible channel.
+/// - **`subscriptions`** uses it as the subscribe permission boundary (see
+///   `crate::subscriptions` — the subscription set never contains a member who
+///   cannot see the channel).
+pub(crate) fn channel_visible(
     conn: &Connection,
     member: &PublicKey,
     channel_id: u64,
@@ -399,7 +405,7 @@ fn visible_event(
         Some(r) => r,
         None => return Ok(None),
     };
-    if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+    if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
         return Ok(None);
     }
     Ok(Some(row))
@@ -2383,7 +2389,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             let info = crate::polls::build_info(conn, &row)?;
@@ -2402,7 +2408,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             // Closed check is exact even before the sweeper ticks: past closes_at counts.
@@ -2435,7 +2441,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             let now = crate::db::now() as i64;
@@ -2464,7 +2470,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             if row.closed_at.is_some() {
@@ -2503,7 +2509,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             let info = crate::giveaways::build_info(conn, &row)?;
@@ -2522,7 +2528,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             if row.status == "cancelled" {
@@ -2559,7 +2565,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             if row.status == "cancelled" {
@@ -2591,7 +2597,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             // Authz: creator OR MANAGE_SERVER.
@@ -2626,7 +2632,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             // Authz: creator OR MANAGE_SERVER.
@@ -2896,10 +2902,10 @@ pub fn handle_request(
         ServerRequest::ListActiveWidgets { channel_id } => {
             // Read: no timeout gate, no rate limit (GetPoll-class bounded read).
             // Opaque visibility: the SAME "channel not found" for a nonexistent
-            // channel and a channel the caller can't see (widget_channel_visible
+            // channel and a channel the caller can't see (channel_visible
             // returns false for channel-gone) — channel ids are not an
             // existence oracle.
-            if !widget_channel_visible(conn, member, channel_id, is_owner)? {
+            if !channel_visible(conn, member, channel_id, is_owner)? {
                 return err("channel not found");
             }
             const ACTIVE_WIDGETS_CAP: usize = 20;

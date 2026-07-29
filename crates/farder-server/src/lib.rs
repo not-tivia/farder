@@ -25,5 +25,6 @@ pub mod reminders;
 pub mod retention;
 pub mod ssrf;
 pub mod state;
+pub mod subscriptions;
 pub mod templates;
 pub mod widgets;

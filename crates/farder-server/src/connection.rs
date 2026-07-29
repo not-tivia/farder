@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use farder_crypto::identity::PublicKey;
 use farder_protocol::{codec, server::*};
 use quinn::{RecvStream, SendStream};
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Duration;
@@ -882,21 +881,18 @@ pub(crate) async fn main_loop(
                                     };
                                     send_server_frame(send, &response).await?;
                                 } else {
-                                    // Update subscriptions: remove from all, add to requested
-                                    let pk_bytes = *member_key.as_bytes();
-                                    {
-                                        let mut subs = state.subscriptions.write().await;
-                                        // Remove from all channels
-                                        for subscribers in subs.values_mut() {
-                                            subscribers.remove(&pk_bytes);
-                                        }
-                                        // Add to requested channels
-                                        for channel_id in channel_ids {
-                                            subs.entry(channel_id)
-                                                .or_insert_with(HashSet::new)
-                                                .insert(pk_bytes);
-                                        }
-                                    }
+                                    // Subscribe is a PERMISSION BOUNDARY, not a bookkeeping
+                                    // call: `channel_ids` is client-supplied and a modified
+                                    // client can name any id.  `apply_subscribe` keeps only
+                                    // the channels this caller can actually see and silently
+                                    // drops the rest — silently so the response is never an
+                                    // existence oracle, and so a legitimate client with a
+                                    // stale channel list still gets its valid subscriptions.
+                                    // See `crate::subscriptions` for the full invariant.
+                                    crate::subscriptions::apply_subscribe(
+                                        &state, &member_key, is_owner, channel_ids,
+                                    )
+                                    .await;
                                     let response = ServerFrame::Response {
                                         request_id: id,
                                         body: ServerResponse::Ok,
@@ -1506,6 +1502,18 @@ pub(crate) async fn main_loop(
 // ---------------------------------------------------------------------------
 
 pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: ServerEvent) {
+    // Subscription revocation choke point. Filtering at Subscribe time only
+    // covers admission; a member who subscribed legitimately and LATER lost
+    // access (kick, ban, role change, permission overwrite, channel delete,
+    // mesh log removal) would keep receiving until they re-subscribed. Every
+    // event announcing such a change passes through here, whoever emitted it,
+    // so re-validating the subscription set here covers the request handlers,
+    // the mesh event-log ingest path and bots with no per-call-site hook.
+    // Cheap: a discriminant test on the hot path, DB work only on the rare
+    // control-plane events. See `crate::subscriptions`.
+    if crate::subscriptions::event_changes_access(&event) {
+        crate::subscriptions::revalidate(state).await;
+    }
     match target {
         EventTarget::All => {
             let clients = state.clients.read().await;

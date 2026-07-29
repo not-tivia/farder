@@ -72,7 +72,7 @@ unreliable datagrams (voice/video frames). For each datagram it:
 `main_loop` runs a `tokio::select!` with two branches:
 
 **Client request branch** — reads `ClientFrame::Request { id, body }` from the stream.
-- `Subscribe { channel_ids }` is handled inline: the client's public-key bytes are removed from all existing subscription sets and added to the requested ones. No DB access needed; replies `ServerResponse::Ok` immediately.
+- `Subscribe { channel_ids }` is handled inline by `subscriptions::apply_subscribe`: the client's public-key bytes are removed from all existing subscription sets, then added to **the requested channels the caller can actually see**. `channel_ids` is client-supplied, so this filter is a **permission boundary**, not bookkeeping — see the invariant below. Ids the caller cannot see are dropped *silently* (no error, nothing named in the response) so the reply is never an existence oracle and a client with a stale channel list keeps its valid subscriptions. Replies `ServerResponse::Ok` regardless.
 - `FetchUrl { url, channel_id }` is handled inline with an async HTTP fetch (permission checked first, no DB lock held during the fetch).
 - All other `ServerRequest` variants are dispatched to `handlers::handle_request` which takes a short-lived `state.db` lock, does the work synchronously, and returns a `HandleResult { response, events, orphaned_file_ids }`. The lock is dropped before any `.await`. After sending the response the loop broadcasts each event in `result.events` and cleans up orphaned attachment files from disk.
 - Reactions are rate-limited to 60/min per user before being dispatched.
@@ -106,6 +106,8 @@ When the main loop exits (clean EOF or error), `handle_connection`:
 ### `broadcast_event(state: &ServerState, target: EventTarget, event: ServerEvent)`
 
 **What it does:** delivers a `ServerEvent` clone to every client matched by `target`, using `try_send` on the per-client `mpsc::Sender`. Slow consumers that have let their 64-entry channel fill will silently drop the event.
+
+Before dispatching, it calls `subscriptions::event_changes_access(&event)`; if that is true (a kick, ban, role change, permission overwrite, channel delete/move, or mesh membership change) it first `await`s `subscriptions::revalidate(state)`, which re-checks every live subscription and drops the ones that no longer hold. This is the **revocation** half of the subscribe permission boundary: filtering at `Subscribe` time only covers admission, and a member who subscribed legitimately and later lost access would otherwise keep receiving until they re-subscribed. Hooking it here rather than at each handler arm means every emitter of those events — the request handlers, the mesh event-log ingest path, bots — is covered with no per-call-site hook. Cost is a discriminant test on the hot path; DB work happens only on those rare control-plane events.
 **Parameters:** `target` — which clients to deliver to (see `EventTarget` below); `event` — the payload.
 **Side effects:** network I/O (writes `ServerFrame::Event` to matched QUIC streams via each client's event loop).
 **Connects to:** called after every successful `handle_request` (result events), and directly from `handle_connection` for `MemberJoined` / `MemberLeft`.
@@ -115,7 +117,7 @@ When the main loop exits (clean EOF or error), `handle_connection`:
 | Variant | Who receives the event |
 |---|---|
 | `All` | Every currently-connected client |
-| `Subscribers(channel_id)` | Clients subscribed to a specific channel (opt-in via `Subscribe` request) |
+| `Subscribers(channel_id)` | Clients subscribed to a specific channel (opt-in via `Subscribe`, **filtered** — the set only ever contains members who can see the channel, so this target is safe to use for private-channel and DM traffic) |
 | `Members(pks)` | An explicit list of public keys (e.g. DM participants) |
 | `PermissionHolders(perm_bit)` | All connected clients whose resolved permissions include `perm_bit` (e.g. for audit events) |
 | `MediaStreamJoin/Leave`, `MediaTrackEnabled/Disabled`, `MediaSetDeafen` | Media lifecycle targets — currently no-op stubs in `broadcast_event` (implementation pending MST-10) |
@@ -206,7 +208,7 @@ Schema migrations are applied inline in `init_schema` using `PRAGMA table_info` 
 |---|---|---|
 | `state.clients` | `RwLock<HashMap<[u8;32], mpsc::Sender<ServerEvent>>>` | One entry per live connection, keyed by public-key bytes. The sender is the inbound end of that client's event channel. Inserted on auth, removed on disconnect. |
 | `state.voice_connections` | `RwLock<HashMap<[u8;32], quinn::Connection>>` | Same key as `clients`. Holds the raw QUIC connection for datagram fan-out. |
-| `state.subscriptions` | `RwLock<HashMap<u64, HashSet<[u8;32]>>>` | `channel_id → set of subscribed public-key bytes`. Updated by the `Subscribe` request; entire entry for the client is removed on disconnect. |
+| `state.subscriptions` | `RwLock<HashMap<u64, HashSet<[u8;32]>>>` | `channel_id → set of subscribed public-key bytes`. Written only by `subscriptions::apply_subscribe` (admission-filtered) and `subscriptions::revalidate` (revocation); the entire entry for a client is removed on disconnect. **Invariant: the subscription set never contains a member who cannot see the channel.** |
 | `state.media.channels` | `StdRwLock<HashMap<u64, StreamState>>` | Per-channel media routing state. Managed by the voice/stream handler (not directly in this file). |
 | `state.owner` | `RwLock<Option<PublicKey>>` | The server's owner public key. Set on first-member auto-claim or when a `setup_token` is consumed. Never cleared. |
 | `state.setup_token` | `Mutex<Option<[u8;32]>>` | One-time bootstrap token. Cleared to `None` atomically when claimed. |
@@ -226,6 +228,7 @@ Schema migrations are applied inline in `init_schema` using `PRAGMA table_info` 
 
 ## Known gotchas
 
+- **`Subscribe` is a permission boundary, not bookkeeping.** The subscription set never contains a member who cannot see the channel. `EventTarget::Subscribers(channel_id)` fans out to that raw set with no further check, and it carries `NewMessage` (plaintext for normal channels, ciphertext plus full metadata for DMs), `MessageEdited`, `MessageDeleted`, `ReactionAdded/Removed` and the poll/giveaway/event widget events — so the privacy of every private channel and DM rests on the set being correct. Two mechanisms hold it: admission (`subscriptions::apply_subscribe`) and revocation (`subscriptions::revalidate`, driven from `broadcast_event`). **Never insert into `state.subscriptions` from anywhere else**, and never add a code path that removes someone's access without emitting one of the events in `subscriptions::event_changes_access` (or calling `revalidate` directly). See `crates/farder-server/src/subscriptions.rs` for the full statement and its documented residual gaps.
 - **`state.db` is a `std::sync::Mutex`** — the lock must never be held across an `.await`. All DB calls in `handle_connection` follow the pattern: acquire lock in a block, do the work, drop block, then `.await`. Violating this deadlocks the entire server because Tokio cannot yield across a sync mutex guard.
 - **`state.clients` event channel capacity is 64.** `try_send` is used (not `.await`-send), so a slow client that fills its inbox silently loses events. This is intentional to prevent one lagging client from blocking all broadcasts, but it means clients may miss events if they can't keep up.
 - **Same-identity reconnect race:** the disconnect cleanup only removes the client from `state.clients` if the stored sender still matches the disconnecting connection's sender (`same_channel` check). Without this, a fast reconnect from the same key would have its entry evicted by the old connection's cleanup.

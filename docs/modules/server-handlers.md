@@ -249,7 +249,7 @@ WebRTC session.
 | `CreateInvite` | Generate an invite code; requires `CREATE_INVITES` (base). Returns `InviteCreated { code }`. No events. |
 | `GetServerInfo` | Return channel list, category list, roles, and member count. No permission check. `name` and `owner_public_key` fields are patched by `connection.rs` after this returns. |
 | `GetMembers` | Return full `MemberInfo` list including role IDs and active timeout data. Sourced from `members::list_members_visible` — the server's own system identity is filtered out in SQL, **before** the mesh `is_bot ||` whitelist below can re-admit it. No permission check. `MemberInfo` now includes `profile_hash: Option<String>` (the SHA-256 hex of the member's last pushed profile, or `null` if none). |
-| `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs`. |
+| `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs` (`subscriptions::apply_subscribe`), which **filters the requested channel ids** — see the `EventTarget` note below. |
 | `FetchUrl` | Returns an immediate `Error`; this variant must be intercepted and handled asynchronously by `connection.rs` before reaching this function. |
 
 ### Bots
@@ -614,7 +614,7 @@ Called by `serve_via_relay`'s `Webhook` dispatch arm when the relay forwards an 
    e. `messages::insert_message_with_author_name(conn, channel_id, &wh.public_key, &content, None, Some(&display))` — inserts the message with the webhook's synthetic public key as author and the display name in `author_name_override`.
    f. `messages::get_message` — reads the full `MessageInfo` (with populated `author_name_override`).
    g. DB lock is released.
-3. **Without any lock held** (async): `broadcast_event(EventTarget::Subscribers(channel_id), ServerEvent::NewMessage { message })`.
+3. **Without any lock held** (async): `broadcast_event(EventTarget::Subscribers(channel_id), ServerEvent::NewMessage { message })`. This is the whole audience check — the subscription set is already filtered to members who can see `channel_id` (see `EventTarget` values below), so no visibility test is repeated per message.
 
 Returns `WebhookAck::Ok` on success. The ack is mapped to HTTP status by `run_relay_webhook` in `relay.rs`: Ok → 204, Unauthorized → 401, BadRequest → 400, TooLarge → 413.
 
@@ -675,7 +675,7 @@ CRUD arms run synchronously inside the standard `handle_request` dispatch. `RunC
 
 ### Widget interaction arms (polls, giveaways & events)
 
-Fifteen synchronous arms in `handle_request` servicing the message widgets — see `docs/modules/server-widgets.md` for the storage modules and `protocol.md` for the full variant table. Shared shape of every arm: load the row → **channel visibility** via `widget_channel_visible(conn, member, channel_id, is_owner)` (DM ⇒ participant, else `VIEW_CHANNEL`; missing channel ⇒ false) with an **opaque** `Error { "poll not found" }` / `"giveaway not found"` / `"event not found"` on any failure (no existence oracle; the event arms share the `visible_event(conn, member, is_owner, event_id)` preamble + the `EVENT_NOT_FOUND` const so the string cannot drift) → then status/authz checks. Mutating arms are `is_timed_out`-gated (**`CancelReminder` excepted** — a private nudge is not channel content; see its row above); `VotePoll`/`RetractVote`/`EnterGiveaway`/`LeaveGiveaway`/`RsvpEvent`/`ClearRsvp`/`CancelEvent`/`EditEvent`/`CancelReminder` also pass through `state.widget_limiter` (10 / 10 s per member, "slow down — too many interactions") — spec §10. `EditEvent` is the one that genuinely needs it: it is repeatable, reachable by any ordinary member who created the event, and each call is a DB write plus up to 30 member lookups under the db mutex plus a full `EventInfo` broadcast to every channel subscriber.
+Fifteen synchronous arms in `handle_request` servicing the message widgets — see `docs/modules/server-widgets.md` for the storage modules and `protocol.md` for the full variant table. Shared shape of every arm: load the row → **channel visibility** via `channel_visible(conn, member, channel_id, is_owner)` (DM ⇒ participant, else `VIEW_CHANNEL`; missing channel ⇒ false) with an **opaque** `Error { "poll not found" }` / `"giveaway not found"` / `"event not found"` on any failure (no existence oracle; the event arms share the `visible_event(conn, member, is_owner, event_id)` preamble + the `EVENT_NOT_FOUND` const so the string cannot drift) → then status/authz checks. Mutating arms are `is_timed_out`-gated (**`CancelReminder` excepted** — a private nudge is not channel content; see its row above); `VotePoll`/`RetractVote`/`EnterGiveaway`/`LeaveGiveaway`/`RsvpEvent`/`ClearRsvp`/`CancelEvent`/`EditEvent`/`CancelReminder` also pass through `state.widget_limiter` (10 / 10 s per member, "slow down — too many interactions") — spec §10. `EditEvent` is the one that genuinely needs it: it is repeatable, reachable by any ordinary member who created the event, and each call is a DB write plus up to 30 member lookups under the db mutex plus a full `EventInfo` broadcast to every channel subscriber.
 
 | `ServerRequest` | Permission | Action |
 |---|---|---|
@@ -760,7 +760,7 @@ an error is logged.
 | Value | Who receives it |
 |---|---|
 | `All` | Every currently connected client on this server |
-| `Subscribers(channel_id)` | Clients subscribed to that channel (managed by `connection.rs`) |
+| `Subscribers(channel_id)` | Clients subscribed to that channel (managed by `connection.rs` / `subscriptions.rs`). **Invariant: Subscribe is a permission boundary — the subscription set never contains a member who cannot see the channel** (DM ⇒ participant, otherwise `VIEW_CHANNEL`; enforced on subscribe by `subscriptions::apply_subscribe` and re-enforced on every access change by `subscriptions::revalidate`). This target is therefore safe for private-channel and DM traffic, and a handler arm that already established channel visibility does **not** need to re-check it here. |
 | `Members(Vec<PublicKey>)` | A specific set of members by public key |
 | `PermissionHolders(perm_bit)` | Clients whose resolved server-level permissions include `perm_bit`; used exclusively for `AuditEventCreated` (gated on `MANAGE_SERVER`) |
 
