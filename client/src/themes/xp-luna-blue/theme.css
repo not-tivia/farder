@@ -3125,6 +3125,103 @@ body {
   font-style: italic;
 }
 
+/* ── Event widget (interactive event card) ─────────────── */
+.event-widget {
+  border: 1px solid var(--xp-border);
+  border-left: 3px solid var(--xp-blue);
+  background: var(--xp-panel-bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-width: 460px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.event-title {
+  font-weight: 600;
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+  overflow-wrap: anywhere;
+}
+.event-when {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+  font-size: 0.9em;
+}
+.event-when-rel {
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  font-size: 0.9em;
+}
+.event-location {
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+.event-description {
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.event-rsvp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.event-rsvp-btn {
+  background: var(--xp-panel-bg);
+  border: 1px solid var(--xp-border);
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: inherit;
+  cursor: pointer;
+}
+.event-rsvp-btn:not(:disabled):hover { border-color: var(--xp-blue); }
+.event-rsvp-btn:disabled { cursor: default; opacity: 0.6; }
+.event-rsvp-btn--mine {
+  border-color: var(--xp-blue);
+  box-shadow: inset 0 0 0 1px var(--xp-blue);
+  font-weight: 600;
+}
+.event-attendees {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.event-attendee-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 90px;
+  font-size: 0.85em;
+}
+.event-attendee-group > strong {
+  color: var(--xp-text-normal, var(--xp-text-secondary));
+  font-weight: 600;
+}
+.event-attendee-name {
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  overflow-wrap: anywhere;
+}
+.event-more {
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  font-style: italic;
+}
+.event-happening {
+  color: var(--xp-blue);
+  font-weight: 600;
+  font-size: 0.9em;
+}
+.event-cancelled {
+  color: var(--xp-text-muted, var(--xp-text-secondary));
+  font-style: italic;
+}
+
 /* ── Widget links (copy control, text pill, linked cards) ── */
 .widget-copy-link {
   background: none;

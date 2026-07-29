@@ -2,12 +2,13 @@ import { useState } from "react";
 import { useApp } from "../context/ServerContext";
 import PollWidget from "./PollWidget";
 import GiveawayWidget from "./GiveawayWidget";
+import EventWidget from "./EventWidget";
 
 /** Parsed `farder://widget/<kind>/<channel_id>/<widget_id>` link. The embedded
  *  channel id is client-side consistency data only — it is never sent to the
  *  server (the fetch is keyed by widget id alone, exactly like a widget card). */
 export interface WidgetLink {
-  kind: "poll" | "giveaway";
+  kind: "poll" | "giveaway" | "event";
   channelId: number;
   widgetId: number;
 }
@@ -38,15 +39,18 @@ export default function LinkedWidgetCard({ serverId, link, messageChannelId }: L
   const server = state.servers[serverId] ?? null;
   const info = link.kind === "poll"
     ? server?.polls[link.widgetId]?.poll ?? null
-    : server?.giveaways[link.widgetId]?.giveaway ?? null;
+    : link.kind === "giveaway"
+      ? server?.giveaways[link.widgetId]?.giveaway ?? null
+      : server?.events[link.widgetId]?.event ?? null;
   const [unavailable, setUnavailable] = useState(false);
 
   if (unavailable || (info && info.channel_id !== link.channelId)) {
-    return (
-      <div className="linked-widget-unavailable">
-        {link.kind === "poll" ? "Poll not available" : "Giveaway not available"}
-      </div>
-    );
+    const label = link.kind === "poll"
+      ? "Poll not available"
+      : link.kind === "giveaway"
+        ? "Giveaway not available"
+        : "Event not available";
+    return <div className="linked-widget-unavailable">{label}</div>;
   }
 
   // Refetch discipline: PollUpdated/GiveawayUpdated broadcasts reach origin-
@@ -56,17 +60,30 @@ export default function LinkedWidgetCard({ serverId, link, messageChannelId }: L
   const sameChannel = link.channelId === messageChannelId;
   const refetch = sameChannel ? "mount" : "interval";
 
-  return link.kind === "poll" ? (
-    <PollWidget
+  if (link.kind === "poll") {
+    return (
+      <PollWidget
+        serverId={serverId}
+        pollId={link.widgetId}
+        refetch={refetch}
+        onUnavailable={() => setUnavailable(true)}
+      />
+    );
+  }
+  if (link.kind === "giveaway") {
+    return (
+      <GiveawayWidget
+        serverId={serverId}
+        giveawayId={link.widgetId}
+        refetch={refetch}
+        onUnavailable={() => setUnavailable(true)}
+      />
+    );
+  }
+  return (
+    <EventWidget
       serverId={serverId}
-      pollId={link.widgetId}
-      refetch={refetch}
-      onUnavailable={() => setUnavailable(true)}
-    />
-  ) : (
-    <GiveawayWidget
-      serverId={serverId}
-      giveawayId={link.widgetId}
+      eventId={link.widgetId}
       refetch={refetch}
       onUnavailable={() => setUnavailable(true)}
     />

@@ -4,6 +4,7 @@ import * as api from "../lib/tauri-bridge";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 import PollWidget from "./PollWidget";
 import GiveawayWidget from "./GiveawayWidget";
+import EventWidget from "./EventWidget";
 
 interface ActiveWidgetsBarProps {
   serverId: string;
@@ -12,7 +13,7 @@ interface ActiveWidgetsBarProps {
 }
 
 interface Chip {
-  kind: "poll" | "giveaway";
+  kind: "poll" | "giveaway" | "event";
   id: number;
   label: string;
   /** Unix-secs end time; null = untimed poll. */
@@ -51,7 +52,7 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
   const connected = server?.connected ?? false;
   const activeWidgets = server?.activeWidgets ?? null;
 
-  const [open, setOpen] = useState<{ kind: "poll" | "giveaway"; id: number; click: { x: number; y: number } } | null>(null);
+  const [open, setOpen] = useState<{ kind: "poll" | "giveaway" | "event"; id: number; click: { x: number; y: number } } | null>(null);
   const [nowSecs, setNowSecs] = useState(() => Math.floor(Date.now() / 1000));
   const barRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -106,11 +107,11 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
   });
 
   // Build chips from the id lists, looking each info up in the shared
-  // polls/giveaways slices (one source of truth with the widgets). Interleave
-  // in creation order by message_id: the two lists arrive id ASC and the
-  // server merges by created_at, but GiveawayInfo carries no created_at —
-  // message ids are one monotonically increasing sequence, so message_id
-  // ascending IS creation order across both kinds.
+  // polls/giveaways/events slices (one source of truth with the widgets).
+  // Interleave in creation order by message_id: the three lists arrive id ASC
+  // and the server merges by created_at, but GiveawayInfo/EventInfo carry no
+  // created_at — message ids are one monotonically increasing sequence, so
+  // message_id ascending IS creation order across all three kinds.
   const chips: Chip[] = [];
   if (activeWidgets && activeWidgets.channelId === channelId && server) {
     for (const id of activeWidgets.polls) {
@@ -120,6 +121,10 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
     for (const id of activeWidgets.giveaways) {
       const g = server.giveaways[id]?.giveaway;
       if (g) chips.push({ kind: "giveaway", id, label: g.prize, endsAt: g.ends_at, order: g.message_id });
+    }
+    for (const id of activeWidgets.events) {
+      const ev = server.events[id]?.event;
+      if (ev) chips.push({ kind: "event", id, label: ev.title, endsAt: ev.starts_at, order: ev.message_id });
     }
     chips.sort((a, b) => a.order - b.order);
   }
@@ -138,7 +143,7 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
   // rug-pull mid-read).
   if (!hasChips && !open) return null;
 
-  function toggleChip(kind: "poll" | "giveaway", id: number, e: React.MouseEvent) {
+  function toggleChip(kind: "poll" | "giveaway" | "event", id: number, e: React.MouseEvent) {
     setOpen(open && open.kind === kind && open.id === id
       ? null
       : { kind, id, click: { x: e.clientX, y: e.clientY } });
@@ -154,7 +159,7 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
               className="widget-chip"
               onClick={(e) => toggleChip(c.kind, c.id, e)}
             >
-              <span>{c.kind === "poll" ? "📊" : "🎉"}</span>
+              <span>{c.kind === "poll" ? "📊" : c.kind === "giveaway" ? "🎉" : "📅"}</span>
               <span style={{ maxWidth: "24ch", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {c.label}
               </span>
@@ -171,7 +176,9 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
               new widget renders without its per-viewer my_vote/my_entered. */}
           {open.kind === "poll"
             ? <PollWidget key={`poll-${open.id}`} serverId={serverId} pollId={open.id} refetch="mount" />
-            : <GiveawayWidget key={`giveaway-${open.id}`} serverId={serverId} giveawayId={open.id} refetch="mount" />}
+            : open.kind === "giveaway"
+              ? <GiveawayWidget key={`giveaway-${open.id}`} serverId={serverId} giveawayId={open.id} refetch="mount" />
+              : <EventWidget key={`event-${open.id}`} serverId={serverId} eventId={open.id} refetch="mount" />}
         </div>
       )}
     </>

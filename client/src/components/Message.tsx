@@ -23,6 +23,7 @@ import LinkEmbed from "./LinkEmbed";
 import { detectEmbedUrls } from "../lib/linkEmbed";
 import PollWidget from "./PollWidget";
 import GiveawayWidget from "./GiveawayWidget";
+import EventWidget from "./EventWidget";
 import LinkedWidgetCard from "./LinkedWidgetCard";
 import type { WidgetLink } from "./LinkedWidgetCard";
 import MemberAvatar from "./MemberAvatar";
@@ -32,12 +33,12 @@ import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
-// Shareable widget links: farder://widget/(poll|giveaway)/<channel_id>/<widget_id>.
+// Shareable widget links: farder://widget/(poll|giveaway|event)/<channel_id>/<widget_id>.
 // They share the farder:// scheme, so INVITE_REGEX / INVITE_SPLIT_REGEX already
 // match and tokenize them — every invite-side consumer must exclude the
 // farder://widget/ prefix first (isInviteLink, the invite-embeds IIFE) or a
 // widget link would render as a bogus invite pill / garbage join card.
-const WIDGET_LINK_REGEX = /farder:\/\/widget\/(poll|giveaway)\/(\d+)\/(\d+)/gi;
+const WIDGET_LINK_REGEX = /farder:\/\/widget\/(poll|giveaway|event)\/(\d+)\/(\d+)/gi;
 
 interface MessageProps {
   message: MessageInfo;
@@ -116,23 +117,54 @@ function isWidgetSchemeLink(s: string): boolean {
 
 /** Anchored, non-global full-token tester (a shared /g regex is stateful). */
 function isWidgetLink(s: string): boolean {
-  return /^farder:\/\/widget\/(poll|giveaway)\/\d+\/\d+$/i.test(s);
+  return /^farder:\/\/widget\/(poll|giveaway|event)\/\d+\/\d+$/i.test(s);
 }
 
 /** Parse a widget link; null when malformed or either id overflows a safe
  *  integer. The channel id is display/consistency data only — never sent to
  *  the server. */
 function parseWidgetLink(link: string): WidgetLink | null {
-  const m = /^farder:\/\/widget\/(poll|giveaway)\/(\d+)\/(\d+)$/i.exec(link);
+  const m = /^farder:\/\/widget\/(poll|giveaway|event)\/(\d+)\/(\d+)$/i.exec(link);
   if (!m) return null;
   const channelId = Number(m[2]);
   const widgetId = Number(m[3]);
   if (!Number.isSafeInteger(channelId) || !Number.isSafeInteger(widgetId)) return null;
-  return { kind: m[1].toLowerCase() as "poll" | "giveaway", channelId, widgetId };
+  return { kind: m[1].toLowerCase() as "poll" | "giveaway" | "event", channelId, widgetId };
+}
+
+/** Pill label for a widget-link token (already validated by isWidgetLink). */
+function widgetPillLabel(seg: string): string {
+  if (/^farder:\/\/widget\/poll\//i.test(seg)) return "📊 Poll link";
+  if (/^farder:\/\/widget\/event\//i.test(seg)) return "📅 Event link";
+  return "🎉 Giveaway link";
+}
+
+/** Prefix test: is this token in the channel-link namespace (even if
+ *  malformed)? Used to keep channel links out of the invite pipeline — the
+ *  reminder DM's link-back rides the same farder:// scheme. */
+function isChannelSchemeLink(s: string): boolean {
+  return /^farder:\/\/channel\//i.test(s);
+}
+
+/** Anchored full-token tester for farder://channel/<id>. */
+function isChannelLink(s: string): boolean {
+  return /^farder:\/\/channel\/\d+$/i.test(s);
+}
+
+/** Channel id from a channel link; null when malformed or the id overflows a
+ *  safe integer. */
+function parseChannelLink(s: string): number | null {
+  const m = /^farder:\/\/channel\/(\d+)$/i.exec(s);
+  if (!m) return null;
+  const id = Number(m[1]);
+  return Number.isSafeInteger(id) ? id : null;
 }
 
 function isInviteLink(s: string): boolean {
-  if (isWidgetSchemeLink(s)) return false; // farder://widget/... is never an invite
+  // farder://widget/... and farder://channel/... are never invites — both match
+  // INVITE_REGEX's farder:// alternative, so they must be excluded here or a
+  // reminder DM / widget link renders a bogus join card.
+  if (isWidgetSchemeLink(s) || isChannelSchemeLink(s)) return false;
   return /^(?:(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+)$/i.test(s);
 }
 
@@ -172,7 +204,13 @@ function renderMentions(text: string, memberNames: Record<string, string>, ownDi
   });
 }
 
-function renderContent(text: string, memberNames: Record<string, string>, ownDisplayName: string | null) {
+function renderContent(
+  text: string,
+  memberNames: Record<string, string>,
+  ownDisplayName: string | null,
+  channelNames: Record<number, string>,
+  onSelectChannel: (channelId: number) => void,
+) {
   // Farder invite URLs display as a compact pill (the invite card below the
   // message carries the details); clicking the pill copies the full link.
   // The underlying message content is untouched — only the display changes.
@@ -191,9 +229,30 @@ function renderContent(text: string, memberNames: Record<string, string>, ownDis
             copyWidgetLink(seg);
           }}
         >
-          {/^farder:\/\/widget\/poll\//i.test(seg) ? "📊 Poll link" : "🎉 Giveaway link"}
+          {widgetPillLabel(seg)}
         </span>
       );
+    }
+    // Channel links (the reminder DM's link-back) also match the invite split's
+    // farder:// alternative — handle them BEFORE the invite branch.
+    if (seg && isChannelLink(seg)) {
+      const cid = parseChannelLink(seg);
+      if (cid != null) {
+        const name = channelNames[cid];
+        return (
+          <span
+            key={`cpill-${si}`}
+            className="widget-link-pill"
+            title={seg}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelectChannel(cid);
+            }}
+          >
+            {name ? `Go to #${name}` : "Open channel"}
+          </span>
+        );
+      }
     }
     if (seg && isInviteLink(seg)) {
       return (
@@ -350,6 +409,15 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const canTakeDown = hasPermission(viewerBits, PERMISSIONS.KICK_MEMBERS);
   const logServerId = activeServer?.logServerId ?? null;
 
+  // Channel names for the farder://channel/<id> pill (the reminder DM's
+  // link-back). An id we don't know renders the generic "Open channel".
+  const channels = activeServer?.channels;
+  const channelNames = useMemo(() => {
+    const map: Record<number, string> = {};
+    for (const c of channels ?? []) map[c.id] = c.name;
+    return map;
+  }, [channels]);
+
   // Server-written widget marker ({"type":"poll","id":7}); treated as untrusted:
   // try/catch parse, id must be a number. Unknown types fall back to plain content.
   const parsedWidget = useMemo((): { type: string; id: number } | null => {
@@ -383,6 +451,14 @@ export default function Message({ message, memberNames, grouped = false, serverI
           <GiveawayWidget
             serverId={serverId}
             giveawayId={parsedWidget.id}
+            onUnavailable={() => setWidgetUnavailable(true)}
+          />
+        );
+      case "event":
+        return (
+          <EventWidget
+            serverId={serverId}
+            eventId={parsedWidget.id}
             onUnavailable={() => setWidgetUnavailable(true)}
           />
         );
@@ -557,7 +633,13 @@ export default function Message({ message, memberNames, grouped = false, serverI
               attachments={message.attachments}
               bookIndex={bookIndex}
               serverId={serverId}
-              renderTextSegment={(t) => renderContent(t, memberNames, ownDisplayName)}
+              renderTextSegment={(t) => renderContent(
+                t,
+                memberNames,
+                ownDisplayName,
+                channelNames,
+                (cid) => dispatch({ type: "SELECT_CHANNEL", serverId, payload: cid }),
+              )}
               renderRemainingAttachments={(remaining) =>
                 remaining.length > 0 ? (
                   <div className="message-attachments">
@@ -589,9 +671,10 @@ export default function Message({ message, memberNames, grouped = false, serverI
         const embeds: string[] = [];
         for (const m of rawMatches) {
           if (embeds.length >= 3) break;
-          // Widget links match INVITE_REGEX's farder:// alternative — keep them
-          // out of parseInviteLink (they'd misparse into a garbage join card).
-          if (isWidgetSchemeLink(m)) continue;
+          // Widget and channel links match INVITE_REGEX's farder:// alternative
+          // — keep them out of parseInviteLink (they'd misparse into a garbage
+          // join card).
+          if (isWidgetSchemeLink(m) || isChannelSchemeLink(m)) continue;
           const parsed = parseInviteLink(m);
           if (!parsed.address) continue;
           if (seen.has(parsed.address)) continue;
