@@ -330,6 +330,34 @@ the narrowing is the authority from here on (and is documented in
    ordinary commits land first. Pinned by
    `the_reset_tree_hash_anchor_binds_only_the_leaves_the_reset_staged`.
 
+2. **Round 3's derived gate let the first confirmer EVICT a co-staged member in
+   good standing and reopen the channel.** `reset_incomplete()` cleared on ANY
+   path that dropped a staged leaf out of `leaves_pending`, and round 2's
+   remove-authz exemption for pending-only leaves is unconditional — it never
+   required the removed leaf's holder to be banned or lost (the only case the
+   fix described). So: owner resets welcoming alice + bob; alice confirms first;
+   ALICE (not the owner) authors a Remove-commit dropping bob's still-pending
+   leaf — authorized, because pending-only leaves carry no good-standing gate and
+   it is her first commit of the generation, so the rate rule exempts it — the
+   gate went false, sealed content flowed again, and bob (a member in good
+   standing, live device, no drift) was left permanently outside the channel,
+   visible only in `pending_adds`, which gates nothing. That is the silent
+   partition C7 forbids, and 9da7db1 correctly rejected the identical sequence.
+   **The obligation set is now pruned by VOIDNESS, not by absence:** an
+   obligation is discharged only when the staged leaf CONFIRMS, or when the fold
+   stops owing its holder a leaf at all (`leaf_holder_in_good_standing` — the
+   single definition now shared with the `DeclaredRemove` bridge rule), which the
+   commit effect prunes out of `reset_welcomed` for good. `reset_incomplete()`
+   becomes "some staged leaf is not yet confirmed", still a pure predicate over
+   fold state, so it composes from any checkpoint; the terminal-state fix (a
+   banned/lost/revoked/expired holder's removal heals the gate) and the
+   solo-owner reset both keep working, and the prune still stops a discharged
+   obligation being resurrected by a later re-add. Pinned by
+   `a_first_confirmer_cannot_evict_a_co_staged_member_and_reopen_the_channel`
+   and `a_discharged_reset_obligation_is_not_resurrected_by_a_later_re_add`,
+   with the terminal-state case still held by
+   `a_reset_completes_when_a_stuck_leaf_is_removed_not_only_when_it_confirms`.
+
 ## Global constraints
 
 - **Old events are untouched.** New variants are APPENDED after

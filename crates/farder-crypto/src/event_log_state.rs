@@ -142,10 +142,12 @@ struct MlsGroupRecord {
     /// `MlsGroupReset`. A channel's first reset ignores it (generation 0).
     channel_events_since_reset: u32,
     /// The leaves an accepted `MlsGroupReset` STAGED (its Welcome set), minus
-    /// those already accounted for. The reset generation is incomplete — and
-    /// sealed content invalid — exactly while one of them is still unconfirmed
-    /// (`reset_incomplete`). See that method for why this is a derived set and
-    /// not the latch it replaced.
+    /// the obligations that are VOID because the fold no longer owes their
+    /// holder a leaf at all (banned, kicked, device revoked or cert-expired —
+    /// pruned by the commit effect). The reset generation is incomplete — and
+    /// sealed content invalid — exactly while one of these leaves is still
+    /// unconfirmed (`reset_incomplete`). See that method for why this is a
+    /// derived gate and not the latch it replaced.
     reset_welcomed: HashSet<(PublicKey, DeviceId)>,
     /// The reset generation's expected tree hash, as DECLARED by the resetter
     /// on `MlsGroupReset` (its add-commit is never a log event, so there is no
@@ -223,15 +225,31 @@ impl MlsGroupRecord {
     /// grew `members × live_devices` so the equality never held either. Escape
     /// required another owner-only reset, destroying continuity.
     ///
-    /// As a predicate over leaf state it self-heals on every path that can
-    /// discharge the obligation — confirmation promotes the leaf out of
-    /// `leaves_pending`, a Remove-commit drops it — and it stays a pure function
-    /// of state, so it composes from any checkpoint. `reset_welcomed` is pruned
-    /// to the still-pending staged leaves by the commit effect, so a leaf that
-    /// was dropped and later re-added is an ORDINARY pending join (which never
-    /// seals the channel), not a resurrected reset obligation.
+    /// As a predicate over leaf state it self-heals on every path that GENUINELY
+    /// discharges the obligation, and it stays a pure function of state, so it
+    /// composes from any checkpoint. There are exactly two such paths:
+    ///
+    /// - the staged leaf CONFIRMS (it lands in `leaves_confirmed` — the promise
+    ///   the reset made is kept); or
+    /// - the fold stops owing its holder a leaf at all (banned, kicked, device
+    ///   revoked, cert expired), in which case the commit effect prunes it out
+    ///   of `reset_welcomed` for good. That prune is also what stops a
+    ///   discharged obligation from being RESURRECTED: when such a holder later
+    ///   returns and is re-added, the pending leaf is an ordinary join, not a
+    ///   revived reset obligation.
+    ///
+    /// Deliberately NOT a discharge path: a Remove-commit dropping a staged leaf
+    /// whose holder is still in good standing. Removing a pending-only leaf is
+    /// open to any member (an unproven Add is not a tree member — see the
+    /// `DeclaredRemove` rule), and a generation's first commit is exempt from
+    /// the rate rule, so keying the gate to `leaves_pending` alone let the FIRST
+    /// welcomed device to confirm evict every peer that had not confirmed yet,
+    /// reopen the channel, and leave them permanently outside it while
+    /// `pending_adds` — which gates nothing — quietly listed them: precisely the
+    /// silent partition spec C7 exists to make impossible. The evicted member's
+    /// Add is simply re-driven, and the channel wakes when they hold their leaf.
     fn reset_incomplete(&self) -> bool {
-        !self.reset_welcomed.is_disjoint(&self.leaves_pending)
+        self.reset_welcomed.iter().any(|leaf| !self.leaves_confirmed.contains(leaf))
     }
 
     /// Whether the freshness ceiling is close enough to demand a rekey NOW
@@ -453,6 +471,22 @@ impl LogState {
     /// the log's corroborated clock).
     fn judged_live_devices(&self, pk: &PublicKey, at_ts: u64) -> Vec<DeviceId> {
         self.live_devices_at(pk, self.judged_liveness_ts(pk, at_ts))
+    }
+
+    /// Whether the fold still OWES this leaf a place in the tree: its holder is
+    /// a full member, not banned, and the device is live as the fold judges it.
+    /// The single definition behind both the `DeclaredRemove` bridge rule and
+    /// the reset-obligation prune, so "removal is legitimate" and "the reset no
+    /// longer owes this leaf" can never drift apart.
+    fn leaf_holder_in_good_standing(
+        &self,
+        identity: &PublicKey,
+        device: &DeviceId,
+        at_ts: u64,
+    ) -> bool {
+        self.is_member(identity)
+            && !self.is_banned(identity)
+            && self.judged_live_devices(identity, at_ts).contains(device)
     }
 
     /// The shared filter: devices of `pk` that are neither revoked nor
@@ -1125,13 +1159,15 @@ impl LogState {
                     // owner-only reset. Removing it evicts nobody: the device
                     // reappears immediately in `pending_adds`, so the Add is
                     // simply re-driven. Adds are open to any member, so their
-                    // inverse must be too, or the first Add wins forever.
+                    // inverse must be too, or the first Add wins forever. (The
+                    // exemption does NOT let the drop discharge a reset
+                    // obligation — see `MlsGroupRecord::reset_incomplete`.)
                     if confirmed {
-                        let good_standing = self.is_member(&rem.identity)
-                            && !self.is_banned(&rem.identity)
-                            && self
-                                .judged_live_devices(&rem.identity, event.core.timestamp)
-                                .contains(&rem.device);
+                        let good_standing = self.leaf_holder_in_good_standing(
+                            &rem.identity,
+                            &rem.device,
+                            event.core.timestamp,
+                        );
                         ensure!(
                             !good_standing || author == &rem.identity,
                             "cannot remove a leaf of a member in good standing (except self-removal)"
@@ -1554,6 +1590,25 @@ impl LogState {
             } => {
                 // Only reached when the epoch CAS passed (a stale commit is a
                 // no-op that never enters this fn).
+                //
+                // Reset obligations that are VOID — staged for a holder the fold
+                // no longer owes a leaf (banned, kicked, device revoked, cert
+                // expired) — are computed against the state as it stands BEFORE
+                // this commit's effects, which is the same picture the
+                // `DeclaredRemove` authz judged. See the prune below.
+                let void_obligations: HashSet<(PublicKey, DeviceId)> = self
+                    .mls_groups
+                    .get(channel_id)
+                    .map(|g| {
+                        g.reset_welcomed
+                            .iter()
+                            .filter(|(pk, dev)| {
+                                !self.leaf_holder_in_good_standing(pk, dev, event.core.timestamp)
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 self.pin_instance(&event.core.device, store_instance_hash);
                 // Consume the cited KeyPackages: live → consumed (a consumed
                 // ref can never be an Add target again).
@@ -1600,14 +1655,17 @@ impl LogState {
                     group.leaves_pending.remove(&leaf);
                     group.leaves_confirmed.insert(leaf);
                 }
-                // Keep the reset's outstanding-obligation set honest: a staged
-                // leaf that this commit REMOVED is discharged (that is the
-                // bridge's answer for a welcomed device that is banned or lost
-                // before confirming), and dropping it here means a later re-add
-                // is an ordinary pending join rather than a resurrected reset
-                // obligation. See `MlsGroupRecord::reset_incomplete`.
-                let (staged, pending) = (&mut group.reset_welcomed, &group.leaves_pending);
-                staged.retain(|leaf| pending.contains(leaf));
+                // Keep the reset's outstanding-obligation set honest: an
+                // obligation to a holder the fold no longer owes a leaf is VOID
+                // (that is the bridge's answer for a welcomed device that is
+                // banned or lost before confirming), and dropping it here means
+                // a later re-add of that leaf is an ordinary pending join rather
+                // than a resurrected reset obligation. Removing a staged leaf
+                // whose holder is still in GOOD STANDING discharges nothing —
+                // otherwise the first confirmer could evict its co-staged peers
+                // and reopen the channel around them. See
+                // `MlsGroupRecord::reset_incomplete`.
+                group.reset_welcomed.retain(|leaf| !void_obligations.contains(leaf));
                 group.events_since_last_commit = 0;
                 group
                     .last_commit_epoch_by_author
@@ -4725,6 +4783,144 @@ mod tests {
         assert_eq!(f.st.pending_confirmations(CH).len(), 1, "dave's leaf is the outstanding obligation");
         let still_open = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 3, vec![]);
         f.st.apply(&still_open).expect("an ordinary pending join never seals the channel");
+    }
+
+    /// The other side of the derived gate: it must NOT be dischargeable by
+    /// EVICTING a co-staged member who is in good standing. Removing a
+    /// pending-only leaf is open to any member (round 2 — an unproven Add is not
+    /// a tree member, and gating it was an invisible lockout), and a
+    /// generation's first commit is exempt from the rate rule, so the FIRST
+    /// welcomed device to confirm could otherwise drop every peer that had not
+    /// confirmed yet, reopen the channel, and leave them permanently outside it
+    /// while `pending_adds` — which gates nothing — quietly listed them. That is
+    /// exactly the silent partition C7 exists to make impossible.
+    #[test]
+    fn a_first_confirmer_cannot_evict_a_co_staged_member_and_reopen_the_channel() {
+        const TR: [u8; 32] = [77u8; 32];
+        let (mut f, bob, bob_dev, bob_last) = reset_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        let alice_did = device_id(&f.alice_dev.public_key());
+        let bob_pk = bob.public_key();
+        let bob_did = device_id(&bob_dev.public_key());
+        let bob_leaf = (bob_pk.clone(), bob_did.clone());
+
+        let w_alice = stage_welcome(&mut f, 1, &alice_pk, &alice_did);
+        let w_bob = stage_welcome(&mut f, 1, &bob_pk, &bob_did);
+        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob], TR);
+        f.st.apply(&reset).expect("the exact-cover reset folds");
+        f.owner_prev = reset;
+
+        // Alice confirms first. Bob is a member in good standing with a live
+        // device — no ban, no revocation, no drift of any kind.
+        let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1, TR, ALICE_STORE);
+        f.st.apply(&ca).expect("alice's post-reset confirmation folds");
+        f.alice_prev = ca;
+        assert!(f.st.pending_removals(CH, 500).is_empty(), "bob is in good standing");
+
+        // ALICE — not the owner — drops bob's still-pending leaf. The commit is
+        // authorized (pending-only leaves carry no good-standing gate, and it is
+        // her first commit of the generation, so the rate rule exempts it)...
+        let evict = mls_commit_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1,
+            vec![], vec![rem_of(&bob_pk, &bob_dev)], [0u8; 32], X1, T1, ALICE_STORE);
+        f.st.apply(&evict).expect("dropping an unproven leaf stays authorized (round 2)");
+        f.alice_prev = evict;
+
+        // ...but it discharges NOTHING: the reset owes bob a confirmed leaf and
+        // he still has not got one, so the channel stays dead, loudly.
+        assert!(
+            f.st.mls_groups.get(&CH).unwrap().reset_incomplete(),
+            "evicting a co-staged member in good standing must not complete the reset"
+        );
+        let sealed = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 2, vec![]);
+        assert_rejected_for(&f.st, &sealed, "reset is incomplete");
+        assert!(f.st.pending_adds(CH, 500).contains(&bob_leaf), "bob is visibly owed a leaf");
+
+        // Recovery is the ordinary one — re-drive bob's Add and let him confirm.
+        let bkp = kp_publish(&bob_dev, &bob_pk, &f.sid, &bob_last, [4u8; 32], 1_000_000, 500);
+        f.st.apply(&bkp).expect("bob's key package publishes");
+        let re_add = mls_commit_gen(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, 2,
+            vec![add_of(&bob_pk, &bob_dev, &bkp.hash())], vec![], X1, X2, T2, OWNER_STORE);
+        f.st.apply(&re_add).expect("bob's re-add folds");
+        f.owner_prev = re_add;
+        assert!(f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "still owed until he confirms");
+        let cb = leaf_confirm_gen(&bob_dev, &bob_pk, &f.sid, &bkp, 1, 3, T2, [4u8; 32]);
+        f.st.apply(&cb).expect("bob's confirmation folds");
+        assert!(
+            !f.st.mls_groups.get(&CH).unwrap().reset_incomplete(),
+            "the reset completes once bob actually holds his leaf"
+        );
+        let unlocked = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 3, vec![]);
+        f.st.apply(&unlocked).expect("sends unlock once every staged leaf is confirmed");
+    }
+
+    /// M1: the `reset_welcomed` prune is what stops a discharged obligation from
+    /// being resurrected. A staged leaf whose holder left good standing is
+    /// dropped from the obligation set for good, so when that holder returns and
+    /// is re-added, the pending leaf is an ORDINARY join — it must not re-seal
+    /// the channel as a revived reset obligation.
+    #[test]
+    fn a_discharged_reset_obligation_is_not_resurrected_by_a_later_re_add() {
+        const TR: [u8; 32] = [77u8; 32];
+        let (mut f, bob, bob_dev, bob_last) = reset_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        let alice_did = device_id(&f.alice_dev.public_key());
+        let bob_pk = bob.public_key();
+        let bob_did = device_id(&bob_dev.public_key());
+
+        let w_alice = stage_welcome(&mut f, 1, &alice_pk, &alice_did);
+        let w_bob = stage_welcome(&mut f, 1, &bob_pk, &bob_did);
+        let reset = group_reset(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, vec![w_alice, w_bob], TR);
+        f.st.apply(&reset).expect("the exact-cover reset folds");
+        f.owner_prev = reset;
+        let ca = leaf_confirm_gen(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 1, 1, TR, ALICE_STORE);
+        f.st.apply(&ca).expect("alice's post-reset confirmation folds");
+        f.alice_prev = ca;
+
+        // Bob is banned before confirming: the reset no longer owes him a leaf,
+        // and the Remove-commit that clears the drift discharges the obligation.
+        ban_of(&mut f, &bob_pk);
+        let drop = mls_commit_gen(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, 1,
+            vec![], vec![rem_of(&bob_pk, &bob_dev)], [0u8; 32], X1, T1, OWNER_STORE);
+        f.st.apply(&drop).expect("the remove-commit folds");
+        f.owner_prev = drop;
+        assert!(!f.st.mls_groups.get(&CH).unwrap().reset_incomplete(), "the obligation is discharged");
+        let open = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 2, vec![]);
+        f.st.apply(&open).expect("the channel is sendable again");
+        f.owner_prev = open;
+
+        // Bob comes back and is re-added with the SAME (identity, device) leaf.
+        let unban = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 500, EP::MemberUnbanned { member: bob_pk.clone() });
+        f.st.apply(&unban).expect("unban folds");
+        f.owner_prev = unban;
+        let inv = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 500,
+            EP::InviteCreated { code_hash: "c2".into(), max_uses: 10, expires_at: 9999, requires_approval: false });
+        f.st.apply(&inv).expect("the re-invite folds");
+        f.owner_prev = inv.clone();
+        let rejoin = Ev::next(&bob_dev, bob_pk.clone(), f.sid.clone(), Some(&bob_last),
+            bob_last.core.lamport + 1, 500,
+            EP::MemberJoined { member: bob_pk.clone(), invite: inv.hash() });
+        f.st.apply(&rejoin).expect("bob rejoins");
+        let bkp = kp_publish(&bob_dev, &bob_pk, &f.sid, &rejoin, [4u8; 32], 1_000_000, 500);
+        f.st.apply(&bkp).expect("bob's key package publishes");
+        let re_add = mls_commit_gen(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, 1, 2,
+            vec![add_of(&bob_pk, &bob_dev, &bkp.hash())], vec![], X1, X2, T2, OWNER_STORE);
+        f.st.apply(&re_add).expect("bob's re-add folds");
+        f.owner_prev = re_add;
+
+        // Without the prune, bob's leaf re-enters the reset's obligation set and
+        // the channel seals itself again on a join that has nothing to do with
+        // the reset.
+        assert_eq!(f.st.pending_confirmations(CH), HashSet::from([(bob_pk, bob_did)]));
+        assert!(
+            !f.st.mls_groups.get(&CH).unwrap().reset_incomplete(),
+            "a re-add after a discharged obligation is an ordinary join"
+        );
+        let still_open = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 1, 3, vec![]);
+        f.st.apply(&still_open).expect("an ordinary pending join never re-seals the channel");
     }
 
     // ---- Rung 2, Task 5: checkpoint composability over ALL the new state ----
