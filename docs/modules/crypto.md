@@ -378,24 +378,23 @@ TypeScript types in `types.ts` use `{ bytes: number[] }` for the serde form. Cal
 Appended after `AttachmentRedacted` (the enum is **append-only**: existing
 variants never change shape or order, so old events' canonical bytes and hashes
 are stable — pinned by `existing_variant_bytes_are_untouched_by_new_variants`).
-Nothing emits these yet. Fold rules for `ChannelCreated`, `MessageDeleted`,
-`DeviceRevoked` (sub-2 Task 2) and the MLS group bookkeeping —
-`MlsKeyPackagePublished`, `MlsCommit`, `MlsWelcome`, `MlsLeafConfirmed` (sub-2
-Task 3) — are **live in `LogState::apply`**; `MlsGroupReset` and the
-sealed-content variants are still rejected by TEMP fail-closed arms until
-Task 4. Ingest handling is sub-3.
+Nothing emits these yet, but **every variant's fold rule is now live in
+`LogState::apply`** (sub-2 Tasks 2–4): channel class gating, tombstones and
+device revocation (Task 2), the MLS group bookkeeping (Task 3), and the
+sealed-content send gates plus non-selective reset (Task 4). Ingest handling
+(size caps, `stale-epoch` bounces, derive) is sub-3.
 
-| Variant | Fields | Fold rule (× = still a TEMP reject) |
+| Variant | Fields | Fold rule |
 |---|---|---|
 | `ChannelCreated` | `channel_id: u64`, `name`, `kind`, `class: ChannelClass`, `parent: Option<u64>` | Owner-only (spec M3, no new capability string); `channel_id` must be new (class is set once or the channel does not exist to the log — no class-change event exists); `parent: Some(p)` requires `p` known to the log AND the child's `class` equal to `p`'s (thread children inherit their parent's class) |
 | `MlsKeyPackagePublished` | `key_package: Vec<u8>`, `store_instance_hash: [u8;32]`, `expires_at_log_pos: u64` | Full member only; `store_instance_hash` must match/pin the device's instance pin; `expires_at_log_pos > log_pos` at publish; at most `MAX_LIVE_KEY_PACKAGES_PER_DEVICE = 10` live (unconsumed, unexpired) refs per device — expired refs stop counting and are pruned on touch. Effect: record ref → expiry log pos |
 | `MlsCommit` | `channel_id`, `generation`, `epoch`, `mls_message: Vec<u8>`, `adds: Vec<DeclaredAdd>`, `removes: Vec<DeclaredRemove>`, `prev_epoch_authenticator: [u8;32]`, `post_epoch_authenticator: [u8;32]`, `post_tree_hash: [u8;32]`, `authz_head: EventHash`, `store_instance_hash: [u8;32]` | Channel must have an E2ee group; `generation` must match; **epoch CAS**: a commit re-declaring a past epoch folds `Ok` as an **accepted no-op** (only chain head + `log_pos` advance — the Rung-3-deterministic loser); instance-hash pin; author must hold a **confirmed** leaf and `prev_epoch_authenticator` must equal the previous commit's declared `post_epoch_authenticator` (BOTH exempt for a generation's first commit — bootstrap, its author's leaf becomes confirmed); each `DeclaredAdd` needs a full non-banned member, a live device, an unconsumed unexpired KeyPackage of exactly that `(identity, device)`, an absent leaf, and the **self-add rule** (an identity with a confirmed leaf may only be extended by itself); each `DeclaredRemove` needs a present leaf that is out of good standing OR self-removal; **commit-rate rule** (`COMMIT_RATE_MIN_EPOCH_GAP = 4`): drift-discharging commits are never blocked, others need to be the author's first or ≥ 4 epochs past their previous. `post_epoch_authenticator` is the author's post-merge `epoch_authenticator()` — the value the NEXT commit must chain onto (plan resolved ambiguity #1); a liar wedges the chain and cannot be built upon. `authz_head` is opaque to the fold (client head attestation) |
 | `MlsWelcome` | `channel_id`, `generation`, `commit: EventRef`, `for_member: PublicKey`, `for_device: DeviceId`, `welcome: Vec<u8>` | `generation == current`: author must hold a confirmed leaf, target leaf must be pending, cited commit must be fold-recorded. `generation == current + 1`: owner-only reset staging (Welcomes precede the content-addressed reset, ambiguity #6). `for_*` unverifiable by the fold — recording a Welcome NEVER promotes a leaf; only the joiner's confirmation does |
 | `MlsLeafConfirmed` | `channel_id`, `generation`, `epoch`, `tree_hash: [u8;32]`, `store_instance_hash: [u8;32]` | Must be authored by the joining device of a **pending** leaf; instance-hash pin; `tree_hash` must equal `commits_by_epoch[epoch].post_tree_hash` — or, in a reset generation with no logged commits, seed/match `reset_expected_tree_hash` (ambiguity #7). Effect: pending → confirmed; clears `reset_pending` once confirmed = members × live devices |
-| `MlsGroupReset` | `channel_id`, `new_generation: u64`, `welcomes: Vec<EventRef>` | × Owner-only; valid only if `welcomes` covers exactly members × live devices (non-selective) |
-| `MessagePostedE2ee` | `channel_id`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `reply_to: Option<EventRef>`, `attachments: Vec<AttachmentCap>`, `authz_head: EventHash` | × Sealed content; `reply_to`/caps stay outside the seal for blind threading/validation |
-| `MessageEditedE2ee` | `channel_id`, `target: EventRef`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `authz_head: EventHash` | × Sealed edit |
-| `MessageDeleted` | `channel_id`, `target: EventRef`, `reason: DeleteReason` | Channel must be known to the log (log deletes are for log channels); target not already tombstoned; `Moderation` requires `"kick"` (the fold verifies moderation authority itself); `Author` requires membership only — target *authorship* needs a per-message index the fold deliberately omits, so ingest (sub-3) verifies it against the derived `messages` table. Effect: durable tombstone, queryable via `is_tombstoned` — deletions cannot resurrect |
+| `MlsGroupReset` | `channel_id`, `new_generation: u64`, `welcomes: Vec<EventRef>` | Owner-only (spec M3); channel must have an E2ee group; `new_generation == generation + 1`; **rate limit** — `channel_events_since_reset >= RESET_MIN_CHANNEL_EVENTS = 1000`, except a channel's FIRST reset (generation 0), which is always allowed; **completeness (spec C7)** — every ref must resolve to a fold-recorded `MlsWelcome` staged for `new_generation`, with no duplicate refs, and the welcomed `(member, device)` set must equal EXACTLY `members × live_devices(event.timestamp)` **minus the resetter's own authoring device** (which becomes the new group's creator). Effect: `generation = new_generation`, `epoch = 1`, `leaves_confirmed = {resetter}`, `leaves_pending = welcomed`, `commit_head`/`epoch_authenticator`/`tree_hash`/`reset_expected_tree_hash` cleared (the cleared authenticator is the new generation's bootstrap marker), `commits_by_epoch` + `last_commit_epoch_by_author` cleared, older-generation `welcomes` dropped, both counters zeroed, `reset_pending = true` |
+| `MessagePostedE2ee` | `channel_id`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `reply_to: Option<EventRef>`, `attachments: Vec<AttachmentCap>`, `authz_head: EventHash` | Channel must be known to the log with `class: E2ee` (unknown or Plaintext ⇒ invalid — the other half of class gating); author must be a full member holding a **confirmed** leaf for the signing device; `generation` and `epoch` must both match the group's current values (a stale epoch is invalid — deterministic on replay). **Send gates, all fail closed:** `pending_removals` empty (spec I1), `events_since_last_commit < FRESHNESS_CEILING_EVENTS = 500` (spec C4), `!reset_pending` (spec C7). `authz_head` is opaque to the fold; `reply_to`/caps stay outside the seal for blind threading/validation. Effect: record attachment uploaders (so `AttachmentRedacted` works on sealed posts) + spend one channel event on both counters |
+| `MessageEditedE2ee` | `channel_id`, `target: EventRef`, `generation`, `epoch`, `ciphertext: Vec<u8>`, `authz_head: EventHash` | Every gate `MessagePostedE2ee` applies, plus: `target` must not be tombstoned (deletions cannot be resurrected). Target *authorship* is ingest's (sub-3, via the derived view) — the fold has no per-message index by design. Same counter effect |
+| `MessageDeleted` | `channel_id`, `target: EventRef`, `reason: DeleteReason` | Channel must be known to the log (log deletes are for log channels); target not already tombstoned; `Moderation` requires `"kick"` (the fold verifies moderation authority itself); `Author` requires membership only — target *authorship* needs a per-message index the fold deliberately omits, so ingest (sub-3) verifies it against the derived `messages` table. Effect: durable tombstone, queryable via `is_tombstoned` — deletions cannot resurrect, and in an E2ee channel it spends one channel event on both freshness counters (a tombstone is content, blind-wise) |
 | `DeviceRevoked` | `device: DeviceId` | Device must be known and not already revoked; author must be the owning identity (any of its devices — self-revoke included) or the server owner. Effect: cert dead, chain frozen — history stands (records are kept), new events from the device are rejected at the envelope |
 
 Support types (all in `event_log.rs`):
@@ -496,15 +495,48 @@ IN = declared + 1 of the last accepted commit), `commit_head`,
 `epoch_authenticator` (**the chain variable** — the last commit's declared
 `post_epoch_authenticator`; `None` marks a generation's bootstrap),
 `tree_hash`, `leaves_confirmed` / `leaves_pending` (`HashSet<(PublicKey,
-DeviceId)>`), `events_since_last_commit` (reset to 0 by every accepted commit;
-the Task-4 freshness ceiling reads it), `last_commit_epoch_by_author`
-(commit-rate clock), `channel_events_since_reset`, `reset_pending`,
+DeviceId)>`), `events_since_last_commit` (freshness-ceiling counter: channel
+events since the last commit — zeroed by every accepted commit and by a reset),
+`last_commit_epoch_by_author` (commit-rate clock),
+`channel_events_since_reset` (reset rate-limit clock), `reset_pending`,
 `reset_expected_tree_hash`, `commits_by_epoch: HashMap<u64, CommitRecord>`
 (keyed by the epoch a commit **created**), `welcomes: HashMap<EventHash,
 WelcomeRecord>`.
 
 Constants (pub): `MAX_LIVE_KEY_PACKAGES_PER_DEVICE = 10`,
 `COMMIT_RATE_MIN_EPOCH_GAP = 4`.
+
+### Rung-2 sealed-content gates and reset (sub-2 Task 4)
+
+Constants (pub): `FRESHNESS_CEILING_EVENTS: u32 = 500`,
+`RESET_MIN_CHANNEL_EVENTS: u32 = 1000`.
+
+Both sealed variants share one private gate helper, so an edit is blocked
+exactly where a post is. In gate order: **class** (unknown channel or
+`Plaintext` ⇒ invalid) → **full member** → **confirmed leaf** for the signing
+device → **generation** → **epoch** (current only) → **`pending_removals` empty**
+→ **freshness ceiling** → **`!reset_pending`**. Each fails closed, and each is a
+*protocol* invariant a blind host enforces, not client courtesy:
+
+- **Pending-removals gate (spec I1).** From the moment a ban / kick / device
+  revocation / cert expiry creates drift, the channel is sealed **for everyone**
+  until a Remove-commit discharges it. A patched or uninformed client cannot
+  keep sending.
+- **Freshness ceiling (spec C4).** `events_since_last_commit` counts sealed
+  posts, sealed edits and tombstones in E2ee channels (saturating). At 500 the
+  channel stops accepting content until somebody rekeys — forward secrecy
+  becomes an invariant rather than a hope. Any accepted commit zeroes it.
+- **Partial reset (spec C7).** After an accepted `MlsGroupReset`,
+  `reset_pending` stays set until `leaves_confirmed` equals
+  `members × live_devices`; sealed sends are invalid throughout, so a partial
+  reset is a **dead channel, loudly**, never a silent partition. The reset
+  generation's add-commit is never a log event, so the first `MlsLeafConfirmed`
+  seeds `reset_expected_tree_hash` and every later one must match it
+  (ambiguity #7).
+
+`authz_head` is carried but **never read by the fold**: head attestation is a
+client-side mechanism (peers compare cited heads against their own folded
+history), documented at the rule site.
 
 **Stale-commit no-op:** `apply` keeps its `Result<()>` signature. An `MlsCommit`
 that loses the epoch CAS returns `Ok(())` but skips all payload effects — only
@@ -537,7 +569,7 @@ Whether the device has been killed by an accepted `DeviceRevoked`.
 
 #### `live_devices(pk: &PublicKey, at_ts: u64) -> Vec<DeviceId>`
 
-An identity's live devices at `at_ts`: authorized, non-revoked, and cert-unexpired at that (untrusted, author-claimed) timestamp. Sorted for determinism. Feeds the device cap, and (Tasks 3–4) the `members × live_devices` MLS target set.
+An identity's live devices at `at_ts`: authorized, non-revoked, and cert-unexpired at that (untrusted, author-claimed) timestamp. Sorted for determinism. Feeds the device cap, the `members × live_devices` MLS target set (drift + reset completeness), and the reset-completion check.
 
 #### `log_pos() -> u64`
 
@@ -548,8 +580,8 @@ no-op still counts — it is an accepted event). Drives KeyPackage lifetimes.
 
 The spec's derived drift set: leaves the group holds that the authz fold says
 should not be there — `(confirmed ∪ pending) \ (members × live_devices(at_ts))`.
-Non-empty ⇒ sealed sends are blocked (Task 4) until a Remove-commit discharges
-it. Empty for channels without an MLS group.
+Non-empty ⇒ sealed sends are blocked until a Remove-commit discharges it.
+Empty for channels without an MLS group.
 
 #### `pending_adds(channel_id: u64, at_ts: u64) -> HashSet<(PublicKey, DeviceId)>`
 
