@@ -400,6 +400,47 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE messages ADD COLUMN event_hash TEXT", [])?;
     }
 
+    // Rung 2: the channel's content class, DERIVED from an accepted `ChannelCreated`
+    // inside the same transaction that accepts the event. Legacy rows default to
+    // 'plaintext' (Q8 carve-out: a channel the log never knew is permanently
+    // plaintext). A missing row or an unrecognised value is UNRESOLVABLE =>
+    // refuse (see `channel_class::resolve`) — fail closed, never fail plaintext.
+    let has_content_class: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(channels)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "content_class")
+    };
+    if !has_content_class {
+        conn.execute(
+            "ALTER TABLE channels ADD COLUMN content_class TEXT NOT NULL DEFAULT 'plaintext'",
+            [],
+        )?;
+    }
+
+    // Rung 2: the sealed message columns. `is_e2ee = 1` marks a row derived from
+    // a signature-verified `MessagePostedE2ee`; `sealed` holds the opaque MLS
+    // ciphertext. Sealed rows keep `content = ''` and never enter `messages_fts`.
+    let msg_cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols
+    };
+    if !msg_cols.iter().any(|c| c == "is_e2ee") {
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN is_e2ee INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !msg_cols.iter().any(|c| c == "sealed") {
+        conn.execute("ALTER TABLE messages ADD COLUMN sealed BLOB", [])?;
+    }
+
     // Migration: attachment redaction — who took the blob down (NULL = live).
     let has_redacted_by: bool = {
         let mut stmt = conn.prepare("PRAGMA table_info(files)")?;

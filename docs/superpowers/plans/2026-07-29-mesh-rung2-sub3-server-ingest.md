@@ -255,7 +255,7 @@ UI. Not the handler. The function every path funnels through."
 - every existing `messages::insert_*` / `edit_message` signature **unchanged**,
   now hard-erroring for E2EE channels.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/farder-server/src/channel_class.rs`'s `#[cfg(test)] mod tests` and
 `messages.rs`'s test module. Spec invariants as names:
@@ -280,7 +280,7 @@ In `crates/farder-server/src/channel_class.rs`'s `#[cfg(test)] mod tests` and
   string `INSERT INTO messages`. This is what makes a *future* writer a test
   failure instead of a breach.
 
-- [ ] **Step 2: Schema — `channels.content_class`**
+- [x] **Step 2: Schema — `channels.content_class`**
 
 In `db.rs`, add to the `channels` CREATE (harmless for existing DBs) and add an
 idempotent migration in the same PRAGMA-table_info style used for
@@ -306,7 +306,7 @@ if !has_content_class {
 }
 ```
 
-- [ ] **Step 3: `channel_class.rs`**
+- [x] **Step 3: `channel_class.rs`**
 
 ```rust
 //! The channel content class as the SERVER sees it, and the fail-closed rule
@@ -391,7 +391,7 @@ pub fn set_class(conn: &Connection, channel_id: u64, class: ChannelClass) -> Res
 `reconcile_channel_classes` lands in Task 3 (it needs the events table read).
 Register the module in `lib.rs`.
 
-- [ ] **Step 4: The choke point in `messages.rs`**
+- [x] **Step 4: The choke point in `messages.rs`**
 
 Collapse the three raw inserts into one private `insert_row`, then guard:
 
@@ -446,7 +446,7 @@ future `content`-reading feature to leak. (`messages.sealed` / `is_e2ee` columns
 land in Task 4; for this task `insert_sealed_row` can be written against them
 by adding the two columns here — do that, it keeps Task 4 to behavior.)
 
-- [ ] **Step 5: Run the gates**
+- [x] **Step 5: Run the gates**
 
 ```bash
 cargo test -p farder-server        # 409 + the new tests, all green
@@ -455,7 +455,7 @@ cargo build --workspace
 cargo clippy -p farder-mls -- -D warnings
 ```
 
-- [ ] **Step 6: Docs + commit**
+- [x] **Step 6: Docs + commit**
 
 `docs/modules/server-handlers.md`: a new "Channel content class + the message
 choke point" section (the resolution table, `E2EE_REFUSED`, the four doors, the

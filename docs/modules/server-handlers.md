@@ -314,6 +314,94 @@ progress to a full authenticated session (see `docs/modules/relay.md`).
 
 ---
 
+## Channel content class + the message write choke point
+
+**Files:** `crates/farder-server/src/channel_class.rs`, `messages.rs`.
+**Spec:** `docs/superpowers/specs/2026-07-27-mesh-rung2-e2ee-design.md` (rev 2), C8/F1.
+
+An E2EE channel's promise is that the server cannot read it. That only holds if
+**no** server-side path can author a plaintext row there. Rung 2 makes that
+structural rather than a per-call-site convention.
+
+### Class resolution (`channel_class.rs`)
+
+The class is a property of the channel's identity **in the log**
+(`EventPayload::ChannelCreated { class }`). It is mirrored into
+`channels.content_class` inside the same transaction that accepts the event, so
+any writer holding only a `&Connection` — including the widget sweeper, which
+has no `ServerState` — can resolve it with a plain DB read and no second mutex.
+
+| stored `content_class` | `ChannelWriteClass` | server-authored content |
+|---|---|---|
+| `'plaintext'` (also the column default, so every legacy channel) | `Plaintext` | allowed |
+| `'e2ee'` | `E2ee` | **refused** |
+| row missing, value unrecognised, or the read **errors** | `Unresolvable` | **refused** |
+
+`ChannelWriteClass::refuses_server_authored_content()` answers `true` for
+anything that is not a definite `Plaintext`. **Fail closed: absence of
+information never yields a plaintext write.**
+
+Public surface:
+
+- `resolve(conn, channel_id) -> ChannelWriteClass` — infallible; a failed read
+  is `Unresolvable`, never `Plaintext`.
+- `require_plaintext(conn, channel_id) -> Result<()>` — the strict guard used by
+  every server-authored door.
+- `require_plaintext_for_derived(conn, channel_id) -> Result<()>` — the guard
+  for the log-derived `MessagePosted` door. Identical to the strict guard except
+  that a channel with **no `channels` row at all** is allowed, mirroring the
+  fold's Rung-1 carve-out (`event_log_state.rs:873-886` gates only channels the
+  log knows). A row that exists with an unreadable class is still refused.
+- `require_e2ee(conn, channel_id) -> Result<()>` — the sealed door's guard; the
+  sealed door is not a general bypass, so it refuses plaintext and unresolvable
+  channels alike.
+- `set_class(conn, channel_id, ChannelClass)` — writes the mirror. Called only
+  from ingest, inside the transaction that accepts the `ChannelCreated`.
+- `E2EE_REFUSED` — the single refusal string every class rejection shares, so a
+  channel id is never an existence oracle.
+
+### The choke point (`messages.rs`)
+
+Exactly one statement in the server inserts a `messages` row: the private
+`messages::insert_row`. Every module reaches it through one of these doors, and
+the class guard lives on the door (not inside `insert_row`) so the one
+legitimate E2EE door can state its own, opposite rule:
+
+| door | visibility | guard |
+|---|---|---|
+| `insert_message` | `pub` | `require_plaintext` |
+| `insert_message_with_ts` | `pub` | `require_plaintext` |
+| `insert_message_with_author_name` | `pub` | `require_plaintext` |
+| `edit_message` (the `UPDATE`) | `pub` | `require_plaintext`, resolved from the row's own `channel_id` |
+| `insert_derived_row` | `pub(crate)` | `require_plaintext_for_derived` — the `MessagePosted` read-view door, used by `event_ingest` |
+| `insert_sealed_row` | `pub(crate)` | `require_e2ee` — the **only** door into an E2EE channel, used by `event_ingest`'s sealed derive path |
+
+The three `insert_message*` signatures are **unchanged**, so all ~18 existing
+writers (legacy `SendMessage`, slash-command replies, webhooks, poll/giveaway/
+event cards and their sweeper announcements, bot and system DMs) are gated by
+construction without being edited.
+
+Sealed rows carry `content = ''`, the opaque ciphertext in `messages.sealed`,
+`messages.is_e2ee = 1`, and **skip the FTS insert entirely** — nothing
+plaintext-shaped is written, so there is nothing for a future `content`-reading
+feature to leak.
+
+**Structural guard:** `no_insert_into_messages_sql_outside_the_choke_point`
+walks `crates/farder-server/src` and asserts no file other than `messages.rs`
+contains a raw `INSERT INTO messages`. A new writer added later fails a test
+instead of silently becoming a plaintext door into a sealed channel.
+
+### Schema (`db.rs`)
+
+- `channels.content_class TEXT NOT NULL DEFAULT 'plaintext'` — the class mirror.
+- `messages.is_e2ee INTEGER NOT NULL DEFAULT 0`, `messages.sealed BLOB`.
+
+All three are added by the idempotent `PRAGMA table_info` migration pattern, so
+existing databases pick them up on the next open with legacy rows defaulting to
+plaintext (Q8's carve-out: a channel the log never knew stays plaintext forever).
+
+---
+
 ## Event ingest helpers (`crates/farder-server/src/event_ingest.rs`)
 
 These public functions are the source of truth for deriving persistent rows from

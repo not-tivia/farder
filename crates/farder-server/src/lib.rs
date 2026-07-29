@@ -5,6 +5,7 @@ pub mod bots;
 pub mod event_ingest;
 pub mod audit;
 pub mod auth;
+pub mod channel_class;
 pub mod channel_events;
 pub mod channels;
 pub mod image_validation;

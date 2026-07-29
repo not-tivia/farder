@@ -107,19 +107,17 @@ pub fn derive_message_row(conn: &Connection, event: &Event) -> Result<Option<u64
     let EventPayload::MessagePosted { channel_id, content, .. } = &event.core.payload else {
         return Ok(None);
     };
-    conn.execute(
-        "INSERT INTO messages (channel_id, author, content, timestamp, reply_to, event_hash) \
-         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-        params![
-            *channel_id as i64,
-            event.core.author.as_bytes().as_slice(),
-            content,
-            event.core.timestamp as i64,
-            event.hash(),
-        ],
+    // Through the choke point (`messages::insert_derived_row`), never raw SQL —
+    // so this path is class-gated like every other writer.
+    let id = crate::messages::insert_derived_row(
+        conn,
+        *channel_id,
+        &event.core.author,
+        content,
+        event.core.timestamp,
+        None,
+        &event.hash(),
     )?;
-    let id = conn.last_insert_rowid() as u64;
-    conn.execute("INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)", params![id as i64, content])?;
     Ok(Some(id))
 }
 

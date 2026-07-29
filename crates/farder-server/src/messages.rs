@@ -49,8 +49,73 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
 }
 
 // ---------------------------------------------------------------------------
-// Message operations
+// THE MESSAGE-WRITE CHOKE POINT (spec rev 2, C8/F1)
 // ---------------------------------------------------------------------------
+//
+// Exactly ONE statement in the entire server inserts a `messages` row:
+// `insert_row` below. Every other module reaches it through one of five doors:
+//
+//   | door                             | visibility  | class guard                     |
+//   |----------------------------------|-------------|---------------------------------|
+//   | `insert_message`                 | pub         | `require_plaintext`             |
+//   | `insert_message_with_ts`         | pub         | `require_plaintext`             |
+//   | `insert_message_with_author_name`| pub         | `require_plaintext`             |
+//   | `edit_message` (UPDATE)          | pub         | `require_plaintext` (row's chan)|
+//   | `insert_derived_row`             | pub(crate)  | `require_plaintext_for_derived` |
+//   | `insert_sealed_row`              | pub(crate)  | `require_e2ee`                  |
+//
+// The guards live on the doors, not inside `insert_row`, so the one legitimate
+// E2EE door can state its own (opposite) rule explicitly. Pinned by
+// `no_insert_into_messages_sql_outside_the_choke_point`, which walks the crate
+// source: a NEW writer added later trips a test, not production.
+
+/// The ONE `INSERT INTO messages` statement in the server. Private on purpose.
+/// `is_e2ee` rows carry `content = ''` plus opaque ciphertext in `sealed`, and
+/// skip the FTS index entirely — nothing plaintext-shaped is ever written for
+/// them, so there is nothing for a future `content`-reading feature to leak.
+#[allow(clippy::too_many_arguments)]
+fn insert_row(
+    conn: &Connection,
+    channel_id: u64,
+    author: &PublicKey,
+    content: &str,
+    timestamp: u64,
+    reply_to: Option<u64>,
+    author_name_override: Option<&str>,
+    author_badge: Option<&str>,
+    event_hash: Option<&str>,
+    sealed: Option<&[u8]>,
+    is_e2ee: bool,
+) -> Result<u64> {
+    conn.execute(
+        "INSERT INTO messages \
+           (channel_id, author, content, timestamp, reply_to, author_name_override, author_badge, event_hash, sealed, is_e2ee) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            channel_id as i64,
+            author.as_bytes().as_slice(),
+            content,
+            timestamp as i64,
+            reply_to.map(|v| v as i64),
+            author_name_override,
+            author_badge,
+            event_hash,
+            sealed,
+            if is_e2ee { 1i64 } else { 0i64 },
+        ],
+    )?;
+    let id = conn.last_insert_rowid() as u64;
+
+    // FTS5 is a plaintext index: sealed rows must never enter it.
+    if !is_e2ee {
+        conn.execute(
+            "INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)",
+            params![id as i64, content],
+        )?;
+    }
+
+    Ok(id)
+}
 
 pub fn insert_message(
     conn: &Connection,
@@ -70,26 +135,10 @@ pub fn insert_message_with_ts(
     reply_to: Option<u64>,
     timestamp: u64,
 ) -> Result<u64> {
-    conn.execute(
-        "INSERT INTO messages (channel_id, author, content, timestamp, reply_to) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            channel_id as i64,
-            author.as_bytes().as_slice(),
-            content,
-            timestamp as i64,
-            reply_to.map(|v| v as i64),
-        ],
-    )?;
-    let id = conn.last_insert_rowid() as u64;
-
-    // Insert into FTS5.
-    conn.execute(
-        "INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)",
-        params![id as i64, content],
-    )?;
-
-    Ok(id)
+    crate::channel_class::require_plaintext(conn, channel_id)?;
+    insert_row(
+        conn, channel_id, author, content, timestamp, reply_to, None, None, None, None, false,
+    )
 }
 
 /// Like `insert_message` but also sets `author_name_override` and `author_badge`
@@ -103,25 +152,86 @@ pub fn insert_message_with_author_name(
     author_name_override: Option<&str>,
     author_badge: Option<&str>,
 ) -> Result<u64> {
-    conn.execute(
-        "INSERT INTO messages (channel_id, author, content, timestamp, reply_to, author_name_override, author_badge) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            channel_id as i64,
-            author.as_bytes().as_slice(),
-            content,
-            now() as i64,
-            reply_to.map(|r| r as i64),
-            author_name_override,
-            author_badge,
-        ],
-    )?;
-    let id = conn.last_insert_rowid() as u64;
-    conn.execute(
-        "INSERT INTO messages_fts(rowid, content) VALUES (?1, ?2)",
-        params![id as i64, content],
-    )?;
-    Ok(id)
+    crate::channel_class::require_plaintext(conn, channel_id)?;
+    insert_row(
+        conn,
+        channel_id,
+        author,
+        content,
+        now(),
+        reply_to,
+        author_name_override,
+        author_badge,
+        None,
+        None,
+        false,
+    )
+}
+
+/// The LOG-DERIVED plaintext door: a `messages` read-view row for a
+/// signature-verified `MessagePosted` the fold accepted, carrying its
+/// `event_hash`. Callable only from `event_ingest`'s derive/reconcile path.
+/// See `channel_class::require_plaintext_for_derived` for why this door mirrors
+/// the fold's unknown-channel carve-out instead of the strict rule.
+pub(crate) fn insert_derived_row(
+    conn: &Connection,
+    channel_id: u64,
+    author: &PublicKey,
+    content: &str,
+    timestamp: u64,
+    reply_to: Option<u64>,
+    event_hash: &str,
+) -> Result<u64> {
+    crate::channel_class::require_plaintext_for_derived(conn, channel_id)?;
+    insert_row(
+        conn,
+        channel_id,
+        author,
+        content,
+        timestamp,
+        reply_to,
+        None,
+        None,
+        Some(event_hash),
+        None,
+        false,
+    )
+}
+
+/// The ONLY door into an E2EE channel. Callable solely from `event_ingest`'s
+/// derive path, i.e. only for a row derived from a signature-verified
+/// `MessagePostedE2ee` the fold accepted. Refuses a PLAINTEXT (or unresolvable)
+/// channel too — it is the sealed door, not a general bypass.
+///
+/// `content` is stored as `''` and the FTS insert is skipped entirely.
+///
+/// Dormant until the sealed derive path lands (`event_ingest` gains its
+/// `MessagePostedE2ee` arm); exercised now by `messages.rs`'s tests, which are
+/// what pin the door's guard in both directions.
+#[allow(dead_code)]
+pub(crate) fn insert_sealed_row(
+    conn: &Connection,
+    channel_id: u64,
+    author: &PublicKey,
+    sealed: &[u8],
+    timestamp: u64,
+    reply_to: Option<u64>,
+    event_hash: &str,
+) -> Result<u64> {
+    crate::channel_class::require_e2ee(conn, channel_id)?;
+    insert_row(
+        conn,
+        channel_id,
+        author,
+        "",
+        timestamp,
+        reply_to,
+        None,
+        None,
+        Some(event_hash),
+        Some(sealed),
+        true,
+    )
 }
 
 /// Stamps the widget JSON on an already-inserted message (insert-then-set-widget idiom:
@@ -228,13 +338,18 @@ pub fn fetch_history(
     Ok(messages)
 }
 
+/// Replace a message's plaintext content. Part of the choke point: the channel
+/// is resolved from the row about to be updated and must be definitely
+/// plaintext — a server-readable edit body in a sealed channel is exactly the
+/// leak `MessageEditedE2ee` exists to prevent (spec coexistence row 10).
 pub fn edit_message(conn: &Connection, id: u64, new_content: &str) -> Result<()> {
     // Fetch the old content before updating so we can remove it from FTS5.
-    let old_content: String = conn.query_row(
-        "SELECT content FROM messages WHERE id = ?1",
+    let (channel_id, old_content): (i64, String) = conn.query_row(
+        "SELECT channel_id, content FROM messages WHERE id = ?1",
         params![id as i64],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    crate::channel_class::require_plaintext(conn, channel_id as u64)?;
 
     let edited_at = now();
     conn.execute(
@@ -471,6 +586,195 @@ mod tests {
         let pk = Keypair::generate().public_key();
         register_member(&conn, &pk, "Alice").unwrap();
         (conn, channel_id, pk)
+    }
+
+    // -----------------------------------------------------------------------
+    // The choke point (spec C8/F1)
+    // -----------------------------------------------------------------------
+
+    /// A channel declared E2EE by an accepted `ChannelCreated` (mirrored class).
+    fn e2ee_channel(conn: &Connection) -> u64 {
+        let id = create_channel(conn, "sealed", ChannelType::Text, None, 1).unwrap();
+        crate::channel_class::set_class(conn, id, farder_crypto::event_log::ChannelClass::E2ee)
+            .unwrap();
+        id
+    }
+
+    fn message_count(conn: &Connection, channel_id: u64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+            params![channel_id as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn insert_message_hard_errors_in_an_e2ee_channel() {
+        let (conn, _plain, pk) = setup();
+        let sealed = e2ee_channel(&conn);
+        let err = insert_message(&conn, sealed, &pk, "host-authored", None).unwrap_err();
+        assert!(err.to_string().contains(crate::channel_class::E2EE_REFUSED), "{err}");
+        assert_eq!(message_count(&conn, sealed), 0, "no row may land");
+    }
+
+    #[test]
+    fn insert_message_with_ts_hard_errors_in_an_e2ee_channel() {
+        let (conn, _plain, pk) = setup();
+        let sealed = e2ee_channel(&conn);
+        let err = insert_message_with_ts(&conn, sealed, &pk, "host-authored", None, 5).unwrap_err();
+        assert!(err.to_string().contains(crate::channel_class::E2EE_REFUSED), "{err}");
+        assert_eq!(message_count(&conn, sealed), 0);
+    }
+
+    #[test]
+    fn insert_message_with_author_name_hard_errors_in_an_e2ee_channel() {
+        let (conn, _plain, pk) = setup();
+        let sealed = e2ee_channel(&conn);
+        let err =
+            insert_message_with_author_name(&conn, sealed, &pk, "webhook says hi", None, Some("Hook"), Some("BOT"))
+                .unwrap_err();
+        assert!(err.to_string().contains(crate::channel_class::E2EE_REFUSED), "{err}");
+        assert_eq!(message_count(&conn, sealed), 0);
+    }
+
+    #[test]
+    fn edit_message_hard_errors_in_an_e2ee_channel() {
+        let (conn, _plain, pk) = setup();
+        let sealed = e2ee_channel(&conn);
+        // Get a row into the sealed channel the only legitimate way.
+        let id = insert_sealed_row(&conn, sealed, &pk, b"ciphertext", 10, None, "hash-edit").unwrap();
+        let err = edit_message(&conn, id, "plaintext edit body").unwrap_err();
+        assert!(err.to_string().contains(crate::channel_class::E2EE_REFUSED), "{err}");
+        // The row is untouched: still empty content, still sealed.
+        let (content, edited_at): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT content, edited_at FROM messages WHERE id = ?1",
+                params![id as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "");
+        assert!(edited_at.is_none());
+    }
+
+    #[test]
+    fn insert_sealed_row_is_the_only_writer_that_reaches_an_e2ee_channel() {
+        let (conn, plain, pk) = setup();
+        let sealed = e2ee_channel(&conn);
+
+        // All four public plaintext doors refuse.
+        assert!(insert_message(&conn, sealed, &pk, "x", None).is_err());
+        assert!(insert_message_with_ts(&conn, sealed, &pk, "x", None, 1).is_err());
+        assert!(insert_message_with_author_name(&conn, sealed, &pk, "x", None, None, None).is_err());
+        // (edit_message is covered above; it needs an existing row.)
+        // The log-derived plaintext door refuses too.
+        assert!(insert_derived_row(&conn, sealed, &pk, "x", 1, None, "h1").is_err());
+        assert_eq!(message_count(&conn, sealed), 0);
+
+        // The sealed door succeeds — and ONLY there.
+        let id = insert_sealed_row(&conn, sealed, &pk, b"\x00\x01ciphertext", 7, None, "h2").unwrap();
+        assert_eq!(message_count(&conn, sealed), 1);
+
+        // The sealed door is not a general bypass: it refuses a plaintext channel...
+        assert!(insert_sealed_row(&conn, plain, &pk, b"ct", 7, None, "h3").is_err());
+        assert_eq!(message_count(&conn, plain), 0);
+        // ...and an unresolvable one.
+        assert!(insert_sealed_row(&conn, 987_654, &pk, b"ct", 7, None, "h4").is_err());
+
+        let _ = id;
+    }
+
+    /// OBSERVATION: inspect the bytes that actually landed for a sealed row.
+    /// The blob is deliberately hostile — it contains the needle as readable
+    /// text — so the assertions prove the row is kept out of the plaintext
+    /// index and out of `content` structurally, not because the ciphertext
+    /// happened to be unreadable.
+    #[test]
+    fn a_sealed_row_persists_ciphertext_only_and_never_enters_the_fts_index() {
+        let (conn, plain, pk) = setup();
+        let sealed_ch = e2ee_channel(&conn);
+        let needle = "topsecretneedle";
+        let ciphertext: Vec<u8> = format!("{needle} pretending to be ciphertext").into_bytes();
+        let id = insert_sealed_row(&conn, sealed_ch, &pk, &ciphertext, 42, None, "hash-obs").unwrap();
+
+        // Control: the same needle in a PLAINTEXT channel IS indexed, so a
+        // negative result below means the skip worked, not that FTS is broken.
+        insert_message(&conn, plain, &pk, "topsecretneedle in the clear", None).unwrap();
+
+        let (content, stored, is_e2ee): (String, Option<Vec<u8>>, i64) = conn
+            .query_row(
+                "SELECT content, sealed, is_e2ee FROM messages WHERE id = ?1",
+                params![id as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "", "sealed rows store no plaintext content");
+        assert_eq!(stored.as_deref(), Some(ciphertext.as_slice()), "sealed bytes stored verbatim");
+        assert_eq!(is_e2ee, 1);
+
+        // The FTS index contains exactly the plaintext row — never the sealed one.
+        let hits: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1")
+                .unwrap();
+            let rows = stmt.query_map(params![needle], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert!(
+            !hits.contains(&(id as i64)),
+            "a sealed row must never be reachable through the plaintext index: {hits:?}"
+        );
+        assert_eq!(hits.len(), 1, "only the plaintext control row is indexed");
+
+        // Search cannot surface it either, in the sealed channel or globally.
+        assert!(search_messages(&conn, needle, Some(sealed_ch), 50, &pk).unwrap().is_empty());
+        let global = search_messages(&conn, needle, None, 50, &pk).unwrap();
+        assert!(global.iter().all(|m| m.id != id));
+    }
+
+    /// The structural guard: exactly one file in the crate may contain the raw
+    /// `messages` INSERT. A future writer added anywhere else fails HERE, in a
+    /// test, instead of silently becoming a plaintext door into a sealed channel.
+    #[test]
+    fn no_insert_into_messages_sql_outside_the_choke_point() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                    out.push(path);
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        assert!(files.len() > 10, "source walk found suspiciously few files");
+
+        // `INSERT INTO messages` NOT followed by `_` (so `messages_fts`, a
+        // plaintext-only index the sealed door skips, does not count).
+        let needle = concat!("INSERT INTO ", "messages");
+        let mut offenders = Vec::new();
+        for path in files {
+            if path.file_name().map(|f| f == "messages.rs").unwrap_or(false) {
+                continue; // the choke point itself
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let hit = text.match_indices(needle).any(|(i, _)| {
+                !matches!(text.as_bytes().get(i + needle.len()), Some(b'_'))
+            });
+            if hit {
+                offenders.push(path.display().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `messages` INSERT outside the choke point (messages.rs): {offenders:?} — \
+             route it through messages::insert_message*/insert_derived_row/insert_sealed_row"
+        );
     }
 
     #[test]
