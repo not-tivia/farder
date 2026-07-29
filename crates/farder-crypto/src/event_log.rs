@@ -62,6 +62,13 @@ pub struct DeviceCertCore {
     pub device_pubkey: PublicKey, // the device's signing subkey
     pub device_id: DeviceId,      // = device_id(device_pubkey)
     pub created_at: u64,
+    /// Optional cert expiry (unix seconds, checked against the UNTRUSTED
+    /// `event.core.timestamp` by the fold — same acceptance Rung 1 made for
+    /// invite expiry). MUST stay the LAST field and skip-when-none: a cert
+    /// without expiry then serializes to the identical canonical bytes legacy
+    /// certs were signed over, so pre-Rung-2 signatures still verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 /// An identity-signed authorization of a device subkey. Events are signed by the
@@ -74,11 +81,32 @@ pub struct DeviceCert {
 
 impl DeviceCert {
     pub fn create(identity: &Keypair, device_pubkey: &PublicKey, created_at: u64) -> Self {
+        Self::create_inner(identity, device_pubkey, created_at, None)
+    }
+
+    /// Like `create`, but the cert expires: the fold rejects events authored by
+    /// this device whose `core.timestamp` exceeds `expires_at`.
+    pub fn create_expiring(
+        identity: &Keypair,
+        device_pubkey: &PublicKey,
+        created_at: u64,
+        expires_at: u64,
+    ) -> Self {
+        Self::create_inner(identity, device_pubkey, created_at, Some(expires_at))
+    }
+
+    fn create_inner(
+        identity: &Keypair,
+        device_pubkey: &PublicKey,
+        created_at: u64,
+        expires_at: Option<u64>,
+    ) -> Self {
         let core = DeviceCertCore {
             identity: identity.public_key(),
             device_pubkey: device_pubkey.clone(),
             device_id: device_id(device_pubkey),
             created_at,
+            expires_at,
         };
         let bytes = rmp_serde::to_vec(&core).expect("devicecert serialization cannot fail");
         let signature = identity.sign(&bytes);
@@ -107,9 +135,45 @@ pub struct AttachmentCap {
     pub uploader: PublicKey,
 }
 
+/// A channel's content class — part of channel identity, immutable (Rung-2
+/// spec §class). A channel with no `ChannelCreated` event is unknown to the
+/// log: legacy DB channels stay permanently plaintext.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelClass {
+    Plaintext,
+    E2ee,
+}
+
+/// Fold-readable declaration of an MLS Add inside `MlsCommit`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeclaredAdd {
+    pub identity: PublicKey,
+    pub device: DeviceId,
+    pub key_package: EventRef, // the MlsKeyPackagePublished event consumed
+}
+
+/// Fold-readable declaration of an MLS Remove inside `MlsCommit`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeclaredRemove {
+    pub identity: PublicKey,
+    pub device: DeviceId,
+}
+
+/// Why a message tombstone exists (Rung-2 spec F2). `Author` claims are
+/// verified against the derived view by ingest (sub-3); the fold verifies
+/// `Moderation` authority itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeleteReason {
+    Author,
+    Moderation,
+}
+
 /// The action an event records. The authorization core (everything except
 /// MessagePosted) gets its signing/validation rules in sub-project 2; here the
 /// variants are pure data so they can be signed and round-tripped.
+///
+/// APPEND-ONLY: new variants go after the last one; existing variants never
+/// change shape or order (canonical bytes of old events must stay stable).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EventPayload {
     MessagePosted {
@@ -130,6 +194,56 @@ pub enum EventPayload {
     /// the original uploader or a moderator (holds "kick"). Content-hash-keyed so it
     /// is meaningful across hosts/replication (file_ids are server-local).
     AttachmentRedacted { content_hash: String },
+
+    // ---- Rung 2 (MLS/E2EE control plane) — all DORMANT until sub-3 ingest ----
+    /// Owner-authored channel identity. No ChannelCreated => the channel does
+    /// not exist to the log (legacy DB channels stay permanently plaintext).
+    ChannelCreated { channel_id: u64, name: String, kind: String, class: ChannelClass, parent: Option<u64> },
+    /// Authored by the owning device; server-scoped; consumed-once; capped and
+    /// lifetime-bounded by log position (spec I5).
+    MlsKeyPackagePublished { key_package: Vec<u8>, store_instance_hash: [u8; 32], expires_at_log_pos: u64 },
+    /// One MLS commit. prev_epoch_authenticator chains onto the previous
+    /// commit's declared post_epoch_authenticator (plan resolved ambiguity #1);
+    /// post_* values are read after the author's local merge.
+    MlsCommit {
+        channel_id: u64,
+        generation: u64,
+        epoch: u64,
+        mls_message: Vec<u8>,
+        adds: Vec<DeclaredAdd>,
+        removes: Vec<DeclaredRemove>,
+        prev_epoch_authenticator: [u8; 32],
+        post_epoch_authenticator: [u8; 32],
+        post_tree_hash: [u8; 32],
+        authz_head: EventHash,
+        store_instance_hash: [u8; 32],
+    },
+    /// Welcome bytes for one (member, device); for_* are unverifiable by the
+    /// fold — leaves only count once the joiner confirms.
+    MlsWelcome { channel_id: u64, generation: u64, commit: EventRef, for_member: PublicKey, for_device: DeviceId, welcome: Vec<u8> },
+    /// Authored by the JOINING device after processing its Welcome; promotes
+    /// its leaf pending -> confirmed iff tree_hash matches the fold's record.
+    MlsLeafConfirmed { channel_id: u64, generation: u64, epoch: u64, tree_hash: [u8; 32], store_instance_hash: [u8; 32] },
+    /// Owner-only recovery hatch; valid only if `welcomes` covers exactly the
+    /// fold's members × live_devices (non-selective reset, spec C7).
+    /// `post_tree_hash` is the new generation's real tree hash: the resetter IS
+    /// the new group's creator by construction, so it is the one party that
+    /// knows it, and every post-reset `MlsLeafConfirmed` is validated against
+    /// THIS value (the reset generation's add-commit is never a log event, so
+    /// there is no `commits_by_epoch` entry to check against).
+    MlsGroupReset { channel_id: u64, new_generation: u64, welcomes: Vec<EventRef>, post_tree_hash: [u8; 32] },
+    /// Sealed channel content. ciphertext = MLS PrivateMessage of a padded
+    /// MessageEnvelope; reply_to + caps stay OUTSIDE the seal (blind threading
+    /// and cap-vs-blob validation).
+    MessagePostedE2ee { channel_id: u64, generation: u64, epoch: u64, ciphertext: Vec<u8>, reply_to: Option<EventRef>, attachments: Vec<AttachmentCap>, authz_head: EventHash },
+    /// Sealed edit (spec F6 — EditMessage{new_content} would ship plaintext).
+    MessageEditedE2ee { channel_id: u64, target: EventRef, generation: u64, epoch: u64, ciphertext: Vec<u8>, authz_head: EventHash },
+    /// Durable content-blind deletion tombstone (spec F2) — derive/reconcile
+    /// consult it so deletions cannot resurrect.
+    MessageDeleted { channel_id: u64, target: EventRef, reason: DeleteReason },
+    /// Kills a device: cert dead, chain frozen (history stands, new events
+    /// rejected), leaves become pending_removals via the bridge.
+    DeviceRevoked { device: DeviceId },
 }
 
 /// The signed-over body of an event. `author` is the IDENTITY; `device` says
@@ -400,6 +514,196 @@ mod tests {
         assert_eq!(e1.core.prev, Some(e0.hash())); // links to e0
         assert_eq!(e1.core.lamport, 6); // 5 observed + 1
         assert!(e1.verify(&device.public_key()).is_ok());
+    }
+
+    /// Every Rung-2 variant, built the way real authors will build it
+    /// (`Event::next`), must round-trip its canonical bytes, hash stably, and
+    /// verify under the signing device key. Pure data this rung — no fold rules.
+    #[test]
+    fn new_mls_variants_roundtrip_canonical_bytes() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let id = identity.public_key();
+        let member = Keypair::generate().public_key();
+        let some_ref: EventRef = sha256_hex(b"some-ref");
+        let head: EventHash = sha256_hex(b"authz-head");
+        let dev_id = device_id(&device.public_key());
+
+        let payloads: Vec<EventPayload> = vec![
+            EventPayload::ChannelCreated {
+                channel_id: 7, name: "vault".into(), kind: "text".into(),
+                class: ChannelClass::E2ee, parent: Some(1),
+            },
+            EventPayload::MlsKeyPackagePublished {
+                key_package: vec![1, 2, 3], store_instance_hash: [9u8; 32], expires_at_log_pos: 4096,
+            },
+            EventPayload::MlsCommit {
+                channel_id: 7, generation: 0, epoch: 3, mls_message: vec![4, 5],
+                adds: vec![DeclaredAdd { identity: member.clone(), device: dev_id.clone(), key_package: some_ref.clone() }],
+                removes: vec![DeclaredRemove { identity: member.clone(), device: dev_id.clone() }],
+                prev_epoch_authenticator: [1u8; 32], post_epoch_authenticator: [2u8; 32],
+                post_tree_hash: [3u8; 32], authz_head: head.clone(), store_instance_hash: [9u8; 32],
+            },
+            EventPayload::MlsWelcome {
+                channel_id: 7, generation: 0, commit: some_ref.clone(),
+                for_member: member.clone(), for_device: dev_id.clone(), welcome: vec![6, 7, 8],
+            },
+            EventPayload::MlsLeafConfirmed {
+                channel_id: 7, generation: 0, epoch: 4, tree_hash: [3u8; 32], store_instance_hash: [9u8; 32],
+            },
+            EventPayload::MlsGroupReset {
+                channel_id: 7, new_generation: 1, welcomes: vec![some_ref.clone(), sha256_hex(b"w2")],
+                post_tree_hash: [4u8; 32],
+            },
+            EventPayload::MessagePostedE2ee {
+                channel_id: 7, generation: 0, epoch: 4, ciphertext: vec![0xAA; 64],
+                reply_to: Some(some_ref.clone()),
+                attachments: vec![AttachmentCap {
+                    content_hash: sha256_hex(b"blob"), declared_type: "image/png".into(),
+                    size: 99, uploader: id.clone(),
+                }],
+                authz_head: head.clone(),
+            },
+            EventPayload::MessageEditedE2ee {
+                channel_id: 7, target: some_ref.clone(), generation: 0, epoch: 4,
+                ciphertext: vec![0xBB; 32], authz_head: head.clone(),
+            },
+            EventPayload::MessageDeleted {
+                channel_id: 7, target: some_ref.clone(), reason: DeleteReason::Moderation,
+            },
+            EventPayload::DeviceRevoked { device: dev_id.clone() },
+        ];
+
+        let mut prev: Option<Event> = None;
+        for (i, payload) in payloads.into_iter().enumerate() {
+            let ev = Event::next(
+                &device, id.clone(), "srv".to_string(), prev.as_ref(),
+                i as u64, 1_700_000_000 + i as u64, payload,
+            );
+            let decoded = Event::from_bytes(&ev.to_bytes())
+                .unwrap_or_else(|e| panic!("variant {i} failed to decode: {e}"));
+            assert_eq!(decoded, ev, "variant {i} must round-trip exactly");
+            assert_eq!(decoded.hash(), ev.hash(), "variant {i} hash must be stable");
+            assert_eq!(ev.hash(), ev.hash(), "variant {i} hash deterministic");
+            assert!(ev.verify(&device.public_key()).is_ok(), "variant {i} must verify");
+            prev = Some(ev);
+        }
+    }
+
+    /// Appending Rung-2 variants must not disturb the canonical bytes of any
+    /// pre-existing variant: a Rung-1 event's payload must encode byte-for-byte
+    /// identically to an enum frozen at the Rung-1 shape (old signatures and
+    /// content hashes stay valid).
+    #[test]
+    fn existing_variant_bytes_are_untouched_by_new_variants() {
+        // The EventPayload enum exactly as it existed before Rung 2.
+        #[derive(Serialize)]
+        enum LegacyPayload {
+            MessagePosted { channel_id: u64, content: String, reply_to: Option<EventRef>, attachments: Vec<AttachmentCap> },
+            #[allow(dead_code)] DeviceAuthorized { cert: DeviceCert },
+            #[allow(dead_code)] InviteCreated { code_hash: String, max_uses: u32, expires_at: u64, requires_approval: bool },
+            #[allow(dead_code)] MemberJoined { member: PublicKey, invite: EventRef },
+            #[allow(dead_code)] MemberApproved { member: PublicKey },
+            #[allow(dead_code)] MemberRemoved { member: PublicKey },
+            #[allow(dead_code)] MemberBanned { member: PublicKey },
+            #[allow(dead_code)] MemberUnbanned { member: PublicKey },
+            #[allow(dead_code)] PermissionGranted { member: PublicKey, capability: String },
+            AttachmentRedacted { content_hash: String },
+        }
+
+        // First variant (MessagePosted) and last legacy variant
+        // (AttachmentRedacted) pin both ends of the legacy index range.
+        let current = EventPayload::MessagePosted {
+            channel_id: 1, content: "msg 0".to_string(), reply_to: None, attachments: vec![],
+        };
+        let legacy = LegacyPayload::MessagePosted {
+            channel_id: 1, content: "msg 0".to_string(), reply_to: None, attachments: vec![],
+        };
+        assert_eq!(
+            rmp_serde::to_vec(&current).unwrap(),
+            rmp_serde::to_vec(&legacy).unwrap(),
+            "MessagePosted canonical bytes changed — enum is no longer append-only"
+        );
+
+        let current_last = EventPayload::AttachmentRedacted { content_hash: "abcd".into() };
+        let legacy_last = LegacyPayload::AttachmentRedacted { content_hash: "abcd".into() };
+        assert_eq!(
+            rmp_serde::to_vec(&current_last).unwrap(),
+            rmp_serde::to_vec(&legacy_last).unwrap(),
+            "AttachmentRedacted canonical bytes changed — enum is no longer append-only"
+        );
+
+        // A full Rung-1-style event still round-trips with a stable hash.
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let ev = a_message(0, None, "srv", &identity.public_key(), &device);
+        let decoded = Event::from_bytes(&ev.to_bytes()).unwrap();
+        assert_eq!(decoded.hash(), ev.hash());
+        assert_eq!(decoded, ev);
+        assert!(decoded.verify(&device.public_key()).is_ok());
+    }
+
+    /// `expires_at: None` must be SKIPPED in serialization so a cert created by
+    /// `DeviceCert::create` signs (and re-encodes to) the exact 4-field bytes
+    /// legacy certs were signed over — pre-Rung-2 signatures keep verifying
+    /// after decode → re-encode.
+    #[test]
+    fn device_cert_without_expiry_preserves_legacy_signed_bytes() {
+        // DeviceCertCore exactly as it existed before Rung 2.
+        #[derive(Serialize)]
+        struct LegacyCore {
+            identity: PublicKey,
+            device_pubkey: PublicKey,
+            device_id: DeviceId,
+            created_at: u64,
+        }
+
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let cert = DeviceCert::create(&identity, &device.public_key(), 1_700_000_000);
+        assert_eq!(cert.core.expires_at, None);
+        assert!(cert.verify().is_ok());
+
+        let legacy = LegacyCore {
+            identity: identity.public_key(),
+            device_pubkey: device.public_key(),
+            device_id: device_id(&device.public_key()),
+            created_at: 1_700_000_000,
+        };
+        assert_eq!(
+            rmp_serde::to_vec(&cert.core).unwrap(),
+            rmp_serde::to_vec(&legacy).unwrap(),
+            "expires_at: None must be skipped — legacy signed bytes changed"
+        );
+
+        // Decode → re-encode keeps the signature valid (i.e. a legacy-signed
+        // cert survives a round trip through the new struct).
+        let decoded: DeviceCert =
+            rmp_serde::from_slice(&rmp_serde::to_vec(&cert).unwrap()).unwrap();
+        assert_eq!(decoded, cert);
+        assert!(decoded.verify().is_ok());
+    }
+
+    #[test]
+    fn expiring_device_cert_roundtrips_and_verifies() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let cert = DeviceCert::create_expiring(&identity, &device.public_key(), 1_700_000_000, 1_800_000_000);
+        assert_eq!(cert.core.expires_at, Some(1_800_000_000));
+        assert!(cert.verify().is_ok());
+
+        let decoded: DeviceCert =
+            rmp_serde::from_slice(&rmp_serde::to_vec(&cert).unwrap()).unwrap();
+        assert_eq!(decoded, cert);
+        assert!(decoded.verify().is_ok());
+
+        // Tampering with expires_at breaks the identity signature.
+        let mut extended = cert.clone();
+        extended.core.expires_at = Some(1_900_000_000);
+        assert!(extended.verify().is_err(), "extending expiry must break the signature");
+        let mut stripped = cert.clone();
+        stripped.core.expires_at = None;
+        assert!(stripped.verify().is_err(), "stripping expiry must break the signature");
     }
 
     #[test]

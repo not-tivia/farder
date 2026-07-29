@@ -40,6 +40,18 @@ fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::PermissionGranted { .. } => "PermissionGranted",
         EventPayload::MemberApproved { .. } => "MemberApproved",
         EventPayload::AttachmentRedacted { .. } => "AttachmentRedacted",
+        // Rung-2 MLS/E2EE variants — DORMANT: LogState rejects them until the
+        // fold rules land; ingest behavior for them is sub-3. Names only here.
+        EventPayload::ChannelCreated { .. } => "ChannelCreated",
+        EventPayload::MlsKeyPackagePublished { .. } => "MlsKeyPackagePublished",
+        EventPayload::MlsCommit { .. } => "MlsCommit",
+        EventPayload::MlsWelcome { .. } => "MlsWelcome",
+        EventPayload::MlsLeafConfirmed { .. } => "MlsLeafConfirmed",
+        EventPayload::MlsGroupReset { .. } => "MlsGroupReset",
+        EventPayload::MessagePostedE2ee { .. } => "MessagePostedE2ee",
+        EventPayload::MessageEditedE2ee { .. } => "MessageEditedE2ee",
+        EventPayload::MessageDeleted { .. } => "MessageDeleted",
+        EventPayload::DeviceRevoked { .. } => "DeviceRevoked",
     }
 }
 

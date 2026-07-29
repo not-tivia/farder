@@ -251,6 +251,13 @@ was written against these exact versions.
 - **farder-crypto** — supplies `Keypair`/`PublicKey`/`DeviceCert`/`device_id`;
   the MLS leaf will sign with the same Ed25519 device subkey that signs log
   events (judged safe: disjoint signed-byte domains).
+- **`tests/fold_chain.rs`** — the sub-2 integration proof that this crate's real
+  values satisfy farder-crypto's blind fold: real `CommitOutcome` +
+  `epoch_authenticator()` become `MlsCommit` events, real KeyPackages become
+  `MlsKeyPackagePublished` events, real `JoinInfo` becomes `MlsLeafConfirmed`,
+  and `LogState` accepts the whole chain (and rejects a tampered
+  `prev_epoch_authenticator`). See `docs/modules/crypto.md` §"Rung-2 purity +
+  checkpoint composability".
 - **Workspace note:** `openmls_sqlite_storage` requires `rusqlite 0.32`; because
   cargo allows only one `links = "sqlite3"` native lib per graph, the whole
   workspace (`farder-node`, `farder-notify`, `farder-server`) is harmonized on
