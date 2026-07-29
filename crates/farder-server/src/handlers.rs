@@ -8,7 +8,7 @@ use anyhow::Result;
 use farder_crypto::event_log::EventPayload;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::*;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -1121,6 +1121,14 @@ pub fn handle_request(
             if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
                 return Ok(denied);
             }
+            // The system identity holds no roles, so require_member_hierarchy
+            // cannot stop this. Deleting its members row would break every
+            // reminder/event DM (build_member_info fails), and the `bots` row
+            // survives, so get_or_create_system_identity would return early.
+            // (bots.rs self-heals too — this is the front door.)
+            if crate::bots::is_system_identity(conn, &member_key)? {
+                return err("that identity can't be removed");
+            }
             members::remove_member(conn, &member_key)?;
             let mut events = vec![BroadcastEvent {
                 target: EventTarget::Members(vec![member_key.clone()]),
@@ -1144,6 +1152,10 @@ pub fn handle_request(
             }
             if let Some(denied) = require_member_hierarchy(conn, member, is_owner, &member_key)? {
                 return Ok(denied);
+            }
+            // Same reasoning as KickMember: no roles => no hierarchy protection.
+            if crate::bots::is_system_identity(conn, &member_key)? {
+                return err("that identity can't be removed");
             }
             members::ban_member(conn, &member_key, reason.as_deref())?;
             let reason_for_audit = reason.clone();
@@ -2135,14 +2147,7 @@ pub fn handle_request(
             }
             // Defense in depth: the system identity is never listed, so a stock
             // client cannot name it — but a modified one could.
-            let kind: Option<String> = conn
-                .query_row(
-                    "SELECT kind FROM bots WHERE public_key = ?1",
-                    rusqlite::params![bot_public_key.as_bytes().as_slice()],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if kind.as_deref() == Some(crate::bots::SYSTEM_BOT_KIND) {
+            if crate::bots::is_system_identity(conn, &bot_public_key)? {
                 return err("that identity can't be removed");
             }
             crate::bots::remove_bot(conn, &bot_public_key)?;
@@ -2743,6 +2748,12 @@ pub fn handle_request(
         }
 
         ServerRequest::CancelEvent { event_id } => {
+            // Spec §10: RSVP/clear/cancel/edit/cancel-reminder all take the
+            // widget limiter. Cancel self-limits (the second call hits the
+            // status guard), but keep the gate uniform.
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
             if let Some(denied) = require_not_timed_out(conn, member)? {
                 return Ok(denied);
             }
@@ -2790,6 +2801,14 @@ pub fn handle_request(
             starts_at,
             remind_lead,
         } => {
+            // Spec §10. Edit is idempotent-but-repeatable and open to any
+            // ordinary member who created the event: each call is a DB write
+            // plus up to 30 member lookups under the db mutex plus a full
+            // EventInfo broadcast to every channel subscriber. Unlike cancel it
+            // does not self-limit, so this gate is the only bound.
+            if !state.widget_limiter.allow(member.as_bytes()) {
+                return err("slow down — too many interactions");
+            }
             if let Some(denied) = require_not_timed_out(conn, member)? {
                 return Ok(denied);
             }
@@ -3446,6 +3465,32 @@ mod tests {
             ServerResponse::Ok => {}
             other => panic!("expected Ok, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_system_identity_cannot_be_kicked_or_banned() {
+        let (conn, owner) = setup();
+        let system = crate::bots::get_or_create_system_identity(&conn).unwrap();
+
+        // The owner bypasses every hierarchy check, and the system identity
+        // holds no roles — so only the explicit guard can stop this.
+        for req in [
+            ServerRequest::KickMember { member_key: system.clone() },
+            ServerRequest::BanMember { member_key: system.clone(), reason: None },
+        ] {
+            let result = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
+            match result.response {
+                ServerResponse::Error { ref reason } => {
+                    assert_eq!(reason, "that identity can't be removed");
+                }
+                ref other => panic!("expected Error, got {:?}", other),
+            }
+        }
+
+        // Both rows intact => system DMs still work.
+        let member = members::get_member(&conn, &system).unwrap().expect("members row survives");
+        assert!(!member.banned, "system identity not banned");
+        assert!(crate::bots::is_system_identity(&conn, &system).unwrap());
     }
 
     #[test]

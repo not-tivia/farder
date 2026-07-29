@@ -65,7 +65,19 @@ pub fn get_or_create_system_identity(conn: &Connection) -> Result<PublicKey> {
         let arr: [u8; 32] = bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("bad system identity pk: wrong length"))?;
-        return Ok(PublicKey::from_bytes(arr));
+        let pk = PublicKey::from_bytes(arr);
+        // Self-heal the members row. The two rows are written by two separate
+        // INSERTs (no transaction), and the `members` row can also be deleted
+        // out from under us later — KickMember/BanMember are guarded, but the
+        // system identity's pk leaks to anyone who ever received a system DM
+        // (`DmCreated.participant`), so treat the members row as recreatable
+        // rather than assumed. Without it every `send_bot_dm_as` fails forever
+        // in `build_member_info` ("member not found"), silently dropping every
+        // reminder and event DM for the life of the server.
+        if crate::members::get_member(conn, &pk)?.is_none() {
+            crate::members::register_bot_member(conn, &pk, SYSTEM_BOT_LABEL)?;
+        }
+        return Ok(pk);
     }
     let kp = farder_crypto::identity::Keypair::generate();
     let pk = kp.public_key();
@@ -81,6 +93,24 @@ pub fn get_or_create_system_identity(conn: &Connection) -> Result<PublicKey> {
         ],
     )?;
     Ok(pk)
+}
+
+/// True when `pk` is the server's own system identity.
+///
+/// Used as a moderation guard: the system identity is never listed anywhere, so
+/// a stock client cannot name it — but its public key is visible to anyone who
+/// has ever received a system DM (`DmCreated.participant` / `DmEntry`), so a
+/// modified client could target it with RemoveBot/KickMember/BanMember.
+pub fn is_system_identity(conn: &Connection, pk: &PublicKey) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM bots WHERE public_key = ?1",
+            params![pk.as_bytes().as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(kind.as_deref() == Some(SYSTEM_BOT_KIND))
 }
 
 /// List the server's ticker/custom bots. The system identity is excluded: it has
@@ -665,6 +695,51 @@ mod system_identity_tests {
         let member = crate::members::get_member(&conn, &a).unwrap().expect("member row");
         assert!(member.is_bot, "system identity is a bot member");
         assert_eq!(member.display_name, SYSTEM_BOT_LABEL);
+    }
+
+    #[test]
+    fn get_or_create_system_identity_reheals_a_deleted_members_row() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let pk = get_or_create_system_identity(&conn).unwrap();
+        // Simulate the members row being deleted out from under us (a kick that
+        // slipped through, or a crash between the two non-transactional
+        // INSERTs). The `bots` row survives, so the early-return branch is the
+        // one that has to heal it.
+        crate::members::remove_member_row(&conn, &pk).unwrap();
+        assert!(crate::members::get_member(&conn, &pk).unwrap().is_none());
+
+        let again = get_or_create_system_identity(&conn).unwrap();
+        assert_eq!(again, pk, "same identity, not a fresh keypair");
+        let member = crate::members::get_member(&conn, &pk)
+            .unwrap()
+            .expect("members row re-registered");
+        assert!(member.is_bot);
+        assert_eq!(member.display_name, SYSTEM_BOT_LABEL);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bots WHERE kind = 'system'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "healing does not mint a second system row");
+    }
+
+    #[test]
+    fn is_system_identity_only_matches_the_system_row() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let system = get_or_create_system_identity(&conn).unwrap();
+        let ticker_kp = farder_crypto::identity::Keypair::generate();
+        crate::members::register_bot_member(&conn, &ticker_kp.public_key(), "BTC").unwrap();
+        register_bot(
+            &conn,
+            &ticker_kp.public_key(),
+            ticker_kp.signing_key_bytes().as_slice(),
+            "bitcoin",
+            "BTC",
+        )
+        .unwrap();
+        let stranger = farder_crypto::identity::Keypair::generate().public_key();
+
+        assert!(is_system_identity(&conn, &system).unwrap());
+        assert!(!is_system_identity(&conn, &ticker_kp.public_key()).unwrap());
+        assert!(!is_system_identity(&conn, &stranger).unwrap());
     }
 
     #[test]

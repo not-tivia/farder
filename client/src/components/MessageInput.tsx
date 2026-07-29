@@ -234,7 +234,11 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         }
         setSending(true); setError(null);
         try {
-          await api.runCommand(serverId, cmd.trigger, channelId, args);
+          // Notice-returning commands (/remind) post nothing to the channel, so
+          // this toast is the ONLY confirmation the typed power-user path gets —
+          // same contract as the builder's handleBuilderCreated.
+          const notice = await api.runCommand(serverId, cmd.trigger, channelId, args);
+          if (notice) toast.success(notice);
           setContent("");
         } catch (e) { setError(String(e)); }        // RunCommand Error shown to invoker; no channel post
         finally { setSending(false); }

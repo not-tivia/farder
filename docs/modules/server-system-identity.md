@@ -1,6 +1,6 @@
 # Server system identity ("Farder")
 
-> **File(s):** `crates/farder-server/src/bots.rs` (identity + DM senders), `crates/farder-server/src/members.rs` (`list_members_visible`), `crates/farder-server/src/db.rs` (the `idx_bots_system` index), `crates/farder-server/src/handlers.rs` (`GetMembers` / `RemoveBot` exclusion points)
+> **File(s):** `crates/farder-server/src/bots.rs` (identity + DM senders), `crates/farder-server/src/members.rs` (`list_members_visible`), `crates/farder-server/src/db.rs` (the `idx_bots_system` index), `crates/farder-server/src/handlers.rs` (`GetMembers` / `RemoveBot` / `KickMember` / `BanMember` exclusion points)
 > **Layer:** Server crate
 > **Last reviewed:** 2026-07-28
 
@@ -42,6 +42,26 @@ event-start pass (`widgets::sweep_once`, which resolves it once per tick and
 `db.rs` creates `CREATE UNIQUE INDEX idx_bots_system ON bots(kind) WHERE kind = 'system'`
 as belt-and-braces — a second row is a hard SQL error, not a silent second identity.
 
+**Self-healing (required, not a nicety).** On the "row already exists" branch the
+function re-checks `members::get_member(conn, &pk)` and re-runs
+`register_bot_member` if the `members` row is gone. The two rows are written by
+two separate un-transacted `INSERT`s, and the `members` row is also a deletable
+object at runtime — the identity's public key is **not secret** (anyone who ever
+received a system DM reads it off `DmCreated.participant`). Without the heal, one
+successful delete is permanently fatal: the `bots` row survives, so this function
+early-returns forever, and every `send_bot_dm_as` then dies in
+`build_member_info` with `"member not found"`. Because delivery is deliberately
+at-most-once (the row is flipped to `sent` / `reminded_at` **before** the DM is
+attempted) the sweeper would log `system dm failed` and silently drop every
+reminder, lead-time, start and cancellation DM for the life of the process.
+
+### `bots::is_system_identity(conn: &Connection, pk: &PublicKey) -> Result<bool>`
+
+**What it does:** `true` when `pk` is the `bots` row with `kind = 'system'`.
+**Returns:** `false` for ticker/custom bots and for unknown keys.
+**Connects to:** the moderation guards in `RemoveBot`, `KickMember` and
+`BanMember` (all three share this one predicate rather than re-querying `kind`).
+
 ### `bots::send_bot_dm_as(state: &Arc<ServerState>, bot_pk: &PublicKey, recipient_pk: &PublicKey, text: &str, name_override: Option<&str>, badge: Option<&str>) -> Result<()>`
 
 **What it does:** the generalized DM sender — the shipped `send_bot_dm` body with
@@ -68,7 +88,7 @@ in three themes for no product gain.
 
 ---
 
-## The four exclusion points (all server-side)
+## The five exclusion points (all server-side)
 
 The identity is invisible and unmanageable. Each point is enforced in the server,
 not in the UI:
@@ -82,10 +102,18 @@ not in the UI:
    `activeServer.members`, so no client change was needed.
 2. **`bots::list_bots`** — `WHERE kind != 'system'`. The bot poller must never
    poll it (its `coin_id` is empty) and no bot UI enumerates it.
-3. **`RemoveBot`** — refuses `kind = 'system'` with
+3. **`RemoveBot`** — `bots::is_system_identity` → refuses with
    `Error { "that identity can't be removed" }` **before doing anything**.
    Defense in depth: the key is never listed, but a modified client could name it.
-4. **No auth path reads `bots.secret_key`.** Connection authentication verifies a
+4. **`KickMember` / `BanMember`** — the same `is_system_identity` guard, same
+   error string. These are the sibling doors: `members::remove_member` is a plain
+   `DELETE FROM members` with no `is_bot` filter, and `require_member_hierarchy`
+   **cannot** block it because the identity holds no roles (its highest position
+   is nothing, so every moderator outranks it). A holder of only `KICK_MEMBERS`
+   would otherwise durably break every reminder/event DM on the server. The guard
+   sits after the perm + hierarchy checks so it never leaks existence to someone
+   who would have been denied anyway.
+5. **No auth path reads `bots.secret_key`.** Connection authentication verifies a
    challenge signature against the `members` table; bot secrets are read only by
    `get_bot_secret` inside the DM sender. Possessing the row does not make the
    identity loggable-in.
@@ -112,5 +140,5 @@ not in the UI:
 - **`channel_events.rs`** — `start_and_announce` takes the system `PublicKey` and
   authors the `📅 <title> is starting now!` reply with it
   (`author_name_override = "Events"`, `author_badge = "BOT"`).
-- **`handlers.rs`** — `GetMembers` / `RemoveBot` exclusion points above; see
-  `server-handlers.md` for the per-arm tables.
+- **`handlers.rs`** — `GetMembers` / `RemoveBot` / `KickMember` / `BanMember`
+  exclusion points above; see `server-handlers.md` for the per-arm tables.
