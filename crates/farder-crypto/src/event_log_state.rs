@@ -39,7 +39,10 @@ pub const FRESHNESS_CEILING_EVENTS: u32 = 500;
 pub const RESET_MIN_CHANNEL_EVENTS: u32 = 1000;
 
 /// A device authorized within this server's log (identity ↔ signing subkey).
-#[derive(Clone, Debug)]
+/// `PartialEq` (like the other fold records) exists for the checkpoint-
+/// composability invariant test, which compares whole folded states field by
+/// field — nothing in the fold itself compares records.
+#[derive(Clone, Debug, PartialEq)]
 struct DeviceRecord {
     identity: PublicKey,
     device_pubkey: PublicKey,
@@ -52,7 +55,7 @@ struct DeviceRecord {
 /// A channel known to the log (from `ChannelCreated`). The class is immutable:
 /// no class-change event exists by construction. A channel ABSENT from this map
 /// is a legacy DB channel — permanently plaintext (replay carve-out).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct ChannelRecord {
     /// name/kind/parent are recorded for sub-3's derive path; the fold itself
     /// reads only `class` (and resolves `parent` at creation time).
@@ -160,7 +163,7 @@ enum Authorized {
 }
 
 /// An open invite, keyed in `LogState.invites` by its `InviteCreated` event hash.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct InviteRecord {
     max_uses: u32,
     expires_at: u64,
@@ -169,7 +172,7 @@ struct InviteRecord {
 }
 
 /// Head of one `(author, device)` chain.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct ChainHead {
     seq: u64,
     hash: EventHash,
@@ -3380,5 +3383,257 @@ mod tests {
         f.st.mls_groups.get_mut(&CH).unwrap().channel_events_since_reset = RESET_MIN_CHANNEL_EVENTS;
         f.st.apply(&r2).expect("the rate limit clears after enough channel events");
         assert_eq!(f.st.mls_current_epoch(CH), Some((2, 1)));
+    }
+
+    // ---- Rung 2, Task 5: checkpoint composability over ALL the new state ----
+
+    /// Whole-state structural equality: EVERY `LogState` field, so a fold path
+    /// that diverges anywhere (not just in the queried surfaces) fails loudly.
+    fn assert_fold_equal(a: &LogState, b: &LogState, ctx: &str) {
+        assert_eq!(a.server_id, b.server_id, "{ctx}: server_id");
+        assert_eq!(a.owner, b.owner, "{ctx}: owner");
+        assert_eq!(a.members, b.members, "{ctx}: members");
+        assert_eq!(a.pending, b.pending, "{ctx}: pending");
+        assert_eq!(a.banned, b.banned, "{ctx}: banned");
+        assert_eq!(a.capabilities, b.capabilities, "{ctx}: capabilities");
+        assert_eq!(a.devices, b.devices, "{ctx}: devices");
+        assert_eq!(a.invites, b.invites, "{ctx}: invites");
+        assert_eq!(a.chains, b.chains, "{ctx}: chains");
+        assert_eq!(a.attachment_uploaders, b.attachment_uploaders, "{ctx}: attachment_uploaders");
+        assert_eq!(a.redacted_attachments, b.redacted_attachments, "{ctx}: redacted_attachments");
+        assert_eq!(a.channels, b.channels, "{ctx}: channels");
+        assert_eq!(a.tombstones, b.tombstones, "{ctx}: tombstones");
+        assert_eq!(a.revoked_devices, b.revoked_devices, "{ctx}: revoked_devices");
+        assert_eq!(a.devices_by_identity, b.devices_by_identity, "{ctx}: devices_by_identity");
+        assert_eq!(a.log_pos, b.log_pos, "{ctx}: log_pos");
+        assert_eq!(a.mls_groups, b.mls_groups, "{ctx}: mls_groups");
+        assert_eq!(a.key_packages, b.key_packages, "{ctx}: key_packages");
+        assert_eq!(a.consumed_key_packages, b.consumed_key_packages, "{ctx}: consumed_key_packages");
+        assert_eq!(a.device_store_instance, b.device_store_instance, "{ctx}: device_store_instance");
+    }
+
+    /// A snapshot of every PUBLIC query surface (the contract sub-3 and the
+    /// client consume), taken over the ids/channels/targets of one log.
+    #[derive(Debug, PartialEq)]
+    struct Surface {
+        log_pos: u64,
+        classes: Vec<Option<ChannelClass>>,
+        epochs: Vec<Option<(u64, u64)>>,
+        confirmed: Vec<Vec<(Vec<u8>, DeviceId)>>,
+        adds: Vec<Vec<(Vec<u8>, DeviceId)>>,
+        removals: Vec<Vec<(Vec<u8>, DeviceId)>>,
+        tombstoned: Vec<bool>,
+        revoked: Vec<bool>,
+        live: Vec<Vec<DeviceId>>,
+        membership: Vec<(bool, bool, bool)>,
+    }
+
+    fn sorted_leaves(s: HashSet<(PublicKey, DeviceId)>) -> Vec<(Vec<u8>, DeviceId)> {
+        let mut v: Vec<(Vec<u8>, DeviceId)> =
+            s.into_iter().map(|(pk, d)| (pk.as_bytes().to_vec(), d)).collect();
+        v.sort();
+        v
+    }
+
+    fn surface(
+        st: &LogState, channels: &[u64], ids: &[PublicKey], devices: &[DeviceId],
+        targets: &[EventRef], at_ts: u64,
+    ) -> Surface {
+        Surface {
+            log_pos: st.log_pos(),
+            classes: channels.iter().map(|c| st.channel_class(*c)).collect(),
+            epochs: channels.iter().map(|c| st.mls_current_epoch(*c)).collect(),
+            confirmed: channels.iter().map(|c| sorted_leaves(st.leaves_confirmed(*c))).collect(),
+            adds: channels.iter().map(|c| sorted_leaves(st.pending_adds(*c, at_ts))).collect(),
+            removals: channels
+                .iter()
+                .map(|c| sorted_leaves(st.pending_removals(*c, at_ts)))
+                .collect(),
+            tombstoned: targets.iter().map(|t| st.is_tombstoned(t)).collect(),
+            revoked: devices.iter().map(|d| st.is_device_revoked(d)).collect(),
+            live: ids.iter().map(|i| st.live_devices(i, at_ts)).collect(),
+            membership: ids
+                .iter()
+                .map(|i| (st.is_member(i), st.is_pending(i), st.is_banned(i)))
+                .collect(),
+        }
+    }
+
+    /// The spec's "extended `replay_equals_stepwise_and_composes_from_a_checkpoint`
+    /// over all new state" (plus its commit-race determinism): one log that
+    /// exercises EVERY Rung-2 variant — both channel classes, KeyPackages, the
+    /// bootstrap commit, an add-commit + Welcome + joiner confirmation, a STALE
+    /// commit (accepted no-op), sealed post/edit, tombstones in both classes,
+    /// cert expiry + `DeviceRevoked`, staged Welcomes + reset + post-reset
+    /// confirmations — folds identically by replay, stepwise, and resume from
+    /// EVERY checkpoint position.
+    #[test]
+    fn replay_equals_stepwise_and_composes_from_a_checkpoint_over_all_rung2_state() {
+        const PLAIN: u64 = 1;
+        const BOB_STORE: [u8; 32] = [3u8; 32];
+        const TR: [u8; 32] = [77u8; 32];
+        const TS: u64 = 500;
+
+        let owner = Keypair::generate();
+        let od = Keypair::generate();
+        let alice = Keypair::generate();
+        let ad = Keypair::generate();
+        let bob = Keypair::generate();
+        let bd = Keypair::generate();
+        let bd2 = Keypair::generate();
+
+        let g = genesis(&owner);
+        let sid = g.server_id();
+        let owner_pk = owner.public_key();
+        let alice_pk = alice.public_key();
+        let bob_pk = bob.public_key();
+        let owner_did = device_id(&od.public_key());
+        let alice_did = device_id(&ad.public_key());
+        let bob_did = device_id(&bd.public_key());
+        let bob2_did = device_id(&bd2.public_key());
+
+        // --- Rung-1 spine: devices, invite, two joins. Bob has a SECOND device
+        // whose cert expires at 400 (so it is not live at the MLS timestamps)
+        // and which is revoked besides. ---
+        let da_o = Ev::next(&od, owner_pk.clone(), sid.clone(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &od.public_key(), 1) });
+        let da_a = Ev::next(&ad, alice_pk.clone(), sid.clone(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&alice, &ad.public_key(), 1) });
+        let da_b = Ev::next(&bd, bob_pk.clone(), sid.clone(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&bob, &bd.public_key(), 1) });
+        let inv = Ev::next(&od, owner_pk.clone(), sid.clone(), Some(&da_o), 1, 100,
+            EP::InviteCreated { code_hash: "c".into(), max_uses: 10, expires_at: 9999, requires_approval: false });
+        let join_a = Ev::next(&ad, alice_pk.clone(), sid.clone(), Some(&da_a), 1, 2,
+            EP::MemberJoined { member: alice_pk.clone(), invite: inv.hash() });
+        let join_b = Ev::next(&bd, bob_pk.clone(), sid.clone(), Some(&da_b), 1, 2,
+            EP::MemberJoined { member: bob_pk.clone(), invite: inv.hash() });
+        let da_b2 = Ev::next(&bd2, bob_pk.clone(), sid.clone(), None, 0, 300,
+            EP::DeviceAuthorized {
+                cert: DeviceCert::create_expiring(&bob, &bd2.public_key(), 100, 400),
+            });
+        let revoke_b2 = Ev::next(&bd, bob_pk.clone(), sid.clone(), Some(&join_b), 2, 310,
+            EP::DeviceRevoked { device: bob2_did.clone() });
+
+        // --- Both channel classes, a plaintext post and its tombstone. ---
+        let ch_plain = channel(&od, &owner_pk, &sid, &inv, PLAIN, ChannelClass::Plaintext, None);
+        let ch_e2ee = channel(&od, &owner_pk, &sid, &ch_plain, CH, ChannelClass::E2ee, None);
+        let post_plain = post_in(&ad, &alice_pk, &sid, &join_a, PLAIN);
+        let del_plain = Ev::next(&ad, alice_pk.clone(), sid.clone(), Some(&post_plain),
+            post_plain.core.lamport + 1, 20,
+            EP::MessageDeleted { channel_id: PLAIN, target: post_plain.hash(), reason: DeleteReason::Author });
+
+        // --- MLS control plane: key packages, bootstrap + add commit, a stale
+        // commit (accepted no-op), Welcome, joiner confirmation. ---
+        let kp_o = kp_publish(&od, &owner_pk, &sid, &ch_e2ee, OWNER_STORE, 1_000_000, TS);
+        let kp_a = kp_publish(&ad, &alice_pk, &sid, &del_plain, ALICE_STORE, 1_000_000, TS);
+        let kp_b = kp_publish(&bd, &bob_pk, &sid, &revoke_b2, BOB_STORE, 1_000_000, TS);
+        let c0 = mls_commit(&od, &owner_pk, &sid, &kp_o, 0, vec![], vec![], [0u8; 32], X0, T0, OWNER_STORE);
+        let c1 = mls_commit(&od, &owner_pk, &sid, &c0, 1,
+            vec![add_of(&alice_pk, &ad, &kp_a.hash())], vec![], X0, X1, T1, OWNER_STORE);
+        // Commit-race determinism: a commit re-declaring the now-past epoch 1 is
+        // ACCEPTED and recorded, with zero MLS state change, on every replica.
+        let stale = mls_commit(&od, &owner_pk, &sid, &c1, 1, vec![], vec![], X1, X2, T2, OWNER_STORE);
+        let w_alice = welcome_for(&od, &owner_pk, &sid, &stale, 0, c1.hash(), &alice_pk, &alice_did);
+        let cf_alice = leaf_confirm(&ad, &alice_pk, &sid, &kp_a, 2, T1, ALICE_STORE);
+
+        // --- Sealed content (post + edit), a moderation tombstone in the E2ee
+        // channel (which spends freshness budget). ---
+        let cap = AttachmentCap {
+            content_hash: "d".repeat(64), declared_type: "image/png".into(),
+            size: 3, uploader: owner_pk.clone(),
+        };
+        let sp1 = sealed_post(&od, &owner_pk, &sid, &w_alice, CH, 0, 2, vec![cap]);
+        let sp2 = sealed_post(&ad, &alice_pk, &sid, &cf_alice, CH, 0, 2, vec![]);
+        let se = sealed_edit(&ad, &alice_pk, &sid, &sp2, 0, 2, sp2.hash());
+        let del_e2ee = Ev::next(&od, owner_pk.clone(), sid.clone(), Some(&sp1), sp1.core.lamport + 1, TS,
+            EP::MessageDeleted { channel_id: CH, target: sp1.hash(), reason: DeleteReason::Moderation });
+
+        // --- Non-selective reset: staged next-generation Welcomes, the reset,
+        // both post-reset confirmations, then a send that proves the unlock. ---
+        let w1_alice = welcome_for(&od, &owner_pk, &sid, &del_e2ee, 1, "c".repeat(64), &alice_pk, &alice_did);
+        let w1_bob = welcome_for(&od, &owner_pk, &sid, &w1_alice, 1, "c".repeat(64), &bob_pk, &bob_did);
+        let reset = group_reset(&od, &owner_pk, &sid, &w1_bob, 1, vec![w1_alice.hash(), w1_bob.hash()]);
+        let cfa1 = leaf_confirm_gen(&ad, &alice_pk, &sid, &se, 1, 1, TR, ALICE_STORE);
+        let cfb1 = leaf_confirm_gen(&bd, &bob_pk, &sid, &kp_b, 1, 1, TR, BOB_STORE);
+        let sp3 = sealed_post(&od, &owner_pk, &sid, &reset, CH, 1, 1, vec![]);
+
+        let plain_target = post_plain.hash();
+        let sealed_target = sp1.hash();
+        let log = vec![
+            da_o, da_a, da_b, inv, join_a, join_b, da_b2, revoke_b2, ch_plain, ch_e2ee,
+            post_plain, del_plain, kp_o, kp_a, kp_b, c0, c1, stale, w_alice, cf_alice,
+            sp1, sp2, se, del_e2ee, w1_alice, w1_bob, reset, cfa1, cfb1, sp3,
+        ];
+        let stale_idx = 17;
+
+        // --- replay == stepwise ---
+        let replayed = LogState::replay(&g, &log).expect("the whole Rung-2 log replays");
+        let mut stepwise = LogState::from_genesis(&g);
+        for e in &log {
+            stepwise.apply(e).expect("stepwise apply of a valid log");
+        }
+        assert_fold_equal(&replayed, &stepwise, "replay vs stepwise");
+
+        // The log is not vacuous: it really did exercise every surface.
+        assert_eq!(replayed.log_pos(), log.len() as u64, "every event was accepted");
+        assert_eq!(replayed.channel_class(PLAIN), Some(ChannelClass::Plaintext));
+        assert_eq!(replayed.channel_class(CH), Some(ChannelClass::E2ee));
+        assert_eq!(replayed.channel_class(999), None, "unknown channel = legacy plaintext");
+        assert_eq!(replayed.mls_current_epoch(CH), Some((1, 1)), "generation 1 after the reset");
+        assert_eq!(
+            replayed.leaves_confirmed(CH),
+            HashSet::from([
+                (owner_pk.clone(), owner_did.clone()),
+                (alice_pk.clone(), alice_did.clone()),
+                (bob_pk.clone(), bob_did.clone()),
+            ]),
+            "every welcomed leaf confirmed, so the reset completed"
+        );
+        assert!(replayed.pending_adds(CH, TS).is_empty() && replayed.pending_removals(CH, TS).is_empty());
+        assert!(replayed.is_tombstoned(&plain_target) && replayed.is_tombstoned(&sealed_target));
+        assert!(replayed.is_device_revoked(&bob2_did) && !replayed.is_device_revoked(&bob_did));
+        assert_eq!(replayed.live_devices(&bob_pk, TS), vec![bob_did.clone()], "revoked+expired device is not live");
+        assert_eq!(replayed.attachment_uploader(&"d".repeat(64)), Some(&owner_pk), "sealed caps stay outside the seal");
+
+        let channels = [PLAIN, CH, 999];
+        let ids = [owner_pk.clone(), alice_pk.clone(), bob_pk.clone()];
+        let devices = [owner_did.clone(), alice_did, bob_did, bob2_did];
+        let targets = [plain_target.clone(), sealed_target.clone(), "e".repeat(64)];
+        let expected = surface(&replayed, &channels, &ids, &devices, &targets, TS);
+        assert_eq!(
+            surface(&stepwise, &channels, &ids, &devices, &targets, TS), expected,
+            "every query surface must agree between replay and stepwise"
+        );
+
+        // --- The stale commit is an ACCEPTED no-op: only envelope accounting
+        // (chain head + log_pos) moves; every byte of MLS state stands still. ---
+        let mut before = LogState::replay(&g, &log[..stale_idx]).expect("prefix replays");
+        let group_before = before.mls_groups.get(&CH).cloned();
+        let kps_before = before.key_packages.clone();
+        let pos_before = before.log_pos();
+        before.apply(&log[stale_idx]).expect("a stale commit is accepted");
+        assert_eq!(before.mls_groups.get(&CH).cloned(), group_before, "stale commit changed MLS state");
+        assert_eq!(before.key_packages, kps_before, "stale commit consumed a key package");
+        assert_eq!(before.log_pos(), pos_before + 1, "an accepted event still advances log_pos");
+        assert_eq!(
+            before.chains[&(owner_pk.clone(), owner_did.clone())].hash,
+            log[stale_idx].hash(),
+            "the stale commit's author chain head advances"
+        );
+
+        // --- Checkpoint composability from EVERY position: fold the prefix,
+        // clone it (the checkpoint), apply the tail — identical state. ---
+        for cut in 0..=log.len() {
+            let checkpoint = LogState::replay(&g, &log[..cut]).expect("every prefix replays");
+            let mut resumed = checkpoint.clone();
+            for e in &log[cut..] {
+                resumed.apply(e).unwrap_or_else(|err| panic!("tail from checkpoint {cut}: {err}"));
+            }
+            assert_fold_equal(&resumed, &replayed, &format!("resume from checkpoint {cut}"));
+            assert_eq!(
+                surface(&resumed, &channels, &ids, &devices, &targets, TS), expected,
+                "query surfaces must agree after resuming from checkpoint {cut}"
+            );
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 > **File(s):** `crates/farder-crypto/src/identity.rs`, `key_exchange.rs`, `encryption.rs`, `media.rs`, `recovery.rs`, `event_log.rs`, `event_log_state.rs`, `lib.rs`
 > **Layer:** Crypto crate
-> **Last reviewed:** 2026-06-04
+> **Last reviewed:** 2026-07-28
 
 ## Purpose
 
@@ -544,6 +544,49 @@ the author's chain head and `log_pos` advance, zero MLS state change — so any
 converged event set folds to the same winner on every replica (plan resolved
 ambiguity #8). Ingest's distinct `stale-epoch` bounce is sub-3's job, served by
 `mls_current_epoch`.
+
+### Rung-2 purity + checkpoint composability (sub-2 Task 5)
+
+The fold stays exactly what Rung 1 made it: a pure
+`(prior_state, event) -> new_state` step, so `replay == stepwise ==
+resume-from-any-checkpoint` over **all** the Rung-2 state above. Two rules keep
+it that way, and both are now load-bearing for MLS:
+
+- **Two deterministic clocks, never wall time.** `event.core.timestamp` (the
+  untrusted author claim) drives device-cert expiry, `live_devices`, and every
+  `members × live_devices` derivation; `log_pos` (count of accepted events)
+  drives KeyPackage lifetimes. Both are inputs or folded state, so a checkpoint
+  carries them.
+- **Check-then-mutate.** Every fallible check runs before any mutation, so a
+  rejected event leaves the state byte-identical (no clone/rollback anywhere).
+
+Pinned by `replay_equals_stepwise_and_composes_from_a_checkpoint_over_all_rung2_state`:
+one log exercising **every** Rung-2 variant (both channel classes, KeyPackage
+publishes, the bootstrap commit, an add-commit + Welcome + joiner confirmation,
+a **stale commit accepted as a no-op**, sealed post + edit, tombstones in both
+classes, an expiring cert + `DeviceRevoked`, staged Welcomes + `MlsGroupReset` +
+post-reset confirmations + the send that proves the unlock) is folded by replay,
+stepwise, and by resuming from **every** checkpoint position; all three are
+compared field-by-field over the whole `LogState` and over every public query
+surface. The stale commit is asserted to move only the chain head and `log_pos`
+(the spec's commit-race determinism: the same event set folds to the same winner
+on every replica). The private fold records derive `PartialEq` solely for that
+comparison — nothing in the fold compares records.
+
+**Validated against real OpenMLS, not just itself:**
+`crates/farder-mls/tests/fold_chain.rs` drives a real `MlsChannelGroup`
+(creator + two joiners, in-memory provider) and feeds real values through the
+fold — `CommitOutcome::{commit_bytes, prev_epoch_authenticator, post_tree_hash,
+epoch}` plus the post-merge `epoch_authenticator()` become `MlsCommit` events,
+real TLS-serialized KeyPackages become `MlsKeyPackagePublished` events (read
+back through `decode_key_package`), and each joiner's `JoinInfo { epoch,
+tree_hash }` becomes its `MlsLeafConfirmed`. The tests assert the chain rule
+holds on real values (`prev_epoch_authenticator` of commit *k+1* IS the
+authenticator commit *k* declared), that a tampered declaration is rejected while
+the honest declaration of the same MLS commit is accepted, and that
+`leaves_confirmed` / `mls_current_epoch` converge on the real tree membership and
+epoch. That is the proof for plan ambiguity #1 (the added
+`post_epoch_authenticator` field) and #5 (the epoch conventions).
 
 ### Public query methods
 
