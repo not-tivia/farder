@@ -23,10 +23,24 @@ pub const MAX_LIVE_DEVICES_PER_IDENTITY: usize = 8;
 pub const MAX_LIVE_KEY_PACKAGES_PER_DEVICE: usize = 10;
 
 /// Spec I3: a commit by author A in a channel is invalid unless it discharges
-/// drift, is A's first commit there, or declares an epoch at least this many
-/// epochs past A's previous commit — stops self-update spam from bouncing every
-/// other member's in-flight sealed message with `stale-epoch`.
+/// drift, is A's first commit there, or declares an epoch at least
+/// `MlsGroupRecord::commit_rate_gap()` epochs past A's previous commit — stops
+/// self-update spam from bouncing every other member's in-flight sealed message
+/// with `stale-epoch`. This is the CEILING on that gap; the gap actually
+/// enforced scales down with the number of identities that can take a turn (see
+/// `commit_rate_gap`), because a raw gap of 4 is unsatisfiable in a channel with
+/// fewer than 4 committing identities.
 pub const COMMIT_RATE_MIN_EPOCH_GAP: u64 = 4;
+
+/// Spec C4 + I3 (review round 3): once a channel's freshness budget is within
+/// this many events of `FRESHNESS_CEILING_EVENTS`, the commit-rate rule stops
+/// applying — a rekey the ceiling itself is demanding is never spam. Without
+/// this hatch, a channel whose only online member has already taken its turn
+/// burns its budget and seals permanently: nothing but a commit advances the
+/// epoch, so nothing can ever satisfy an epoch-distance rule again. The hatch
+/// cannot be milked, because every accepted commit zeroes the budget: it buys
+/// at most one commit per `FRESHNESS_CEILING_EVENTS - GRACE` sealed events.
+pub const COMMIT_RATE_CEILING_GRACE_EVENTS: u32 = 50;
 
 /// Spec C4/I1: the blind rekey ceiling. Once this many channel events have
 /// accumulated since the last accepted commit, sealed content becomes invalid —
@@ -153,6 +167,39 @@ impl MlsGroupRecord {
             commits_by_epoch: HashMap::new(),
             welcomes: HashMap::new(),
         }
+    }
+
+    /// How many DISTINCT identities hold a confirmed leaf — i.e. how many
+    /// parties can actually take a turn at committing in this group.
+    fn committing_identities(&self) -> u64 {
+        self.leaves_confirmed.iter().map(|(pk, _)| pk).collect::<HashSet<_>>().len() as u64
+    }
+
+    /// The commit-rate gap this group enforces (spec I3, corrected in review
+    /// round 3): `min(COMMIT_RATE_MIN_EPOCH_GAP, committing identities)`.
+    ///
+    /// The rule is an EPOCH-distance rule, and every accepted commit advances
+    /// the epoch by exactly one — so with M identities round-robining, an
+    /// author's next turn arrives exactly M epochs later. A fixed gap of 4 is
+    /// therefore unsatisfiable whenever M < 4: once every member had spent the
+    /// one exempt "first commit", nobody could ever commit again, and 500 sealed
+    /// events later the freshness ceiling sealed the channel permanently. The
+    /// spec's own "#private with a friend" channel is M = 2.
+    ///
+    /// Scaling the gap to M keeps the property the rule exists for — an author
+    /// still cannot take two turns in a row while anyone else holds a leaf — and
+    /// makes the client rekey cadence reachable in small channels instead of
+    /// leaving them dependent on the ceiling hatch. A one-identity group has
+    /// nobody to bounce, so its gap is 1 (rekey freely).
+    fn commit_rate_gap(&self) -> u64 {
+        COMMIT_RATE_MIN_EPOCH_GAP.min(self.committing_identities().max(1))
+    }
+
+    /// Whether the freshness ceiling is close enough to demand a rekey NOW
+    /// (spec C4) — in which case the commit-rate rule stands aside.
+    fn ceiling_demands_rekey(&self) -> bool {
+        self.events_since_last_commit.saturating_add(COMMIT_RATE_CEILING_GRACE_EVENTS)
+            >= FRESHNESS_CEILING_EVENTS
     }
 }
 
@@ -1053,16 +1100,21 @@ impl LogState {
                     }
                 }
                 // Commit-rate rule (spec I3): drift discharge is NEVER blocked;
-                // otherwise the author's first commit, or an epoch gap of at
-                // least COMMIT_RATE_MIN_EPOCH_GAP, is required.
+                // neither is a rekey the freshness ceiling is demanding (spec
+                // C4 — that rekey is the opposite of spam, and blocking it
+                // sealed channels permanently); otherwise the author's first
+                // commit, or an epoch gap of at least the group's
+                // `commit_rate_gap()`, is required.
+                let gap = group.commit_rate_gap();
                 let rate_ok = self.commit_discharges_drift(event)
+                    || group.ceiling_demands_rekey()
                     || match group.last_commit_epoch_by_author.get(author) {
                         None => true,
-                        Some(&last) => *epoch >= last + COMMIT_RATE_MIN_EPOCH_GAP,
+                        Some(&last) => *epoch >= last + gap,
                     };
                 ensure!(
                     rate_ok,
-                    "commit-rate rule: a non-drift-discharging commit must be its author's first or at least {COMMIT_RATE_MIN_EPOCH_GAP} epochs past their previous one"
+                    "commit-rate rule: a non-drift-discharging commit must be its author's first or at least {gap} epochs past their previous one"
                 );
                 Ok(Authorized::Apply)
             }
@@ -4178,6 +4230,277 @@ mod tests {
         // An unused channel id is unaffected.
         let fresh = channel(&owner_dev, &owner_pk, &sid, &legacy, 10, ChannelClass::E2ee, None);
         st.apply(&fresh).expect("an unused channel id can still be created as E2ee");
+    }
+
+    // ---- Review round 3: the commit-rate rule vs. real channel sizes ----
+
+    /// Deterministic per-epoch chain values: the X*/T* constants do not stretch
+    /// to the dozen epochs the freshness-cycle tests walk through.
+    fn auth_at(epoch: u64) -> [u8; 32] {
+        let mut v = [0xA0u8; 32];
+        v[..8].copy_from_slice(&epoch.to_le_bytes());
+        v
+    }
+    fn tree_at(epoch: u64) -> [u8; 32] {
+        let mut v = [0x7Eu8; 32];
+        v[..8].copy_from_slice(&epoch.to_le_bytes());
+        v
+    }
+
+    /// Fold owner-authored sealed posts at `epoch` until the channel's freshness
+    /// budget is exactly exhausted, and assert the ceiling then bites. Returns
+    /// how many posts the channel accepted in this cycle (never 0).
+    fn fill_to_ceiling(f: &mut E2eeFix, epoch: u64) -> u32 {
+        let owner_pk = f.owner.public_key();
+        let mut n = 0;
+        while f.st.mls_groups[&CH].events_since_last_commit < FRESHNESS_CEILING_EVENTS {
+            let e = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, epoch, vec![]);
+            f.st.apply(&e).unwrap_or_else(|err| panic!("sealed post {} at epoch {epoch}: {err}", n + 1));
+            f.owner_prev = e;
+            n += 1;
+        }
+        assert!(n > 0, "the cycle must have accepted real content");
+        let over = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, epoch, vec![]);
+        assert_rejected_for(&f.st, &over, "freshness ceiling");
+        n
+    }
+
+    /// One self-update rekey at the group's current `epoch`, chaining onto
+    /// `prev_auth`. Returns the fold's verdict, so a test can assert both
+    /// acceptance and rate-blocking; on rejection the author's chain head (like
+    /// every other piece of state) is left untouched.
+    #[allow(clippy::too_many_arguments)]
+    fn try_rekey(
+        st: &mut LogState, sid: &str, dev: &Keypair, author: &PublicKey, prev: &mut Ev,
+        epoch: u64, prev_auth: [u8; 32], store: [u8; 32],
+    ) -> Result<()> {
+        let c = mls_commit(dev, author, sid, prev, epoch, vec![], vec![], prev_auth,
+            auth_at(epoch), tree_at(epoch), store);
+        st.apply(&c)?;
+        *prev = c;
+        Ok(())
+    }
+
+    /// Join one more member into the E2ee fixture's group: invite + device +
+    /// KeyPackage, an owner add-commit at `epoch` (drift-discharging, so never
+    /// rate-blocked) and the joiner's own leaf confirmation.
+    fn join_and_confirm(
+        f: &mut E2eeFix, epoch: u64, prev_auth: [u8; 32], store: [u8; 32],
+    ) -> (Keypair, Keypair, Ev) {
+        let owner_pk = f.owner.public_key();
+        let (u, ud, last) =
+            add_member_with_cap(&mut f.st, &f.owner, &f.owner_dev, &mut f.owner_prev, None);
+        let kp = kp_publish(&ud, &u.public_key(), &f.sid, &last, store, 1_000_000, 500);
+        f.st.apply(&kp).expect("the joiner's key package publishes");
+        let add = mls_commit(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, epoch,
+            vec![add_of(&u.public_key(), &ud, &kp.hash())], vec![],
+            prev_auth, auth_at(epoch), tree_at(epoch), OWNER_STORE);
+        f.st.apply(&add).expect("an add-commit discharges drift, so it is never rate-blocked");
+        f.owner_prev = add;
+        let cf = leaf_confirm(&ud, &u.public_key(), &f.sid, &kp, epoch + 1, tree_at(epoch), store);
+        f.st.apply(&cf).expect("the joiner confirms its leaf");
+        (u, ud, cf)
+    }
+
+    /// THE round-3 CRITICAL. Every accepted commit advances the epoch by exactly
+    /// one, so with M round-robining authors a member's next turn arrives M
+    /// epochs later — and the rate rule demanded a RAW gap of 4. With M <= 3 and
+    /// no drift, every member was permanently rate-blocked the moment it had
+    /// spent its one exempt "first commit", and 500 sealed events later the
+    /// freshness ceiling sealed the channel FOREVER (the reset hatch cannot
+    /// rescue it twice: `channel_events_since_reset` only advances on content
+    /// the ceiling has already stopped). The spec's own "#private with a friend"
+    /// channel is M = 2. This drives four full ceiling cycles — the second is
+    /// where every real channel lives, and where the old rule died.
+    #[test]
+    fn two_member_channel_survives_repeated_freshness_cycles() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);       // owner commits at epoch 0 -> group epoch 1
+        add_and_confirm_alice(&mut f); // owner commits at epoch 1 -> group epoch 2
+        let mut prev_auth = X1;
+        let mut epoch = 2;
+        let mut delivered = 0u32;
+
+        for cycle in 0..4 {
+            delivered += fill_to_ceiling(&mut f, epoch);
+            // The ceiling is demanding a rekey; SOMEBODY must be able to answer
+            // it. Alternate, so no cycle rides on another member's one exempt
+            // first commit.
+            let r = if cycle % 2 == 0 {
+                try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev,
+                    epoch, prev_auth, ALICE_STORE)
+            } else {
+                try_rekey(&mut f.st, &f.sid, &f.owner_dev, &owner_pk, &mut f.owner_prev,
+                    epoch, prev_auth, OWNER_STORE)
+            };
+            r.unwrap_or_else(|e| panic!("cycle {cycle}: the rekey the ceiling demands must fold: {e}"));
+            prev_auth = auth_at(epoch);
+            epoch += 1;
+            assert_eq!(f.st.mls_current_epoch(CH), Some((0, epoch)));
+            assert_eq!(f.st.mls_groups[&CH].events_since_last_commit, 0, "the rekey refreshed the budget");
+        }
+
+        // ...and content really does keep flowing afterwards.
+        let after = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, epoch, vec![]);
+        f.st.apply(&after).expect("a two-member channel keeps accepting content indefinitely");
+        assert!(delivered >= 4 * FRESHNESS_CEILING_EVENTS, "four full ceiling cycles were delivered");
+    }
+
+    /// The same, one member up: M = 3 was equally fatal (an author's turn comes
+    /// 3 epochs later, the rule demanded 4).
+    #[test]
+    fn three_member_channel_survives_repeated_freshness_cycles() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // group epoch 2, authenticator X1
+        let (bob, bob_dev, mut bob_prev) = join_and_confirm(&mut f, 2, X1, [4u8; 32]);
+        let bob_pk = bob.public_key();
+        let mut prev_auth = auth_at(2);
+        let mut epoch = 3;
+        assert_eq!(f.st.leaves_confirmed(CH).len(), 3, "three confirmed leaves, three identities");
+
+        for cycle in 0..5 {
+            fill_to_ceiling(&mut f, epoch);
+            let r = match cycle % 3 {
+                0 => try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev,
+                        epoch, prev_auth, ALICE_STORE),
+                1 => try_rekey(&mut f.st, &f.sid, &bob_dev, &bob_pk, &mut bob_prev,
+                        epoch, prev_auth, [4u8; 32]),
+                _ => try_rekey(&mut f.st, &f.sid, &f.owner_dev, &owner_pk, &mut f.owner_prev,
+                        epoch, prev_auth, OWNER_STORE),
+            };
+            r.unwrap_or_else(|e| panic!("cycle {cycle}: the rekey the ceiling demands must fold: {e}"));
+            prev_auth = auth_at(epoch);
+            epoch += 1;
+        }
+        let after = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, epoch, vec![]);
+        f.st.apply(&after).expect("a three-member channel keeps accepting content indefinitely");
+    }
+
+    /// Fix (c) on its own: the enforced gap is
+    /// `min(COMMIT_RATE_MIN_EPOCH_GAP, committing identities)`, so a small
+    /// channel can round-robin its rekeys on the CLIENT cadence (weekly / 200
+    /// messages) instead of only when the ceiling is about to bite. Without the
+    /// scaling, a two-member channel's forward-secrecy window would silently
+    /// stretch to "whenever the ceiling grace opens", which is not the bound the
+    /// spec sells.
+    #[test]
+    fn small_channels_can_rekey_on_cadence_not_only_at_the_ceiling() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // owner's last commit: epoch 1; group epoch 2
+
+        // A completely fresh freshness budget — no ceiling pressure anywhere.
+        assert_eq!(f.st.mls_groups[&CH].events_since_last_commit, 0);
+        try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev, 2, X1, ALICE_STORE)
+            .expect("alice's first cadence rekey");
+        assert_eq!(f.st.mls_groups[&CH].events_since_last_commit, 0);
+        try_rekey(&mut f.st, &f.sid, &f.owner_dev, &owner_pk, &mut f.owner_prev, 3, auth_at(2), OWNER_STORE)
+            .expect("the owner's turn comes round after 2 epochs in a 2-identity channel");
+        try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev, 4, auth_at(3), ALICE_STORE)
+            .expect("and alice's again");
+
+        // Turn-taking, not free-for-all: neither member may take two turns in a
+        // row, because the gap is still >= 2 while two identities hold leaves.
+        let twice = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, 5, vec![], vec![],
+            auth_at(4), auth_at(5), tree_at(5), ALICE_STORE);
+        assert_rejected_for(&f.st, &twice, "commit-rate rule");
+    }
+
+    /// Fix (a) on its own: when the ceiling is about to seal the channel, the
+    /// rate rule steps aside — a rekey the ceiling itself is demanding is never
+    /// spam. This is what saves a channel whose only online member has already
+    /// taken its turn (an M >= 4 channel where nobody else is around to advance
+    /// the epoch), and it closes again the moment the budget is refreshed.
+    #[test]
+    fn a_lone_rekeyer_can_always_answer_the_freshness_ceiling() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f); // group epoch 2, authenticator X1
+        let (_bob, _bd, _bp) = join_and_confirm(&mut f, 2, X1, [4u8; 32]);
+        let (_carol, _cd, _cp) = join_and_confirm(&mut f, 3, auth_at(2), [5u8; 32]);
+        assert_eq!(f.st.leaves_confirmed(CH).len(), 4, "a full-size channel: the gap is the full 4");
+        let mut epoch = 4;
+        let mut prev_auth = auth_at(3);
+
+        // Alice takes her turn while the budget is fresh...
+        try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev, epoch, prev_auth, ALICE_STORE)
+            .expect("alice's first commit is exempt");
+        prev_auth = auth_at(epoch);
+        epoch += 1;
+
+        // ...and is now rate-blocked, correctly, while there is budget left.
+        let early = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, epoch, vec![], vec![],
+            prev_auth, auth_at(epoch), tree_at(epoch), ALICE_STORE);
+        assert_rejected_for(&f.st, &early, "commit-rate rule");
+
+        // Nobody else ever comes online, so nothing advances the epoch and the
+        // channel burns its whole budget. The rate rule must now yield, or the
+        // ceiling seals a channel whose only present member is willing to rekey.
+        fill_to_ceiling(&mut f, epoch);
+        try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev, epoch, prev_auth, ALICE_STORE)
+            .expect("the ceiling demands a rekey and the only member present must be able to author it");
+        prev_auth = auth_at(epoch);
+        epoch += 1;
+        let resumed = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, epoch, vec![]);
+        f.st.apply(&resumed).expect("content flows again");
+        f.owner_prev = resumed;
+
+        // The hatch is not a standing licence: with the budget refreshed, the
+        // same author is rate-blocked again.
+        let again = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, epoch, vec![], vec![],
+            prev_auth, auth_at(epoch), tree_at(epoch), ALICE_STORE);
+        assert_rejected_for(&f.st, &again, "commit-rate rule");
+    }
+
+    /// The anti-spam property the rate rule exists for (spec I3) is untouched in
+    /// a channel big enough to have it: one member cannot bounce everybody
+    /// else's in-flight sealed messages with back-to-back self-updates.
+    #[test]
+    fn commit_rate_rule_still_blocks_spam_in_a_large_channel() {
+        let mut f = e2ee_fixture();
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f);
+        let (bob, bob_dev, mut bob_prev) = join_and_confirm(&mut f, 2, X1, [4u8; 32]);
+        let (carol, carol_dev, mut carol_prev) = join_and_confirm(&mut f, 3, auth_at(2), [5u8; 32]);
+        let (bob_pk, carol_pk) = (bob.public_key(), carol.public_key());
+        assert_eq!(f.st.leaves_confirmed(CH).len(), 4);
+
+        // Alice takes her turn at epoch 4, then tries to hog every epoch after
+        // it — each attempt is rejected until the full gap of 4 has passed.
+        try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev, 4, auth_at(3), ALICE_STORE)
+            .expect("alice's first commit");
+        let mut prev_auth = auth_at(4);
+        for epoch in 5..8 {
+            let spam = mls_commit(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, epoch, vec![], vec![],
+                prev_auth, auth_at(epoch), tree_at(epoch), ALICE_STORE);
+            assert_rejected_for(&f.st, &spam, "commit-rate rule");
+            // Somebody else takes the turn instead, so the epoch still moves
+            // (the owner last committed at epoch 3, so its turn is epoch 7).
+            let r = match epoch {
+                5 => try_rekey(&mut f.st, &f.sid, &bob_dev, &bob_pk, &mut bob_prev,
+                        epoch, prev_auth, [4u8; 32]),
+                6 => try_rekey(&mut f.st, &f.sid, &carol_dev, &carol_pk, &mut carol_prev,
+                        epoch, prev_auth, [5u8; 32]),
+                _ => try_rekey(&mut f.st, &f.sid, &f.owner_dev, &owner_pk, &mut f.owner_prev,
+                        epoch, prev_auth, OWNER_STORE),
+            };
+            r.unwrap_or_else(|e| panic!("another member's turn at epoch {epoch}: {e}"));
+            prev_auth = auth_at(epoch);
+        }
+        // Four epochs on, alice's turn comes round again.
+        try_rekey(&mut f.st, &f.sid, &f.alice_dev, &alice_pk, &mut f.alice_prev, 8, prev_auth, ALICE_STORE)
+            .expect("alice may commit again once the full gap has passed");
     }
 
     // ---- Rung 2, Task 5: checkpoint composability over ALL the new state ----

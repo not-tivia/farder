@@ -219,6 +219,45 @@ here on (and is documented in `docs/modules/crypto.md`).
    `live_devices` uses. Pinned by
    `an_expired_device_cannot_author_by_back_dating`.
 
+## Review round 3 — adjustments (implemented)
+
+Round 3 found the two fixes below plus three minors. Each is fixed in its own
+`fix(crypto): …` commit; where a fix narrows or overrides an earlier decision,
+the narrowing is the authority from here on (and is documented in
+`docs/modules/crypto.md`).
+
+1. **The commit-rate rule and the freshness ceiling together bricked every
+   channel with fewer than four committing identities — permanently.** The rule
+   was an EPOCH-distance rule (`epoch >= last + COMMIT_RATE_MIN_EPOCH_GAP`) and
+   every accepted commit advances the epoch by exactly one, so with M authors
+   round-robining, an author's next turn arrives exactly M epochs later:
+   sustained rekeying required M >= 4. With M <= 3 and zero drift, EVERY member
+   was permanently rate-blocked once it had spent its one exempt "first commit"
+   — and `FRESHNESS_CEILING_EVENTS` sealed events later the channel accepted no
+   further content, forever. The reset hatch cannot rescue it twice
+   (`channel_events_since_reset` only advances on sealed content and tombstones,
+   and sealed content is exactly what the ceiling stopped). The spec's own
+   "#private with a friend" case is M = 2. The pre-existing ceiling test passed
+   only because it spent Alice's FIRST commit as the rekey; no test drove the
+   second cycle, which is where every real channel lives. **Two changes, both
+   pure functions of fold state:** (i) the gap SCALES —
+   `commit_rate_gap() = min(COMMIT_RATE_MIN_EPOCH_GAP, distinct identities
+   holding a confirmed leaf)`, floored at 1, which preserves the anti-spam
+   property exactly (while anyone else holds a leaf the gap is >= 2, so no author
+   takes two turns in a row) while making the client rekey cadence reachable in
+   small channels; and (ii) the CEILING OVERRIDES the rule — within
+   `COMMIT_RATE_CEILING_GRACE_EVENTS = 50` events of the ceiling the rate rule
+   stands aside, because a rekey the ceiling itself is demanding is never spam.
+   (ii) is what saves an M >= 4 channel whose only online member has already
+   taken its turn: nothing but a commit advances the epoch, so no epoch-distance
+   rule could ever be satisfied again. It cannot be milked — every accepted
+   commit zeroes the budget, so the hatch buys at most one commit per 450 sealed
+   events. Pinned by `two_member_channel_survives_repeated_freshness_cycles`,
+   `three_member_channel_survives_repeated_freshness_cycles`,
+   `small_channels_can_rekey_on_cadence_not_only_at_the_ceiling`,
+   `a_lone_rekeyer_can_always_answer_the_freshness_ceiling`, with anti-spam held
+   by `commit_rate_rule_still_blocks_spam_in_a_large_channel`.
+
 ## Global constraints
 
 - **Old events are untouched.** New variants are APPENDED after
