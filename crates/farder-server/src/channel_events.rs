@@ -38,6 +38,15 @@ pub const MIN_LEAD_SECS: u64 = 60;
 pub const MAX_AHEAD_SECS: u64 = 365 * 86_400;
 /// Allowed reminder leads, in seconds (15 minutes / 1 hour / 1 day).
 pub const REMIND_LEADS: [u64; 3] = [900, 3_600, 86_400];
+/// Max event rows one sweeper tick will pick up per pass — the sibling of
+/// `reminders::REMINDER_DUE_BATCH` (same value, same reason). After downtime the
+/// overdue backlog can be arbitrarily large, and every row in a pass costs a
+/// write (plus, for the start pass, an announcement INSERT) while the caller
+/// holds the single `state.db` mutex. Bounding the pass keeps one tick's
+/// lock-hold bounded; the remainder drains on the next tick, and the guarded
+/// UPDATEs (`reminded_at IS NULL`, `status='upcoming'`,
+/// `cancel_notified_at IS NULL`) mean a row carried over can never fire twice.
+pub const EVENT_DUE_BATCH: usize = 200;
 
 pub const EVENT_USAGE: &str =
     "usage: /<trigger> Title | 3d [| location] [| description] [| remind 1h]";
@@ -388,6 +397,14 @@ pub fn my_rsvp(conn: &Connection, event_id: i64, member: &PublicKey) -> Result<O
 
 /// Public keys of everyone whose RSVP is in `responses` (the DM audiences:
 /// going+maybe for the lead reminder, going only for start/cancel).
+///
+/// DELIBERATELY UNCAPPED, unlike the `EVENT_DUE_BATCH`-bounded due lists. A
+/// truncated due list is *deferred* work (the row keeps its guard column and is
+/// picked up next tick); a truncated responder list is *dropped* work — the
+/// attendees past the cut would silently never be told their event started, with
+/// no state left behind to retry from. The list is naturally bounded by the
+/// members who affirmatively RSVPed to one event, and the DMs it produces are
+/// returned as data and sent after the db guard is dropped.
 pub fn responders(
     conn: &Connection,
     event_id: i64,
@@ -470,29 +487,40 @@ fn query_rows<P: rusqlite::Params>(conn: &Connection, tail: &str, p: P) -> Resul
 /// Events whose lead moment has arrived but which have not started yet. The
 /// `starts_at > ?1` clause means an event whose START also came due in the same
 /// tick skips the lead DM and gets only the start DM — no double-ping.
+/// Bounded to `EVENT_DUE_BATCH` (oldest first); the rest drains next tick.
 pub fn list_reminder_due(conn: &Connection, now: i64) -> Result<Vec<EventRow>> {
     query_rows(
         conn,
-        "WHERE status = 'upcoming' AND remind_lead IS NOT NULL AND reminded_at IS NULL \
-           AND starts_at - remind_lead <= ?1 AND starts_at > ?1 ORDER BY id ASC",
+        &format!(
+            "WHERE status = 'upcoming' AND remind_lead IS NOT NULL AND reminded_at IS NULL \
+               AND starts_at - remind_lead <= ?1 AND starts_at > ?1 \
+             ORDER BY id ASC LIMIT {EVENT_DUE_BATCH}"
+        ),
         params![now],
     )
 }
 
 /// Upcoming events whose start time has arrived (the sweeper's flip list).
+/// Bounded to `EVENT_DUE_BATCH` (oldest first); the rest drains next tick.
 pub fn list_start_due(conn: &Connection, now: i64) -> Result<Vec<EventRow>> {
     query_rows(
         conn,
-        "WHERE status = 'upcoming' AND starts_at <= ?1 ORDER BY id ASC",
+        &format!(
+            "WHERE status = 'upcoming' AND starts_at <= ?1 ORDER BY id ASC LIMIT {EVENT_DUE_BATCH}"
+        ),
         params![now],
     )
 }
 
 /// Cancelled events whose attendees have not been told yet.
+/// Bounded to `EVENT_DUE_BATCH` (oldest first); the rest drains next tick.
 pub fn list_cancel_unnotified(conn: &Connection) -> Result<Vec<EventRow>> {
     query_rows(
         conn,
-        "WHERE status = 'cancelled' AND cancel_notified_at IS NULL ORDER BY id ASC",
+        &format!(
+            "WHERE status = 'cancelled' AND cancel_notified_at IS NULL \
+             ORDER BY id ASC LIMIT {EVENT_DUE_BATCH}"
+        ),
         [],
     )
 }
@@ -963,6 +991,46 @@ mod tests {
         // Marking flips it out of the list.
         assert!(mark_reminded(&conn, soon, now).unwrap());
         assert!(list_reminder_due(&conn, now).unwrap().is_empty());
+    }
+
+    /// The three sweeper feeds are bounded exactly like `reminders::list_due`:
+    /// one tick takes at most `EVENT_DUE_BATCH` rows, oldest (`id ASC`) first.
+    #[test]
+    fn sweeper_due_lists_cap_at_event_due_batch_oldest_first() {
+        let (conn, cid, pk) = setup();
+        let now = 1_000_000i64;
+        let over = EVENT_DUE_BATCH + 5;
+        let mut lead = simple(WhenSpec::Relative(60));
+        lead.remind_lead = Some(900);
+
+        let mut start_due = Vec::new();
+        let mut reminder_due = Vec::new();
+        let mut cancelled = Vec::new();
+        for i in 0..over {
+            start_due.push(create(&conn, cid, 1, &pk, &simple(WhenSpec::Relative(60)), now - 5, 0).unwrap());
+            // Lead reached, start still ahead.
+            reminder_due.push(create(&conn, cid, 2, &pk, &lead, now + 300 + i as i64, 0).unwrap());
+            let c = create(&conn, cid, 3, &pk, &simple(WhenSpec::Relative(60)), now + 9_000, 0).unwrap();
+            cancel(&conn, c, now).unwrap();
+            cancelled.push(c);
+        }
+
+        let starts = list_start_due(&conn, now).unwrap();
+        assert_eq!(starts.len(), EVENT_DUE_BATCH, "start pass is batched");
+        assert_eq!(starts[0].id, start_due[0], "oldest id first");
+        assert_eq!(list_reminder_due(&conn, now).unwrap().len(), EVENT_DUE_BATCH, "lead pass is batched");
+        assert_eq!(
+            list_cancel_unnotified(&conn).unwrap().len(),
+            EVENT_DUE_BATCH,
+            "cancel-notify pass is batched"
+        );
+        assert!(starts.windows(2).all(|w| w[0].id < w[1].id), "id ASC");
+        // The remainder is not lost — clearing the first batch's guards surfaces it.
+        for id in starts.iter().map(|r| r.id) {
+            conn.execute("UPDATE channel_events SET status = 'started' WHERE id = ?1", params![id])
+                .unwrap();
+        }
+        assert_eq!(list_start_due(&conn, now).unwrap().len(), over - EVENT_DUE_BATCH);
     }
 
     #[test]

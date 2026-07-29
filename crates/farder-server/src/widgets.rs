@@ -102,13 +102,9 @@ pub fn sweep_once(conn: &mut rusqlite::Connection, now: u64) -> SweepOutcome {
                 let chan = crate::channels::get_channel(conn, row.channel_id as u64)
                     .ok()
                     .flatten();
-                let name = chan.map(|c| c.name).unwrap_or_else(|| "a channel".to_string());
                 out.dms.push(PendingDm {
                     recipient: row.owner.clone(),
-                    text: format!(
-                        "⏰ {}\n— set in #{} · farder://channel/{}",
-                        row.text, name, row.channel_id
-                    ),
+                    text: reminder_dm_text(&row.text, row.channel_id, chan.as_ref()),
                 });
             }
         }
@@ -216,6 +212,30 @@ fn sweep_events(conn: &mut rusqlite::Connection, now: u64, out: &mut SweepOutcom
         }
         Err(e) => tracing::warn!("widget sweeper: event list_cancel_unnotified failed: {e}"),
     }
+}
+
+/// The reminder DM's body + its origin footer.
+///
+/// `/remind` is reachable inside a DM, so `channel_id` can be a **DM** channel
+/// id — and a DM channel is not in the client's `activeServer.channels` (it has
+/// no name either: `create_dm_channel` stores `''`). A `farder://channel/<id>`
+/// pill for one would render as a nameless "Open channel" that drops the main
+/// view onto an id it cannot resolve. So a DM origin gets a plain, link-free
+/// footer. (The event DMs' `farder://widget/event/...` links are unaffected —
+/// those render an inline card client-side, they never switch channel.)
+fn reminder_dm_text(
+    text: &str,
+    channel_id: i64,
+    chan: Option<&farder_protocol::server::ChannelInfo>,
+) -> String {
+    let is_dm = chan
+        .map(|c| c.channel_type == farder_protocol::server::ChannelType::Dm)
+        .unwrap_or(false);
+    if is_dm {
+        return format!("⏰ {text}\n— set in a direct message");
+    }
+    let name = chan.map(|c| c.name.as_str()).unwrap_or("a channel");
+    format!("⏰ {text}\n— set in #{name} · farder://channel/{channel_id}")
 }
 
 /// Body + optional location + the widget deep link.
@@ -364,6 +384,33 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "sent");
+    }
+
+    #[test]
+    fn sweep_once_reminder_set_in_dm_omits_the_channel_link_back() {
+        let mut conn = crate::db::open_in_memory().unwrap();
+        let owner = farder_crypto::identity::Keypair::generate().public_key();
+        let peer = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &owner, "Alice").unwrap();
+        crate::members::register_member(&conn, &peer, "Bob").unwrap();
+        // /remind is reachable inside a DM — and a DM channel id is not in the
+        // client's channel list, so the pill must not be emitted at all.
+        let dm_id = crate::channels::create_dm_channel(&conn, &owner, &peer).unwrap();
+        let now = 1_000_000u64;
+        crate::reminders::create(&conn, &owner, dm_id as i64, "call mum", now as i64 - 5, 0)
+            .unwrap();
+
+        let out = sweep_once(&mut conn, now);
+        assert_eq!(out.dms.len(), 1, "a DM-origin reminder still fires");
+        assert_eq!(out.dms[0].recipient, owner);
+        assert!(out.dms[0].text.contains("call mum"), "the nudge itself is unchanged");
+        assert!(
+            !out.dms[0].text.contains("farder://channel/"),
+            "no channel pill for a DM origin: {}",
+            out.dms[0].text
+        );
+        assert!(!out.dms[0].text.contains('#'), "no nameless #… either");
+        assert!(out.dms[0].text.contains("direct message"), "but the origin is still stated");
     }
 
     #[test]
@@ -584,6 +631,59 @@ mod tests {
         assert_eq!(row.cancel_notified_at, Some(now as i64));
         // Single-shot.
         assert!(sweep_once(&mut conn, now).dms.is_empty());
+    }
+
+    /// After downtime the overdue backlog can exceed `EVENT_DUE_BATCH`. One tick
+    /// must take at most a batch (bounded lock-hold), and the carry-over must
+    /// drain on later ticks — each event starting EXACTLY once.
+    #[test]
+    fn sweep_once_drains_oversized_start_backlog_across_ticks_without_duplication() {
+        use crate::channel_events::EVENT_DUE_BATCH;
+        let (mut conn, channel_id, creator) = ev_setup();
+        let now = 1_000_000u64;
+        let going = ev_member(&conn, "Going");
+        let total = EVENT_DUE_BATCH + 5;
+        let mut ids = Vec::new();
+        for i in 0..total {
+            let id = make_ev(&conn, channel_id, &creator, now as i64 - 5 - i as i64, None, None);
+            crate::channel_events::rsvp(&conn, id, &going, "going", 1).unwrap();
+            ids.push(id);
+        }
+
+        // Tick 1 — capped at exactly one batch.
+        let t1 = sweep_once(&mut conn, now);
+        assert_eq!(t1.broadcasts.len(), EVENT_DUE_BATCH * 2, "EventUpdated + announcement each");
+        assert_eq!(t1.dms.len(), EVENT_DUE_BATCH, "one Going DM per started event");
+        // Tick 2 — the carry-over, and only the carry-over.
+        let t2 = sweep_once(&mut conn, now);
+        assert_eq!(t2.broadcasts.len(), (total - EVENT_DUE_BATCH) * 2);
+        assert_eq!(t2.dms.len(), total - EVENT_DUE_BATCH);
+        // Tick 3 — backlog empty; the guarded UPDATEs mean nothing re-fires.
+        let t3 = sweep_once(&mut conn, now);
+        assert!(t3.broadcasts.is_empty() && t3.dms.is_empty(), "drained, and never twice");
+
+        // Every event started exactly once, across all ticks.
+        let mut started: Vec<i64> = t1
+            .broadcasts
+            .iter()
+            .chain(t2.broadcasts.iter())
+            .filter_map(|b| match &b.event {
+                farder_protocol::server::ServerEvent::EventUpdated { event } => Some(event.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started.len(), total, "one EventUpdated per event, no duplicates");
+        started.sort_unstable();
+        let mut want = ids.clone();
+        want.sort_unstable();
+        assert_eq!(started, want, "the whole backlog drained, exactly once each");
+        assert!(ids
+            .iter()
+            .all(|id| crate::channel_events::get(&conn, *id).unwrap().unwrap().status == "started"));
+        // One announcement row per event — not one per tick it was visible in.
+        let msgs: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(msgs, total as i64, "exactly one announcement per event");
     }
 
     #[test]

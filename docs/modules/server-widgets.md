@@ -18,7 +18,7 @@ Fixed tick interval. A due poll closes / a due giveaway draws at most ~15 s late
 
 ### `sweep_once(conn: &mut Connection, now: u64) -> SweepOutcome`
 
-**What it does:** the sync tick body servicing every half: `polls::close_due` (every due timed poll → `PollUpdated`), then `giveaways::list_due` + `close_and_draw` per row (→ `GiveawayUpdated` + winner-announcement `NewMessage`), then `reminders::list_due` + `mark_sent` per row (→ one `PendingDm`, **zero broadcasts**), then the three **event passes** (`sweep_events`; the system identity is resolved via `bots::get_or_create_system_identity` once per tick and ONLY when the start pass actually has rows, so a server that never starts an event never mints one):
+**What it does:** the sync tick body servicing every half: `polls::close_due` (every due timed poll → `PollUpdated`), then `giveaways::list_due` + `close_and_draw` per row (→ `GiveawayUpdated` + winner-announcement `NewMessage`), then `reminders::list_due` + `mark_sent` per row (→ one `PendingDm`, **zero broadcasts**; its footer is `— set in #<channel> · farder://channel/<id>`, but a reminder set **inside a DM** gets the link-free `— set in a direct message` instead, because a DM channel id is not in the client's channel list and has no name — see `reminder_dm_text`), then the three **event passes** (`sweep_events`; the system identity is resolved via `bots::get_or_create_system_identity` once per tick and ONLY when the start pass actually has rows, so a server that never starts an event never mints one):
 
 1. **Lead-time pass** — `channel_events::list_reminder_due` + `mark_reminded` (single-shot) → one `PendingDm` per **going + maybe** responder (`⏰ "<title>" starts soon.` + optional location + `farder://widget/event/<channel>/<id>`). An event whose start is also due this tick is excluded by the query, so it gets the start DM only — no double-ping.
 2. **Start pass** — `channel_events::list_start_due` + `start_and_announce` (one transaction: guarded `upcoming → started` flip + the `📅 <title> is starting now!` announcement authored by the system identity, `author_name_override = "Events"`, `author_badge = "BOT"`, `reply_to` = the card). `Ok(None)` (a Cancel won the guard) ⇒ announce nothing. Emits `EventUpdated` + `NewMessage`, plus one `PendingDm` per **going** responder.
@@ -105,7 +105,7 @@ Redraw for an `ended` giveaway with a winner; `None` when the eligible set is em
 
 **Naming:** the `events` table is the mesh signed log and `events.rs` is `EventTarget`/`BroadcastEvent`, so the product's event cards live in `channel_events` / `channel_event_rsvps` and in THIS module. Protocol/client names stay product-facing (`EventInfo`, `GetEvent`, `EventUpdated`).
 
-`starts_at` is an ABSOLUTE unix second — nothing timezone-shaped is stored or transmitted; every client renders it locally. Bounds: `MAX_TITLE = 120`, `MAX_LOCATION = 120`, `MAX_DESCRIPTION = 500`, `MIN_LEAD_SECS = 60`, `MAX_AHEAD_SECS = 365 d`, `REMIND_LEADS = [900, 3600, 86400]`, `ATTENDEE_NAME_CAP = 10`.
+`starts_at` is an ABSOLUTE unix second — nothing timezone-shaped is stored or transmitted; every client renders it locally. Bounds: `MAX_TITLE = 120`, `MAX_LOCATION = 120`, `MAX_DESCRIPTION = 500`, `MIN_LEAD_SECS = 60`, `MAX_AHEAD_SECS = 365 d`, `REMIND_LEADS = [900, 3600, 86400]`, `ATTENDEE_NAME_CAP = 10`, `EVENT_DUE_BATCH = 200` rows per sweeper pass (the remainder drains next tick).
 
 ### `parse_event_args(args: &str) -> Result<ParsedEvent, String>`
 
@@ -132,7 +132,8 @@ Guarded `status='upcoming'` flip + the announcement insert in ONE transaction. R
 - `create(conn, channel_id: i64, message_id: i64, creator, parsed, starts_at: i64, now: i64) -> Result<i64>`, `get(conn, id) -> Result<Option<EventRow>>`.
 - `rsvp(conn, event_id, member, response, now)` — `INSERT … ON CONFLICT(event_id, member) DO UPDATE` (the `poll_votes` idiom); `clear_rsvp(…) -> Result<bool>` (rows-affected); `my_rsvp(…) -> Result<Option<String>>`; `responders(conn, event_id, responses: &[&str]) -> Result<Vec<PublicKey>>` (the DM audiences).
 - `cancel(conn, id, now) -> Result<bool>` — guarded on `status='upcoming'`; `edit(conn, id, title, description, location, starts_at, remind_lead, rearm_reminder)` — upcoming only, NULLs `reminded_at` when `rearm_reminder`.
-- `list_reminder_due(conn, now)` / `list_start_due(conn, now)` / `list_cancel_unnotified(conn)` — the three sweeper queries; `list_upcoming_in_channel(conn, channel_id, now, limit)` — the active-bar query (`starts_at > now` excludes a due-but-unswept event).
+- `list_reminder_due(conn, now)` / `list_start_due(conn, now)` / `list_cancel_unnotified(conn)` — the three sweeper queries, each `ORDER BY id ASC LIMIT EVENT_DUE_BATCH` (200, the sibling of `REMINDER_DUE_BATCH`): after downtime the overdue backlog is unbounded, and every row in a pass is a write (plus, in the start pass, an announcement INSERT) held under the single `state.db` mutex. The remainder drains on the next tick, and the guarded UPDATEs make a carried-over row unable to fire twice. `responders` is **deliberately uncapped** — a truncated due list is deferred work, but a truncated responder list would silently drop attendees with no state left to retry from.
+- `list_upcoming_in_channel(conn, channel_id, now, limit)` — the active-bar query (`starts_at > now` excludes a due-but-unswept event).
 - `mark_reminded(conn, id, now)` / `mark_cancel_notified(conn, id, now)` — guarded single-shot `UPDATE … WHERE x IS NULL`; `false` ⇒ the caller must NOT DM.
 
 ---
