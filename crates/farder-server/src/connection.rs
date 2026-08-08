@@ -1457,14 +1457,27 @@ pub(crate) async fn main_loop(
                                         send_server_frame(send, &response).await?;
                                     }
                                     Ok(mut result) => {
-                                        // Patch server name + owner pubkey into ServerInfo responses
-                                        if let ServerResponse::ServerInfo {
-                                            ref mut name,
-                                            ref mut owner_public_key,
-                                            ..
-                                        } = result.response {
-                                            *name = state.server_name.clone();
-                                            *owner_public_key = state.owner.read().await.clone();
+                                        // Patch server name + owner pubkey into BOTH ServerInfo
+                                        // shapes. The handler cannot fill these itself (the name
+                                        // lives on the connection state, the owner behind an async
+                                        // lock), so it leaves them blank and relies on this site —
+                                        // which means a new *Info variant that is not listed here
+                                        // silently ships a blank server name and no owner key.
+                                        match result.response {
+                                            ServerResponse::ServerInfo {
+                                                ref mut name,
+                                                ref mut owner_public_key,
+                                                ..
+                                            }
+                                            | ServerResponse::ServerInfoV2 {
+                                                ref mut name,
+                                                ref mut owner_public_key,
+                                                ..
+                                            } => {
+                                                *name = state.server_name.clone();
+                                                *owner_public_key = state.owner.read().await.clone();
+                                            }
+                                            _ => {}
                                         }
 
                                         let response = ServerFrame::Response {

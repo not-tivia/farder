@@ -1443,13 +1443,13 @@ pub fn handle_request(
             // `member` is the AUTHENTICATED connection key. The request's
             // `channel_id` can only narrow this; there is deliberately no
             // recipient field, so no caller can ask for anyone else's Welcomes.
-            let events = crate::event_ingest::fetch_welcomes_for(
+            let (events, next_accept_seq, more) = crate::event_ingest::fetch_welcomes_for(
                 conn,
                 member,
                 channel_id,
                 since_accept_seq,
             )?;
-            ok(ServerResponse::Welcomes { events })
+            ok(ServerResponse::Welcomes { events, next_accept_seq, more })
         }
 
         ServerRequest::FetchKeyPackages { member: target, device } => {
@@ -8991,10 +8991,15 @@ mod tests {
             &state,
         )
         .unwrap();
-        let ServerResponse::Welcomes { events } = r.response else {
+        let ServerResponse::Welcomes { events, next_accept_seq, more } = r.response else {
             panic!("expected Welcomes");
         };
         assert!(events.is_empty());
+        // The cursor is what makes paging possible at all: `accept_seq` appears
+        // nowhere in the returned event bytes, so without it a client could only
+        // ever ask from 0 and could never reach its newest Welcome.
+        assert_eq!(next_accept_seq, 0, "no rows scanned, so the cursor stands still");
+        assert!(!more);
 
         // The stranger has not negotiated, so it is refused before it reads
         // anything — the version gate and the membership gate stack.

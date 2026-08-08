@@ -77,7 +77,7 @@ v1 and v2 surfaces are separate variants, never modes of one variant:
 |---|---|---|
 | `GetServerInfo` / `ServerInfo` | `GetServerInfoV2` / `ServerInfoV2` | v2 carries `ChannelInfoV2` (channel + class). **The v1 surface omits every non-plaintext channel for every caller**, since `ChannelInfo` cannot express that a channel is sealed and a client that cannot tell would show a working composer |
 | `FetchHistory` / `History` | `FetchHistoryV2` / `HistoryV2` | v2 carries `MessageInfoV2` (message + `is_e2ee` + `sealed` + `event_hash`). The v1 surface filters `is_e2ee = 0`, or a sealed row would arrive as a real message with an empty body |
-| — | `FetchWelcomes` / `Welcomes` | MLS Welcomes addressed to the **authenticated connection key**. There is deliberately no recipient field: `channel_id` can narrow the result, nothing can widen it |
+| — | `FetchWelcomes` / `Welcomes` | MLS Welcomes addressed to the **authenticated connection key**. There is deliberately no recipient field: `channel_id` can narrow the result, nothing can widen it. The response carries `next_accept_seq` + `more`, because `accept_seq` is a server-local column that appears nowhere in the returned event bytes — without the cursor a client could only ever ask from 0 and, once its backlog exceeded the per-fetch cap, could never reach its newest Welcome |
 | — | `FetchKeyPackages` / `KeyPackages` | published KeyPackages for one `(member, device)`. Public *within* the server by design — membership gating still applies |
 
 Both fetch responses hand back **raw signed `Event` bytes**: the server stores

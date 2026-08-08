@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use farder_server::{auth, connection, db, members, permissions, retention, state::ServerState, templates};
 use quinn::Endpoint;
@@ -120,23 +120,36 @@ async fn main() -> Result<()> {
             // `reconcile_messages` because the message choke point resolves class
             // from that very column: a drifted mirror would make the sealed derive
             // door refuse the rows it is there to rebuild.
-            let reclassed =
-                farder_server::channel_class::reconcile_channel_classes(&conn).unwrap_or(0);
+            // NOT `unwrap_or(0)`. This pass is the thing that repairs a mirror
+            // saying `plaintext` for a channel the log declares `e2ee`, and a
+            // drifted mirror is exactly the fail-OPEN state: every server-authored
+            // writer (SendMessage, webhooks, slash commands, the sweeper) resolves
+            // the class from that column and would be waved into a sealed channel.
+            // Swallowing the error boots a server whose repair silently did not
+            // run. Refusing to start is the loud answer, and the only one
+            // consistent with what `channel_class.rs` promises.
+            let reclassed = farder_server::channel_class::reconcile_channel_classes(&conn)
+                .context("channel-class mirror repair failed; refusing to start")?;
             if reclassed > 0 {
                 tracing::info!(count = reclassed, "repaired drifted channel class mirrors from the event log");
             }
             // The `LogState` is handed in so deletions survive the restart: this
             // pass re-derives every log message lacking a row, and without the
             // fold's tombstones it would re-derive the deleted ones too (spec F2).
-            let repaired = farder_server::event_ingest::reconcile_messages(
-                &conn,
-                server_state.log_state.lock().unwrap().as_ref(),
-            )
-            .unwrap_or(0);
+            // Also not swallowed: this pass carries the F2 guarantee that a
+            // content-blind delete survives a restart. A silent failure here
+            // resurrects deleted messages on the next boot with nothing in the
+            // log to say it happened.
+            let repaired = {
+                let guard = server_state.log_state.lock().unwrap();
+                farder_server::event_ingest::reconcile_messages(&conn, guard.as_ref())
+                    .context("event-sourced message reconciliation failed; refusing to start")?
+            };
             if repaired > 0 {
                 tracing::info!("reconciled {} event-sourced messages missing from the view", repaired);
             }
-            let repaired_att = farder_server::event_ingest::reconcile_attachments(&conn).unwrap_or(0);
+            let repaired_att = farder_server::event_ingest::reconcile_attachments(&conn)
+                .context("attachment reconciliation failed; refusing to start")?;
             if repaired_att > 0 {
                 tracing::info!(count = repaired_att, "reconciled missing attachment rows from the event log");
             }

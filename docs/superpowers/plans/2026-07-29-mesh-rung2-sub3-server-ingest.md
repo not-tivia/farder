@@ -1002,3 +1002,85 @@ apply_tombstone, reconcile_messages}` are used consistently across tasks.
   `cargo build --workspace` does not compile it. After Task 5,
   `cd client/src-tauri && cargo build` is mandatory.
 - The sweeper must `continue`, never abort a tick, on a class refusal.
+
+---
+
+## Final review (2026-08-07) — findings, fixes, and carry-forwards
+
+A whole-branch review of `main...HEAD` raised 11 findings. Each was verified
+against the code before acting; five were confirmed real and fixed on the branch,
+one was a repo-hygiene defect, and five are recorded here as carry-forwards
+rather than silently dropped.
+
+### Fixed before merge
+
+1. **`ServerInfoV2` was never patched with the server name / owner key.** The
+   handler leaves both blank with a comment saying the connection handler fills
+   them, but that site matched only `ServerResponse::ServerInfo`. Every v2 client
+   would have seen a blank server name and no owner. Fixed by matching both
+   shapes; the comment now warns that a new `*Info` variant not listed there
+   ships blank.
+2. **An account-deletion request permanently disabled log reconciliation.**
+   `anonymize_messages_by_author` rewrites `messages.author` on sealed rows too,
+   so a member who had edited a sealed message no longer matched their own row.
+   `sealed_edit_target`'s authorship `ensure!` then returned `Err` inside
+   `replay_sealed_edits`, aborting `reconcile_messages` before its reply-link
+   pass — on that boot and every boot after, silently (see #3). **Reproduced
+   with a probe before fixing.** `sealed_edit_target` gained a `strict` flag:
+   ingest still refuses a mismatch (that IS the authorship check), reconcile
+   skips it (it is replaying events ingest already authorized). Regression test:
+   `anonymizing_an_author_does_not_permanently_break_reconcile`, which also
+   asserts ingest stayed strict.
+3. **Startup reconciliation failed open.** All three passes used
+   `.unwrap_or(0)`. A failed `reconcile_channel_classes` leaves a mirror reading
+   `plaintext` for a channel the log declares `e2ee` — precisely the state that
+   waves every server-authored writer into a sealed channel — and the server
+   booted anyway. This is also what made #2 invisible. All three now propagate
+   and refuse to start.
+6. **`resolve_reply_target` was not scoped to the citing event's channel**,
+   unlike its two siblings `sealed_edit_target` and `apply_tombstone`, so a reply
+   edge could point across channels. Scoped, at derive time and in
+   `repair_reply_links`.
+5. **`FetchWelcomes`' `since_accept_seq` cursor was unusable.** `accept_seq` is
+   server-local and appears nowhere in the returned bytes, so a client could only
+   ask from 0 and, past the 500-row cap, could never reach its newest Welcome —
+   i.e. never join the current epoch. `Welcomes` now returns
+   `next_accept_seq` + `more`, and the cap bounds rows SCANNED rather than rows
+   matched (bounding only matches would let one request walk the whole table).
+   Done now rather than later because it is the same protocol upheaval (F15).
+10. **Line endings.** `crates/farder-protocol/src/server.rs` was CRLF and my
+   edits rewrote the whole file as LF, destroying `git blame` on a wire-protocol
+   file. Restored; the branch was swept to confirm it was the only file affected.
+
+### Carry-forwards (NOT fixed — deliberate)
+
+4. **No v2-only event is ever emitted.** `SealedMessage`,
+   `SealedMessageEdited`, `MessageTombstoned`, `MlsControlEvent` and
+   `ChannelCreatedV2` exist, are classified by `event_requires_v2`, and are
+   filtered correctly — but nothing sends them. That is this task's stated scope
+   ("all dormant"): the emit sites belong to **sub-4**, alongside the client that
+   would receive them. Recorded so nobody mistakes the plumbing for delivery.
+7. **Reconcile resurrects retention-deleted messages.** `delete_messages_before`
+   hard-deletes rows while their events stay in `events` forever, so pass 1
+   re-derives them on the next boot. Pre-existing for Rung-1 plaintext; this
+   branch extends retention to sealed rows and so extends the bug. **Not fixed
+   here because it needs a design decision, not a patch:** if the log is the
+   source of truth, "retention" either means a tombstone event (durable, like
+   `MessageDeleted`) or it means the derived view is intentionally rebuildable
+   and retention is cosmetic. Picking one is a Rung-3 replication question.
+8. **A widget due in a sealed channel is a zombie.** The sweeper skips it, so it
+   is returned again every 15 s forever: the giveaway never draws, the event never
+   starts, and a `warn!` is emitted per stuck row indefinitely. A terminal skip
+   (close once, announce nothing) would fix both, but that is a product decision
+   about what a stranded giveaway owes its entrants.
+9. **`fetch_key_packages` returns oldest-first under a cap and has no liveness
+   filter.** KeyPackages are one-time-use, so oldest-first is the right consumption
+   order, but a device with more than `MAX_FETCH_EVENTS` published packages can
+   never have its newest fetched, and a committer cannot tell a spent package from
+   a fresh one. **Sub-5 owns key refresh and re-provisioning** and should take this.
+11. **The class gate precedes the permission check in `SendMessage`.** Reviewed
+   and judged correct as written: sealed and nonexistent channels answer
+   identically, which is the deliberate non-oracle property, and the reply for a
+   nonexistent channel changing to the uniform refusal is that same design rather
+   than a regression.
+

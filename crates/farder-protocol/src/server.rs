@@ -730,7 +730,14 @@ pub enum ServerResponse {
     ProtocolVersion { server_version: u32, min_client_version_for_e2ee: u32 },
     /// Raw signed `Event` bytes (`rmp_serde`), oldest-first. The server hands out
     /// OPAQUE bytes: it stores and orders MLS traffic, it never interprets it.
-    Welcomes { events: Vec<Vec<u8>> },
+    ///
+    /// `next_accept_seq` is the cursor to pass as the NEXT request's
+    /// `since_accept_seq`, and `more` says whether the server truncated. Without
+    /// them the cursor would be unusable: `accept_seq` is a server-local column
+    /// that appears nowhere in the returned event bytes, so a client could only
+    /// ever ask from 0 and — once its backlog exceeded the per-fetch cap — could
+    /// never reach the NEWEST Welcome, i.e. never join the current epoch.
+    Welcomes { events: Vec<Vec<u8>>, next_accept_seq: u64, more: bool },
     /// Raw signed `Event` bytes carrying `MlsKeyPackagePublished`, oldest-first.
     KeyPackages { events: Vec<Vec<u8>> },
     ServerInfoV2 {

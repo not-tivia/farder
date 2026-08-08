@@ -296,12 +296,27 @@ pub fn build_log_state(conn: &Connection) -> Result<Option<LogState>> {
 ///
 /// The lookup is exact-match on `messages.event_hash`, which
 /// `idx_messages_event_hash` makes unique and O(log n).
-fn resolve_reply_target(conn: &Connection, reply_to: Option<&str>) -> Result<Option<u64>> {
+///
+/// **Scoped to `channel_id`**, matching `sealed_edit_target` and
+/// `apply_tombstone`, which both refuse a target in another channel. Without the
+/// scope a sealed post could cite a plaintext message's hash (or the reverse)
+/// and the derived `reply_to` would point ACROSS channels — `fetch_history`
+/// would then hand clients a reply edge into a conversation the reader may not
+/// even be able to see, and in a sealed channel it would point at a body the
+/// channel's whole purpose is to keep the server out of.
+///
+/// An out-of-channel (or not-yet-derived) target resolves to `None` rather than
+/// failing the event; `repair_reply_links` re-checks later under the same scope.
+fn resolve_reply_target(
+    conn: &Connection,
+    channel_id: u64,
+    reply_to: Option<&str>,
+) -> Result<Option<u64>> {
     let Some(target) = reply_to else { return Ok(None) };
     let id: Option<i64> = conn
         .query_row(
-            "SELECT id FROM messages WHERE event_hash = ?1",
-            params![target],
+            "SELECT id FROM messages WHERE event_hash = ?1 AND channel_id = ?2",
+            params![target, channel_id as i64],
             |r| r.get(0),
         )
         .optional()?;
@@ -324,7 +339,7 @@ fn resolve_reply_target(conn: &Connection, reply_to: Option<&str>) -> Result<Opt
 pub fn derive_message_row(conn: &Connection, event: &Event) -> Result<Option<u64>> {
     match &event.core.payload {
         EventPayload::MessagePosted { channel_id, content, reply_to, .. } => {
-            let reply = resolve_reply_target(conn, reply_to.as_deref())?;
+            let reply = resolve_reply_target(conn, *channel_id, reply_to.as_deref())?;
             // Through the choke point (`messages::insert_derived_row`), never raw
             // SQL — so this path is class-gated like every other writer.
             let id = crate::messages::insert_derived_row(
@@ -339,7 +354,7 @@ pub fn derive_message_row(conn: &Connection, event: &Event) -> Result<Option<u64
             Ok(Some(id))
         }
         EventPayload::MessagePostedE2ee { channel_id, ciphertext, reply_to, .. } => {
-            let reply = resolve_reply_target(conn, reply_to.as_deref())?;
+            let reply = resolve_reply_target(conn, *channel_id, reply_to.as_deref())?;
             let id = crate::messages::insert_sealed_row(
                 conn,
                 *channel_id,
@@ -369,11 +384,27 @@ pub fn derive_message_row(conn: &Connection, event: &Event) -> Result<Option<u64
 /// - `Err` — a row exists but the edit has no business touching it: wrong
 ///   channel, not a sealed row, or a different author. Only the author may edit
 ///   their own message; moderators delete, they do not rewrite.
+///
+/// `strict` splits the two callers, and the split is load-bearing:
+///
+/// - INGEST (`strict = true`) is judging a live event and must refuse a
+///   mismatch — that refusal is the authorship check itself.
+/// - RECONCILE (`strict = false`) is replaying events ingest ALREADY accepted,
+///   so a mismatch is not an attack, it is drift the server itself created.
+///   `anonymize_messages_by_author` (the account-deletion path) rewrites
+///   `messages.author` to `DELETED_USER_KEY` on sealed rows too, so after any
+///   member exercises data deletion, their old sealed edits no longer match
+///   their rows. Erroring there would abort `reconcile_messages` before its
+///   reply-link pass on EVERY subsequent boot, permanently — a deletion request
+///   would silently disable log reconciliation for the whole server. Skip
+///   instead: the edit was authorized when it was accepted, and the row it
+///   describes is already anonymized.
 fn sealed_edit_target(
     conn: &Connection,
     channel_id: u64,
     target: &str,
     author: &PublicKey,
+    strict: bool,
 ) -> Result<Option<u64>> {
     let row: Option<(i64, i64, Vec<u8>, i64)> = conn
         .query_row(
@@ -390,10 +421,10 @@ fn sealed_edit_target(
         "sealed edit cites a target in a different channel"
     );
     ensure!(is_e2ee != 0, "sealed edit targets a plaintext message");
-    ensure!(
-        row_author.as_slice() == author.as_bytes().as_slice(),
-        "only a message's own author may edit it"
-    );
+    if row_author.as_slice() != author.as_bytes().as_slice() {
+        ensure!(!strict, "only a message's own author may edit it");
+        return Ok(None);
+    }
     Ok(Some(id as u64))
 }
 
@@ -414,7 +445,7 @@ pub fn apply_sealed_edit(conn: &Connection, event: &Event) -> Result<Option<u64>
     else {
         return Ok(None);
     };
-    let id = sealed_edit_target(conn, *channel_id, target, &event.core.author)?
+    let id = sealed_edit_target(conn, *channel_id, target, &event.core.author, true)?
         .context("sealed edit cites a message this server has not derived")?;
     crate::messages::update_sealed_row(conn, id, ciphertext, event.core.timestamp)?;
     Ok(Some(id))
@@ -699,7 +730,7 @@ fn replay_sealed_edits(
         if is_tombstoned(target) {
             continue;
         }
-        let Some(id) = sealed_edit_target(conn, *channel_id, target, &event.core.author)? else {
+        let Some(id) = sealed_edit_target(conn, *channel_id, target, &event.core.author, false)? else {
             continue;
         };
         crate::messages::update_sealed_row(conn, id, ciphertext, event.core.timestamp)?;
@@ -733,13 +764,19 @@ pub fn repair_reply_links(conn: &Connection) -> Result<usize> {
     let mut repaired = 0usize;
     for (body, id) in rows {
         let event = Event::from_bytes(&body).context("decode event for reply repair")?;
+        // The citing event's OWN channel scopes the lookup, exactly as it does at
+        // derive time — repair must not create an edge derive would have refused.
         let cited = match &event.core.payload {
-            EventPayload::MessagePosted { reply_to, .. } => reply_to.clone(),
-            EventPayload::MessagePostedE2ee { reply_to, .. } => reply_to.clone(),
+            EventPayload::MessagePosted { channel_id, reply_to, .. } => {
+                reply_to.clone().map(|r| (*channel_id, r))
+            }
+            EventPayload::MessagePostedE2ee { channel_id, reply_to, .. } => {
+                reply_to.clone().map(|r| (*channel_id, r))
+            }
             _ => None,
         };
-        let Some(cited) = cited else { continue };
-        if let Some(target_id) = resolve_reply_target(conn, Some(&cited))? {
+        let Some((cited_channel, cited)) = cited else { continue };
+        if let Some(target_id) = resolve_reply_target(conn, cited_channel, Some(&cited))? {
             conn.execute(
                 "UPDATE messages SET reply_to = ?2 WHERE id = ?1",
                 params![id, target_id as i64],
@@ -765,21 +802,37 @@ pub const MAX_FETCH_EVENTS: usize = 500;
 ///
 /// The bytes are handed back opaque. The server stores and orders MLS traffic;
 /// it does not interpret it, and a Welcome is useless to anyone but its holder.
+///
+/// Returns `(events, next_accept_seq, more)`. The cursor advances past every row
+/// EXAMINED, not just the ones returned — a page that matched nothing still
+/// makes progress, so a recipient whose Welcomes sit behind thousands of other
+/// members' is not stuck re-scanning the same prefix forever.
 pub fn fetch_welcomes_for(
     conn: &Connection,
     recipient: &PublicKey,
     channel_filter: Option<u64>,
     since_accept_seq: u64,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, u64, bool)> {
     let mut stmt = conn.prepare(
-        "SELECT event_body FROM events \
+        "SELECT accept_seq, event_body FROM events \
          WHERE payload_type = 'MlsWelcome' AND accept_seq > ?1 \
          ORDER BY accept_seq ASC",
     )?;
-    let rows = stmt.query_map(params![since_accept_seq as i64], |r| r.get::<_, Vec<u8>>(0))?;
+    let rows = stmt.query_map(params![since_accept_seq as i64], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
     let mut out = Vec::new();
+    let mut cursor = since_accept_seq;
+    let mut more = false;
     for row in rows {
-        let body = row?;
+        let (seq, body) = row?;
+        // Cap on ROWS SCANNED, not rows matched: bounding only the matches would
+        // let one request walk the entire table when nothing matches.
+        if out.len() >= MAX_FETCH_EVENTS || (seq as u64) > cursor + MAX_FETCH_EVENTS as u64 {
+            more = true;
+            break;
+        }
+        cursor = seq as u64;
         let event = Event::from_bytes(&body).context("decode welcome event")?;
         let EventPayload::MlsWelcome { channel_id, for_member, .. } = &event.core.payload else {
             continue;
@@ -793,11 +846,8 @@ pub fn fetch_welcomes_for(
             }
         }
         out.push(body);
-        if out.len() >= MAX_FETCH_EVENTS {
-            break;
-        }
     }
-    Ok(out)
+    Ok((out, cursor, more))
 }
 
 /// Raw signed-`Event` bytes for the KeyPackages one `(member, device)` published,
@@ -1738,6 +1788,53 @@ mod tests {
                 params![ghost.hash()], |r| r.get::<_, i64>(0)).unwrap() == 0,
             "a refused edit rolls the whole ingest transaction back"
         );
+    }
+
+    /// REGRESSION: an account-deletion request must not permanently disable
+    /// log reconciliation.
+    ///
+    /// `anonymize_messages_by_author` rewrites `messages.author` on sealed rows
+    /// too, so a member who ever edited a sealed message no longer matches their
+    /// own rows afterwards. When the reconcile path treated that mismatch as an
+    /// authorship VIOLATION it returned `Err`, aborting `reconcile_messages`
+    /// before its reply-link repair — on that boot and every boot after it,
+    /// forever, and silently, because `main.rs` swallows the error.
+    ///
+    /// This is the recurring shape where an over-strict guard creates a state
+    /// the system can never leave. Reconcile now SKIPS the anonymized row: the
+    /// edit was authorized when ingest accepted it, and re-judging settled
+    /// history against mutated rows was never the check's job.
+    #[test]
+    fn anonymizing_an_author_does_not_permanently_break_reconcile() {
+        let mut f = SealedFix::new();
+        f.add_alice();
+        f.give_alice_a_leaf();
+        let (post, id) = f.sealed_post(b"v1", None);
+        let e = f.sealed_edit_of(&post.hash(), b"v2 edited");
+        f.own(e);
+
+        // Reconcile is healthy before the deletion request.
+        reconcile_messages(&f.conn, Some(&f.st)).expect("healthy before");
+
+        // The author exercises data deletion (the path `retention.rs` runs).
+        let author = f.owner.public_key();
+        crate::messages::anonymize_messages_by_author(&f.conn, &author).unwrap();
+
+        // ...and reconcile still works, on this boot and the next.
+        reconcile_messages(&f.conn, Some(&f.st))
+            .expect("a deletion request must not disable reconciliation");
+        reconcile_messages(&f.conn, Some(&f.st)).expect("still working on the next boot");
+
+        // The anonymized row kept its latest ciphertext: replay skipped it
+        // rather than rolling it back to the pre-edit bytes.
+        let (_, sealed, _, _, _) = f.row(id).expect("row survived");
+        assert_eq!(sealed.as_deref(), Some(&b"v2 edited"[..]));
+
+        // And INGEST is still strict: a live edit of someone else's message is
+        // refused exactly as before. Relaxing reconcile must not relax the gate.
+        let hostile = f.alice_signs(f.sealed_edit_of(&post.hash(), b"alice rewrote this"));
+        let err = format!("{:#}", f.ingest(&hostile).unwrap_err());
+        assert!(err.contains("only a message's own author may edit it"), "{err}");
     }
 
     #[test]
