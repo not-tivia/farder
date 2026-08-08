@@ -320,13 +320,22 @@ async fn handle_fetch_url(
     url: &str,
     channel_id: u64,
 ) -> Result<u64, String> {
-    // Permission check
+    // Permission + class check (one scoped lock, dropped before any await).
     {
         let db = state.db.lock().unwrap();
         let perms = handlers::resolve_member_perms_pub(&db, member, channel_id, is_owner)
             .map_err(|e| e.to_string())?;
         if !permissions::has(perms, permissions::SEND_MESSAGES) {
             return Err("missing SEND_MESSAGES permission".to_string());
+        }
+        // Class gate BEFORE the outbound HTTP fetch: the blob the server
+        // downloads and stores is server-visible by construction, and the
+        // client's legacy auto-attach fallback would put it in the channel
+        // (spec Coexistence row 6b). Refusing here also means an E2EE channel
+        // cannot be used to make the server fetch a URL at all.
+        // FAIL CLOSED: an unresolvable class refuses.
+        if crate::channel_class::resolve(&db, channel_id).refuses_server_authored_content() {
+            return Err(crate::channel_class::E2EE_REFUSED.to_string());
         }
     }
 
@@ -707,6 +716,13 @@ pub(crate) async fn cleanup_session(
             .unwrap_or(false);
         if still_ours {
             clients.remove(&pk_bytes);
+            // Drop the negotiated version with the connection that negotiated it,
+            // so a reconnecting client must negotiate again (absent = v1 = fail
+            // closed). Guarded by `still_ours` for the opposite reason: if this
+            // is a STALE cleanup racing a fresh connection, clearing the live
+            // connection's version would silently downgrade it to v1 and it would
+            // stop receiving sealed messages with nothing to retry.
+            state.client_protocol.write().unwrap().remove(&pk_bytes);
         }
     }
     {
@@ -1437,14 +1453,27 @@ pub(crate) async fn main_loop(
                                         send_server_frame(send, &response).await?;
                                     }
                                     Ok(mut result) => {
-                                        // Patch server name + owner pubkey into ServerInfo responses
-                                        if let ServerResponse::ServerInfo {
-                                            ref mut name,
-                                            ref mut owner_public_key,
-                                            ..
-                                        } = result.response {
-                                            *name = state.server_name.clone();
-                                            *owner_public_key = state.owner.read().await.clone();
+                                        // Patch server name + owner pubkey into BOTH ServerInfo
+                                        // shapes. The handler cannot fill these itself (the name
+                                        // lives on the connection state, the owner behind an async
+                                        // lock), so it leaves them blank and relies on this site —
+                                        // which means a new *Info variant that is not listed here
+                                        // silently ships a blank server name and no owner key.
+                                        match result.response {
+                                            ServerResponse::ServerInfo {
+                                                ref mut name,
+                                                ref mut owner_public_key,
+                                                ..
+                                            }
+                                            | ServerResponse::ServerInfoV2 {
+                                                ref mut name,
+                                                ref mut owner_public_key,
+                                                ..
+                                            } => {
+                                                *name = state.server_name.clone();
+                                                *owner_public_key = state.owner.read().await.clone();
+                                            }
+                                            _ => {}
                                         }
 
                                         let response = ServerFrame::Response {
@@ -1501,6 +1530,30 @@ pub(crate) async fn main_loop(
 // Broadcasting (public)
 // ---------------------------------------------------------------------------
 
+/// May this connection be handed this event?
+///
+/// **The M2 invariant.** `rmp_serde` decodes an enum by variant NAME, and an
+/// unknown name fails the decode of the WHOLE frame. Sending one v2-only event
+/// to a v1 client therefore does not degrade — it breaks that client's stream,
+/// including in the plaintext channels it is entitled to. So the filter sits on
+/// the send, not on the client.
+///
+/// Fail closed: a connection with no recorded version is v1, and a v1 client
+/// gets exactly the events it got before this rung existed.
+pub(crate) fn may_receive(state: &ServerState, pk: &[u8; 32], event: &ServerEvent) -> bool {
+    if !farder_protocol::server::event_requires_v2(event) {
+        return true;
+    }
+    state
+        .client_protocol
+        .read()
+        .unwrap()
+        .get(pk)
+        .copied()
+        .unwrap_or(1)
+        >= farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
+}
+
 pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: ServerEvent) {
     // Subscription revocation choke point. Filtering at Subscribe time only
     // covers admission; a member who subscribed legitimately and LATER lost
@@ -1517,7 +1570,10 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
     match target {
         EventTarget::All => {
             let clients = state.clients.read().await;
-            for sender in clients.values() {
+            for (pk_bytes, sender) in clients.iter() {
+                if !may_receive(state, pk_bytes, &event) {
+                    continue;
+                }
                 let _ = sender.try_send(event.clone());
             }
         }
@@ -1526,6 +1582,9 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
             if let Some(subscriber_keys) = subs.get(&channel_id) {
                 let clients = state.clients.read().await;
                 for pk_bytes in subscriber_keys {
+                    if !may_receive(state, pk_bytes, &event) {
+                        continue;
+                    }
                     if let Some(sender) = clients.get(pk_bytes) {
                         let _ = sender.try_send(event.clone());
                     }
@@ -1535,6 +1594,9 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
         EventTarget::Members(pks) => {
             let clients = state.clients.read().await;
             for pk in pks {
+                if !may_receive(state, pk.as_bytes(), &event) {
+                    continue;
+                }
                 if let Some(sender) = clients.get(pk.as_bytes()) {
                     let _ = sender.try_send(event.clone());
                 }
@@ -1553,7 +1615,9 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
                 if let Ok(perms) =
                     crate::handlers::resolve_member_server_perms(&conn, &pk, is_owner)
                 {
-                    if crate::permissions::has(perms, perm_bit) {
+                    if crate::permissions::has(perms, perm_bit)
+                        && may_receive(state, pk_bytes, &event)
+                    {
                         let _ = sender.try_send(event.clone());
                     }
                 }
@@ -1623,6 +1687,88 @@ pub(crate) async fn process_inbound_voice_frame(
         crate::media_stream::IngressDecision::Drop(_reason) => {
             tracing::trace!("[media] datagram dropped: {:?}", _reason);
         }
+    }
+}
+
+#[cfg(test)]
+mod class_gate_tests {
+    use super::*;
+
+    /// `FetchUrl` makes the SERVER download a URL and store the blob — in the
+    /// clear, on the host's disk — and the shipped client falls back to
+    /// attaching it (spec Coexistence row 6b). Refused for an E2EE channel
+    /// BEFORE the outbound request, so a sealed channel cannot even be used as
+    /// a fetch trigger.
+    ///
+    /// The URL here is unroutable on purpose: if the gate ever regressed, the
+    /// test would fail on a network error rather than silently pass.
+    #[tokio::test]
+    async fn fetch_url_is_refused_in_an_e2ee_channel() {
+        let state = std::sync::Arc::new(crate::state::ServerState::new_for_test().unwrap());
+        let member = farder_crypto::identity::Keypair::generate().public_key();
+        let (sealed, plain) = {
+            let conn = state.db.lock().unwrap();
+            let everyone = crate::members::create_role(
+                &conn,
+                "@everyone",
+                crate::permissions::DEFAULT_EVERYONE,
+                None,
+                0,
+                true,
+                false,
+            )
+            .unwrap();
+            crate::members::register_member(&conn, &member, "M").unwrap();
+            crate::members::assign_role(&conn, &member, everyone).unwrap();
+            let sealed = crate::channels::create_channel(
+                &conn, "sealed", farder_protocol::server::ChannelType::Text, None, 0,
+            )
+            .unwrap();
+            let plain = crate::channels::create_channel(
+                &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
+            )
+            .unwrap();
+            crate::channel_class::set_class(
+                &conn,
+                sealed,
+                farder_crypto::event_log::ChannelClass::E2ee,
+            )
+            .unwrap();
+            (sealed, plain)
+        };
+
+        let e = handle_fetch_url(&state, &member, false, "http://192.0.2.1/x.png", sealed)
+            .await
+            .expect_err("a sealed channel must refuse");
+        assert_eq!(e, crate::channel_class::E2EE_REFUSED);
+
+        // Fail closed: a channel that does not exist answers IDENTICALLY, so
+        // the refusal is not an existence oracle.
+        let e2 = handle_fetch_url(&state, &member, false, "http://192.0.2.1/x.png", 999_999)
+            .await
+            .expect_err("an unresolvable channel must refuse too");
+        assert_eq!(e2, e);
+
+        // No file record was created for either attempt.
+        {
+            let conn = state.db.lock().unwrap();
+            let files: i64 = conn
+                .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(files, 0, "a refused fetch stores no blob");
+        }
+
+        // Control: the SAME call in a plaintext channel gets PAST the class gate
+        // and reaches the next check (the scheme validation immediately after
+        // it), proving the gate is class-driven — and that it sits BEFORE the
+        // outbound fetch, since the sealed case never got this far.
+        let plain_err = handle_fetch_url(&state, &member, false, "ftp://example.com/x.png", plain)
+            .await
+            .expect_err("scheme check, i.e. past the class gate");
+        assert_eq!(
+            plain_err, "invalid URL",
+            "a plaintext channel must fall through to the NEXT check, not be class-refused"
+        );
     }
 }
 
@@ -1739,5 +1885,138 @@ mod voice_relay_tests {
 
         let second = tokio::time::timeout(std::time::Duration::from_millis(300), relay_rx.read_datagram()).await;
         assert!(second.is_err(), "only one recipient (bob); sender must not be echoed");
+    }
+}
+
+#[cfg(test)]
+mod protocol_version_tests {
+    use super::*;
+    use farder_crypto::identity::Keypair;
+    use farder_protocol::server::{
+        event_requires_v2, ChannelInfoV2, MessageInfoV2, MIN_CLIENT_VERSION_FOR_E2EE,
+    };
+
+    fn v1_event() -> ServerEvent {
+        ServerEvent::MessageDeleted { message_id: 1, channel_id: 2 }
+    }
+
+    fn v2_events() -> Vec<ServerEvent> {
+        let msg = MessageInfoV2 {
+            base: farder_protocol::server::MessageInfo {
+                id: 1,
+                channel_id: 2,
+                author: Keypair::generate().public_key(),
+                content: String::new(),
+                timestamp: 0,
+                edited_at: None,
+                reply_to: None,
+                pinned: false,
+                attachments: vec![],
+                reactions: vec![],
+                thread_id: None,
+                thread_message_count: None,
+                author_name_override: None,
+                author_badge: None,
+                widget: None,
+            },
+            is_e2ee: true,
+            sealed: Some(vec![9, 9, 9]),
+            event_hash: Some("deadbeef".to_string()),
+        };
+        vec![
+            ServerEvent::SealedMessage { channel_id: 2, message: msg.clone() },
+            ServerEvent::SealedMessageEdited { channel_id: 2, message: msg },
+            ServerEvent::MessageTombstoned { channel_id: 2, message_id: 1 },
+            ServerEvent::MlsControlEvent {
+                channel_id: Some(2),
+                event_hash: "abc".to_string(),
+                payload_type: "MlsCommit".to_string(),
+            },
+            ServerEvent::ChannelCreatedV2 {
+                channel: ChannelInfoV2 {
+                    base: farder_protocol::server::ChannelInfo {
+                        id: 2,
+                        name: "sealed".to_string(),
+                        channel_type: farder_protocol::server::ChannelType::Text,
+                        category_id: None,
+                        position: 0,
+                        topic: None,
+                        nsfw: false,
+                        slow_mode_secs: 0,
+                        retention_secs: None,
+                        thread_parent_message_id: None,
+                    },
+                    class: farder_crypto::event_log::ChannelClass::E2ee,
+                },
+            },
+        ]
+    }
+
+    /// THE M2 INVARIANT, at the send. A v1 connection is handed no v2-only frame,
+    /// because a frame it cannot decode fails its WHOLE stream — including the
+    /// plaintext channels it is entitled to.
+    ///
+    /// Un-negotiated is tested first because that is the default every shipped
+    /// client is in today: absence of a version must read as v1, not as "unknown,
+    /// probably fine".
+    #[test]
+    fn a_v1_connection_is_never_handed_a_v2_only_event() {
+        let state = ServerState::new_for_test().unwrap();
+        let pk = Keypair::generate().public_key();
+        let key = *pk.as_bytes();
+
+        // 1. Un-negotiated ⇒ v1 ⇒ every v2-only event is withheld...
+        for ev in v2_events() {
+            assert!(
+                event_requires_v2(&ev),
+                "{ev:?} must be classified v2-only or the filter cannot see it"
+            );
+            assert!(
+                !may_receive(&state, &key, &ev),
+                "an un-negotiated connection was handed {ev:?}"
+            );
+        }
+        // ...while everything it received before still flows.
+        assert!(may_receive(&state, &key, &v1_event()));
+
+        // 2. An explicitly OLD client is equally withheld.
+        state.client_protocol.write().unwrap().insert(key, 1);
+        for ev in v2_events() {
+            assert!(!may_receive(&state, &key, &ev), "a v1 client was handed {ev:?}");
+        }
+
+        // 3. Only after negotiating does it receive them.
+        state
+            .client_protocol
+            .write()
+            .unwrap()
+            .insert(key, MIN_CLIENT_VERSION_FOR_E2EE);
+        for ev in v2_events() {
+            assert!(may_receive(&state, &key, &ev), "a v2 client was denied {ev:?}");
+        }
+
+        // 4. And a DIFFERENT connection is unaffected by that negotiation — the
+        //    version is per-connection, not global.
+        let other = *Keypair::generate().public_key().as_bytes();
+        for ev in v2_events() {
+            assert!(!may_receive(&state, &other, &ev), "version leaked across connections");
+        }
+    }
+
+    /// Fail closed in the other direction too: a version we do not recognise is
+    /// only ever trusted for what it explicitly claims. A client claiming a
+    /// FUTURE version still satisfies the floor (it can decode v2 by definition),
+    /// but a claim BELOW the floor never does, whatever the number.
+    #[test]
+    fn an_unknown_client_version_is_judged_only_against_the_floor() {
+        let state = ServerState::new_for_test().unwrap();
+        let key = *Keypair::generate().public_key().as_bytes();
+        let ev = v2_events().remove(0);
+
+        state.client_protocol.write().unwrap().insert(key, 0);
+        assert!(!may_receive(&state, &key, &ev), "version 0 must not clear the floor");
+
+        state.client_protocol.write().unwrap().insert(key, u32::MAX);
+        assert!(may_receive(&state, &key, &ev), "a newer client can decode v2");
     }
 }

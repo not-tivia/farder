@@ -118,6 +118,28 @@ not in the UI:
    `get_bot_secret` inside the DM sender. Possessing the row does not make the
    identity loggable-in.
 
+## Rung 2: where the system identity may write
+
+The identity has exactly two write surfaces, and neither can reach an E2EE
+channel:
+
+- **DMs** (`send_system_dm` / `send_bot_dm_as` → `bots.rs`). DM channels are
+  created by `channels::create_dm_channel`, which writes a real `channels` row,
+  so they resolve `ChannelWriteClass::Plaintext` and can never be anything else:
+  `channel_class::set_class` is ingest-only, written solely from an accepted
+  `ChannelCreated`, and ingest accepts `kind == "text"` shapes only. A DM channel
+  therefore has no path to E2EE class at all. The honest caveat is unchanged and
+  unrelated to class: these DMs are **server-encrypted, not E2E** — the server
+  holds the identity's key, exactly as it already does for ticker-bot alert DMs.
+- **The event start announcement** (`widgets::sweep_once` → `start_and_announce`).
+  This is a normal channel write and is class-gated in the sweeper: a
+  non-plaintext channel is skipped with a `continue` before the flip, and the
+  `messages.rs` choke point refuses it as a backstop. See
+  `docs/modules/server-widgets.md`.
+
+The cancel-notify pass and the lead-time pass write **no** channel row at all —
+they are DM-only by design.
+
 ## Known gotchas
 
 - **The secret is the same trust class as the existing ticker-bot secrets** —

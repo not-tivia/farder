@@ -120,7 +120,18 @@ pub fn check_run_command_channel_auth(
         return Ok(Some(format!("timed out until {until_ms}{reason_part}")));
     }
 
-    // 2. Channel-level check (mirrors SendMessage).
+    // 2. Class gate — ONE check covering ALL SIX command kinds (`text`, `api`,
+    //    `poll`, `giveaway`, `event`, `reminder`) before any parse, outbound
+    //    fetch or DB write. `text`/`api` post a reply, `poll`/`giveaway`/`event`
+    //    post a card, and `reminder` posts nothing but stores `reminders.text`
+    //    server-side in PLAINTEXT — which is exactly the content a sealed
+    //    channel promises to hide (spec Coexistence rows 4, 5, 19, 20).
+    //    FAIL CLOSED: an unresolvable class refuses.
+    if crate::channel_class::resolve(conn, channel_id).refuses_server_authored_content() {
+        return Ok(Some(crate::channel_class::E2EE_REFUSED.to_string()));
+    }
+
+    // 3. Channel-level check (mirrors SendMessage).
     let channel = channels::get_channel(conn, channel_id)?
         .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
 
@@ -360,16 +371,54 @@ fn require_member_hierarchy(
     Ok(None)
 }
 
+/// Class gate for every request that would produce (or act on) server-readable
+/// content in a channel. `Some(denied)` must be propagated by the caller;
+/// `None` means proceed.
+///
+/// FAIL CLOSED (spec rev 2, C8/F1): an unresolvable class — no `channels` row,
+/// an unrecognised `content_class`, or a failed read — refuses exactly like a
+/// declared E2EE channel. The refusal string is the single byte-identical
+/// [`crate::channel_class::E2EE_REFUSED`], so a channel id is never an existence
+/// oracle: a sealed channel and a channel that does not exist answer the same.
+///
+/// The refusal string — and ONLY the string — depends on the caller's negotiated
+/// version: a v1 connection is told to upgrade, a v2 one gets `E2EE_REFUSED`.
+/// This does not reopen the oracle, because the *set* of refused requests is
+/// identical either way: sealed and unresolvable channels take the same branch,
+/// so a v1 client learns "not for you", never "this id exists and is sealed".
+fn require_plaintext_channel(
+    conn: &Connection,
+    state: &crate::state::ServerState,
+    member: &PublicKey,
+    channel_id: u64,
+) -> Option<Result<HandleResult>> {
+    if crate::channel_class::resolve(conn, channel_id).refuses_server_authored_content() {
+        return Some(err(if connection_speaks_v2(state, member) {
+            crate::channel_class::E2EE_REFUSED
+        } else {
+            UPGRADE_REQUIRED
+        }));
+    }
+    None
+}
+
 /// Channel visibility: can `member` see `channel_id`? DM channels ⇒ participant;
 /// all others ⇒ VIEW_CHANNEL. A missing (or soft-deleted) channel ⇒ `false`.
 ///
 /// Two kinds of caller, and both matter for privacy:
 /// - **Widget/event request arms** MUST map `false` (and a missing channel) to
 ///   the same opaque "... not found" error as a missing row, so an id is never
-///   an existence oracle for an invisible channel.
+///   an existence oracle for an invisible channel. Those callers go through
+///   [`widget_channel_visible`], which adds the Rung-2 class gate.
 /// - **`subscriptions`** uses it as the subscribe permission boundary (see
 ///   `crate::subscriptions` — the subscription set never contains a member who
 ///   cannot see the channel).
+///
+/// **Deliberately NO channel-class check here.** An E2EE channel must stay
+/// subscribable: sealed messages are delivered to subscribers like any other
+/// broadcast, so gating this function on class would leave every member of a
+/// sealed channel silently receiving nothing. Class is a gate on server-readable
+/// CONTENT, not on membership or visibility.
 pub(crate) fn channel_visible(
     conn: &Connection,
     member: &PublicKey,
@@ -386,6 +435,39 @@ pub(crate) fn channel_visible(
         let perms = resolve_member_perms_pub(conn, member, channel_id, is_owner)?;
         Ok(permissions::has(perms, permissions::VIEW_CHANNEL))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn widget_channel_visible_for_test(
+    conn: &Connection,
+    member: &PublicKey,
+    channel_id: u64,
+    is_owner: bool,
+) -> Result<bool> {
+    widget_channel_visible(conn, member, channel_id, is_owner)
+}
+
+/// Widget visibility: [`channel_visible`] AND the Rung-2 class gate.
+///
+/// A channel that is not definitely plaintext is **invisible to every widget
+/// request**. No poll, giveaway or event can exist in an E2EE channel (create is
+/// refused at `RunCommand`), so this is defence in depth — and it is expressed
+/// as invisibility rather than a distinct error, so a widget id cannot be used
+/// to classify a channel.
+///
+/// Kept separate from `channel_visible` rather than folded into it: that
+/// function is also the Subscribe permission boundary, and a class check there
+/// would make sealed channels unsubscribable.
+fn widget_channel_visible(
+    conn: &Connection,
+    member: &PublicKey,
+    channel_id: u64,
+    is_owner: bool,
+) -> Result<bool> {
+    if crate::channel_class::resolve(conn, channel_id).refuses_server_authored_content() {
+        return Ok(false);
+    }
+    channel_visible(conn, member, channel_id, is_owner)
 }
 
 /// The ONE error string every event arm returns for "no such event", "channel
@@ -405,7 +487,7 @@ fn visible_event(
         Some(r) => r,
         None => return Ok(None),
     };
-    if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+    if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
         return Ok(None);
     }
     Ok(Some(row))
@@ -426,8 +508,33 @@ fn request_requires_membership(req: &ServerRequest) -> bool {
             | ServerRequest::ResolveInvite { .. }
             | ServerRequest::GetServerInfo
             | ServerRequest::GetMembershipStatus
+            // v2: a client must be able to declare its version BEFORE it is a
+            // member, or a joiner could never be told the server speaks v2. It
+            // reads nothing and writes only the caller's own version slot.
+            | ServerRequest::NegotiateProtocol { .. }
     )
 }
+
+/// The protocol version this connection negotiated. **Absent ⇒ v1**: the only
+/// fail-closed reading of "this client never told us what it speaks".
+pub fn connection_protocol_version(state: &crate::state::ServerState, member: &PublicKey) -> u32 {
+    state
+        .client_protocol
+        .read()
+        .unwrap()
+        .get(member.as_bytes())
+        .copied()
+        .unwrap_or(1)
+}
+
+/// Whether this connection may be shown E2EE content or handed a v2-only frame.
+pub fn connection_speaks_v2(state: &crate::state::ServerState, member: &PublicKey) -> bool {
+    connection_protocol_version(state, member) >= farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
+}
+
+/// What a v1 connection is told when it asks for something only a v2 client can
+/// be given. Actionable where `E2EE_REFUSED` would be baffling.
+pub const UPGRADE_REQUIRED: &str = "this channel requires a newer client";
 
 /// On a mesh server (event log present), returns `Some(reason)` if `member` is
 /// NOT a log member — meaning content must be denied. Returns `None` when the
@@ -480,6 +587,13 @@ pub fn handle_request(
         } => {
             if let Some(denied) = require_not_timed_out(conn, member)? {
                 return Ok(denied);
+            }
+            // Class gate BEFORE any allocation-heavy work (attachment lookups,
+            // FTS insert). The choke point in `messages.rs` would also refuse,
+            // but a hard error is the wrong answer to a request — this is the
+            // clean "not available in encrypted channels".
+            if let Some(denied) = require_plaintext_channel(conn, state, member, channel_id) {
+                return denied;
             }
             if content.len() > 8000 {
                 return err("message content too long (max 8000 characters)");
@@ -553,6 +667,12 @@ pub fn handle_request(
             };
             if msg.author != *member {
                 return err("can only edit own messages");
+            }
+            // `EditMessage { new_content: String }` ships the whole body in
+            // plaintext (spec Coexistence row 10). Sealed edits ride
+            // `MessageEditedE2ee` instead.
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
+                return denied;
             }
             messages::edit_message(conn, message_id, &new_content)?;
             let updated = messages::get_message(conn, message_id, member)?.unwrap();
@@ -1250,11 +1370,20 @@ pub fn handle_request(
                 let guard = state.log_state.lock().unwrap();
                 guard.as_ref().map(|ls| ls.is_member(member)).unwrap_or(true) // legacy: full info
             };
-            let (channels_list, categories_list, roles_list) = if is_member {
+            let (mut channels_list, categories_list, roles_list) = if is_member {
                 (channels::list_channels(conn)?, channels::list_categories(conn)?, members::list_roles(conn)?)
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
             };
+            // The V1 surface omits every channel that is not DEFINITELY plaintext,
+            // for EVERY caller — not just un-negotiated ones (spec M2). `ChannelInfo`
+            // has no class field, so a client that received a sealed channel here
+            // could not tell it was sealed and would show a working composer over
+            // it. A v2 client reads classes through `GetServerInfoV2`; filtering
+            // unconditionally means a v2 client that forgets to is still safe.
+            channels_list.retain(|c| {
+                !crate::channel_class::resolve(conn, c.id).refuses_server_authored_content()
+            });
             ok(ServerResponse::ServerInfo {
                 name: String::new(), // patched by connection handler
                 member_count,
@@ -1264,6 +1393,112 @@ pub fn handle_request(
                 owner_public_key: None, // patched by connection handler
                 server_id: state.genesis.lock().unwrap().as_ref().map(|g| g.server_id()),
             })
+        }
+
+        // ----------------------------------------------------------------
+        // Rung-2 (v2) surfaces
+        // ----------------------------------------------------------------
+
+        // Record what this connection speaks and answer with what the server
+        // speaks. Bootstrap-allow-listed: a joiner must be able to negotiate
+        // before it is a member. It reads nothing and writes only the caller's
+        // OWN version slot, keyed by the authenticated connection key.
+        ServerRequest::NegotiateProtocol { client_version } => {
+            state
+                .client_protocol
+                .write()
+                .unwrap()
+                .insert(*member.as_bytes(), client_version);
+            ok(ServerResponse::ProtocolVersion {
+                server_version: farder_protocol::server::SERVER_PROTOCOL_VERSION,
+                min_client_version_for_e2ee: farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE,
+            })
+        }
+
+        ServerRequest::GetServerInfoV2 => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            let all_members = members::list_members(conn)?;
+            let member_count = all_members.len() as u32;
+            // Same membership reduction as `GetServerInfo`: a non-member is told
+            // the server exists and nothing about its shape.
+            let is_member = {
+                let guard = state.log_state.lock().unwrap();
+                guard.as_ref().map(|ls| ls.is_member(member)).unwrap_or(true)
+            };
+            let (channels_list, categories_list, roles_list) = if is_member {
+                (channels::list_channels(conn)?, channels::list_categories(conn)?, members::list_roles(conn)?)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+            // The class comes from the same resolver every write gate consults,
+            // so what a client is told matches what the server will enforce.
+            // `Unresolvable` reports `E2ee`: the fail-closed direction, since a
+            // client that treats an unknown channel as plaintext would offer a
+            // composer the choke point then refuses.
+            let channels_v2 = channels_list
+                .into_iter()
+                .map(|c| {
+                    let class = match crate::channel_class::resolve(conn, c.id) {
+                        crate::channel_class::ChannelWriteClass::Plaintext => farder_crypto::event_log::ChannelClass::Plaintext,
+                        _ => farder_crypto::event_log::ChannelClass::E2ee,
+                    };
+                    ChannelInfoV2 { base: c, class }
+                })
+                .collect();
+            ok(ServerResponse::ServerInfoV2 {
+                name: String::new(),      // patched by connection handler
+                member_count,
+                channels: channels_v2,
+                categories: categories_list,
+                roles: roles_list,
+                owner_public_key: None,   // patched by connection handler
+                server_id: state.genesis.lock().unwrap().as_ref().map(|g| g.server_id()),
+            })
+        }
+
+        ServerRequest::FetchHistoryV2 { channel_id, before_id, limit } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // The SAME permission check as `FetchHistory` — the v2 surface is a
+            // wider encoding, never a wider authorization.
+            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::READ_MESSAGES) {
+                return err("missing READ_MESSAGES permission");
+            }
+            let limit = limit.min(500);
+            let msgs = messages::fetch_history_v2(conn, channel_id, before_id, limit, member)?;
+            ok(ServerResponse::HistoryV2 { messages: msgs })
+        }
+
+        ServerRequest::FetchWelcomes { channel_id, since_accept_seq } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // `member` is the AUTHENTICATED connection key. The request's
+            // `channel_id` can only narrow this; there is deliberately no
+            // recipient field, so no caller can ask for anyone else's Welcomes.
+            let (events, next_accept_seq, more) = crate::event_ingest::fetch_welcomes_for(
+                conn,
+                member,
+                channel_id,
+                since_accept_seq,
+            )?;
+            ok(ServerResponse::Welcomes { events, next_accept_seq, more })
+        }
+
+        ServerRequest::FetchKeyPackages { member: target, device } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // Membership-gated by the request gate at the top of `handle_request`
+            // (this variant is NOT in the bootstrap allow-list). KeyPackages are
+            // public WITHIN the server by design — a committer must be able to
+            // fetch the packages of the member it is adding.
+            let events = crate::event_ingest::fetch_key_packages(conn, &target, &device)?;
+            ok(ServerResponse::KeyPackages { events })
         }
 
         ServerRequest::GetMembershipStatus => {
@@ -1414,6 +1649,13 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::SEND_MESSAGES) {
                 return err("missing SEND_MESSAGES permission");
             }
+            // A thread off a sealed parent is created through the LEGACY path —
+            // i.e. a plaintext channel hanging under a sealed message, whose
+            // every post the host can read (spec Coexistence row 12). Refused
+            // this rung; E2EE thread groups are a later build.
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
+                return denied;
+            }
             let parent_channel = channels::get_channel(conn, msg.channel_id)?
                 .ok_or_else(|| anyhow::anyhow!("parent channel not found"))?;
             if parent_channel.channel_type == ChannelType::Thread {
@@ -1444,6 +1686,12 @@ pub fn handle_request(
             if !permissions::has(perms, permissions::READ_MESSAGES) {
                 return err("missing READ_MESSAGES permission");
             }
+            // `ReactionAdded { message_id, emoji, public_key }` would tell the
+            // host exactly WHO reacted WITH WHAT to WHICH sealed message — a
+            // content leak dressed as metadata (spec Coexistence row 11).
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
+                return denied;
+            }
             let inserted = crate::reactions::add_reaction(conn, message_id, member, &emoji, file_id)?;
             // A duplicate (INSERT OR IGNORE no-op) must NOT broadcast: phantom
             // ReactionAdded events made clients stack counts for re-clicks.
@@ -1463,6 +1711,11 @@ pub fn handle_request(
         ServerRequest::RemoveReaction { message_id, emoji, file_id } => {
             let msg = messages::get_message(conn, message_id, member)?
                 .ok_or_else(|| anyhow::anyhow!("message not found"))?;
+            // Symmetric with AddReaction: `ReactionRemoved` carries the same
+            // (who, what, which sealed message) triple.
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
+                return denied;
+            }
             crate::reactions::remove_reaction(conn, message_id, member, &emoji, file_id)?;
             ok_with(ServerResponse::Ok, vec![BroadcastEvent {
                 target: EventTarget::Subscribers(msg.channel_id),
@@ -2023,6 +2276,36 @@ pub fn handle_request(
                 None => return err("server is not running the event log (no genesis yet)"),
             };
 
+            // 1b. INGEST CAPS, before anything allocation-heavy. `LogState::apply`
+            //     runs on a CLONE of the whole fold state, so the clone is what a
+            //     cap breach would otherwise buy; and the fold checks no size caps
+            //     at all by design (sub-2 ambiguity #9). Blind: byte counts,
+            //     vector lengths and one clock comparison, nothing else.
+            if let Err(e) = crate::event_ingest::check_ingest_caps(&event) {
+                return err(&format!("event rejected: {}", e));
+            }
+
+            // 1c. STALE-EPOCH, before the fold. A commit that lost the epoch CAS is
+            //     an ACCEPTED no-op in the fold (Rung-3 replay determinism needs
+            //     every replica to fold a converged event set identically), but the
+            //     author's client must not believe it landed. Ingest bounces it with
+            //     a distinct, machine-readable code its resync loop keys on:
+            //     process winner -> rebuild -> resubmit. Never stored, so the fold's
+            //     no-op path is unreachable through ingest.
+            //
+            //     This runs BEFORE signature/authz, so an unauthenticated submitter
+            //     can distinguish "current epoch" from "not current". That leaks
+            //     nothing: the whole commit/Welcome stream is already public
+            //     server-wide by this rung's design (spec §"What is still visible"),
+            //     so the group's epoch is public log state, not a secret.
+            if let EventPayload::MlsCommit { channel_id, generation, epoch, .. } = &event.core.payload {
+                if let Some((cur_gen, cur_epoch)) = ls.mls_current_epoch(*channel_id) {
+                    if *generation != cur_gen || *epoch != cur_epoch {
+                        return err("stale-epoch");
+                    }
+                }
+            }
+
             // 2. Validate on a CLONE — apply runs the full envelope + authz; on
             //    error nothing is mutated and we reject.
             let mut trial = ls.clone();
@@ -2057,11 +2340,19 @@ pub fn handle_request(
                 None
             };
 
-            let derived_id = {
+            let (derived_id, created_class, tombstoned) = {
                 let tx = conn.unchecked_transaction()
                     .map_err(|e| anyhow::anyhow!("failed to begin tx: {}", e))?;
                 crate::event_ingest::store_event(&tx, &event)
                     .map_err(|e| anyhow::anyhow!("failed to store event: {}", e))?;
+                // `ChannelCreated` materializes its `channels` row — with its
+                // content class — inside THIS transaction, so the log and its
+                // mirror can never disagree across a crash, and any refusal here
+                // rolls back the stored event too (no channel row, no log advance).
+                let created_class = match crate::event_ingest::materialize_channel_created(&tx, &event) {
+                    Ok(c) => c,
+                    Err(e) => return err(&format!("event rejected: {}", e)),
+                };
                 let id = crate::event_ingest::derive_message_row(&tx, &event)
                     .map_err(|e| anyhow::anyhow!("failed to derive message: {}", e))?;
                 if let (Some(mid), Some(owner)) = (id, owner_pk.as_ref()) {
@@ -2072,8 +2363,23 @@ pub fn handle_request(
                     crate::attachments::redact_blob(&tx, &state.storage_dir, content_hash, &event.core.author)
                         .map_err(|e| anyhow::anyhow!("failed to redact attachment: {}", e))?;
                 }
+                // A sealed EDIT rewrites its target's ciphertext in place, and a
+                // tombstone HARD-DELETES its target's row. Both address the row
+                // through `messages.event_hash` and both REFUSE an unknown target,
+                // which rolls this transaction back — nothing stored, no log
+                // advance. That refusal is what bounds the fold's `tombstones` set
+                // and keeps `MessageEditedE2ee` from being a free write: the fold
+                // authorizes them on the send gates and leaves target existence +
+                // authorship to ingest, which owns the only per-message index.
+                if let Err(e) = crate::event_ingest::apply_sealed_edit(&tx, &event) {
+                    return err(&format!("event rejected: {}", e));
+                }
+                let tombstoned = match crate::event_ingest::apply_tombstone(&tx, &event) {
+                    Ok(t) => t,
+                    Err(e) => return err(&format!("event rejected: {}", e)),
+                };
                 tx.commit().map_err(|e| anyhow::anyhow!("failed to commit event: {}", e))?;
-                id
+                (id, created_class, tombstoned)
             };
 
             // 5. Commit the advanced authorization state in memory.
@@ -2090,6 +2396,25 @@ pub fn handle_request(
                         events.push(BroadcastEvent {
                             target: EventTarget::Subscribers(*channel_id),
                             event: ServerEvent::NewMessage { message: msg },
+                        });
+                    }
+                }
+            }
+
+            // A log-declared channel is announced to clients ONLY when it is
+            // plaintext: `ChannelInfo` has no class field and cannot gain one
+            // without breaking every un-updated client's decode of plaintext
+            // channels too (spec M2). Announcing a sealed channel through it would
+            // hand v1 clients a normal-looking channel with a working composer —
+            // worse than not seeing it. The E2EE announcement rides
+            // `ChannelInfoV2` (Task 5); until then an E2EE channel is simply not
+            // announced, which is the fail-closed side.
+            if created_class == Some(farder_crypto::event_log::ChannelClass::Plaintext) {
+                if let EventPayload::ChannelCreated { channel_id, .. } = &event.core.payload {
+                    if let Some(channel) = channels::get_channel(conn, *channel_id)? {
+                        events.push(BroadcastEvent {
+                            target: EventTarget::All,
+                            event: ServerEvent::ChannelCreated { channel },
                         });
                     }
                 }
@@ -2119,7 +2444,34 @@ pub fn handle_request(
                 });
             }
 
-            ok_with(ServerResponse::EventAccepted { event_hash: event.hash(), timestamp }, events)
+            // A tombstone takes effect live, through the SHIPPED `MessageDeleted`
+            // event — no new variant, so v1 clients act on it too. The payload is
+            // an id and a channel, both already public metadata, so it is
+            // content-blind in a sealed channel exactly as it is in a plaintext
+            // one. Without this the moderator's only tool would appear to do
+            // nothing until every client reconnected.
+            //
+            // Sealed POSTS and sealed EDITS are deliberately NOT broadcast here:
+            // `NewMessage`/`MessageEdited` carry a `String` body, and stuffing
+            // ciphertext into one would ship garbage to every v1 client. Their
+            // delivery rides the v2 surfaces (Task 5).
+            let mut orphaned_file_ids = Vec::new();
+            if let Some(t) = tombstoned {
+                orphaned_file_ids = t.orphaned_file_ids;
+                events.push(BroadcastEvent {
+                    target: EventTarget::Subscribers(t.channel_id),
+                    event: ServerEvent::MessageDeleted {
+                        message_id: t.message_id,
+                        channel_id: t.channel_id,
+                    },
+                });
+            }
+
+            Ok(HandleResult {
+                response: ServerResponse::EventAccepted { event_hash: event.hash(), timestamp },
+                events,
+                orphaned_file_ids,
+            })
         }
 
         ServerRequest::AddBot { coin_id, label } => {
@@ -2242,6 +2594,13 @@ pub fn handle_request(
             }
             if channels::get_channel(conn, channel_id)?.is_none() {
                 return err("channel not found");
+            }
+            // An external webhook sender has no group key, so anything it posts
+            // is host-readable by construction (spec Coexistence row 3).
+            // Refused at CREATE here and again at DELIVERY (`webhooks::deliver`)
+            // so an already-issued token cannot survive a class change.
+            if let Some(denied) = require_plaintext_channel(conn, state, member, channel_id) {
+                return denied;
             }
             let name = name.trim().to_string();
             if name.is_empty() || name.len() > 64 {
@@ -2389,7 +2748,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             let info = crate::polls::build_info(conn, &row)?;
@@ -2408,7 +2767,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             // Closed check is exact even before the sweeper ticks: past closes_at counts.
@@ -2441,7 +2800,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             let now = crate::db::now() as i64;
@@ -2470,7 +2829,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("poll not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("poll not found");
             }
             if row.closed_at.is_some() {
@@ -2509,7 +2868,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             let info = crate::giveaways::build_info(conn, &row)?;
@@ -2528,7 +2887,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             if row.status == "cancelled" {
@@ -2565,7 +2924,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             if row.status == "cancelled" {
@@ -2597,7 +2956,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             // Authz: creator OR MANAGE_SERVER.
@@ -2632,7 +2991,7 @@ pub fn handle_request(
                 Some(r) => r,
                 None => return err("giveaway not found"),
             };
-            if !channel_visible(conn, member, row.channel_id as u64, is_owner)? {
+            if !widget_channel_visible(conn, member, row.channel_id as u64, is_owner)? {
                 return err("giveaway not found");
             }
             // Authz: creator OR MANAGE_SERVER.
@@ -2905,7 +3264,7 @@ pub fn handle_request(
             // channel and a channel the caller can't see (channel_visible
             // returns false for channel-gone) — channel ids are not an
             // existence oracle.
-            if !channel_visible(conn, member, channel_id, is_owner)? {
+            if !widget_channel_visible(conn, member, channel_id, is_owner)? {
                 return err("channel not found");
             }
             const ACTIVE_WIDGETS_CAP: usize = 20;
@@ -3049,6 +3408,22 @@ mod tests {
 
     fn fake_state() -> Arc<ServerState> {
         Arc::new(ServerState::new_for_test().unwrap())
+    }
+
+    /// A state in which `who` has negotiated v2.
+    ///
+    /// The class-gate tests use this deliberately: refusing a v1 client is the
+    /// easy half. The property worth pinning is that a FULLY CAPABLE, v2-aware
+    /// client still cannot write server-readable content into a sealed channel —
+    /// the class gate is about the channel, not about the client's vintage.
+    fn fake_state_v2(who: &PublicKey) -> Arc<ServerState> {
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        state
+            .client_protocol
+            .write()
+            .unwrap()
+            .insert(*who.as_bytes(), farder_protocol::server::SERVER_PROTOCOL_VERSION);
+        state
     }
 
     // -----------------------------------------------------------------------
@@ -8123,5 +8498,1698 @@ mod tests {
             ServerRequest::ListActiveWidgets { channel_id }, "", &fake_state()).unwrap();
         let (_p, _g, events) = active_widgets(r);
         assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![info.id]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2 — request-layer class refusals (spec rev 2, C8/F1 requirement 2)
+    //
+    // Every test here drives the REAL request path and asserts BOTH that the
+    // request is refused AND that the channel still holds zero message rows.
+    // "It returned an error" is not the claim; "no server-readable content
+    // landed" is.
+    // -----------------------------------------------------------------------
+
+    use crate::channel_class::{ChannelWriteClass, E2EE_REFUSED};
+    use farder_crypto::event_log::ChannelClass;
+
+    /// A channel whose mirrored class is `e2ee`, exactly as `ChannelCreated`
+    /// ingest will leave it (Task 3).
+    fn make_e2ee_channel(conn: &Connection) -> u64 {
+        let id = channels::create_channel(conn, "sealed", ChannelType::Text, None, 0).unwrap();
+        crate::channel_class::set_class(conn, id, ChannelClass::E2ee).unwrap();
+        assert_eq!(crate::channel_class::resolve(conn, id), ChannelWriteClass::E2ee);
+        id
+    }
+
+    fn message_count(conn: &Connection, channel_id: u64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+            rusqlite::params![channel_id as i64],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn send_message_is_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::SendMessage {
+                channel_id: sealed,
+                content: "plaintext the host could read".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "",
+            &fake_state_v2(&owner),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        assert!(r.events.is_empty(), "a refused send broadcasts nothing");
+        assert_eq!(message_count(&conn, sealed), 0);
+
+        // Control: the SAME request in a plaintext channel still works, so the
+        // gate is class-driven and not a blanket break.
+        let plain = make_channel(&conn);
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::SendMessage {
+                channel_id: plain,
+                content: "fine here".to_string(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            "",
+            &fake_state_v2(&owner),
+        )
+        .unwrap();
+        assert!(matches!(r.response, ServerResponse::MessageSent { .. }));
+        assert_eq!(message_count(&conn, plain), 1);
+    }
+
+    /// A channel that flips to E2EE with a legacy row already in it: the edit is
+    /// refused and the STORED CONTENT IS UNCHANGED (the observation that matters
+    /// — an accepted edit would have rewritten `messages.content` in place).
+    #[test]
+    fn edit_message_is_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let id = messages::insert_message(&conn, channel_id, &owner, "original", None).unwrap();
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::EditMessage {
+                message_id: id,
+                new_content: "rewritten in the clear".to_string(),
+            },
+            "",
+            &fake_state_v2(&owner),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        assert!(r.events.is_empty());
+
+        let stored: String = conn
+            .query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                rusqlite::params![id as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "original", "a refused edit must not touch the row");
+        let edited: Option<i64> = conn
+            .query_row(
+                "SELECT edited_at FROM messages WHERE id = ?1",
+                rusqlite::params![id as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(edited.is_none(), "no edit stamp for a refused edit");
+    }
+
+    /// `ReactionAdded { message_id, emoji, public_key }` tells the host who
+    /// reacted with what to which sealed message. Both arms refuse, and no
+    /// reaction row is stored.
+    #[test]
+    fn add_and_remove_reaction_are_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let id = messages::insert_message(&conn, channel_id, &owner, "hi", None).unwrap();
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        for req in [
+            ServerRequest::AddReaction {
+                message_id: id,
+                emoji: "🔥".to_string(),
+                file_id: None,
+            },
+            ServerRequest::RemoveReaction {
+                message_id: id,
+                emoji: "🔥".to_string(),
+                file_id: None,
+            },
+        ] {
+            let r = handle_request(&conn, &owner, true, req, "", &fake_state_v2(&owner)).unwrap();
+            assert_eq!(err_reason(&r), E2EE_REFUSED);
+            assert!(r.events.is_empty(), "a refused reaction broadcasts nothing");
+        }
+        let reactions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM reactions WHERE message_id = ?1",
+                rusqlite::params![id as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reactions, 0, "no reactor is recorded against a sealed message");
+    }
+
+    /// A thread under a sealed parent would be a PLAINTEXT channel hanging off a
+    /// sealed message. Refused, and no child channel row is created.
+    #[test]
+    fn thread_create_is_refused_under_an_e2ee_parent() {
+        let (conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let id = messages::insert_message(&conn, channel_id, &owner, "parent", None).unwrap();
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0))
+            .unwrap();
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::CreateThread {
+                message_id: id,
+                name: Some("leaky thread".to_string()),
+            },
+            "",
+            &fake_state_v2(&owner),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        assert!(r.events.is_empty());
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, after, "no thread channel is created");
+        assert!(crate::channels::get_thread_for_message(&conn, id).unwrap().is_none());
+    }
+
+    /// All SIX `RunCommand` kinds, refused by the one gate
+    /// (`check_run_command_channel_auth`) that `connection.rs` calls before it
+    /// even looks the command up — so the refusal cannot depend on the kind.
+    ///
+    /// `reminder` is the case the spec's C8 enumeration has no idea exists: it
+    /// posts NOTHING, so the choke point would never see it, yet `reminders.text`
+    /// is stored server-side in plaintext.
+    #[test]
+    fn every_run_command_kind_is_refused_in_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+        let plain = make_channel(&conn);
+
+        for kind in ["text", "api", "poll", "giveaway", "event", "reminder"] {
+            // Register a REAL command of this kind so the case is not hypothetical.
+            let r = handle_request(
+                &conn,
+                &owner,
+                true,
+                ServerRequest::AddCommand {
+                    name: format!("cmd {kind}"),
+                    trigger: kind.to_string(),
+                    description: String::new(),
+                    kind: kind.to_string(),
+                    body_text: Some("body".to_string()),
+                    url_template: Some("https://example.com/x".to_string()),
+                    value_path: Some("a.b".to_string()),
+                    response_template: None,
+                    unit: None,
+                },
+                "",
+                &fake_state_v2(&owner),
+            )
+            .unwrap();
+            assert!(matches!(r.response, ServerResponse::Ok), "AddCommand {kind}");
+            assert!(crate::commands::find_by_trigger(&conn, kind).unwrap().is_some());
+
+            // The gate is kind-agnostic BY CONSTRUCTION: it runs before the
+            // trigger lookup, so every kind gets the same answer.
+            assert_eq!(
+                check_run_command_channel_auth(&conn, &owner, true, sealed).unwrap(),
+                Some(E2EE_REFUSED.to_string()),
+                "/{kind} must be refused in an E2EE channel"
+            );
+            assert_eq!(
+                check_run_command_channel_auth(&conn, &owner, true, plain).unwrap(),
+                None,
+                "/{kind} must still work in a plaintext channel"
+            );
+        }
+
+        assert_eq!(message_count(&conn, sealed), 0);
+        let reminders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reminders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reminders, 0, "no plaintext reminder text is stored");
+    }
+
+    #[test]
+    fn webhook_create_is_refused_for_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::CreateWebhook {
+                channel_id: sealed,
+                name: "CI".to_string(),
+            },
+            "",
+            &fake_state_v2(&owner),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), E2EE_REFUSED);
+        let hooks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM webhooks WHERE channel_id = ?1",
+                rusqlite::params![sealed as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hooks, 0, "no token is ever minted for a sealed channel");
+    }
+
+    /// Every widget request refuses in an E2EE channel using its EXISTING opaque
+    /// not-found string. A distinguishable "encrypted channel" answer would turn
+    /// a widget id into a channel classifier, so the refusal must be
+    /// byte-identical to the answer for a widget that does not exist at all.
+    #[test]
+    fn widget_interactions_in_an_e2ee_channel_refuse_without_an_existence_oracle() {
+        let (mut conn, owner) = setup();
+        let channel_id = make_channel(&conn);
+        let now = crate::db::now();
+
+        // Build one of each widget kind while the channel is still plaintext,
+        // then flip the class — the strictly harder case than "create refused".
+        let poll_id = crate::polls::create(
+            &conn,
+            channel_id as i64,
+            1,
+            &owner,
+            "q?",
+            &["a".to_string(), "b".to_string()],
+            None,
+        )
+        .unwrap();
+        let giveaway_id = crate::giveaways::create(
+            &conn,
+            channel_id as i64,
+            1,
+            &owner,
+            "prize",
+            now as i64 + 10_000,
+        )
+        .unwrap();
+        let parsed = crate::channel_events::parse_event_args("Party | 3d").unwrap();
+        let (_m, event_info) =
+            crate::channel_events::create_event_card(&mut conn, channel_id, &owner, &parsed, now)
+                .unwrap();
+        let event_id = event_info.id;
+
+        crate::channel_class::set_class(&conn, channel_id, ChannelClass::E2ee).unwrap();
+
+        // (request, the opaque string it must return) — each is the SAME string
+        // the arm returns for a nonexistent id.
+        let cases: Vec<(ServerRequest, &str)> = vec![
+            (ServerRequest::GetPoll { poll_id }, "poll not found"),
+            (
+                ServerRequest::VotePoll { poll_id, option_index: 0 },
+                "poll not found",
+            ),
+            (ServerRequest::RetractVote { poll_id }, "poll not found"),
+            (ServerRequest::ClosePoll { poll_id }, "poll not found"),
+            (ServerRequest::GetGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::EnterGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::LeaveGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::CancelGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::RerollGiveaway { giveaway_id }, "giveaway not found"),
+            (ServerRequest::GetEvent { event_id }, EVENT_NOT_FOUND),
+            (
+                ServerRequest::RsvpEvent { event_id, response: "going".to_string() },
+                EVENT_NOT_FOUND,
+            ),
+            (ServerRequest::ClearRsvp { event_id }, EVENT_NOT_FOUND),
+            (ServerRequest::CancelEvent { event_id }, EVENT_NOT_FOUND),
+            (
+                ServerRequest::EditEvent {
+                    event_id,
+                    title: "New".to_string(),
+                    description: None,
+                    location: None,
+                    starts_at: now + 100_000,
+                    remind_lead: None,
+                },
+                EVENT_NOT_FOUND,
+            ),
+            (ServerRequest::ListActiveWidgets { channel_id }, "channel not found"),
+        ];
+
+        for (req, opaque) in cases {
+            let label = format!("{req:?}");
+            let r = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
+            let reason = err_reason(&r);
+            assert_eq!(reason, opaque, "{label} must return its EXISTING opaque error");
+            assert!(
+                !reason.contains(E2EE_REFUSED),
+                "{label} leaked the channel class: {reason}"
+            );
+            assert!(r.events.is_empty(), "{label} must broadcast nothing");
+        }
+
+        // Nothing was mutated: no vote, no entry, no RSVP, nothing closed.
+        assert!(crate::polls::my_vote(&conn, poll_id, &owner).unwrap().is_none());
+        assert!(crate::polls::get(&conn, poll_id).unwrap().unwrap().closed_at.is_none());
+        assert_eq!(
+            crate::giveaways::get(&conn, giveaway_id).unwrap().unwrap().status,
+            "open"
+        );
+        let row = crate::channel_events::get(&conn, event_id).unwrap().unwrap();
+        assert_eq!(row.status, "upcoming");
+        assert_eq!(row.title, "Party", "a refused EditEvent rewrote nothing");
+    }
+
+    /// The V1 read surface never lists a sealed channel — for ANY caller.
+    ///
+    /// `ChannelInfo` has no class field, so a client handed a sealed channel here
+    /// could not tell it was sealed and would render a working composer over it.
+    /// Filtering unconditionally (not merely for un-negotiated connections) means
+    /// a v2 client that forgets to use `GetServerInfoV2` is still safe.
+    #[test]
+    fn the_v1_server_info_surface_never_lists_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let plain = make_channel(&conn);
+        let sealed = make_e2ee_channel(&conn);
+
+        for (label, state) in [
+            ("un-negotiated (v1)", fake_state()),
+            ("negotiated v2", fake_state_v2(&owner)),
+        ] {
+            let r =
+                handle_request(&conn, &owner, true, ServerRequest::GetServerInfo, "", &state)
+                    .unwrap();
+            let ServerResponse::ServerInfo { channels, .. } = r.response else {
+                panic!("{label}: expected ServerInfo");
+            };
+            let ids: Vec<u64> = channels.iter().map(|c| c.id).collect();
+            assert!(ids.contains(&plain), "{label}: the plaintext channel vanished");
+            assert!(
+                !ids.contains(&sealed),
+                "{label}: the V1 surface leaked a sealed channel: {ids:?}"
+            );
+        }
+    }
+
+    /// `GetServerInfoV2` is the surface that CAN carry a class — and it needs a
+    /// negotiated v2 connection to reach.
+    #[test]
+    fn the_v2_server_info_surface_carries_classes_and_needs_negotiation() {
+        let (conn, owner) = setup();
+        let plain = make_channel(&conn);
+        let sealed = make_e2ee_channel(&conn);
+
+        // v1 cannot reach it at all.
+        let r =
+            handle_request(&conn, &owner, true, ServerRequest::GetServerInfoV2, "", &fake_state())
+                .unwrap();
+        assert_eq!(err_reason(&r), UPGRADE_REQUIRED);
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::GetServerInfoV2,
+            "",
+            &fake_state_v2(&owner),
+        )
+        .unwrap();
+        let ServerResponse::ServerInfoV2 { channels, .. } = r.response else {
+            panic!("expected ServerInfoV2");
+        };
+        let class_of = |id: u64| {
+            channels.iter().find(|c| c.base.id == id).map(|c| c.class).unwrap_or_else(|| {
+                panic!("channel {id} missing from ServerInfoV2")
+            })
+        };
+        assert_eq!(class_of(plain), farder_crypto::event_log::ChannelClass::Plaintext);
+        assert_eq!(class_of(sealed), farder_crypto::event_log::ChannelClass::E2ee);
+    }
+
+    /// A v1 connection naming a sealed channel is told to upgrade rather than
+    /// handed the bare class refusal.
+    ///
+    /// **This does not reopen the existence oracle.** The assertion that matters
+    /// is the second one: a channel that does NOT EXIST answers identically, so a
+    /// v1 client learns "not for you", never "this id exists and is sealed".
+    #[test]
+    fn a_v1_request_naming_an_e2ee_channel_gets_the_upgrade_error() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+        let nonexistent = 999_999_u64;
+
+        let send = |channel_id: u64, state: &Arc<ServerState>| {
+            let r = handle_request(
+                &conn,
+                &owner,
+                true,
+                ServerRequest::SendMessage {
+                    channel_id,
+                    content: "x".to_string(),
+                    reply_to: None,
+                    attachment_ids: vec![],
+                },
+                "",
+                state,
+            )
+            .unwrap();
+            err_reason(&r)
+        };
+
+        let v1 = fake_state();
+        assert_eq!(send(sealed, &v1), UPGRADE_REQUIRED);
+        assert_eq!(
+            send(nonexistent, &v1),
+            UPGRADE_REQUIRED,
+            "a sealed channel and a nonexistent one must answer IDENTICALLY"
+        );
+
+        // A v2 client gets the class refusal, and the same non-oracle holds there.
+        let v2 = fake_state_v2(&owner);
+        assert_eq!(send(sealed, &v2), E2EE_REFUSED);
+        assert_eq!(send(nonexistent, &v2), E2EE_REFUSED);
+    }
+
+    /// The new fetch surfaces are membership-gated, need v2, and — for Welcomes —
+    /// serve the AUTHENTICATED connection key's own events and nobody else's.
+    #[test]
+    fn new_fetch_surfaces_are_membership_gated_and_actor_is_the_connection_key() {
+        let (conn, owner) = setup();
+        let stranger = Keypair::generate().public_key();
+
+        let reqs = || {
+            vec![
+                ServerRequest::FetchWelcomes { channel_id: None, since_accept_seq: 0 },
+                ServerRequest::FetchKeyPackages {
+                    member: owner.clone(),
+                    device: "dev".to_string(),
+                },
+                ServerRequest::GetServerInfoV2,
+                ServerRequest::FetchHistoryV2 { channel_id: 1, before_id: None, limit: 10 },
+            ]
+        };
+
+        // 1. None of the four is in the bootstrap allow-list.
+        for req in reqs() {
+            assert!(
+                request_requires_membership(&req),
+                "{req:?} must be membership-gated"
+            );
+        }
+
+        // 2. All four refuse an un-negotiated (v1) connection.
+        for req in reqs() {
+            let label = format!("{req:?}");
+            let r = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
+            assert_eq!(err_reason(&r), UPGRADE_REQUIRED, "{label}");
+        }
+
+        // 3. `FetchWelcomes` has no recipient field AT ALL — the only way to name
+        //    a recipient is to BE one. With no Welcomes stored, both the owner and
+        //    a stranger get an empty list; neither can ask for the other's.
+        let state = fake_state_v2(&owner);
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::FetchWelcomes { channel_id: None, since_accept_seq: 0 },
+            "",
+            &state,
+        )
+        .unwrap();
+        let ServerResponse::Welcomes { events, next_accept_seq, more } = r.response else {
+            panic!("expected Welcomes");
+        };
+        assert!(events.is_empty());
+        // The cursor is what makes paging possible at all: `accept_seq` appears
+        // nowhere in the returned event bytes, so without it a client could only
+        // ever ask from 0 and could never reach its newest Welcome.
+        assert_eq!(next_accept_seq, 0, "no rows scanned, so the cursor stands still");
+        assert!(!more);
+
+        // The stranger has not negotiated, so it is refused before it reads
+        // anything — the version gate and the membership gate stack.
+        let r = handle_request(
+            &conn,
+            &stranger,
+            false,
+            ServerRequest::FetchWelcomes { channel_id: None, since_accept_seq: 0 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), UPGRADE_REQUIRED);
+    }
+
+    /// `NegotiateProtocol` records ONLY the caller's own slot, keyed by the
+    /// authenticated connection key.
+    #[test]
+    fn negotiate_protocol_records_only_the_callers_own_version() {
+        let (conn, owner) = setup();
+        let other = Keypair::generate().public_key();
+        let state = fake_state();
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::NegotiateProtocol { client_version: 2 },
+            "",
+            &state,
+        )
+        .unwrap();
+        let ServerResponse::ProtocolVersion { server_version, min_client_version_for_e2ee } =
+            r.response
+        else {
+            panic!("expected ProtocolVersion");
+        };
+        assert_eq!(server_version, farder_protocol::server::SERVER_PROTOCOL_VERSION);
+        assert_eq!(
+            min_client_version_for_e2ee,
+            farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
+        );
+
+        assert!(connection_speaks_v2(&state, &owner));
+        assert!(
+            !connection_speaks_v2(&state, &other),
+            "negotiating on one connection must not upgrade another"
+        );
+
+        // A client may also downgrade itself; the server believes the claim in
+        // the safe direction without argument.
+        handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::NegotiateProtocol { client_version: 1 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert!(!connection_speaks_v2(&state, &owner));
+    }
+
+    /// Default-deny, stated exhaustively. The `match` below is EXHAUSTIVE over
+    /// `ServerRequest`, so a newly added variant fails to COMPILE until someone
+    /// classifies it — which is the point: the bootstrap allow-list must never
+    /// grow by accident.
+    #[test]
+    fn no_new_request_variant_escapes_default_deny_request_requires_membership() {
+        fn expected(req: &ServerRequest) -> bool {
+            match req {
+                // THE BOOTSTRAP ALLOW-LIST — exactly five, and growing it is a
+                // deliberate, reviewed act. `NegotiateProtocol` is the ONLY
+                // variant Task 5 added to it: a joiner must be able to declare
+                // its version before it is a member, and it reads nothing.
+                ServerRequest::SubmitEvent { .. }
+                | ServerRequest::ResolveInvite { .. }
+                | ServerRequest::GetServerInfo
+                | ServerRequest::GetMembershipStatus
+                | ServerRequest::NegotiateProtocol { .. } => false,
+                // The other four v2 surfaces are GATED like everything else.
+                ServerRequest::FetchWelcomes { .. }
+                | ServerRequest::FetchKeyPackages { .. }
+                | ServerRequest::GetServerInfoV2
+                | ServerRequest::FetchHistoryV2 { .. } => true,
+                // Everything else is gated. Enumerated, not `_`-defaulted.
+                ServerRequest::AddBot { .. }
+                | ServerRequest::AddBotAlert { .. }
+                | ServerRequest::AddCommand { .. }
+                | ServerRequest::AddCustomBot { .. }
+                | ServerRequest::AddReaction { .. }
+                | ServerRequest::AssignRole { .. }
+                | ServerRequest::BanMember { .. }
+                | ServerRequest::BlockUser { .. }
+                | ServerRequest::CancelDeletion
+                | ServerRequest::CancelEvent { .. }
+                | ServerRequest::CancelGiveaway { .. }
+                | ServerRequest::CancelReminder { .. }
+                | ServerRequest::ClearRsvp { .. }
+                | ServerRequest::ClosePoll { .. }
+                | ServerRequest::CreateCategory { .. }
+                | ServerRequest::CreateChannel { .. }
+                | ServerRequest::CreateInvite { .. }
+                | ServerRequest::CreateRole { .. }
+                | ServerRequest::CreateThread { .. }
+                | ServerRequest::CreateWebhook { .. }
+                | ServerRequest::DeleteCategory { .. }
+                | ServerRequest::DeleteChannel { .. }
+                | ServerRequest::DeleteCommand { .. }
+                | ServerRequest::DeleteMessage { .. }
+                | ServerRequest::DeleteRole { .. }
+                | ServerRequest::DeleteWebhook { .. }
+                | ServerRequest::DisableTrack { .. }
+                | ServerRequest::EditEvent { .. }
+                | ServerRequest::EditMessage { .. }
+                | ServerRequest::EnableTrack { .. }
+                | ServerRequest::EnterGiveaway { .. }
+                | ServerRequest::FetchHistory { .. }
+                | ServerRequest::FetchUrl { .. }
+                | ServerRequest::GetBotPollInterval
+                | ServerRequest::GetDeletionStatus
+                | ServerRequest::GetEvent { .. }
+                | ServerRequest::GetGiveaway { .. }
+                | ServerRequest::GetMediaState { .. }
+                | ServerRequest::GetMemberProfile { .. }
+                | ServerRequest::GetMembers
+                | ServerRequest::GetPendingMembers
+                | ServerRequest::GetPoll { .. }
+                | ServerRequest::JoinChannelMedia { .. }
+                | ServerRequest::JoinStream { .. }
+                | ServerRequest::KickMember { .. }
+                | ServerRequest::LeaveChannelMedia { .. }
+                | ServerRequest::LeaveGiveaway { .. }
+                | ServerRequest::LeaveStream
+                | ServerRequest::ListActiveWidgets { .. }
+                | ServerRequest::ListAuditEvents { .. }
+                | ServerRequest::ListBanned
+                | ServerRequest::ListBotAlerts { .. }
+                | ServerRequest::ListCommands {}
+                | ServerRequest::ListDms
+                | ServerRequest::ListMyReminders
+                | ServerRequest::ListMySubscriptions
+                | ServerRequest::ListWebhooks { .. }
+                | ServerRequest::OfferStreamKey { .. }
+                | ServerRequest::OpenDm { .. }
+                | ServerRequest::PinMessage { .. }
+                | ServerRequest::RegenerateWebhookToken { .. }
+                | ServerRequest::RemoveBot { .. }
+                | ServerRequest::RemoveBotAlert { .. }
+                | ServerRequest::RemoveReaction { .. }
+                | ServerRequest::RemoveRole { .. }
+                | ServerRequest::RemoveTimeout { .. }
+                | ServerRequest::RequestDeletion
+                | ServerRequest::RerollGiveaway { .. }
+                | ServerRequest::RetractVote { .. }
+                | ServerRequest::RsvpEvent { .. }
+                | ServerRequest::RunCommand { .. }
+                | ServerRequest::Search { .. }
+                | ServerRequest::SendMessage { .. }
+                | ServerRequest::SetBotPollInterval { .. }
+                | ServerRequest::SetCategoryOverride { .. }
+                | ServerRequest::SetChannelOverride { .. }
+                | ServerRequest::SetDeafen { .. }
+                | ServerRequest::SetMute { .. }
+                | ServerRequest::Subscribe { .. }
+                | ServerRequest::SubscribeBot { .. }
+                | ServerRequest::TimeoutMember { .. }
+                | ServerRequest::Typing { .. }
+                | ServerRequest::UnbanMember { .. }
+                | ServerRequest::UnblockUser { .. }
+                | ServerRequest::UnpinMessage { .. }
+                | ServerRequest::UnsubscribeBot { .. }
+                | ServerRequest::UpdateCategory { .. }
+                | ServerRequest::UpdateChannel { .. }
+                | ServerRequest::UpdatePresence { .. }
+                | ServerRequest::UpdateProfile { .. }
+                | ServerRequest::UpdateRole { .. }
+                | ServerRequest::VotePoll { .. } => true,
+            }
+        }
+
+        let pk = Keypair::generate().public_key();
+        // Every request this sub-project gates, plus all four bootstrap
+        // variants, checked against the classifier above.
+        let samples: Vec<ServerRequest> = vec![
+            ServerRequest::GetServerInfo,
+            ServerRequest::GetMembershipStatus,
+            ServerRequest::ResolveInvite { code: "x".into() },
+            ServerRequest::SendMessage {
+                channel_id: 1,
+                content: String::new(),
+                reply_to: None,
+                attachment_ids: vec![],
+            },
+            ServerRequest::EditMessage { message_id: 1, new_content: String::new() },
+            ServerRequest::AddReaction { message_id: 1, emoji: "x".into(), file_id: None },
+            ServerRequest::RemoveReaction { message_id: 1, emoji: "x".into(), file_id: None },
+            ServerRequest::CreateThread { message_id: 1, name: None },
+            ServerRequest::CreateWebhook { channel_id: 1, name: "w".into() },
+            ServerRequest::FetchUrl { url: "https://e".into(), channel_id: 1 },
+            ServerRequest::RunCommand {
+                trigger: "t".into(),
+                channel_id: 1,
+                args: String::new(),
+            },
+            ServerRequest::GetPoll { poll_id: 1 },
+            ServerRequest::VotePoll { poll_id: 1, option_index: 0 },
+            ServerRequest::RetractVote { poll_id: 1 },
+            ServerRequest::ClosePoll { poll_id: 1 },
+            ServerRequest::GetGiveaway { giveaway_id: 1 },
+            ServerRequest::EnterGiveaway { giveaway_id: 1 },
+            ServerRequest::LeaveGiveaway { giveaway_id: 1 },
+            ServerRequest::CancelGiveaway { giveaway_id: 1 },
+            ServerRequest::RerollGiveaway { giveaway_id: 1 },
+            ServerRequest::GetEvent { event_id: 1 },
+            ServerRequest::RsvpEvent { event_id: 1, response: "going".into() },
+            ServerRequest::ClearRsvp { event_id: 1 },
+            ServerRequest::CancelEvent { event_id: 1 },
+            ServerRequest::ListActiveWidgets { channel_id: 1 },
+            ServerRequest::ListMyReminders,
+            ServerRequest::CancelReminder { reminder_id: 1 },
+            ServerRequest::GetMembers,
+            ServerRequest::AssignRole { member_key: pk.clone(), role_id: 1 },
+        ];
+        for req in &samples {
+            assert_eq!(
+                request_requires_membership(req),
+                expected(req),
+                "default-deny drift for {req:?}"
+            );
+        }
+        // The allow-list is exactly four, stated positively.
+        assert_eq!(
+            samples.iter().filter(|r| !request_requires_membership(r)).count(),
+            3,
+            "only the three bootstrap variants in this sample may be ungated \
+             (SubmitEvent is the fourth and is not sampled here)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2 — INGEST: caps, stale-epoch, timestamp bound, and the atomic
+    // `ChannelCreated` -> `channels` row materialization (spec "Server changes"
+    // + "Size caps" M4/F8 + Ordering + `crypto.md`'s sub-3 residual).
+    //
+    // Every test here drives the REAL `SubmitEvent` arm. A refusal is only half
+    // the claim; each also asserts what did NOT happen — no stored event, no
+    // channel row, no in-memory log advance.
+    // -----------------------------------------------------------------------
+
+    use farder_crypto::event_log::{
+        DeviceCert, Event, EventPayload as EP, Genesis, E2EE_CHANNEL_ID_FLOOR,
+        MAX_E2EE_CIPHERTEXT_BYTES, MAX_EVENT_FUTURE_SKEW_SECS,
+    };
+    use farder_crypto::event_log_state::LogState;
+    use rusqlite::OptionalExtension as _;
+
+    /// A log-mode server with the owner registered, its device authorized, and a
+    /// live `LogState` — i.e. the only shape on which Rung-2 ingest is reachable
+    /// at all (Q8: fresh servers only).
+    struct LogFixture {
+        state: Arc<ServerState>,
+        owner: Keypair,
+        dev: Keypair,
+        g: Genesis,
+        head: Event,
+    }
+
+    impl LogFixture {
+        fn new() -> Self {
+            let state = fake_state();
+            let owner = Keypair::generate();
+            let dev = Keypair::generate();
+            let g = Genesis {
+                version: 1,
+                name: "t".into(),
+                owner: owner.public_key(),
+                created_at: 1,
+                nonce: [0u8; 16],
+            };
+            {
+                let conn = state.db.lock().unwrap();
+                let everyone = members::create_role(
+                    &conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false,
+                )
+                .unwrap();
+                members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+                members::assign_role(&conn, &owner.public_key(), everyone).unwrap();
+                crate::event_ingest::save_genesis(&conn, &g).unwrap();
+            }
+            *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+            *state.genesis.lock().unwrap() = Some(g.clone());
+
+            let head = Event::next(
+                &dev,
+                owner.public_key(),
+                g.server_id(),
+                None,
+                0,
+                1,
+                EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &dev.public_key(), 1) },
+            );
+            let mut f = Self { state, owner, dev, g, head: head.clone() };
+            let state = f.state.clone();
+            let conn = state.db.lock().unwrap();
+            f.accept(&conn, &head);
+            drop(conn);
+            f
+        }
+
+        /// Sign the next event on the owner-device chain. A refused event does
+        /// not consume the chain, so `head` only advances on acceptance.
+        fn sign(&self, ts: u64, payload: EP) -> Event {
+            Event::next(
+                &self.dev,
+                self.owner.public_key(),
+                self.g.server_id(),
+                Some(&self.head),
+                self.head.core.lamport,
+                ts,
+                payload,
+            )
+        }
+
+        fn submit(&self, conn: &Connection, event: &Event) -> HandleResult {
+            handle_request(
+                conn,
+                &self.owner.public_key(),
+                true,
+                ServerRequest::SubmitEvent { event: event.clone() },
+                "",
+                &self.state,
+            )
+            .unwrap()
+        }
+
+        /// Submit and require acceptance, advancing the chain head.
+        fn accept(&mut self, conn: &Connection, event: &Event) -> HandleResult {
+            let r = self.submit(conn, event);
+            match &r.response {
+                ServerResponse::EventAccepted { .. } => {}
+                other => panic!("expected EventAccepted, got {other:?}"),
+            }
+            self.head = event.clone();
+            r
+        }
+
+        fn log_pos(&self) -> u64 {
+            self.state.log_state.lock().unwrap().as_ref().unwrap().log_pos()
+        }
+
+        fn class_in_log(&self, channel_id: u64) -> Option<ChannelClass> {
+            self.state
+                .log_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .channel_class(channel_id)
+        }
+
+        /// A `ChannelCreated` the fold will authorize (owner-authored, fresh id).
+        fn channel_created(&self, channel_id: u64, class: ChannelClass) -> Event {
+            self.sign(
+                now_ts(),
+                EP::ChannelCreated {
+                    channel_id,
+                    name: "sealed".into(),
+                    kind: "text".into(),
+                    class,
+                    parent: None,
+                },
+            )
+        }
+    }
+
+    fn now_ts() -> u64 {
+        crate::db::now()
+    }
+
+    fn event_is_stored(conn: &Connection, event: &Event) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM events WHERE event_hash = ?1",
+            rusqlite::params![event.hash()],
+            |_| Ok(true),
+        )
+        .optional()
+        .unwrap()
+        .unwrap_or(false)
+    }
+
+    fn channel_row_class(conn: &Connection, channel_id: u64) -> Option<String> {
+        conn.query_row(
+            "SELECT content_class FROM channels WHERE id = ?1",
+            rusqlite::params![channel_id as i64],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// Assert an event changed NOTHING: not stored, no log advance, and (if it
+    /// named a channel) no channel row. This is the atomicity claim, made once.
+    fn assert_ingest_left_no_trace(f: &LogFixture, conn: &Connection, event: &Event, before: u64) {
+        assert!(!event_is_stored(conn, event), "a refused event must not be stored");
+        assert_eq!(f.log_pos(), before, "a refused event must not advance the fold");
+        if let EP::ChannelCreated { channel_id, .. } = &event.core.payload {
+            assert_eq!(channel_row_class(conn, *channel_id), None);
+            assert_eq!(f.class_in_log(*channel_id), None);
+        }
+    }
+
+    #[test]
+    fn oversized_sealed_ciphertext_is_refused_before_the_fold_runs() {
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let before = f.log_pos();
+
+        let over = f.sign(
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; MAX_E2EE_CIPHERTEXT_BYTES + 1],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: f.head.hash(),
+            },
+        );
+        let r = f.submit(&conn, &over);
+        let reason = err_reason(&r);
+        assert!(reason.contains("MessagePostedE2ee.ciphertext"), "{reason}");
+        assert!(reason.contains("cap"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &over, before);
+
+        // The boundary is exact: at the cap the event gets PAST ingest and is
+        // refused by the FOLD instead (there is no such channel). If the cap were
+        // off by one in the other direction this would still say "over the cap".
+        let at_cap = f.sign(
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; MAX_E2EE_CIPHERTEXT_BYTES],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: f.head.hash(),
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &at_cap));
+        assert!(!reason.contains("over the"), "a legal maximum message must clear the cap: {reason}");
+        assert_eq!(f.log_pos(), before, "the fold still refused it, so still no advance");
+
+        // ORDERING, observed rather than asserted: the same oversized payload
+        // signed by a device the log has NEVER authorized still comes back as the
+        // cap error. The fold would have rejected that event on the device cert
+        // long before it looked at the payload — so if caps ran after `apply`
+        // (i.e. after the `LogState` clone, the allocation-heavy step a cap
+        // breach must not be able to buy) the fold's message is what we would see.
+        let stranger = Keypair::generate();
+        let rogue = Event::next(
+            &stranger,
+            stranger.public_key(),
+            f.g.server_id(),
+            None,
+            0,
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; MAX_E2EE_CIPHERTEXT_BYTES + 1],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: "h".into(),
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &rogue));
+        assert!(
+            reason.contains("MessagePostedE2ee.ciphertext"),
+            "caps must run before the fold, for an unauthenticated author too: {reason}"
+        );
+        // ...and the same event WITHIN the cap is the control: now the fold speaks.
+        let rogue_ok = Event::next(
+            &stranger,
+            stranger.public_key(),
+            f.g.server_id(),
+            None,
+            0,
+            now_ts(),
+            EP::MessagePostedE2ee {
+                channel_id: E2EE_CHANNEL_ID_FLOOR + 1,
+                generation: 0,
+                epoch: 0,
+                ciphertext: vec![9u8; 32],
+                reply_to: None,
+                attachments: vec![],
+                authz_head: "h".into(),
+            },
+        );
+        assert!(err_reason(&f.submit(&conn, &rogue_ok)).starts_with("event rejected:"));
+        assert_eq!(f.log_pos(), before);
+    }
+
+    #[test]
+    fn oversized_commit_welcome_and_key_package_are_refused() {
+        use farder_crypto::event_log::{
+            DeclaredAdd, DeclaredRemove, MAX_DECLARED_LEAVES_PER_COMMIT, MAX_KEY_PACKAGE_BYTES,
+            MAX_MLS_MESSAGE_BYTES, MAX_MLS_WELCOME_BYTES, MAX_RESET_WELCOMES,
+        };
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let before = f.log_pos();
+        let pk = f.owner.public_key();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 1;
+
+        let big_commit = |mls: usize, adds: usize, removes: usize| EP::MlsCommit {
+            channel_id: ch,
+            generation: 0,
+            epoch: 0,
+            mls_message: vec![1u8; mls],
+            adds: (0..adds)
+                .map(|_| DeclaredAdd {
+                    identity: pk.clone(),
+                    device: "d".into(),
+                    key_package: "k".into(),
+                })
+                .collect(),
+            removes: (0..removes)
+                .map(|_| DeclaredRemove { identity: pk.clone(), device: "d".into() })
+                .collect(),
+            prev_epoch_authenticator: [0u8; 32],
+            post_epoch_authenticator: [0u8; 32],
+            post_tree_hash: [0u8; 32],
+            authz_head: "h".into(),
+            store_instance_hash: [0u8; 32],
+        };
+
+        let cases: Vec<(&str, EP)> = vec![
+            ("MlsCommit.mls_message", big_commit(MAX_MLS_MESSAGE_BYTES + 1, 0, 0)),
+            ("MlsCommit.adds", big_commit(0, MAX_DECLARED_LEAVES_PER_COMMIT + 1, 0)),
+            ("MlsCommit.removes", big_commit(0, 0, MAX_DECLARED_LEAVES_PER_COMMIT + 1)),
+            (
+                "MlsWelcome.welcome",
+                EP::MlsWelcome {
+                    channel_id: ch,
+                    generation: 0,
+                    commit: "c".into(),
+                    for_member: pk.clone(),
+                    for_device: "d".into(),
+                    welcome: vec![2u8; MAX_MLS_WELCOME_BYTES + 1],
+                },
+            ),
+            (
+                "MlsKeyPackagePublished.key_package",
+                EP::MlsKeyPackagePublished {
+                    key_package: vec![3u8; MAX_KEY_PACKAGE_BYTES + 1],
+                    store_instance_hash: [0u8; 32],
+                    expires_at_log_pos: 1_000,
+                },
+            ),
+            (
+                "MlsGroupReset.welcomes",
+                EP::MlsGroupReset {
+                    channel_id: ch,
+                    new_generation: 1,
+                    welcomes: vec!["w".to_string(); MAX_RESET_WELCOMES + 1],
+                    post_tree_hash: [0u8; 32],
+                },
+            ),
+        ];
+
+        for (label, payload) in cases {
+            let e = f.sign(now_ts(), payload);
+            let reason = err_reason(&f.submit(&conn, &e));
+            assert!(reason.contains(label), "{label}: got {reason:?}");
+            assert_ingest_left_no_trace(&f, &conn, &e, before);
+        }
+    }
+
+    #[test]
+    fn a_stale_epoch_commit_is_bounced_with_the_stale_epoch_code() {
+        use farder_crypto::event_log::{DeclaredAdd, DeclaredRemove};
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 7;
+        let created = f.channel_created(ch, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+
+        let before = f.log_pos();
+        let authz_head = f.head.hash();
+        let commit = |generation: u64, epoch: u64| EP::MlsCommit {
+            channel_id: ch,
+            generation,
+            epoch,
+            mls_message: vec![1, 2, 3],
+            adds: Vec::<DeclaredAdd>::new(),
+            removes: Vec::<DeclaredRemove>::new(),
+            prev_epoch_authenticator: [0u8; 32],
+            post_epoch_authenticator: [0u8; 32],
+            post_tree_hash: [0u8; 32],
+            authz_head: authz_head.clone(),
+            store_instance_hash: [0u8; 32],
+        };
+
+        // A fresh E2ee channel's group sits at generation 0 / epoch 0.
+        for (generation, epoch) in [(0u64, 7u64), (3, 0), (3, 7)] {
+            let e = f.sign(now_ts(), commit(generation, epoch));
+            let r = f.submit(&conn, &e);
+            assert_eq!(
+                err_reason(&r),
+                "stale-epoch",
+                "the bounce must be the exact machine-readable code the client's \
+                 resync loop keys on, for gen {generation} / epoch {epoch}"
+            );
+            assert!(r.events.is_empty(), "a bounced commit broadcasts nothing");
+            // Never stored: the fold's accept-as-no-op path is unreachable
+            // through ingest, so a loser can never be replayed as accepted.
+            assert_ingest_left_no_trace(&f, &conn, &e, before);
+        }
+
+        // Control: the CURRENT (generation, epoch) clears the pre-check and is
+        // judged by the fold, which accepts it (the bootstrap commit of a fresh
+        // generation, authored by the channel's creator). So this is a staleness
+        // gate, not a blanket "commits are refused" — and it moves the group on,
+        // which is what makes the NEXT epoch-0 commit stale.
+        let current = f.sign(now_ts(), commit(0, 0));
+        f.accept(&conn, &current);
+        assert_eq!(
+            state.log_state.lock().unwrap().as_ref().unwrap().mls_current_epoch(ch),
+            Some((0, 1)),
+            "the accepted commit advanced the group"
+        );
+        let now_stale = f.sign(now_ts(), commit(0, 0));
+        assert_eq!(
+            err_reason(&f.submit(&conn, &now_stale)),
+            "stale-epoch",
+            "the epoch that was current one event ago is now the stale one"
+        );
+    }
+
+    #[test]
+    fn an_event_dated_far_in_the_future_is_refused_at_ingest() {
+        let mut f = LogFixture::new();
+
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let before = f.log_pos();
+
+        let ch = E2EE_CHANNEL_ID_FLOOR + 11;
+        let future = f.sign(
+            now_ts() + MAX_EVENT_FUTURE_SKEW_SECS + 60,
+            EP::ChannelCreated {
+                channel_id: ch,
+                name: "sealed".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: None,
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &future));
+        assert!(reason.contains("ahead of server time"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &future, before);
+
+        // Inside the skew window the same event is accepted, so this bounds
+        // clock drift rather than banning any timestamp in the future.
+        let near = f.sign(
+            now_ts() + MAX_EVENT_FUTURE_SKEW_SECS - 60,
+            EP::ChannelCreated {
+                channel_id: ch,
+                name: "sealed".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: None,
+            },
+        );
+        f.accept(&conn, &near);
+        assert_eq!(channel_row_class(&conn, ch).as_deref(), Some("e2ee"));
+    }
+
+    #[test]
+    fn channel_created_materializes_the_channel_row_atomically_with_its_class() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // --- E2ee ---
+        let sealed = E2EE_CHANNEL_ID_FLOOR + 21;
+        let e = f.channel_created(sealed, ChannelClass::E2ee);
+        let r = f.accept(&conn, &e);
+        assert_eq!(channel_row_class(&conn, sealed).as_deref(), Some("e2ee"));
+        assert_eq!(f.class_in_log(sealed), Some(ChannelClass::E2ee));
+        assert_eq!(
+            crate::channel_class::resolve(&conn, sealed),
+            ChannelWriteClass::E2ee,
+            "the mirror and the log must agree the instant the event is accepted"
+        );
+        // A sealed channel is NOT announced: `ChannelInfo` has no class field, so
+        // a v1 client would get a normal-looking channel with a working composer.
+        assert!(
+            !r.events.iter().any(|b| matches!(b.event, ServerEvent::ChannelCreated { .. })),
+            "an E2EE channel must not be announced over the v1 `ChannelInfo` event"
+        );
+        // The observation that matters: the choke point is now closed for it.
+        assert!(
+            messages::insert_message(&conn, sealed, &f.owner.public_key(), "host text", None)
+                .is_err(),
+            "materialization must actually gate the message choke point"
+        );
+        assert_eq!(message_count(&conn, sealed), 0);
+
+        // --- Plaintext: same path, opposite class, and it IS announced ---
+        let plain = E2EE_CHANNEL_ID_FLOOR + 22;
+        let e = f.channel_created(plain, ChannelClass::Plaintext);
+        let r = f.accept(&conn, &e);
+        assert_eq!(channel_row_class(&conn, plain).as_deref(), Some("plaintext"));
+        assert_eq!(f.class_in_log(plain), Some(ChannelClass::Plaintext));
+        assert_eq!(crate::channel_class::resolve(&conn, plain), ChannelWriteClass::Plaintext);
+        let announced = r.events.iter().any(|b| match &b.event {
+            ServerEvent::ChannelCreated { channel } => channel.id == plain,
+            _ => false,
+        });
+        assert!(announced, "a plaintext log channel is announced normally");
+        messages::insert_message(&conn, plain, &f.owner.public_key(), "fine here", None).unwrap();
+        assert_eq!(message_count(&conn, plain), 1);
+    }
+
+    #[test]
+    fn channel_created_is_refused_for_a_channel_that_already_has_messages() {
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 31;
+
+        // A channel the LOG never saw that already carries plaintext, then loses
+        // its `channels` row (a delete, a restore, a hand-edited DB). The fold's
+        // `plaintext_history_channels` cannot see it — this is the belt-and-braces
+        // that stops a lock icon landing on messages the host already read.
+        conn.execute(
+            "INSERT INTO channels (id, name, channel_type, position) VALUES (?1, 'old', 'text', 0)",
+            rusqlite::params![ch as i64],
+        )
+        .unwrap();
+        messages::insert_message(&conn, ch, &f.owner.public_key(), "already read by the host", None)
+            .unwrap();
+        conn.execute("DELETE FROM channels WHERE id = ?1", rusqlite::params![ch as i64]).unwrap();
+
+        let before = f.log_pos();
+        let e = f.channel_created(ch, ChannelClass::E2ee);
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("message history"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &e, before);
+        // The pre-existing plaintext is untouched and still plainly readable —
+        // it was never retroactively relabelled as sealed.
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM messages WHERE channel_id = ?1",
+                rusqlite::params![ch as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "already read by the host");
+    }
+
+    #[test]
+    fn channel_created_is_refused_below_the_reserved_id_floor_or_on_a_collision() {
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // Below the floor: a client-chosen id must not be able to land on the
+        // `channels` AUTOINCREMENT space and adopt a legacy channel.
+        for id in [1u64, E2EE_CHANNEL_ID_FLOOR - 1] {
+            let before = f.log_pos();
+            let e = f.channel_created(id, ChannelClass::E2ee);
+            let reason = err_reason(&f.submit(&conn, &e));
+            assert!(reason.contains("reserved floor"), "id {id}: {reason}");
+            assert_ingest_left_no_trace(&f, &conn, &e, before);
+        }
+
+        // Collision above the floor with a row the LOG does not know about (the
+        // fold's own immutability rule cannot see legacy DB state).
+        let ch = E2EE_CHANNEL_ID_FLOOR + 41;
+        conn.execute(
+            "INSERT INTO channels (id, name, channel_type, position) VALUES (?1, 'squatter', 'text', 0)",
+            rusqlite::params![ch as i64],
+        )
+        .unwrap();
+        let before = f.log_pos();
+        let e = f.channel_created(ch, ChannelClass::E2ee);
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("already exists"), "{reason}");
+        assert!(!event_is_stored(&conn, &e));
+        assert_eq!(f.log_pos(), before);
+        assert_eq!(
+            channel_row_class(&conn, ch).as_deref(),
+            Some("plaintext"),
+            "the squatting row keeps its own class; the refused event never touched it"
+        );
+    }
+
+    #[test]
+    fn channel_created_is_refused_for_an_unsupported_shape() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // kind != "text": categories and voice channels are legacy DB state with
+        // no log representation this rung.
+        let before = f.log_pos();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 51;
+        let e = f.sign(
+            now_ts(),
+            EP::ChannelCreated {
+                channel_id: ch,
+                name: "loud".into(),
+                kind: "voice".into(),
+                class: ChannelClass::E2ee,
+                parent: None,
+            },
+        );
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("unsupported ChannelCreated shape"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &e, before);
+
+        // parent: Some(_) — the FOLD accepts this (its class-inheritance rule is
+        // live for a later rung), so the refusal is genuinely ingest's, and the
+        // spec's row 12 "threads under a sealed parent are refused" holds.
+        let parent = E2EE_CHANNEL_ID_FLOOR + 52;
+        let created = f.channel_created(parent, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+        let before = f.log_pos();
+        let child = E2EE_CHANNEL_ID_FLOOR + 53;
+        let e = f.sign(
+            now_ts(),
+            EP::ChannelCreated {
+                channel_id: child,
+                name: "thread".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: Some(parent),
+            },
+        );
+        // Prove the fold really did authorize it, so the refusal below is ingest's.
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&e).expect("the fold authorizes an inheriting thread child");
+        let reason = err_reason(&f.submit(&conn, &e));
+        assert!(reason.contains("unsupported ChannelCreated shape"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &e, before);
+    }
+
+    #[test]
+    fn a_failed_ingest_transaction_leaves_no_channel_row_and_no_log_advance() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // The hardest atomicity case: the fold ACCEPTS the event (so `store_event`
+        // has already run inside the transaction) and ingest then refuses it. The
+        // derived write and the in-memory fold advance must stand or fall together.
+        let parent = E2EE_CHANNEL_ID_FLOOR + 61;
+        let created = f.channel_created(parent, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+        let before_pos = f.log_pos();
+        let before_events: i64 =
+            conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        let before_channels: i64 =
+            conn.query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0)).unwrap();
+
+        let child = E2EE_CHANNEL_ID_FLOOR + 62;
+        let e = f.sign(
+            now_ts(),
+            EP::ChannelCreated {
+                channel_id: child,
+                name: "thread".into(),
+                kind: "text".into(),
+                class: ChannelClass::E2ee,
+                parent: Some(parent),
+            },
+        );
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&e).expect("the fold accepted it; only ingest refuses");
+
+        let r = f.submit(&conn, &e);
+        assert!(matches!(r.response, ServerResponse::Error { .. }));
+        assert!(r.events.is_empty());
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap(),
+            before_events,
+            "store_event ran inside the transaction and must have rolled back"
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM channels", [], |r| r.get(0)).unwrap(),
+            before_channels
+        );
+        assert_eq!(f.log_pos(), before_pos, "the in-memory fold must not have advanced");
+        assert_eq!(f.class_in_log(child), None);
+        assert_eq!(crate::channel_class::resolve(&conn, child), ChannelWriteClass::Unresolvable);
+
+        // And the server is still usable afterwards: the same chain slot accepts a
+        // well-shaped event, so a rolled-back ingest wedges nothing.
+        let ok = f.channel_created(E2EE_CHANNEL_ID_FLOOR + 63, ChannelClass::E2ee);
+        f.accept(&conn, &ok);
+        assert!(f.log_pos() > before_pos);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2 — DERIVATION on the REAL `SubmitEvent` path (spec "Derivation" +
+    // F2). The unit-level rules are pinned in `event_ingest`'s tests; these
+    // three drive the shipped handler and assert the BYTES that were persisted
+    // and the events that were broadcast, per CLAUDE.md's verify-by-observation
+    // rule for security features.
+    // -----------------------------------------------------------------------
+
+    impl LogFixture {
+        /// An E2EE channel whose MLS group has been bootstrapped by its creator
+        /// (epoch-0 commit ⇒ the creator's own leaf is confirmed), which is the
+        /// minimum state in which the fold authorizes sealed content at all.
+        fn sealed_channel(&mut self, conn: &Connection, id: u64) -> u64 {
+            let ch = self.channel_created(id, ChannelClass::E2ee);
+            self.accept(conn, &ch);
+            let boot = self.sign(
+                now_ts(),
+                EP::MlsCommit {
+                    channel_id: id,
+                    generation: 0,
+                    epoch: 0,
+                    mls_message: vec![0xC0],
+                    adds: vec![],
+                    removes: vec![],
+                    prev_epoch_authenticator: [0u8; 32],
+                    post_epoch_authenticator: [11u8; 32],
+                    post_tree_hash: [21u8; 32],
+                    authz_head: "a".repeat(64),
+                    store_instance_hash: [3u8; 32],
+                },
+            );
+            self.accept(conn, &boot);
+            id
+        }
+
+        fn sealed_epoch(&self, channel_id: u64) -> u64 {
+            self.state
+                .log_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .mls_current_epoch(channel_id)
+                .expect("the group exists")
+                .1
+        }
+
+        fn sealed_post(
+            &mut self,
+            conn: &Connection,
+            channel_id: u64,
+            ciphertext: &[u8],
+        ) -> (Event, HandleResult) {
+            let epoch = self.sealed_epoch(channel_id);
+            let e = self.sign(
+                now_ts(),
+                EP::MessagePostedE2ee {
+                    channel_id,
+                    generation: 0,
+                    epoch,
+                    ciphertext: ciphertext.to_vec(),
+                    reply_to: None,
+                    attachments: vec![],
+                    authz_head: "a".repeat(64),
+                },
+            );
+            let r = self.accept(conn, &e);
+            (e, r)
+        }
+    }
+
+    #[test]
+    fn a_sealed_post_ingests_as_ciphertext_and_broadcasts_no_plaintext() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = f.sealed_channel(&conn, E2EE_CHANNEL_ID_FLOOR + 71);
+
+        // The payload carries a readable needle: every assertion below is on the
+        // bytes that actually landed, not on which function got called.
+        let needle = "SECRETNEEDLE";
+        let ciphertext = format!("{needle} pretending to be a PrivateMessage").into_bytes();
+        let (posted, accepted) = f.sealed_post(&conn, ch, &ciphertext);
+
+        let (id, content, sealed, is_e2ee): (i64, String, Option<Vec<u8>>, i64) = conn
+            .query_row(
+                "SELECT id, content, sealed, is_e2ee FROM messages WHERE event_hash = ?1",
+                rusqlite::params![posted.hash()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "", "no plaintext column for a sealed row");
+        assert_eq!(sealed.as_deref(), Some(ciphertext.as_slice()), "ciphertext stored verbatim");
+        assert_eq!(is_e2ee, 1);
+
+        // Not in the plaintext index, and not reachable through search.
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?1",
+                rusqlite::params![needle],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 0, "a sealed row must never enter messages_fts");
+        assert!(
+            messages::search_messages(&conn, needle, None, 50, &f.owner.public_key())
+                .unwrap()
+                .is_empty()
+        );
+
+        // And nothing about it went out on the wire: `NewMessage` carries a
+        // `String` body, so broadcasting a sealed post through it would ship
+        // garbage (or worse) to every v1 client. Delivery is Task 5's v2 surface.
+        assert!(matches!(accepted.response, ServerResponse::EventAccepted { .. }));
+        assert!(
+            accepted.events.is_empty(),
+            "a sealed post broadcasts nothing on the v1 surfaces: {:?}",
+            accepted.events
+        );
+        assert!(accepted.orphaned_file_ids.is_empty());
+        let _ = id;
+    }
+
+    #[test]
+    fn a_log_tombstone_deletes_the_derived_row_and_survives_a_restart() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = f.sealed_channel(&conn, E2EE_CHANNEL_ID_FLOOR + 72);
+        let (keep, _) = f.sealed_post(&conn, ch, b"survivor");
+        let (doomed, _) = f.sealed_post(&conn, ch, b"doomed");
+        let doomed_id: i64 = conn
+            .query_row(
+                "SELECT id FROM messages WHERE event_hash = ?1",
+                rusqlite::params![doomed.hash()],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let del = f.sign(
+            now_ts(),
+            EP::MessageDeleted {
+                channel_id: ch,
+                target: doomed.hash(),
+                reason: farder_crypto::event_log::DeleteReason::Author,
+            },
+        );
+        let r = f.accept(&conn, &del);
+
+        // The row is gone...
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE event_hash = ?1",
+                rusqlite::params![doomed.hash()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "a tombstone hard-deletes the derived row");
+        // ...clients are told through the SHIPPED event (id + channel only — no
+        // content, so it is as content-blind in a sealed channel as anywhere)...
+        assert_eq!(r.events.len(), 1);
+        match (&r.events[0].target, &r.events[0].event) {
+            (EventTarget::Subscribers(c), ServerEvent::MessageDeleted { message_id, channel_id }) => {
+                assert_eq!(*c, ch);
+                assert_eq!(*channel_id, ch);
+                assert_eq!(*message_id as i64, doomed_id);
+            }
+            other => panic!("expected a MessageDeleted broadcast, got {other:?}"),
+        }
+
+        // ...and THE F2 INVARIANT: the next startup's reconcile must not
+        // resurrect it from the still-stored event.
+        let ls = state.log_state.lock().unwrap();
+        assert_eq!(
+            crate::event_ingest::reconcile_messages(&conn, ls.as_ref()).unwrap(),
+            0
+        );
+        drop(ls);
+        let remaining: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT event_hash FROM messages WHERE channel_id = ?1")
+                .unwrap();
+            let rows = stmt.query_map(rusqlite::params![ch as i64], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(remaining, vec![keep.hash()], "only the survivor is left");
+    }
+
+    #[test]
+    fn a_sealed_edit_or_tombstone_with_an_unknown_target_leaves_no_trace() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = f.sealed_channel(&conn, E2EE_CHANNEL_ID_FLOOR + 73);
+        let (post, _) = f.sealed_post(&conn, ch, b"v1");
+
+        // Both refusals are INGEST's: the fold has no per-message index, so it
+        // authorizes an edit/delete citing a target that does not exist. That
+        // refusal is what bounds the fold's tombstone set.
+        let before = f.log_pos();
+        let ghost_edit = f.sign(
+            now_ts(),
+            EP::MessageEditedE2ee {
+                channel_id: ch,
+                target: "f".repeat(64),
+                generation: 0,
+                epoch: f.sealed_epoch(ch),
+                ciphertext: b"nowhere".to_vec(),
+                authz_head: "a".repeat(64),
+            },
+        );
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&ghost_edit).expect("the FOLD accepts it; only ingest refuses");
+        let reason = err_reason(&f.submit(&conn, &ghost_edit));
+        assert!(reason.contains("has not derived"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &ghost_edit, before);
+
+        let ghost_del = f.sign(
+            now_ts(),
+            EP::MessageDeleted {
+                channel_id: ch,
+                target: "e".repeat(64),
+                reason: farder_crypto::event_log::DeleteReason::Moderation,
+            },
+        );
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&ghost_del).expect("the FOLD accepts it; only ingest refuses");
+        let reason = err_reason(&f.submit(&conn, &ghost_del));
+        assert!(reason.contains("has not derived"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &ghost_del, before);
+
+        // The real message is untouched by either attempt, byte for byte.
+        let sealed: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT sealed FROM messages WHERE event_hash = ?1",
+                rusqlite::params![post.hash()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sealed.as_deref(), Some(&b"v1"[..]));
+        assert!(
+            !state.log_state.lock().unwrap().as_ref().unwrap().is_tombstoned(&"e".repeat(64))
+        );
     }
 }

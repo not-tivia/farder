@@ -448,6 +448,49 @@ whose author-device cert has `expires_at < event.core.timestamp` — including
 the `DeviceAuthorized` self-registration itself. Nothing emits expiring certs
 yet.
 
+### Ingest caps (Rung 2, sub-3)
+
+`event_log.rs` also exports the **wire size caps** the spec's "Size caps" table
+(M4/F8) specifies. They are **constants, not fold rules**: `LogState::apply`
+never reads a single one of them (sub-2 resolved ambiguity #9 — the fold's job
+is authorization, not framing economics). The **server enforces them at ingest**
+(`event_ingest::check_ingest_caps`, run before the fold's `LogState` clone) and
+the client must not exceed them. They live in `farder-crypto` because it is the
+only crate both `farder-mls` (client) and `farder-server` depend on.
+
+| Constant | Value | Bounds |
+|---|---|---|
+| `MAX_E2EE_CIPHERTEXT_BYTES` | 45 KiB | `MessagePostedE2ee.ciphertext` |
+| `MAX_E2EE_EDIT_CIPHERTEXT_BYTES` | = above | `MessageEditedE2ee.ciphertext` |
+| `MAX_MLS_MESSAGE_BYTES` | 256 KiB | `MlsCommit.mls_message` |
+| `MAX_MLS_WELCOME_BYTES` | 256 KiB | `MlsWelcome.welcome` |
+| `MAX_KEY_PACKAGE_BYTES` | 8 KiB | `MlsKeyPackagePublished.key_package` |
+| `MAX_DECLARED_LEAVES_PER_COMMIT` | 256 | `MlsCommit.adds` and `.removes`, each |
+| `MAX_RESET_WELCOMES` | 256 | `MlsGroupReset.welcomes` |
+| `MAX_E2EE_ATTACHMENTS` | 10 | `MessagePostedE2ee.attachments` |
+| `MAX_CHANNEL_NAME_BYTES` | 256 | `ChannelCreated.name` and `.kind` |
+| `E2EE_CHANNEL_ID_FLOOR` | `1 << 32` | minimum `ChannelCreated.channel_id` |
+| `MAX_EVENT_FUTURE_SKEW_SECS` | 300 | `core.timestamp` vs server time |
+
+**Why the ciphertext cap is 45 KiB, not the spec's 40 KiB.** The spec's "40 KiB"
+is the top `PADDING_BUCKETS` entry, which is **plaintext**; the MLS
+`PrivateMessage` that seals it is strictly larger. A literal 40960-byte cap
+would hard-bounce a legal maximum-size message — the exact bug rev 2 fixed when
+it raised the cap from 16 KiB. The headroom is **measured, not assumed**:
+`crates/farder-mls/tests/ciphertext_cap.rs` builds a real two-member group,
+seals a real top-bucket envelope through the real `seal_message` path, and
+asserts the sealed bytes both fit the cap and exceed the bucket. Measured
+2026-07-29 on openmls 0.8.1: **41125 bytes** (165 bytes of framing, 4955 bytes
+of headroom).
+
+**`MAX_EVENT_FUTURE_SKEW_SECS` is not a size cap** — it closes the residual this
+doc named for sub-3: `core.timestamp` is an untrusted device claim that the fold
+uses as its device-liveness and cert-expiry clock, so without an upper bound a
+forward-dated event walks the corroborated clock into the future and keeps a
+dead cert alive. Only the future is bounded (the past is already covered by the
+fold's monotonicity rules and by legacy events carrying small timestamps), and
+it applies to **every** variant, not only the Rung-2 ones.
+
 ---
 
 ## `event_log_state.rs` — authorization state machine (`LogState`)
@@ -525,8 +568,12 @@ directions, and the fold uses a different judgment point for each question:
 **Residual, stated plainly:** two *colluding* identities can still push the
 corroborated clock forward, and an author can still back-date below the expiry of
 a *different* identity that went silent before its cert died and never claimed
-anything after it. Closing those needs a bound on `core.timestamp` against server
-time, which is ingest's (sub-3) job.
+anything after it. **Closed by sub-3** for the forward direction: ingest refuses
+any event whose `core.timestamp` is more than `MAX_EVENT_FUTURE_SKEW_SECS` (300s)
+ahead of server time (`event_ingest::check_ingest_caps`), so the corroborated
+clock cannot be walked past real time no matter how many identities collude. The
+back-dating half stands as an accepted residual — it needs a *lower* bound, which
+would break legitimate replication of older events.
 
 ### Rung-2 MLS fold state (sub-2 Task 3)
 
@@ -664,8 +711,12 @@ history), documented at the rule site.
 that loses the epoch CAS returns `Ok(())` but skips all payload effects — only
 the author's chain head and `log_pos` advance, zero MLS state change — so any
 converged event set folds to the same winner on every replica (plan resolved
-ambiguity #8). Ingest's distinct `stale-epoch` bounce is sub-3's job, served by
-`mls_current_epoch`.
+ambiguity #8). Ingest's distinct `stale-epoch` bounce is **shipped in sub-3**:
+the `SubmitEvent` arm pre-checks `mls_current_epoch(channel_id)` *before*
+`apply`, and returns the exact string `"stale-epoch"` when either the declared
+generation or the declared epoch is not the current one — so the fold's
+accept-as-no-op path is unreachable through ingest and the author's client
+resyncs instead of believing its commit landed.
 
 ### Rung-2 purity + checkpoint composability (sub-2 Task 5)
 

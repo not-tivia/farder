@@ -59,6 +59,22 @@ pub fn sweep_once(conn: &mut rusqlite::Connection, now: u64) -> SweepOutcome {
     match crate::giveaways::list_due(conn, now as i64) {
         Ok(rows) => {
             for row in rows {
+                // Class gate. There is NO request layer behind the sweeper, so
+                // this is the only place a draw announcement can be stopped
+                // before the choke point hard-errors. SKIP AND CONTINUE — a
+                // single non-plaintext channel must never abort the tick and
+                // starve every other channel's widgets (the sweeper is one task
+                // for the whole server).
+                if crate::channel_class::resolve(conn, row.channel_id as u64)
+                    .refuses_server_authored_content()
+                {
+                    tracing::warn!(
+                        "widget sweeper: giveaway {} sits in a non-plaintext channel — \
+                         skipping the draw announcement",
+                        row.id
+                    );
+                    continue;
+                }
                 match crate::giveaways::close_and_draw(conn, &row) {
                     Ok((info, msg)) => {
                         let channel_id = info.channel_id;
@@ -159,6 +175,19 @@ fn sweep_events(conn: &mut rusqlite::Connection, now: u64, out: &mut SweepOutcom
             };
             for row in rows {
                 let Some(system_pk) = system_pk.as_ref() else { break };
+                // Class gate — same rule as the giveaway draw: no request layer
+                // exists here, so skip the flip AND its announcement together
+                // (they share one transaction) and CONTINUE to the next row.
+                if crate::channel_class::resolve(conn, row.channel_id as u64)
+                    .refuses_server_authored_content()
+                {
+                    tracing::warn!(
+                        "widget sweeper: event {} sits in a non-plaintext channel — \
+                         skipping the start announcement",
+                        row.id
+                    );
+                    continue;
+                }
                 match crate::channel_events::start_and_announce(conn, &row, system_pk, now_i) {
                     // A Cancel (or a card delete) won the guard — announce nothing.
                     Ok(None) => continue,
@@ -710,6 +739,156 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
         assert_eq!(msg_count, msg_count_after, "no announcement row was written");
         assert_eq!(crate::channel_events::get(&conn, id).unwrap().unwrap().status, "cancelled");
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2 — the sweeper's two announcement paths (spec rev 2, C8/F1)
+    //
+    // These are the ONLY two message writers with no request layer in front of
+    // them: nobody asks the sweeper to announce, it just does. So the class gate
+    // has to live in the tick itself, and it must SKIP AND CONTINUE — a single
+    // sealed channel must never starve every other channel's widgets.
+    // -----------------------------------------------------------------------
+
+    fn seal(conn: &rusqlite::Connection, channel_id: u64) {
+        crate::channel_class::set_class(
+            conn,
+            channel_id,
+            farder_crypto::event_log::ChannelClass::E2ee,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_giveaway_sweeper_cannot_announce_into_an_e2ee_channel() {
+        let mut conn = crate::db::open_in_memory().unwrap();
+        let sealed = crate::channels::create_channel(
+            &conn, "sealed", farder_protocol::server::ChannelType::Text, None, 0,
+        )
+        .unwrap();
+        // A SECOND, plaintext channel with its own due giveaway: the sweeper is
+        // one task for the whole server, so the tick must still service it.
+        let plain = crate::channels::create_channel(
+            &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
+        )
+        .unwrap();
+        let creator = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &creator, "Creator").unwrap();
+        let entrant = farder_crypto::identity::Keypair::generate().public_key();
+        crate::members::register_member(&conn, &entrant, "Entrant").unwrap();
+        let now = 1_000_000u64;
+
+        let sealed_gid =
+            crate::giveaways::create(&conn, sealed as i64, 1, &creator, "SECRET-PRIZE", now as i64 - 10)
+                .unwrap();
+        crate::giveaways::enter(&conn, sealed_gid, &entrant, 1).unwrap();
+        let plain_gid =
+            crate::giveaways::create(&conn, plain as i64, 2, &creator, "open prize", now as i64 - 10)
+                .unwrap();
+        crate::giveaways::enter(&conn, plain_gid, &entrant, 2).unwrap();
+        seal(&conn, sealed);
+
+        let out = sweep_once(&mut conn, now);
+
+        // The tick did NOT abort: the plaintext giveaway drew and announced.
+        assert_eq!(out.broadcasts.len(), 2, "only the plaintext draw produced events");
+        for b in &out.broadcasts {
+            assert!(
+                matches!(b.target, crate::events::EventTarget::Subscribers(c) if c == plain),
+                "no broadcast may target the sealed channel"
+            );
+        }
+        assert_eq!(
+            crate::giveaways::get(&conn, plain_gid).unwrap().unwrap().status,
+            "ended",
+            "the plaintext giveaway was serviced in the same tick"
+        );
+
+        // The sealed one was skipped whole: not drawn, not announced.
+        let sealed_row = crate::giveaways::get(&conn, sealed_gid).unwrap().unwrap();
+        assert_eq!(sealed_row.status, "open", "no draw happened in a sealed channel");
+        assert!(sealed_row.winner.is_none());
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+                rusqlite::params![sealed as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "no announcement row landed in the sealed channel");
+        let leaked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE '%SECRET-PRIZE%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked, 0, "the prize text reached no message row anywhere");
+
+        // Still skipped on every later tick — never a deferred leak.
+        let out2 = sweep_once(&mut conn, now + 60);
+        assert!(out2.broadcasts.is_empty() && out2.dms.is_empty());
+        assert_eq!(
+            crate::giveaways::get(&conn, sealed_gid).unwrap().unwrap().status,
+            "open"
+        );
+    }
+
+    #[test]
+    fn the_event_sweeper_cannot_announce_into_an_e2ee_channel() {
+        let (mut conn, sealed, creator) = ev_setup();
+        let plain = crate::channels::create_channel(
+            &conn, "general", farder_protocol::server::ChannelType::Text, None, 0,
+        )
+        .unwrap();
+        let now = 1_000_000u64;
+
+        let sealed_id = make_ev(&conn, sealed, &creator, now as i64 - 5, None, None);
+        let plain_id = make_ev(&conn, plain, &creator, now as i64 - 5, None, None);
+        let going = ev_member(&conn, "Going");
+        crate::channel_events::rsvp(&conn, sealed_id, &going, "going", 1).unwrap();
+        crate::channel_events::rsvp(&conn, plain_id, &going, "going", 2).unwrap();
+        seal(&conn, sealed);
+
+        let out = sweep_once(&mut conn, now);
+
+        // The tick continued: the plaintext event started and announced.
+        assert_eq!(out.broadcasts.len(), 2, "EventUpdated + announcement, plaintext only");
+        for b in &out.broadcasts {
+            assert!(
+                matches!(b.target, crate::events::EventTarget::Subscribers(c) if c == plain),
+                "no broadcast may target the sealed channel"
+            );
+        }
+        assert_eq!(
+            crate::channel_events::get(&conn, plain_id).unwrap().unwrap().status,
+            "started"
+        );
+        assert_eq!(out.dms.len(), 1, "only the plaintext event DMs its Going list");
+
+        // The sealed event was skipped whole: the flip and its announcement
+        // share one transaction, so neither happened.
+        assert_eq!(
+            crate::channel_events::get(&conn, sealed_id).unwrap().unwrap().status,
+            "upcoming",
+            "no status flip without an announcement it is allowed to write"
+        );
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+                rusqlite::params![sealed as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "no announcement row landed in the sealed channel");
+
+        // And it stays skipped.
+        let out2 = sweep_once(&mut conn, now + 60);
+        assert!(out2.broadcasts.is_empty());
+        assert_eq!(
+            crate::channel_events::get(&conn, sealed_id).unwrap().unwrap().status,
+            "upcoming"
+        );
     }
 }
 

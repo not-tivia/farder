@@ -134,6 +134,11 @@ Both are handled over auxiliary QUIC bidirectional streams, not over the primary
 
 **URL fetch** (`handle_fetch_url`): the server fetches a URL on the client's behalf (max 10 MB, 10-second timeout, HTTP/HTTPS only), stores it as an attachment, and returns the `file_id`. Permission is checked (requires `SEND_MESSAGES` on the target channel). The DB lock is held only for the brief store step — the HTTP fetch runs without any lock.
 
+**Rung-2 class gates (`FetchUrl`, `RunCommand`).** Both are handled here rather than in `handlers.rs`, so both carry their own channel-content-class check (`docs/modules/server-handlers.md` → "Channel content class + the message write choke point"). Fail closed: an unresolvable class refuses exactly like a declared E2EE one, and the refusal string is the byte-identical `channel_class::E2EE_REFUSED`, so a channel id is not an existence oracle.
+
+- `handle_fetch_url` checks the class in the same scoped lock as the `SEND_MESSAGES` check and **before the outbound HTTP request** — the blob the server downloads is server-visible by construction, and refusing early also means a sealed channel cannot be used to make the server fetch a URL at all (spec Coexistence row 6b).
+- `RunCommand` inherits its gate from `handlers::check_run_command_channel_auth`, which the dispatch arm already calls before the command lookup. One check therefore covers **all six kinds** (`text`, `api`, `poll`, `giveaway`, `event`, `reminder`) before any parse, outbound fetch or DB write — including `reminder`, which posts nothing but would store `reminders.text` server-side in plaintext.
+
 ---
 
 ## Media stream routing (`media_stream.rs`)
@@ -212,6 +217,37 @@ Schema migrations are applied inline in `init_schema` using `PRAGMA table_info` 
 | `state.media.channels` | `StdRwLock<HashMap<u64, StreamState>>` | Per-channel media routing state. Managed by the voice/stream handler (not directly in this file). |
 | `state.owner` | `RwLock<Option<PublicKey>>` | The server's owner public key. Set on first-member auto-claim or when a `setup_token` is consumed. Never cleared. |
 | `state.setup_token` | `Mutex<Option<[u8;32]>>` | One-time bootstrap token. Cleared to `None` atomically when claimed. |
+| `state.client_protocol` | `StdRwLock<HashMap<[u8;32], u32>>` | Per-connection negotiated protocol version, same key as `clients`. **Absent means v1.** Written only by `NegotiateProtocol`, for the caller's own slot. Removed on disconnect, guarded by the same `still_ours` check as `clients` (see below). |
+
+---
+
+## The v2 broadcast filter (`may_receive`)
+
+Every send site in `broadcast_event` — `All`, `Subscribers`, `Members` and
+`PermissionHolders` — passes through `may_receive(state, pk, event)` before
+`try_send`. It answers `false` when `farder_protocol::server::event_requires_v2`
+classifies the event as v2-only and that connection's recorded version is below
+`MIN_CLIENT_VERSION_FOR_E2EE`.
+
+**Why the filter is on the send and not on the client (spec M2).** `rmp_serde`
+decodes an enum by variant NAME, and an unknown name fails the decode of the
+whole frame. Handing a v1 client one v2-only event therefore does not degrade
+gracefully — it breaks that client's stream, *including in the plaintext
+channels it is entitled to*. An old client cannot ignore what it cannot parse,
+so it must never be sent it.
+
+`event_requires_v2` is an **exhaustive match with no wildcard arm**: adding a
+`ServerEvent` variant fails to compile until someone classifies it, so a future
+v2-only event cannot be silently treated as safe for v1 clients.
+
+Two fail-closed details:
+
+- **Absent means v1.** A connection that never negotiated is old until it proves
+  otherwise, which is the only direction where being wrong is harmless.
+- **The disconnect cleanup is `still_ours`-guarded.** Clearing the version
+  unconditionally would let a *stale* cleanup racing a fresh connection silently
+  downgrade the live one to v1 — it would stop receiving sealed messages with
+  nothing to retry and no error. Fail-closed must not mean fail-stuck.
 
 ---
 

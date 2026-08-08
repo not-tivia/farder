@@ -172,6 +172,20 @@ pub async fn deliver(
             return WebhookAck::Unauthorized;
         };
 
+        // Class gate. `CreateWebhook` already refuses an E2EE channel, but a
+        // token issued before a class change (or a channel row that has become
+        // unresolvable) must not deliver either — the choke point in
+        // `messages.rs` would hard-error, and a hard error is not an answer to
+        // give an external HTTP caller.
+        //
+        // The ack is the EXISTING opaque `Unauthorized`, deliberately identical
+        // to a bad token: a distinct "encrypted channel" ack would let anyone
+        // holding a token — or spraying tokens — classify channels from outside
+        // the server. FAIL CLOSED: an unresolvable class refuses.
+        if crate::channel_class::resolve(&conn, wh.channel_id).refuses_server_authored_content() {
+            return WebhookAck::Unauthorized;
+        }
+
         let payload = match parse_webhook_payload(body) {
             Ok(p) => p,
             Err(_) => return WebhookAck::BadRequest,
@@ -286,5 +300,95 @@ mod tests {
 
         delete(&conn, id).unwrap();
         assert!(find_by_token(&conn, &new_token).unwrap().is_none());
+    }
+
+    /// Rung 2: an external HTTP caller holding a VALID token for a channel that
+    /// has become E2EE-class must be refused, and must write nothing.
+    ///
+    /// This is the case `CreateWebhook`'s refusal alone cannot cover: a token
+    /// minted while the channel was plaintext. The ack is the existing opaque
+    /// `Unauthorized` — byte-identical to a bad token — so token-holders and
+    /// token-sprayers alike cannot classify channels from outside the server.
+    #[tokio::test]
+    async fn webhook_delivery_into_an_e2ee_channel_is_refused_and_writes_nothing() {
+        let state = std::sync::Arc::new(crate::state::ServerState::new_for_test().unwrap());
+        let (ch, token) = {
+            let conn = state.db.lock().unwrap();
+            let ch = crate::channels::create_channel(
+                &conn,
+                "gen",
+                farder_protocol::server::ChannelType::Text,
+                None,
+                0,
+            )
+            .unwrap();
+            let (_id, token) = create(&conn, ch, "CI").unwrap();
+            (ch, token)
+        };
+
+        // Control FIRST, while the channel is still plaintext: delivery works,
+        // so a later failure is the class gate and not a broken fixture.
+        let ack = deliver(&state, &token, br#"{"content":"before"}"#).await;
+        assert!(matches!(ack, WebhookAck::Ok), "plaintext control must deliver");
+        {
+            let conn = state.db.lock().unwrap();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+                    rusqlite::params![ch as i64],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1);
+            // The token survives the class change — only the class stops it.
+            crate::channel_class::set_class(
+                &conn,
+                ch,
+                farder_crypto::event_log::ChannelClass::E2ee,
+            )
+            .unwrap();
+            assert!(find_by_token(&conn, &token).unwrap().is_some());
+        }
+
+        let ack = deliver(&state, &token, br#"{"content":"SECRET-NEEDLE"}"#).await;
+        assert!(
+            matches!(ack, WebhookAck::Unauthorized),
+            "a sealed channel must answer exactly like a bad token, got {ack:?}"
+        );
+
+        // Observation: the payload reached no storage at all — not the message
+        // table, not the FTS index. (Scoped block: the guard must not survive
+        // to the next `.await`.)
+        {
+            let conn = state.db.lock().unwrap();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+                    rusqlite::params![ch as i64],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "the refused delivery added no row");
+            let leaked: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE content LIKE '%SECRET-NEEDLE%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(leaked, 0, "webhook plaintext must not be anywhere in messages");
+            let fts: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'SECRET'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            assert_eq!(fts, 0, "webhook plaintext must not enter the search index");
+        }
+
+        // And a bad token is indistinguishable from the refusal above.
+        let bad = deliver(&state, "not-a-token", br#"{"content":"x"}"#).await;
+        assert_eq!(format!("{bad:?}"), format!("{:?}", WebhookAck::Unauthorized));
     }
 }

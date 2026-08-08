@@ -37,6 +37,56 @@ farder_protocol::codec::decode(&bytes)   // -> Result<T>
 There is no versioning or magic header in the byte stream; both sides must agree
 on the same compiled type definitions.
 
+### Wire-compatibility rule: NEVER MUTATE A SHIPPED STRUCT OR VARIANT
+
+This is measured behaviour, pinned by
+`existing_variants_are_byte_stable_after_the_additions` (byte literals captured
+from the shipped protocol and verified against it), not a convention:
+
+| change | safe? | why |
+|---|---|---|
+| add an enum variant | **yes**, at any position | `rmp_serde` encodes a variant by its **name** (`GetServerInfo` is literally the fixstr `"GetServerInfo"`), so variant order is irrelevant |
+| rename a shipped variant | **no** | the name *is* the tag; every deployed client fails to decode it |
+| add / remove / reorder a field of a shipped struct or struct variant | **no** | a struct is encoded as a **positional array** (`MessageSent { id, timestamp }` -> `["MessageSent", [4, 5]]`), so the field list is the fragile part |
+| add a **new** struct | **yes** | nothing shipped changes shape |
+
+The failure mode is what makes this strict: an unknown variant name or a
+wrong-length field array fails the decode of the **whole frame**, so one
+unreadable event breaks that client's entire stream — including the plaintext
+channels it is fully entitled to. There is no partial or graceful degradation.
+
+This is why Rung 2 added `ChannelInfoV2` and `MessageInfoV2` as **new structs**
+rather than adding `class` / `sealed` fields to `ChannelInfo` / `MessageInfo`,
+and why v2-only events are filtered at the send (see
+`docs/modules/server-connection.md`) instead of being ignored by old clients.
+
+### Protocol versions (v1 / v2)
+
+`SERVER_PROTOCOL_VERSION = 2`, `MIN_CLIENT_VERSION_FOR_E2EE = 2`.
+
+A connection declares its version with `NegotiateProtocol { client_version }`
+and is answered with `ProtocolVersion { server_version,
+min_client_version_for_e2ee }`. **A connection that has not negotiated is
+treated as v1** — the only fail-closed reading of "this client never said what
+it speaks". `NegotiateProtocol` is the one v2 variant in the bootstrap
+allow-list: a joiner must be able to negotiate before it is a member.
+
+v1 and v2 surfaces are separate variants, never modes of one variant:
+
+| v1 (unchanged) | v2 | difference |
+|---|---|---|
+| `GetServerInfo` / `ServerInfo` | `GetServerInfoV2` / `ServerInfoV2` | v2 carries `ChannelInfoV2` (channel + class). **The v1 surface omits every non-plaintext channel for every caller**, since `ChannelInfo` cannot express that a channel is sealed and a client that cannot tell would show a working composer |
+| `FetchHistory` / `History` | `FetchHistoryV2` / `HistoryV2` | v2 carries `MessageInfoV2` (message + `is_e2ee` + `sealed` + `event_hash`). The v1 surface filters `is_e2ee = 0`, or a sealed row would arrive as a real message with an empty body |
+| — | `FetchWelcomes` / `Welcomes` | MLS Welcomes addressed to the **authenticated connection key**. There is deliberately no recipient field: `channel_id` can narrow the result, nothing can widen it. The response carries `next_accept_seq` + `more`, because `accept_seq` is a server-local column that appears nowhere in the returned event bytes — without the cursor a client could only ever ask from 0 and, once its backlog exceeded the per-fetch cap, could never reach its newest Welcome |
+| — | `FetchKeyPackages` / `KeyPackages` | published KeyPackages for one `(member, device)`. Public *within* the server by design — membership gating still applies |
+
+Both fetch responses hand back **raw signed `Event` bytes**: the server stores
+and orders MLS traffic, it never interprets it.
+
+The four non-`NegotiateProtocol` v2 requests are membership-gated like any other
+request, and additionally refuse an un-negotiated connection with
+`"this channel requires a newer client"`.
+
 ### `PublicKey` serialization quirk
 
 `PublicKey` (from `farder_crypto::identity`) derives `Serialize`/`Deserialize`

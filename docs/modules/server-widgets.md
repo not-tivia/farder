@@ -24,6 +24,13 @@ Fixed tick interval. A due poll closes / a due giveaway draws at most ~15 s late
 2. **Start pass** — `channel_events::list_start_due` + `start_and_announce` (one transaction: guarded `upcoming → started` flip + the `📅 <title> is starting now!` announcement authored by the system identity, `author_name_override = "Events"`, `author_badge = "BOT"`, `reply_to` = the card). `Ok(None)` (a Cancel won the guard) ⇒ announce nothing. Emits `EventUpdated` + `NewMessage`, plus one `PendingDm` per **going** responder.
 3. **Cancel-notify pass** — `channel_events::list_cancel_unnotified` + `mark_cancel_notified` (single-shot) → one `PendingDm` per **going** responder (`❌ "<title>" was cancelled.`). **No channel message** — the card flip is the public record.
 
+**Rung-2 class gate (the two announcement paths).** The giveaway draw and the event start pass are the only two message writers in the server with **no request layer in front of them** — nobody asks the sweeper to announce. So the gate lives in the tick: before `close_and_draw` and before `start_and_announce`, `channel_class::resolve(conn, row.channel_id)` is consulted, and anything that is not definitely `Plaintext` is **skipped with a `continue`** and a `warn!`. Two properties are load-bearing:
+
+- **Skip, never abort.** The sweeper is one task for the whole server, so a single sealed (or unresolvable) channel must never starve every other channel's widgets. The tick continues to the next row.
+- **Skip the flip too.** For events the status flip and its announcement share one transaction, so neither happens — the row stays `upcoming` and is skipped again on every later tick rather than becoming a deferred leak.
+
+No widget can exist in an E2EE channel anyway (`RunCommand` create is refused, see `server-connection.md`), so this is defence in depth behind the `messages.rs` choke point, which would otherwise surface a hard error mid-tick.
+
 It takes `&mut Connection` (not `&Connection`) purely because the start pass opens a real `conn.transaction()`.
 **Returns / emits:** `SweepOutcome { broadcasts, dms }`; each half's errors are `tracing::warn!`ed per-item and never panic the sweeper.
 **Side effects:** persists every state change (close / draw / announcement insert / reminder `sent` flip) BEFORE returning — i.e. under the caller's DB lock, before any broadcast or DM, and always behind a guarded `UPDATE` whose rows-affected decides whether the notification is produced at all. Persist-then-notify by construction: a crash in between can never re-close, redraw or re-fire. The accepted cost is **at-most-once** delivery (a crash in the persist→notify window loses that one notification; the durable state is still correct).

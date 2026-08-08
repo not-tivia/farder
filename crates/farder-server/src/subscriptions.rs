@@ -233,6 +233,51 @@ mod tests {
         channels::create_channel(&conn, name, ChannelType::Text, None, 0).unwrap()
     }
 
+    /// MERGE-BOUNDARY REGRESSION: an E2EE channel must stay SUBSCRIBABLE.
+    ///
+    /// Two changes met here. `channel_visible` became the Subscribe permission
+    /// boundary, and Rung 2 made a non-plaintext channel invisible to widget
+    /// requests. Folding the class check into `channel_visible` would have
+    /// satisfied both call sites and silently broken the feature: sealed
+    /// messages are delivered to SUBSCRIBERS like any other broadcast, so a
+    /// class-gated subscribe leaves every member of a sealed channel receiving
+    /// nothing, with no error anywhere to say why.
+    ///
+    /// The class gate therefore lives in `widget_channel_visible` only. This
+    /// test pins the half that has no other test: class does NOT gate subscribe.
+    #[tokio::test]
+    async fn an_e2ee_channel_is_still_subscribable() {
+        let (state, owner) = setup().await;
+        let sealed = text_channel(&state, "sealed");
+        {
+            let conn = state.db.lock().unwrap();
+            crate::channel_class::set_class(
+                &conn,
+                sealed,
+                farder_crypto::event_log::ChannelClass::E2ee,
+            )
+            .unwrap();
+        }
+
+        let allowed = {
+            let conn = state.db.lock().unwrap();
+            visible(&state, &conn, &owner, true, sealed)
+        };
+        assert!(
+            allowed,
+            "a sealed channel became unsubscribable — its members would receive \
+             no sealed messages at all"
+        );
+
+        // ...and the widget surface still cannot see it, so the class gate did
+        // not simply get deleted.
+        let widget_sees = {
+            let conn = state.db.lock().unwrap();
+            crate::handlers::widget_channel_visible_for_test(&conn, &owner, sealed, true).unwrap()
+        };
+        assert!(!widget_sees, "widgets must not see a sealed channel");
+    }
+
     fn everyone_role_id_with(conn: &Connection) -> u64 {
         members::list_roles(conn)
             .unwrap()

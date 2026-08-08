@@ -43,7 +43,7 @@ Data crosses several hard boundaries; each is a place bugs hide.
 |---|---|
 | `client/src/` | React + TypeScript frontend. `components/`, `hooks/`, `context/` (the reducer/state), `lib/` (incl. `tauri-bridge.ts`, the `invoke()` wrappers, and `types.ts`). |
 | `client/src-tauri/src/` | The Tauri (Rust) backend the UI talks to. `commands.rs` (every `#[tauri::command]`), `bridge.rs` (server-event → frontend-event bus + voice-event routing), `voice/` (the local voice engine), `audio_cpal.rs`/`audio.rs` (audio devices), `server_manager.rs` (spawns local server sidecars). |
-| `crates/farder-server/` | The server: `handlers.rs` (request dispatch + permissions + DB writes + event broadcast), `channels.rs`, `members.rs`, `connection.rs`, `db.rs`, `media_stream.rs` (voice media relay), `polls.rs`/`giveaways.rs`/`channel_events.rs`/`reminders.rs`/`widgets.rs` (interactive message widgets — polls, giveaways, RSVP event cards — personal reminders, and the shared sweeper). |
+| `crates/farder-server/` | The server: `handlers.rs` (request dispatch + permissions + DB writes + event broadcast), `channels.rs`, `members.rs`, `connection.rs`, `db.rs`, `media_stream.rs` (voice media relay), `polls.rs`/`giveaways.rs`/`channel_events.rs`/`reminders.rs`/`widgets.rs` (interactive message widgets — polls, giveaways, RSVP event cards — personal reminders, and the shared sweeper), `messages.rs` (**the single message-write choke point** — see below), `channel_class.rs` (fail-closed channel content class). |
 | `crates/farder-protocol/` | The wire contract: `ServerRequest`, `ServerResponse`, `ServerEvent`, shared types. The single source of truth for client↔server messages. |
 | `crates/farder-crypto/` | Ed25519 identity, X25519 key exchange, AES-GCM, E2EE DM + media key wrapping. |
 | `crates/farder-mls/` | OpenMLS 0.8.1 wrapper for E2EE channel groups (mesh rung 2). Client-side only — the server never links it and never holds group keys. See `docs/modules/farder-mls.md`. |
@@ -67,6 +67,38 @@ the Tauri event `server:new_message` → `useServerEvents.ts` dispatches into
 4. `NewMessage` is broadcast; downloaders go through the normal `download_file` path gated on `message_attachments` join rows. Both "not found" and "access denied" download responses are uniform (`"not available"`) so a `file_id` cannot be used as a *download-path* existence oracle. (The upload-dedup path still short-circuits on a known hash — a separate, pre-existing hash-existence oracle tracked under the file-hardening track, not closed by 4a.)
 
 Note: URL-fetched images (via `fetchUrl`) and inline-emoji attachments have no client-known content hash and stay on the legacy `sendMessage` path even on mesh-mode servers.
+
+**The message-write choke point (mesh rung 2):** every `messages` row in the
+server — legacy `SendMessage`, edits, slash-command replies, webhooks, poll /
+giveaway / event cards and their sweeper announcements, bot and system DMs, and
+the log-derive path — goes through exactly one private statement,
+`messages::insert_row`, reached via six named doors. Each door first resolves
+the channel's content class from `channels.content_class` (mirrored from an
+accepted `ChannelCreated`) via `channel_class::resolve`, which is **fail
+closed**: a missing row, an unrecognised value, or a failed read all count as
+encrypted and refuse. Only `messages::insert_sealed_row` may write into an E2EE
+channel, it accepts only opaque ciphertext, and sealed rows never enter the FTS
+index. A source-level test asserts no other file in the crate contains a raw
+`INSERT INTO messages`, so a future writer fails a test rather than becoming a
+plaintext door into a sealed channel. Details:
+`docs/modules/server-handlers.md` § "Channel content class + the message write
+choke point".
+
+**Rung-2 ingest (`SubmitEvent`):** the arm's order is log-mode check →
+`event_ingest::check_ingest_caps` (per-variant size/vector caps + a 300s
+`core.timestamp` future bound, run **before** the `LogState` clone so a cap
+breach cannot buy the allocation-heavy step) → the `stale-epoch` pre-check for
+`MlsCommit` (a lost epoch CAS is an accepted no-op *in the fold*, so ingest
+bounces it with that exact machine-readable code instead) → fold trial-apply →
+one SQLite transaction (`store_event` → `materialize_channel_created` → derive)
+→ in-memory `LogState` advance → broadcast. `ChannelCreated` materializes its
+`channels` row **and its content class** inside that transaction, so the log and
+its mirror cannot disagree across a crash; a refusal there rolls back the stored
+event too. At startup `channel_class::reconcile_channel_classes` re-derives the
+mirror from the log, repairing drift in the fail-closed direction only (it never
+widens a channel the DB currently treats as sealed). Only a Plaintext-declared
+channel is announced over the v1 `ServerEvent::ChannelCreated`; E2EE channels
+wait for `ChannelInfoV2`.
 
 **Attachment takedown (mesh-4b):** a member (uploader self-remove) or moderator (`KICK_MEMBERS`) right-clicks an attachment and chooses Remove / Take down. The UI calls `invoke("redact_attachment", { serverId, logServerId, contentHash })` → `commands.rs` builds a signed `AttachmentRedacted { content_hash }` event (same device-chain pattern as `submit_event`) and submits it via `ServerRequest::SubmitEvent`. On the server: `LogState::apply` validates authz (uploader OR `"kick"`, hash known, not already redacted), `attachments::redact_blob` sets `files.redacted_by` and deletes the on-disk bytes inside the persist TX, the in-memory `LogState` gains `content_hash` in `redacted_attachments`, and `ServerEvent::AttachmentRedacted { content_hash, by_moderator }` is broadcast to all clients. `bridge.rs` re-emits this as `server:attachment_redacted`; `useServerEvents.ts` dispatches `ATTACHMENT_REDACTED`; the `ServerContext` reducer walks `messages` and sets `redacted_by_moderator` on the matching `AttachmentInfo`. The UI replaces the attachment widget with a `Removed by the uploader` / `Removed by a moderator` placeholder. Download of a redacted blob returns uniform `"not available"` — same as not-found and access-denied — so the hash cannot be used as an existence oracle. At server startup, `event_ingest::sweep_redacted_bytes` deletes any remaining on-disk bytes for rows already marked redacted (crash-recovery).
 
@@ -321,6 +353,15 @@ Custom monitor bots let an owner point a bot at any public JSON API; the server 
   stores the Ed25519 key encrypted (Argon2id + AES-256-GCM) behind a 4-digit
   PIN; `farder-crypto::recovery` provides a BIP39 recovery phrase. See
   `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #2.
+- **The wire is v1/v2 split, and old clients cannot ignore what they cannot
+  parse.** MessagePack fails a decode on an unknown variant name or a
+  wrong-length field array, and it fails the WHOLE frame — so one v2-only event
+  sent to a v1 client breaks that client's stream in plaintext channels too.
+  Consequences: never add or reorder a field on a shipped struct (add a new
+  `...V2` struct instead — that is why `ChannelInfoV2` / `MessageInfoV2` exist);
+  a connection that has not sent `NegotiateProtocol` is treated as v1; and
+  v2-only events are filtered at the send in `connection::may_receive`. See
+  `docs/modules/protocol.md` and `docs/modules/server-connection.md`.
 - **The untyped command seam** (above). Keep `invoke("...")` names, the
   `#[tauri::command]`, and the `generate_handler!` list in `main.rs` in sync.
 - **The event bus** (`bridge.rs`): every `ServerEvent` maps to exactly one

@@ -134,7 +134,7 @@ the primary mutation still completes.
 | `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
 |---|---|---|---|---|
 | `SendMessage` | Insert a message into a channel or DM, attach files (legacy path) | `SEND_MESSAGES` (channel); DM checks participation and block list | `messages::insert_message`, `attachments::create_message_attachment` | `NewMessage` → `Subscribers(channel_id)` |
-| `SubmitEvent` | Accept a signed event from the mesh event log (log-mode servers only). **For `MessagePosted`:** (1) validates the event against the in-memory `LogState`; (2) checks the channel exists and content length (max 8 000 chars); (3) persists the event body, derives the `messages` row, and materializes validated `AttachmentCap`s into `message_attachments` — all inside a single SQLite transaction (atomic); (4) advances `LogState`. Each cap is validated by `event_ingest::derive_attachments`: a cap is valid iff the stored blob's `size`/`mime_type`/`uploaded_by` match AND the event author is the cap's uploader or the server owner. Invalid caps are quarantined (logged + skipped — the message still renders). **For `AttachmentRedacted`:** (1) trial-applies to verify authz (uploader OR `"kick"`, hash known, not already redacted); (2) calls `attachments::redact_blob` inside the persist TX, which sets `files.redacted_by` to the requester's public-key bytes and deletes the on-disk file bytes (tombstone row); (3) advances `LogState` (`redacted_attachments` set gains the hash); (4) broadcasts `ServerEvent::AttachmentRedacted { content_hash, by_moderator }` to all clients. `by_moderator` is derived before the state advance by checking whether the requester matches the recorded uploader (`LogState::attachment_uploader`). | Log membership + `LogState::apply` authorization | `event_ingest::store_event`; `attachments::redact_blob` (all in one TX) | `NewMessage` → `Subscribers(channel_id)` (when a `MessagePosted` is derived); `AttachmentRedacted { content_hash, by_moderator }` → `All` (when an `AttachmentRedacted` is ingested); `EventAccepted` returned to caller |
+| `SubmitEvent` | Accept a signed event from the mesh event log (log-mode servers only). **Arm order (Rung 2):** log-mode check → `event_ingest::check_ingest_caps` (size/vector caps + the `core.timestamp` future bound, *before* the `LogState` clone) → `stale-epoch` pre-check for `MlsCommit` → fold trial-apply → persist transaction (`store_event` → `materialize_channel_created` → derive) → in-memory `LogState` advance → broadcast. **For `MessagePosted`:** (1) validates the event against the in-memory `LogState`; (2) checks the channel exists and content length (max 8 000 chars); (3) persists the event body, derives the `messages` row, and materializes validated `AttachmentCap`s into `message_attachments` — all inside a single SQLite transaction (atomic); (4) advances `LogState`. Each cap is validated by `event_ingest::derive_attachments`: a cap is valid iff the stored blob's `size`/`mime_type`/`uploaded_by` match AND the event author is the cap's uploader or the server owner. Invalid caps are quarantined (logged + skipped — the message still renders). **For `AttachmentRedacted`:** (1) trial-applies to verify authz (uploader OR `"kick"`, hash known, not already redacted); (2) calls `attachments::redact_blob` inside the persist TX, which sets `files.redacted_by` to the requester's public-key bytes and deletes the on-disk file bytes (tombstone row); (3) advances `LogState` (`redacted_attachments` set gains the hash); (4) broadcasts `ServerEvent::AttachmentRedacted { content_hash, by_moderator }` to all clients. `by_moderator` is derived before the state advance by checking whether the requester matches the recorded uploader (`LogState::attachment_uploader`). | Log membership + `LogState::apply` authorization | `event_ingest::store_event`; `attachments::redact_blob` (all in one TX) | `NewMessage` → `Subscribers(channel_id)` (when a `MessagePosted` is derived); `AttachmentRedacted { content_hash, by_moderator }` → `All` (when an `AttachmentRedacted` is ingested); `EventAccepted` returned to caller |
 | `EditMessage` | Replace a message's content | Author-only (no permission bit) | `messages::edit_message` | `MessageEdited` → `Subscribers(channel_id)` |
 | `DeleteMessage` | Soft-delete a message | Author-only, OR `MANAGE_MESSAGES` | `messages::delete_message`; orphaned file IDs returned to caller | `MessageDeleted` → `Subscribers(channel_id)` |
 | `FetchHistory` | Paginated message fetch (cursor by `before_id`, max 500) | `READ_MESSAGES` | Read only | None |
@@ -314,11 +314,359 @@ progress to a full authenticated session (see `docs/modules/relay.md`).
 
 ---
 
+## Channel content class + the message write choke point
+
+**Files:** `crates/farder-server/src/channel_class.rs`, `messages.rs`.
+**Spec:** `docs/superpowers/specs/2026-07-27-mesh-rung2-e2ee-design.md` (rev 2), C8/F1.
+
+An E2EE channel's promise is that the server cannot read it. That only holds if
+**no** server-side path can author a plaintext row there. Rung 2 makes that
+structural rather than a per-call-site convention.
+
+### Class resolution (`channel_class.rs`)
+
+The class is a property of the channel's identity **in the log**
+(`EventPayload::ChannelCreated { class }`). It is mirrored into
+`channels.content_class` inside the same transaction that accepts the event, so
+any writer holding only a `&Connection` — including the widget sweeper, which
+has no `ServerState` — can resolve it with a plain DB read and no second mutex.
+
+| stored `content_class` | `ChannelWriteClass` | server-authored content |
+|---|---|---|
+| `'plaintext'` (also the column default, so every legacy channel) | `Plaintext` | allowed |
+| `'e2ee'` | `E2ee` | **refused** |
+| row missing, value unrecognised, or the read **errors** | `Unresolvable` | **refused** |
+
+`ChannelWriteClass::refuses_server_authored_content()` answers `true` for
+anything that is not a definite `Plaintext`. **Fail closed: absence of
+information never yields a plaintext write.**
+
+Public surface:
+
+- `resolve(conn, channel_id) -> ChannelWriteClass` — infallible; a failed read
+  is `Unresolvable`, never `Plaintext`.
+- `require_plaintext(conn, channel_id) -> Result<()>` — the strict guard used by
+  every server-authored door.
+- `require_plaintext_for_derived(conn, channel_id) -> Result<()>` — the guard
+  for the log-derived `MessagePosted` door. Identical to the strict guard except
+  that a channel with **no `channels` row at all** is allowed, mirroring the
+  fold's Rung-1 carve-out (`event_log_state.rs:873-886` gates only channels the
+  log knows). A row that exists with an unreadable class is still refused.
+- `require_e2ee(conn, channel_id) -> Result<()>` — the sealed door's guard; the
+  sealed door is not a general bypass, so it refuses plaintext and unresolvable
+  channels alike.
+- `set_class(conn, channel_id, ChannelClass)` — writes the mirror. Called only
+  from `reconcile_channel_classes` (the ingest path writes the class in the same
+  `INSERT` that creates the row, so there is no window between the two).
+- `reconcile_channel_classes(conn) -> Result<usize>` — startup re-derivation,
+  called from `main.rs` beside `reconcile_messages`. Replays every stored
+  `ChannelCreated` and re-asserts the mirror. The repair rule is **one-way**,
+  because "the log is the authority" and "fail closed" only ever point the same
+  direction: a mirror that is anything other than `'e2ee'` is repaired to the
+  log's declared value (which can only ever refuse *more*), but a mirror that
+  says `'e2ee'` while the log disagrees is **left alone** and logged at `error!`
+  — widening a channel the DB currently treats as sealed is the one move that
+  could expose content, so a disagreement there is refused rather than resolved.
+  A declared channel with **no `channels` row** is logged and skipped, never
+  re-created: absence resolves `Unresolvable` ⇒ refuse, whereas re-materializing
+  could resurrect a deleted channel. Returns the number of rows repaired.
+- `E2EE_REFUSED` — the single refusal string every class rejection shares, so a
+  channel id is never an existence oracle.
+
+### The choke point (`messages.rs`)
+
+Exactly one statement in the server inserts a `messages` row: the private
+`messages::insert_row`. Every module reaches it through one of these doors, and
+the class guard lives on the door (not inside `insert_row`) so the one
+legitimate E2EE door can state its own, opposite rule:
+
+| door | visibility | guard |
+|---|---|---|
+| `insert_message` | `pub` | `require_plaintext` |
+| `insert_message_with_ts` | `pub` | `require_plaintext` |
+| `insert_message_with_author_name` | `pub` | `require_plaintext` |
+| `edit_message` (the `UPDATE`) | `pub` | `require_plaintext`, resolved from the row's own `channel_id` |
+| `insert_derived_row` | `pub(crate)` | `require_plaintext_for_derived` — the `MessagePosted` read-view door, used by `event_ingest` |
+| `insert_sealed_row` | `pub(crate)` | `require_e2ee` — the **only** door into an E2EE channel, used by `event_ingest`'s sealed derive path |
+| `update_sealed_row` (the `UPDATE`) | `pub(crate)` | `require_e2ee` resolved from the row's own `channel_id`, **plus** the row itself must be sealed — the sealed-edit door, used by `event_ingest::apply_sealed_edit`. Never touches `content` or `messages_fts` |
+
+The three `insert_message*` signatures are **unchanged**, so all ~18 existing
+writers (legacy `SendMessage`, slash-command replies, webhooks, poll/giveaway/
+event cards and their sweeper announcements, bot and system DMs) are gated by
+construction without being edited.
+
+Sealed rows carry `content = ''`, the opaque ciphertext in `messages.sealed`,
+`messages.is_e2ee = 1`, and **skip the FTS insert entirely** — nothing
+plaintext-shaped is written, so there is nothing for a future `content`-reading
+feature to leak.
+
+**Structural guard:** `no_insert_into_messages_sql_outside_the_choke_point`
+walks `crates/farder-server/src` and asserts no file other than `messages.rs`
+contains a raw `INSERT INTO messages`. A new writer added later fails a test
+instead of silently becoming a plaintext door into a sealed channel.
+
+### Rung-2 ingest: caps, `stale-epoch`, and atomic channel creation
+
+The `SubmitEvent` arm gained three things, in this order, all **before** the
+persist transaction:
+
+1. **`check_ingest_caps`** — see "Event ingest helpers" below. Runs before the
+   `LogState` clone.
+2. **The `stale-epoch` pre-check.** An `MlsCommit` that lost the epoch CAS is an
+   *accepted no-op* in the fold (Rung-3 replay determinism needs every replica to
+   fold a converged event set identically), but the author's client must not
+   believe it landed. Ingest consults `LogState::mls_current_epoch(channel_id)`
+   and, if either the declared generation or the declared epoch is not current,
+   returns the **exact string `"stale-epoch"`** — a distinct, machine-readable
+   code the client's resync loop keys on (process winner → rebuild → resubmit).
+   The event is never stored, so the fold's no-op path is unreachable through
+   ingest. A channel with no MLS group falls through to the fold, which refuses
+   it. *This runs before signature/authz, so an unauthenticated submitter can
+   distinguish "current epoch" from "not current" — which leaks nothing: the
+   whole commit/Welcome stream is public server-wide by this rung's design.*
+3. **`materialize_channel_created`**, inside the persist transaction — see
+   "Event ingest helpers" below.
+
+**Broadcast rule for `ChannelCreated`:** only a **Plaintext**-declared channel is
+announced, via the existing `ServerEvent::ChannelCreated { channel: ChannelInfo }`.
+`ChannelInfo` has no class field and cannot gain one without breaking every
+un-updated client's decode of *plaintext* channels too (spec M2), so announcing a
+sealed channel through it would hand a v1 client a normal-looking channel with a
+working composer — worse than not seeing it. The E2EE announcement rides
+`ChannelInfoV2` (sub-3 Task 5); until then an E2EE channel is simply not
+announced, which is the fail-closed side.
+
+**Atomicity, observed:** the "fold accepts, ingest refuses" case (a thread child
+whose class the fold happily inherits, which ingest refuses on shape) is the
+hardest one, and it is the one the test drives — `store_event` has already run
+inside the transaction, and the assertion is that the `events` count, the
+`channels` count and `LogState::log_pos()` are all unchanged afterwards, and that
+the next well-shaped event on the same chain slot is still accepted.
+
+### Rung-2 derivation: sealed rows, reply mapping, edits, tombstones
+
+Every Rung-2 read-view write addresses its row through `messages.event_hash`,
+which a `UNIQUE` index makes a real key. That is a correctness property, not a
+performance one: reply mapping, sealed edits and content-blind deletes all mean
+"the row this event derived", and a second row carrying the same hash would make
+that target ambiguous — on the moderation path, ambiguity is a bug. SQLite
+treats `NULL`s in a unique index as distinct, so every legacy row keeps its
+`NULL` hash and is unaffected.
+
+**Reply mapping (spec F9).** A log reply cites an event *hash*; the client
+renders threading off a numeric row *id*. `resolve_reply_target` bridges the two
+by looking the hash up in `messages.event_hash`. An **unresolvable** target
+derives `reply_to = NULL` rather than failing the event — the edge is repaired
+later by `repair_reply_links`, so out-of-order arrival (or a future replicated
+log) costs a render, never the message. Without this, replies in an E2EE
+channel would be silently dropped, since such channels are log-only.
+
+**Sealed edits.** `apply_sealed_edit` runs inside the persist transaction.
+`LogState` keeps no per-message index by design, so the fold authorizes
+`MessageEditedE2ee` on the send gates plus "not tombstoned" and leaves **target
+authorship** to ingest, which owns the only per-message index there is. The
+target must exist, sit in the cited channel, be sealed, and belong to the same
+author: only an author rewrites their own message — moderators delete, they do
+not rewrite. `update_sealed_row` touches `sealed` and `edited_at` only, so
+`content` stays `''` and the row never reaches `messages_fts` through the back
+door `edit_message`'s re-index would open.
+
+**Tombstones (spec F2).** `apply_tombstone` **hard-deletes** the derived row and
+returns its orphaned blob ids so the handler can hand them to the same file-GC
+path the legacy `DeleteMessage` arm uses. Authorship splits exactly where the
+fold splits it: `DeleteReason::Moderation` is fully authorized by the fold (it
+checks the `kick` capability), while `DeleteReason::Author` needs the index the
+fold omits, so ingest requires the deleter to be the row's author. The delete
+takes effect live through the **shipped** `ServerEvent::MessageDeleted` — no new
+variant, so v1 clients act on it too, and its payload (an id and a channel) is
+public metadata, so it stays content-blind in a sealed channel. Content-blind
+delete is the *only* moderation mechanism in an E2EE channel, so this path is
+load-bearing rather than cleanup.
+
+**Unknown targets are refused, and that is what bounds the fold.** Both
+`apply_sealed_edit` and `apply_tombstone` return `Err` for a target no row
+carries, which rolls the persist transaction back: nothing stored, no log
+advance. The fold cannot tell a real target from a fabricated one, so without
+this refusal `MessageEditedE2ee` would be a free write into a sealed channel's
+history and the fold's `tombstones` set would accept anything.
+
+**Sealed posts and sealed edits are deliberately NOT broadcast.**
+`NewMessage`/`MessageEdited` carry a `String` body; stuffing ciphertext into one
+would ship garbage to every v1 client. Their delivery rides the v2 surfaces
+(sub-3 Task 5).
+
+**`reconcile_messages(conn, log_state: Option<&LogState>)`** — the signature
+change is the point. At startup it now runs four passes, and is idempotent (a
+second run in a row repairs nothing):
+
+1. **Derive missing rows** for both `MessagePosted` and `MessagePostedE2ee`,
+   in `accept_seq` order, **skipping any event the log has tombstoned**. Without
+   that skip, deletion would silently undo itself on the next boot — the event
+   is still stored, so re-derivation would resurrect the row.
+2. **Sweep** any row a stored tombstone still targets (the crash-window heal),
+   logged at `warn!`.
+3. **Replay sealed edits** in accept order, last edit wins. Derivation alone
+   gives every row its *original* ciphertext, so a wiped-and-rebuilt view would
+   otherwise roll back every edit ever made. An absent target — tombstoned, or
+   not yet derived — is skipped, not an error.
+4. **Repair reply links** left `NULL` at derive time.
+
+Together these are what make `derived_view_rebuild_from_events` equal the live
+view: wipe `messages`, re-run reconcile, and the result matches row for row,
+with tombstoned rows staying absent and reply edges restored.
+
+**Search.** `search_messages` adds `AND is_e2ee = 0` as belt-and-braces behind
+the FTS skip (coexistence row 7a). A sealed row never enters `messages_fts` so
+it cannot match — but the index is a mutable artifact and search is the one
+surface whose whole job is reading content, so the filter is stated in the query
+too. Retention, redaction and anonymization already operate on the ciphertext
+row without reading it (row 7b), which the tests verify rather than assert.
+
+### Observation tests (`crates/farder-server/tests/e2ee_observation.rs`)
+
+The unit tests in `handlers.rs` pin the refusal *strings*. This file pins the
+thing those strings are supposed to guarantee, by driving the REAL path and then
+observing the bytes that actually landed — CLAUDE.md's rule that a test asserting
+a function was called does not count.
+
+`assert_no_plaintext_anywhere(conn, needle)` enumerates the schema from
+`sqlite_master` **at runtime** and scans every value of every row of every table
+at the byte level. That design matters more than any individual test: a path
+added later that writes into a NEW table is covered without anyone remembering to
+extend a list, and a needle buried inside a serialized blob (`events.event_body`,
+a widget's JSON) trips it as loudly as one in a `content` column.
+`the_observer_finds_a_needle_that_is_really_there` is the self-check that keeps
+the rest from being vacuously green.
+
+Paths observed: legacy send, legacy edit (on a channel sealed *after* the message
+was posted, so the class is resolved from the row), reactions, threads, all six
+slash-command kinds (including `reminder` and `api`, which post no message at all
+and would slip past a message-count assertion), webhook creation, `FetchUrl`,
+search, retention/anonymization, the sweeper, and every public `insert_message*`
+door.
+
+Two tests are deliberately adversarial rather than confirmatory:
+
+- `a_sealed_row_is_unreachable_by_search_even_with_a_poisoned_fts_index` plants a
+  sealed row **and a matching FTS entry for it** — the state a corrupted or
+  tampered index would be in — and asserts search still cannot surface it. It
+  proves the `AND is_e2ee = 0` second guard holds with the first one defeated.
+  (Verified by breaking the filter: the test fails.)
+- `the_sweeper_announces_nothing_into_a_sealed_channel_even_on_drift` builds the
+  event through the real doors while the channel is plaintext, then reclassifies —
+  a row that today's rules would refuse to create. The sweeper is the one writer
+  with no user request behind it, so there is nobody to return a refusal to.
+
+### Schema (`db.rs`)
+
+- `channels.content_class TEXT NOT NULL DEFAULT 'plaintext'` — the class mirror.
+- `messages.is_e2ee INTEGER NOT NULL DEFAULT 0`, `messages.sealed BLOB`.
+- `idx_messages_event_hash` — a `UNIQUE` index on `messages.event_hash`,
+  enforcing exactly one derived row per log event (see "Rung-2 derivation"
+  above). Created unconditionally, not via the column migration.
+
+All three are added by the idempotent `PRAGMA table_info` migration pattern, so
+existing databases pick them up on the next open with legacy rows defaulting to
+plaintext (Q8's carve-out: a channel the log never knew stays plaintext forever).
+
+### Request-layer refusals
+
+The choke point hard-**errors**, which is the right answer for a programming
+mistake but the wrong answer to a user request. So every request that would
+produce (or act on) server-readable content in a channel is refused *first*, at
+the request layer, with a clean message. The choke point remains as the
+backstop; neither is load-bearing alone.
+
+`handlers::require_plaintext_channel(conn, channel_id) -> Option<Result<HandleResult>>`
+is the shared gate: `Some(denied)` to propagate, `None` to proceed. It returns
+the byte-identical `E2EE_REFUSED` and fails closed on `Unresolvable`, so a
+sealed channel and a nonexistent one are indistinguishable.
+
+| request | where the gate sits | refusal |
+|---|---|---|
+| `SendMessage` | after the timeout check, before any attachment/FTS work | `E2EE_REFUSED` |
+| `EditMessage` | after the authorship check, via `msg.channel_id` | `E2EE_REFUSED` |
+| `AddReaction` / `RemoveReaction` | after the permission check, via `msg.channel_id` | `E2EE_REFUSED` |
+| `CreateThread` | after the permission check, via the parent's `channel_id` | `E2EE_REFUSED` |
+| `CreateWebhook` | after the channel-exists check | `E2EE_REFUSED` |
+| `RunCommand` (all six kinds) | inside `check_run_command_channel_auth`, before the trigger is even looked up | `E2EE_REFUSED` |
+| `FetchUrl` | `connection::handle_fetch_url`, before the outbound HTTP fetch | `E2EE_REFUSED` |
+| every widget request | inside `widget_channel_visible`, which now answers `false` for any non-plaintext class | that arm's **existing opaque** string (`"poll not found"`, `"giveaway not found"`, `EVENT_NOT_FOUND`, `"channel not found"`) |
+| incoming webhook delivery | `webhooks::deliver`, after `find_by_token` | `WebhookAck::Unauthorized` (the existing opaque ack) |
+| giveaway draw + event start announcements | `widgets::sweep_once`, before the guarded UPDATE | skip and `continue`, logged at `warn!` |
+
+Two deliberate choices in that table:
+
+- **Widget arms keep their own opaque errors.** A distinguishable "encrypted
+  channel" answer would let a widget id classify a channel, so the gate is
+  expressed as *invisibility* — the same answer the arm gives for a widget that
+  does not exist. No widget can exist in an E2EE channel anyway (create is
+  refused at `RunCommand`); this is defence in depth.
+- **`RunCommand`'s gate is kind-agnostic by construction.** It sits in
+  `check_run_command_channel_auth`, which `connection.rs` calls before the
+  command lookup, so `text`, `api`, `poll`, `giveaway`, `event` and `reminder`
+  are all covered by one check. `reminder` matters even though it posts nothing:
+  `reminders.text` is stored server-side in plaintext.
+
+`request_requires_membership` keeps its default-deny shape — the bootstrap
+allow-list is still exactly `SubmitEvent`, `ResolveInvite`, `GetServerInfo`,
+`GetMembershipStatus`, pinned by an exhaustive-`match` test that fails to
+compile when a new `ServerRequest` variant is added without being classified.
+
+---
+
 ## Event ingest helpers (`crates/farder-server/src/event_ingest.rs`)
 
 These public functions are the source of truth for deriving persistent rows from
 the immutable event log. They are called inside the `SubmitEvent` handler and
 also by the startup reconciliation path in `main.rs`.
+
+### `check_ingest_caps(event) -> Result<()>` / `check_ingest_caps_at(event, now) -> Result<()>`
+
+The bounds the **fold deliberately does not own** (sub-2 resolved ambiguity #9).
+Two jobs, both blind — every rule is a byte count, a vector length or a clock
+comparison, and no payload field is inspected for meaning:
+
+1. **Per-variant size caps.** The constants live in
+   `farder_crypto::event_log` (see `docs/modules/crypto.md` → "Ingest caps");
+   `LogState::apply` reads none of them, so unbounded is unbounded until here.
+2. **The `core.timestamp` upper bound** (`MAX_EVENT_FUTURE_SKEW_SECS`, 300s).
+   Applies to **every** variant, not only the Rung-2 ones — `core.timestamp` is
+   the fold's device-liveness and cert-expiry clock for all of them.
+
+`check_ingest_caps` reads the clock itself; `check_ingest_caps_at` takes it as a
+parameter so the skew bound is testable without racing a real second boundary.
+
+**Ordering is load-bearing.** This runs at the very top of the `SubmitEvent`
+arm, before the `LogState` clone that `apply` validates against — that clone is
+the allocation-heavy step of ingest, and a cap breach must not be able to buy
+it. Observed, not asserted: an oversized payload signed by a device the log has
+never authorized still returns the *cap* error, not the fold's device error
+(`oversized_sealed_ciphertext_is_refused_before_the_fold_runs`).
+
+---
+
+### `materialize_channel_created(conn, event) -> Result<Option<ChannelClass>>`
+
+Creates the `channels` row for an accepted `ChannelCreated`, **with its
+`content_class`**, inside the same transaction that stores the event — so the
+log and its mirror cannot disagree across a crash, and any refusal here rolls
+back the stored event too (no channel row, no log advance, nothing broadcast).
+Returns `None` for every other payload.
+
+The fold has already authorized the event (owner-authored, id never seen in the
+log, no plaintext history in the log, parent class inherited). What ingest adds
+is everything the fold cannot see because it lives in the **legacy DB**, plus
+the shape this rung supports:
+
+| refusal | why |
+|---|---|
+| `channel_id < E2EE_CHANNEL_ID_FLOOR` (`1 << 32`) | the id is **client-chosen**; the floor keeps it clear of the `channels` AUTOINCREMENT space so it can never adopt a legacy channel |
+| the id already exists in `channels` | the log's own immutability rule cannot see legacy DB rows |
+| the id already has rows in `messages` | belt-and-braces for the case the fold's `plaintext_history_channels` cannot catch — a legacy DB channel carrying plaintext the log never saw. Declaring E2ee over it would put a lock icon on messages every host already read |
+| `kind != "text"` or `parent: Some(_)` | this rung accepts text channels only; threads under a sealed parent are refused by the spec (coexistence row 12) and categories are legacy DB state with no log representation. The fold's parent-class inheritance rule stays live for a later rung |
+
+---
 
 ### `derive_attachments(conn, message_id, event, owner) -> Result<usize>`
 
