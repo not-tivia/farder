@@ -786,7 +786,7 @@ separate client-crate build, not five.
 **Files:** `crates/farder-protocol/src/server.rs`, `state.rs`, `connection.rs`,
 `handlers.rs`; `docs/modules/protocol.md`, `server-connection.md`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 - `a_v1_connection_never_sees_an_e2ee_channel_or_a_v2_only_event` — the
   broadcast filter drops v2-only events for un-negotiated connections, and
@@ -804,7 +804,7 @@ separate client-crate build, not five.
   shipped `ServerRequest`/`ServerResponse`/`ServerEvent` variants and assert the
   encoded bytes are unchanged (the M2 append-only rule, enforced not assumed).
 
-- [ ] **Step 2: Protocol additions (append-only, dormant)**
+- [x] **Step 2: Protocol additions (append-only, dormant)**
 
 `ServerRequest`: `NegotiateProtocol { client_version: u32 }`,
 `FetchWelcomes { channel_id: Option<u64>, since_accept_seq: u64 }`,
@@ -827,7 +827,7 @@ Option<Vec<u8>>`, `event_hash: Option<String>`). New structs, never mutations.
 `MlsControlEvent { channel_id: Option<u64>, event_hash: String, payload_type: String }`,
 `ChannelCreatedV2 { channel: ChannelInfoV2 }`.
 
-- [ ] **Step 3: The version gate**
+- [x] **Step 3: The version gate**
 
 `ServerState` gains `client_protocol: RwLock<HashMap<[u8;32], u32>>` (default
 absent ⇒ v1). `NegotiateProtocol` records it; the broadcast path
@@ -838,7 +838,7 @@ connection returns `"this channel requires a newer client"`.
 Fail closed both directions: an *unknown/newer* client version is treated as v2
 only for events it explicitly negotiated; an un-negotiated connection is v1.
 
-- [ ] **Step 4: Gates (including the client crate — protocol changed)**
+- [x] **Step 4: Gates (including the client crate — protocol changed)**
 
 ```bash
 cargo test -p farder-crypto && cargo test -p farder-server && cargo test --workspace
@@ -847,7 +847,7 @@ cd client/src-tauri && cargo build      # NOT a workspace member — required he
 cargo clippy -p farder-mls -- -D warnings
 ```
 
-- [ ] **Step 5: Docs + commit**
+- [x] **Step 5: Docs + commit**
 
 `protocol.md` gains the new catalogs and an explicit "never mutate a shipped
 struct" banner; `server-connection.md` documents the per-connection version map

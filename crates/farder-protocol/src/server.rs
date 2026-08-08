@@ -1,3 +1,4 @@
+use farder_crypto::event_log::ChannelClass;
 use farder_crypto::identity::PublicKey;
 use serde::{Deserialize, Serialize};
 
@@ -152,6 +153,51 @@ pub struct ChannelInfo {
     pub slow_mode_secs: u32,
     pub retention_secs: Option<u64>,
     pub thread_parent_message_id: Option<u64>,
+}
+
+/// The protocol version this server speaks. A client learns it with
+/// `NegotiateProtocol` and, in the same round trip, tells the server its own.
+pub const SERVER_PROTOCOL_VERSION: u32 = 2;
+
+/// The lowest client version that may be shown an E2EE channel or handed a
+/// v2-only frame. **Fail closed:** a connection that has not negotiated is
+/// treated as v1, so silence is the safe answer, never an upgrade.
+///
+/// This bound exists because of how the codec fails. `rmp_serde` decodes an enum
+/// by variant NAME, and an unknown name fails the decode of the WHOLE frame — so
+/// handing a v1 client one v2-only event does not degrade gracefully, it breaks
+/// that client's stream in plaintext channels too (spec M2). The only safe
+/// treatment of an old client is to never send it a frame it cannot read.
+pub const MIN_CLIENT_VERSION_FOR_E2EE: u32 = 2;
+
+/// A channel plus its content class.
+///
+/// The class could not be added to [`ChannelInfo`]: `rmp_serde` encodes a struct
+/// as a POSITIONAL ARRAY, so one extra field lengthens that array and every
+/// un-updated client then fails to decode *plaintext* channels as well. New
+/// struct, never a mutation (spec M2).
+///
+/// The shipped fields are EMBEDDED rather than copied so the two views cannot
+/// drift as `ChannelInfo` grows — a field added there is carried here for free,
+/// and there is no second list to forget to update.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChannelInfoV2 {
+    pub base: ChannelInfo,
+    pub class: ChannelClass,
+}
+
+/// A message plus the sealed-row fields a v1 client has no way to render.
+///
+/// New struct for the same reason as [`ChannelInfoV2`]. For a sealed row `base`
+/// carries `content: ""` — the server holds ciphertext and cannot fill it — and
+/// the payload rides in `sealed`. `event_hash` is what a client needs to cite a
+/// message in a reply, edit or delete over the log.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MessageInfoV2 {
+    pub base: MessageInfo,
+    pub is_e2ee: bool,
+    pub sealed: Option<Vec<u8>>,
+    pub event_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -556,6 +602,40 @@ pub enum ServerRequest {
         starts_at: u64,
         remind_lead: Option<u64>,
     },
+
+    // ---- Rung-2 (v2) surfaces. ----
+    //
+    // THE WIRE RULE (measured, not assumed — see
+    // `existing_variants_are_byte_stable_after_the_additions`): `rmp_serde`
+    // encodes an enum variant by its NAME and a struct variant's fields as a
+    // POSITIONAL ARRAY. So:
+    //
+    //   * adding a variant is safe at any position — names, not indices;
+    //   * RENAMING a shipped variant breaks every client;
+    //   * adding, removing or reordering a FIELD of a shipped variant or struct
+    //     changes that array and breaks every client — which is exactly why the
+    //     class could not be added to `ChannelInfo` and `ChannelInfoV2` exists.
+    //
+    // New variants still go at the end by convention, so the diff of a protocol
+    // change is readable.
+    /// Declare the client's protocol version and learn the server's. Until a
+    /// connection sends this it is treated as v1 and never shown E2EE content.
+    /// The only v2 addition to the bootstrap allow-list — a client must be able
+    /// to negotiate before it is a member.
+    NegotiateProtocol { client_version: u32 },
+    /// Fetch MLS Welcomes addressed to the CALLER. `channel_id` narrows the
+    /// result; it can never widen it — the recipient is always the authenticated
+    /// connection key, never a field in this request.
+    FetchWelcomes { channel_id: Option<u64>, since_accept_seq: u64 },
+    /// Fetch the published KeyPackages for one member's device, so a committer
+    /// can add them to a group. KeyPackages are public by design.
+    FetchKeyPackages { member: PublicKey, device: String },
+    /// `GetServerInfo` with per-channel classes. The v1 surface omits E2EE
+    /// channels entirely, because `ChannelInfo` cannot express that a channel is
+    /// sealed and a client that cannot tell would show a working composer.
+    GetServerInfoV2,
+    /// `FetchHistory` that can carry sealed rows.
+    FetchHistoryV2 { channel_id: u64, before_id: Option<u64>, limit: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -644,6 +724,25 @@ pub enum ServerResponse {
     /// Full event state for `GetEvent`. `my_rsvp` is requester-specific and never
     /// rides in the `EventUpdated` broadcast.
     Event { event: EventInfo, my_rsvp: Option<String> },
+
+    // ---- Rung-2 (v2) responses. Same wire rule as `ServerRequest`. ----
+    /// Answer to `NegotiateProtocol`.
+    ProtocolVersion { server_version: u32, min_client_version_for_e2ee: u32 },
+    /// Raw signed `Event` bytes (`rmp_serde`), oldest-first. The server hands out
+    /// OPAQUE bytes: it stores and orders MLS traffic, it never interprets it.
+    Welcomes { events: Vec<Vec<u8>> },
+    /// Raw signed `Event` bytes carrying `MlsKeyPackagePublished`, oldest-first.
+    KeyPackages { events: Vec<Vec<u8>> },
+    ServerInfoV2 {
+        name: String,
+        member_count: u32,
+        channels: Vec<ChannelInfoV2>,
+        categories: Vec<CategoryInfo>,
+        roles: Vec<RoleInfo>,
+        owner_public_key: Option<PublicKey>,
+        server_id: Option<String>,
+    },
+    HistoryV2 { messages: Vec<MessageInfoV2> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -759,6 +858,97 @@ pub enum ServerEvent {
     /// EventCancelled). Targets `Subscribers(channel_id)` only: the roster is
     /// visible to exactly the audience that can read the channel.
     EventUpdated { event: EventInfo },
+
+    // ---- Rung-2 (v2-only) events. Same wire rule as `ServerRequest`.
+    // Every variant below MUST be listed in `event_requires_v2` — a v2-only
+    // frame delivered to a v1 connection fails that connection's decode of the
+    // WHOLE frame (an unknown variant name is a hard decode error), not just
+    // this event.
+    /// A sealed post. Rides its own variant because `NewMessage` carries a
+    /// `String` body and ciphertext is not a string.
+    SealedMessage { channel_id: u64, message: MessageInfoV2 },
+    /// A sealed edit — the whole row, not a diff: there is no server-side notion
+    /// of "the new text" when the server cannot read either version.
+    SealedMessageEdited { channel_id: u64, message: MessageInfoV2 },
+    /// A content-blind delete in a sealed channel. Distinct from the shipped
+    /// `MessageDeleted` so a v2 client can tell the two paths apart.
+    MessageTombstoned { channel_id: u64, message_id: u64 },
+    /// An MLS control event landed (KeyPackage / Commit / Welcome / LeafConfirmed
+    /// / GroupReset). Carries only the pointer — the client fetches and verifies
+    /// the signed event itself rather than trusting a server-shaped summary.
+    MlsControlEvent { channel_id: Option<u64>, event_hash: String, payload_type: String },
+    /// A newly declared channel WITH its class. `ChannelCreated` announces only
+    /// plaintext channels, for the reason given on `ChannelInfoV2`.
+    ChannelCreatedV2 { channel: ChannelInfoV2 },
+}
+
+/// Whether an event may only be delivered to a connection that negotiated
+/// [`MIN_CLIENT_VERSION_FOR_E2EE`] or higher.
+///
+/// Stated as an exhaustive `match` with no wildcard arm ON PURPOSE: adding a
+/// variant to `ServerEvent` then fails to compile here, so a future v2-only
+/// event cannot be silently classified as safe for v1 clients. Every shipped
+/// (v1) variant answers `false` — v1 clients keep receiving exactly what they
+/// received before.
+pub fn event_requires_v2(event: &ServerEvent) -> bool {
+    match event {
+        ServerEvent::SealedMessage { .. }
+        | ServerEvent::SealedMessageEdited { .. }
+        | ServerEvent::MessageTombstoned { .. }
+        | ServerEvent::MlsControlEvent { .. }
+        | ServerEvent::ChannelCreatedV2 { .. } => true,
+
+        // Every shipped (v1) variant, listed rather than wildcarded. v1 clients
+        // keep receiving exactly what they received before.
+        ServerEvent::NewMessage { .. }
+        | ServerEvent::MessageEdited { .. }
+        | ServerEvent::MessageDeleted { .. }
+        | ServerEvent::MessagePinned { .. }
+        | ServerEvent::MessageUnpinned { .. }
+        | ServerEvent::MemberJoined { .. }
+        | ServerEvent::MemberLeft { .. }
+        | ServerEvent::MemberBanned { .. }
+        | ServerEvent::MemberUnbanned { .. }
+        | ServerEvent::MemberTimeoutChanged { .. }
+        | ServerEvent::MemberProfileUpdated { .. }
+        | ServerEvent::MemberPresenceUpdated { .. }
+        | ServerEvent::YouWereKicked
+        | ServerEvent::YouWereBanned { .. }
+        | ServerEvent::AuditEventCreated { .. }
+        | ServerEvent::TypingStarted { .. }
+        | ServerEvent::ChannelCreated { .. }
+        | ServerEvent::ChannelUpdated { .. }
+        | ServerEvent::ChannelDeleted { .. }
+        | ServerEvent::CategoryCreated { .. }
+        | ServerEvent::CategoryUpdated { .. }
+        | ServerEvent::CategoryDeleted { .. }
+        | ServerEvent::RoleCreated { .. }
+        | ServerEvent::RoleUpdated { .. }
+        | ServerEvent::RoleDeleted { .. }
+        | ServerEvent::PermissionsChanged
+        | ServerEvent::ReactionAdded { .. }
+        | ServerEvent::ReactionRemoved { .. }
+        | ServerEvent::DeletionRequested { .. }
+        | ServerEvent::DeletionCancelled { .. }
+        | ServerEvent::DeletionExecuted { .. }
+        | ServerEvent::DmCreated { .. }
+        | ServerEvent::MediaJoined { .. }
+        | ServerEvent::MediaLeft { .. }
+        | ServerEvent::StreamJoined { .. }
+        | ServerEvent::StreamLeft { .. }
+        | ServerEvent::TrackEnabled { .. }
+        | ServerEvent::TrackDisabled { .. }
+        | ServerEvent::TrackActivityChanged { .. }
+        | ServerEvent::StreamStateChanged { .. }
+        | ServerEvent::StreamCallIncoming { .. }
+        | ServerEvent::StreamCallEnded { .. }
+        | ServerEvent::StreamKeyOffer { .. }
+        | ServerEvent::MembershipChanged { .. }
+        | ServerEvent::AttachmentRedacted { .. }
+        | ServerEvent::PollUpdated { .. }
+        | ServerEvent::GiveawayUpdated { .. }
+        | ServerEvent::EventUpdated { .. } => false,
+    }
 }
 
 #[cfg(test)]
@@ -766,6 +956,107 @@ mod tests {
     use super::*;
     use crate::codec;
     use farder_crypto::identity::Keypair;
+
+
+    /// The M2 append-only rule, ENFORCED rather than asserted.
+    ///
+    /// These literals were captured from the shipped protocol BEFORE the Rung-2
+    /// additions and verified byte-for-byte against it. A future change that
+    /// renames a shipped variant, or adds/removes/reorders a field of one, moves
+    /// these bytes and fails here — which is the whole point, because every such
+    /// change silently breaks every deployed client's decode of the frame.
+    ///
+    /// What the bytes show (this is the real wire rule, measured not assumed):
+    ///
+    /// * `GetServerInfo` is `[173, b"GetServerInfo"]` — a bare fixstr. A unit
+    ///   variant is its NAME, so variant ORDER is irrelevant and adding variants
+    ///   anywhere is safe.
+    /// * `MessageSent { id, timestamp }` is a 1-entry map from the name to
+    ///   `[4, 5]` — a POSITIONAL ARRAY of the fields. So a struct's field list is
+    ///   the fragile part, not the enum's variant list. That is exactly why
+    ///   `ChannelInfoV2`/`MessageInfoV2` are new structs instead of new fields on
+    ///   `ChannelInfo`/`MessageInfo`.
+    #[test]
+    fn existing_variants_are_byte_stable_after_the_additions() {
+        let cases: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+            (
+                "ServerRequest::GetServerInfo",
+                codec::encode(&ServerRequest::GetServerInfo).unwrap(),
+                vec![173, 71, 101, 116, 83, 101, 114, 118, 101, 114, 73, 110, 102, 111],
+            ),
+            (
+                "ServerRequest::FetchHistory",
+                codec::encode(&ServerRequest::FetchHistory {
+                    channel_id: 7,
+                    before_id: None,
+                    limit: 50,
+                })
+                .unwrap(),
+                vec![129, 172, 70, 101, 116, 99, 104, 72, 105, 115, 116, 111, 114, 121, 147, 7, 192, 50],
+            ),
+            (
+                "ServerRequest::EditEvent (the last shipped variant)",
+                codec::encode(&ServerRequest::EditEvent {
+                    event_id: 3,
+                    title: "t".to_string(),
+                    description: None,
+                    location: None,
+                    starts_at: 9,
+                    remind_lead: None,
+                })
+                .unwrap(),
+                vec![129, 169, 69, 100, 105, 116, 69, 118, 101, 110, 116, 150, 3, 161, 116, 192, 192, 9, 192],
+            ),
+            (
+                "ServerResponse::Ok",
+                codec::encode(&ServerResponse::Ok).unwrap(),
+                vec![162, 79, 107],
+            ),
+            (
+                "ServerResponse::MessageSent",
+                codec::encode(&ServerResponse::MessageSent { id: 4, timestamp: 5 }).unwrap(),
+                vec![129, 171, 77, 101, 115, 115, 97, 103, 101, 83, 101, 110, 116, 146, 4, 5],
+            ),
+            (
+                "ServerResponse::Notice",
+                codec::encode(&ServerResponse::Notice { text: "n".to_string() }).unwrap(),
+                vec![129, 166, 78, 111, 116, 105, 99, 101, 145, 161, 110],
+            ),
+            (
+                "ServerEvent::MessageDeleted",
+                codec::encode(&ServerEvent::MessageDeleted { message_id: 1, channel_id: 2 })
+                    .unwrap(),
+                vec![129, 174, 77, 101, 115, 115, 97, 103, 101, 68, 101, 108, 101, 116, 101, 100, 146, 1, 2],
+            ),
+        ];
+        for (label, actual, expected) in cases {
+            assert_eq!(actual, expected, "{label} changed on the wire");
+        }
+    }
+
+    /// Every v2-only event is classified as such, and no shipped one is.
+    ///
+    /// The companion to the byte-stability test: that one pins what a v1 client
+    /// CAN decode, this one pins what it is never sent.
+    #[test]
+    fn v2_only_events_are_classified_and_shipped_events_are_not() {
+        assert!(event_requires_v2(&ServerEvent::MessageTombstoned {
+            channel_id: 1,
+            message_id: 2
+        }));
+        assert!(event_requires_v2(&ServerEvent::MlsControlEvent {
+            channel_id: None,
+            event_hash: "h".to_string(),
+            payload_type: "MlsCommit".to_string(),
+        }));
+        assert!(!event_requires_v2(&ServerEvent::MessageDeleted {
+            message_id: 1,
+            channel_id: 2
+        }));
+        assert!(!event_requires_v2(&ServerEvent::MembershipChanged {
+            public_key: Keypair::generate().public_key()
+        }));
+    }
 
     #[test]
     fn test_invite_preview_frames_roundtrip() {

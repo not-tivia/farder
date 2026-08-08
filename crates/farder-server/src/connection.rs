@@ -717,6 +717,13 @@ pub(crate) async fn cleanup_session(
             .unwrap_or(false);
         if still_ours {
             clients.remove(&pk_bytes);
+            // Drop the negotiated version with the connection that negotiated it,
+            // so a reconnecting client must negotiate again (absent = v1 = fail
+            // closed). Guarded by `still_ours` for the opposite reason: if this
+            // is a STALE cleanup racing a fresh connection, clearing the live
+            // connection's version would silently downgrade it to v1 and it would
+            // stop receiving sealed messages with nothing to retry.
+            state.client_protocol.write().unwrap().remove(&pk_bytes);
         }
     }
     {
@@ -1514,11 +1521,38 @@ pub(crate) async fn main_loop(
 // Broadcasting (public)
 // ---------------------------------------------------------------------------
 
+/// May this connection be handed this event?
+///
+/// **The M2 invariant.** `rmp_serde` decodes an enum by variant NAME, and an
+/// unknown name fails the decode of the WHOLE frame. Sending one v2-only event
+/// to a v1 client therefore does not degrade — it breaks that client's stream,
+/// including in the plaintext channels it is entitled to. So the filter sits on
+/// the send, not on the client.
+///
+/// Fail closed: a connection with no recorded version is v1, and a v1 client
+/// gets exactly the events it got before this rung existed.
+pub(crate) fn may_receive(state: &ServerState, pk: &[u8; 32], event: &ServerEvent) -> bool {
+    if !farder_protocol::server::event_requires_v2(event) {
+        return true;
+    }
+    state
+        .client_protocol
+        .read()
+        .unwrap()
+        .get(pk)
+        .copied()
+        .unwrap_or(1)
+        >= farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
+}
+
 pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: ServerEvent) {
     match target {
         EventTarget::All => {
             let clients = state.clients.read().await;
-            for sender in clients.values() {
+            for (pk_bytes, sender) in clients.iter() {
+                if !may_receive(state, pk_bytes, &event) {
+                    continue;
+                }
                 let _ = sender.try_send(event.clone());
             }
         }
@@ -1527,6 +1561,9 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
             if let Some(subscriber_keys) = subs.get(&channel_id) {
                 let clients = state.clients.read().await;
                 for pk_bytes in subscriber_keys {
+                    if !may_receive(state, pk_bytes, &event) {
+                        continue;
+                    }
                     if let Some(sender) = clients.get(pk_bytes) {
                         let _ = sender.try_send(event.clone());
                     }
@@ -1536,6 +1573,9 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
         EventTarget::Members(pks) => {
             let clients = state.clients.read().await;
             for pk in pks {
+                if !may_receive(state, pk.as_bytes(), &event) {
+                    continue;
+                }
                 if let Some(sender) = clients.get(pk.as_bytes()) {
                     let _ = sender.try_send(event.clone());
                 }
@@ -1554,7 +1594,9 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
                 if let Ok(perms) =
                     crate::handlers::resolve_member_server_perms(&conn, &pk, is_owner)
                 {
-                    if crate::permissions::has(perms, perm_bit) {
+                    if crate::permissions::has(perms, perm_bit)
+                        && may_receive(state, pk_bytes, &event)
+                    {
                         let _ = sender.try_send(event.clone());
                     }
                 }
@@ -1822,5 +1864,138 @@ mod voice_relay_tests {
 
         let second = tokio::time::timeout(std::time::Duration::from_millis(300), relay_rx.read_datagram()).await;
         assert!(second.is_err(), "only one recipient (bob); sender must not be echoed");
+    }
+}
+
+#[cfg(test)]
+mod protocol_version_tests {
+    use super::*;
+    use farder_crypto::identity::Keypair;
+    use farder_protocol::server::{
+        event_requires_v2, ChannelInfoV2, MessageInfoV2, MIN_CLIENT_VERSION_FOR_E2EE,
+    };
+
+    fn v1_event() -> ServerEvent {
+        ServerEvent::MessageDeleted { message_id: 1, channel_id: 2 }
+    }
+
+    fn v2_events() -> Vec<ServerEvent> {
+        let msg = MessageInfoV2 {
+            base: farder_protocol::server::MessageInfo {
+                id: 1,
+                channel_id: 2,
+                author: Keypair::generate().public_key(),
+                content: String::new(),
+                timestamp: 0,
+                edited_at: None,
+                reply_to: None,
+                pinned: false,
+                attachments: vec![],
+                reactions: vec![],
+                thread_id: None,
+                thread_message_count: None,
+                author_name_override: None,
+                author_badge: None,
+                widget: None,
+            },
+            is_e2ee: true,
+            sealed: Some(vec![9, 9, 9]),
+            event_hash: Some("deadbeef".to_string()),
+        };
+        vec![
+            ServerEvent::SealedMessage { channel_id: 2, message: msg.clone() },
+            ServerEvent::SealedMessageEdited { channel_id: 2, message: msg },
+            ServerEvent::MessageTombstoned { channel_id: 2, message_id: 1 },
+            ServerEvent::MlsControlEvent {
+                channel_id: Some(2),
+                event_hash: "abc".to_string(),
+                payload_type: "MlsCommit".to_string(),
+            },
+            ServerEvent::ChannelCreatedV2 {
+                channel: ChannelInfoV2 {
+                    base: farder_protocol::server::ChannelInfo {
+                        id: 2,
+                        name: "sealed".to_string(),
+                        channel_type: farder_protocol::server::ChannelType::Text,
+                        category_id: None,
+                        position: 0,
+                        topic: None,
+                        nsfw: false,
+                        slow_mode_secs: 0,
+                        retention_secs: None,
+                        thread_parent_message_id: None,
+                    },
+                    class: farder_crypto::event_log::ChannelClass::E2ee,
+                },
+            },
+        ]
+    }
+
+    /// THE M2 INVARIANT, at the send. A v1 connection is handed no v2-only frame,
+    /// because a frame it cannot decode fails its WHOLE stream — including the
+    /// plaintext channels it is entitled to.
+    ///
+    /// Un-negotiated is tested first because that is the default every shipped
+    /// client is in today: absence of a version must read as v1, not as "unknown,
+    /// probably fine".
+    #[test]
+    fn a_v1_connection_is_never_handed_a_v2_only_event() {
+        let state = ServerState::new_for_test().unwrap();
+        let pk = Keypair::generate().public_key();
+        let key = *pk.as_bytes();
+
+        // 1. Un-negotiated ⇒ v1 ⇒ every v2-only event is withheld...
+        for ev in v2_events() {
+            assert!(
+                event_requires_v2(&ev),
+                "{ev:?} must be classified v2-only or the filter cannot see it"
+            );
+            assert!(
+                !may_receive(&state, &key, &ev),
+                "an un-negotiated connection was handed {ev:?}"
+            );
+        }
+        // ...while everything it received before still flows.
+        assert!(may_receive(&state, &key, &v1_event()));
+
+        // 2. An explicitly OLD client is equally withheld.
+        state.client_protocol.write().unwrap().insert(key, 1);
+        for ev in v2_events() {
+            assert!(!may_receive(&state, &key, &ev), "a v1 client was handed {ev:?}");
+        }
+
+        // 3. Only after negotiating does it receive them.
+        state
+            .client_protocol
+            .write()
+            .unwrap()
+            .insert(key, MIN_CLIENT_VERSION_FOR_E2EE);
+        for ev in v2_events() {
+            assert!(may_receive(&state, &key, &ev), "a v2 client was denied {ev:?}");
+        }
+
+        // 4. And a DIFFERENT connection is unaffected by that negotiation — the
+        //    version is per-connection, not global.
+        let other = *Keypair::generate().public_key().as_bytes();
+        for ev in v2_events() {
+            assert!(!may_receive(&state, &other, &ev), "version leaked across connections");
+        }
+    }
+
+    /// Fail closed in the other direction too: a version we do not recognise is
+    /// only ever trusted for what it explicitly claims. A client claiming a
+    /// FUTURE version still satisfies the floor (it can decode v2 by definition),
+    /// but a claim BELOW the floor never does, whatever the number.
+    #[test]
+    fn an_unknown_client_version_is_judged_only_against_the_floor() {
+        let state = ServerState::new_for_test().unwrap();
+        let key = *Keypair::generate().public_key().as_bytes();
+        let ev = v2_events().remove(0);
+
+        state.client_protocol.write().unwrap().insert(key, 0);
+        assert!(!may_receive(&state, &key, &ev), "version 0 must not clear the floor");
+
+        state.client_protocol.write().unwrap().insert(key, u32::MAX);
+        assert!(may_receive(&state, &key, &ev), "a newer client can decode v2");
     }
 }

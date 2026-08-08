@@ -98,6 +98,16 @@ pub struct ServerState {
     /// by, distinct from the mesh genesis). Set at startup in relay mode; used to
     /// build webhook URLs. None for direct (non-relay) servers.
     pub relay_server_id: std::sync::Mutex<Option<String>>,
+
+    /// Per-connection negotiated protocol version, keyed by the AUTHENTICATED
+    /// connection key. **Absent means v1** — a connection that never sent
+    /// `NegotiateProtocol` is old until it proves otherwise, which is the only
+    /// direction that fails closed (spec M2). Cleared when the connection drops
+    /// so a reconnecting client must negotiate again.
+    ///
+    /// A `std` lock (like `presences`) rather than a `tokio` one because
+    /// `handlers::handle_request` is synchronous and cannot await.
+    pub client_protocol: StdRwLock<HashMap<[u8; 32], u32>>,
 }
 
 impl ServerState {
@@ -124,6 +134,7 @@ impl ServerState {
             genesis: std::sync::Mutex::new(None),
             log_state: std::sync::Mutex::new(None),
             relay_server_id: std::sync::Mutex::new(None),
+            client_protocol: StdRwLock::new(HashMap::new()),
         }
     }
 

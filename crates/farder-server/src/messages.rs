@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use farder_crypto::identity::PublicKey;
-use farder_protocol::server::{MessageInfo, DELETED_USER_KEY};
+use farder_protocol::server::{MessageInfo, MessageInfoV2, DELETED_USER_KEY};
 
 use crate::db::now;
 
@@ -298,14 +298,18 @@ pub fn fetch_history(
     limit: u32,
     requester: &PublicKey,
 ) -> Result<Vec<MessageInfo>> {
+    // `AND is_e2ee = 0`: this is the V1 read surface, and `MessageInfo` has no
+    // way to carry ciphertext. Without the filter a sealed row would arrive as a
+    // real message with an EMPTY body — indistinguishable from a blank post, and
+    // silently wrong. A v2 client reads sealed rows through `fetch_history_v2`.
     let sql = match before_id {
         Some(_) => format!(
-            "SELECT {} FROM messages WHERE channel_id = ?1 AND id < ?2 \
+            "SELECT {} FROM messages WHERE channel_id = ?1 AND is_e2ee = 0 AND id < ?2 \
              ORDER BY id DESC LIMIT ?3",
             MSG_SELECT
         ),
         None => format!(
-            "SELECT {} FROM messages WHERE channel_id = ?1 \
+            "SELECT {} FROM messages WHERE channel_id = ?1 AND is_e2ee = 0 \
              ORDER BY id DESC LIMIT ?2",
             MSG_SELECT
         ),
@@ -447,6 +451,93 @@ pub fn unpin_message(conn: &Connection, id: u64) -> Result<()> {
         params![id as i64],
     )?;
     Ok(())
+}
+
+/// The v2 read surface: history that can carry sealed rows.
+///
+/// Same ordering, permission model and `limit` semantics as [`fetch_history`] —
+/// the ONLY difference is that a sealed row is included, with its ciphertext in
+/// `sealed`, `is_e2ee = true`, and `base.content` left as the `''` the server
+/// stores (it holds ciphertext and has nothing else to put there).
+///
+/// `event_hash` rides along because a v2 client needs it to cite a message in a
+/// reply, edit or delete over the log; the numeric id is server-local.
+pub fn fetch_history_v2(
+    conn: &Connection,
+    channel_id: u64,
+    before_id: Option<u64>,
+    limit: u32,
+    requester: &PublicKey,
+) -> Result<Vec<MessageInfoV2>> {
+    let select = format!("{}, is_e2ee, sealed, event_hash", MSG_SELECT);
+    let sql = match before_id {
+        Some(_) => format!(
+            "SELECT {} FROM messages WHERE channel_id = ?1 AND id < ?2 \
+             ORDER BY id DESC LIMIT ?3",
+            select
+        ),
+        None => format!(
+            "SELECT {} FROM messages WHERE channel_id = ?1 \
+             ORDER BY id DESC LIMIT ?2",
+            select
+        ),
+    };
+    let row_to_v2 = |row: &rusqlite::Row| -> rusqlite::Result<MessageInfoV2> {
+        let base = row_to_message_info(row)?;
+        let n = 11; // MSG_SELECT's column count; the three v2 columns follow it.
+        let is_e2ee: i64 = row.get(n)?;
+        Ok(MessageInfoV2 {
+            base,
+            is_e2ee: is_e2ee != 0,
+            sealed: row.get(n + 1)?,
+            event_hash: row.get(n + 2)?,
+        })
+    };
+
+    let mut out: Vec<MessageInfoV2> = Vec::new();
+    {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = match before_id {
+            Some(bid) => stmt.query_map(
+                params![channel_id as i64, bid as i64, limit as i64],
+                row_to_v2,
+            )?,
+            None => stmt.query_map(params![channel_id as i64, limit as i64], row_to_v2)?,
+        };
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    // Enrich exactly as `fetch_history` does, through the SAME batch loaders —
+    // per-message lookups here would be an N+1 the v1 surface does not have.
+    // Attachments, reactions and threads are class-independent: a sealed message
+    // can still carry an encrypted attachment and still be reacted to.
+    //
+    // Ordering matches `fetch_history` exactly (newest-first, `ORDER BY id DESC`,
+    // no reversal). A v2 client paginates identically to a v1 one.
+    let msg_ids: Vec<u64> = out.iter().map(|m| m.base.id).collect();
+    if !msg_ids.is_empty() {
+        let attach_map = crate::attachments::get_attachments_for_messages(conn, &msg_ids)?;
+        let reaction_map = crate::reactions::get_reactions_for_messages(conn, &msg_ids, requester)?;
+        for m in out.iter_mut() {
+            if let Some(a) = attach_map.get(&m.base.id) {
+                m.base.attachments = a.clone();
+            }
+            if let Some(r) = reaction_map.get(&m.base.id) {
+                m.base.reactions = r.clone();
+            }
+            if let Some(thread) = crate::channels::get_thread_for_message(conn, m.base.id)? {
+                m.base.thread_id = Some(thread.id);
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+                    params![thread.id as i64],
+                    |row| row.get(0),
+                )?;
+                m.base.thread_message_count = Some(count as u32);
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub fn search_messages(

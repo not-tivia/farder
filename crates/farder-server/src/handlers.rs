@@ -380,9 +380,24 @@ fn require_member_hierarchy(
 /// declared E2EE channel. The refusal string is the single byte-identical
 /// [`crate::channel_class::E2EE_REFUSED`], so a channel id is never an existence
 /// oracle: a sealed channel and a channel that does not exist answer the same.
-fn require_plaintext_channel(conn: &Connection, channel_id: u64) -> Option<Result<HandleResult>> {
+///
+/// The refusal string — and ONLY the string — depends on the caller's negotiated
+/// version: a v1 connection is told to upgrade, a v2 one gets `E2EE_REFUSED`.
+/// This does not reopen the oracle, because the *set* of refused requests is
+/// identical either way: sealed and unresolvable channels take the same branch,
+/// so a v1 client learns "not for you", never "this id exists and is sealed".
+fn require_plaintext_channel(
+    conn: &Connection,
+    state: &crate::state::ServerState,
+    member: &PublicKey,
+    channel_id: u64,
+) -> Option<Result<HandleResult>> {
     if crate::channel_class::resolve(conn, channel_id).refuses_server_authored_content() {
-        return Some(err(crate::channel_class::E2EE_REFUSED));
+        return Some(err(if connection_speaks_v2(state, member) {
+            crate::channel_class::E2EE_REFUSED
+        } else {
+            UPGRADE_REQUIRED
+        }));
     }
     None
 }
@@ -456,8 +471,33 @@ fn request_requires_membership(req: &ServerRequest) -> bool {
             | ServerRequest::ResolveInvite { .. }
             | ServerRequest::GetServerInfo
             | ServerRequest::GetMembershipStatus
+            // v2: a client must be able to declare its version BEFORE it is a
+            // member, or a joiner could never be told the server speaks v2. It
+            // reads nothing and writes only the caller's own version slot.
+            | ServerRequest::NegotiateProtocol { .. }
     )
 }
+
+/// The protocol version this connection negotiated. **Absent ⇒ v1**: the only
+/// fail-closed reading of "this client never told us what it speaks".
+pub fn connection_protocol_version(state: &crate::state::ServerState, member: &PublicKey) -> u32 {
+    state
+        .client_protocol
+        .read()
+        .unwrap()
+        .get(member.as_bytes())
+        .copied()
+        .unwrap_or(1)
+}
+
+/// Whether this connection may be shown E2EE content or handed a v2-only frame.
+pub fn connection_speaks_v2(state: &crate::state::ServerState, member: &PublicKey) -> bool {
+    connection_protocol_version(state, member) >= farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
+}
+
+/// What a v1 connection is told when it asks for something only a v2 client can
+/// be given. Actionable where `E2EE_REFUSED` would be baffling.
+pub const UPGRADE_REQUIRED: &str = "this channel requires a newer client";
 
 /// On a mesh server (event log present), returns `Some(reason)` if `member` is
 /// NOT a log member — meaning content must be denied. Returns `None` when the
@@ -515,7 +555,7 @@ pub fn handle_request(
             // FTS insert). The choke point in `messages.rs` would also refuse,
             // but a hard error is the wrong answer to a request — this is the
             // clean "not available in encrypted channels".
-            if let Some(denied) = require_plaintext_channel(conn, channel_id) {
+            if let Some(denied) = require_plaintext_channel(conn, state, member, channel_id) {
                 return denied;
             }
             if content.len() > 8000 {
@@ -594,7 +634,7 @@ pub fn handle_request(
             // `EditMessage { new_content: String }` ships the whole body in
             // plaintext (spec Coexistence row 10). Sealed edits ride
             // `MessageEditedE2ee` instead.
-            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
                 return denied;
             }
             messages::edit_message(conn, message_id, &new_content)?;
@@ -1293,11 +1333,20 @@ pub fn handle_request(
                 let guard = state.log_state.lock().unwrap();
                 guard.as_ref().map(|ls| ls.is_member(member)).unwrap_or(true) // legacy: full info
             };
-            let (channels_list, categories_list, roles_list) = if is_member {
+            let (mut channels_list, categories_list, roles_list) = if is_member {
                 (channels::list_channels(conn)?, channels::list_categories(conn)?, members::list_roles(conn)?)
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
             };
+            // The V1 surface omits every channel that is not DEFINITELY plaintext,
+            // for EVERY caller — not just un-negotiated ones (spec M2). `ChannelInfo`
+            // has no class field, so a client that received a sealed channel here
+            // could not tell it was sealed and would show a working composer over
+            // it. A v2 client reads classes through `GetServerInfoV2`; filtering
+            // unconditionally means a v2 client that forgets to is still safe.
+            channels_list.retain(|c| {
+                !crate::channel_class::resolve(conn, c.id).refuses_server_authored_content()
+            });
             ok(ServerResponse::ServerInfo {
                 name: String::new(), // patched by connection handler
                 member_count,
@@ -1307,6 +1356,112 @@ pub fn handle_request(
                 owner_public_key: None, // patched by connection handler
                 server_id: state.genesis.lock().unwrap().as_ref().map(|g| g.server_id()),
             })
+        }
+
+        // ----------------------------------------------------------------
+        // Rung-2 (v2) surfaces
+        // ----------------------------------------------------------------
+
+        // Record what this connection speaks and answer with what the server
+        // speaks. Bootstrap-allow-listed: a joiner must be able to negotiate
+        // before it is a member. It reads nothing and writes only the caller's
+        // OWN version slot, keyed by the authenticated connection key.
+        ServerRequest::NegotiateProtocol { client_version } => {
+            state
+                .client_protocol
+                .write()
+                .unwrap()
+                .insert(*member.as_bytes(), client_version);
+            ok(ServerResponse::ProtocolVersion {
+                server_version: farder_protocol::server::SERVER_PROTOCOL_VERSION,
+                min_client_version_for_e2ee: farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE,
+            })
+        }
+
+        ServerRequest::GetServerInfoV2 => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            let all_members = members::list_members(conn)?;
+            let member_count = all_members.len() as u32;
+            // Same membership reduction as `GetServerInfo`: a non-member is told
+            // the server exists and nothing about its shape.
+            let is_member = {
+                let guard = state.log_state.lock().unwrap();
+                guard.as_ref().map(|ls| ls.is_member(member)).unwrap_or(true)
+            };
+            let (channels_list, categories_list, roles_list) = if is_member {
+                (channels::list_channels(conn)?, channels::list_categories(conn)?, members::list_roles(conn)?)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+            // The class comes from the same resolver every write gate consults,
+            // so what a client is told matches what the server will enforce.
+            // `Unresolvable` reports `E2ee`: the fail-closed direction, since a
+            // client that treats an unknown channel as plaintext would offer a
+            // composer the choke point then refuses.
+            let channels_v2 = channels_list
+                .into_iter()
+                .map(|c| {
+                    let class = match crate::channel_class::resolve(conn, c.id) {
+                        crate::channel_class::ChannelWriteClass::Plaintext => farder_crypto::event_log::ChannelClass::Plaintext,
+                        _ => farder_crypto::event_log::ChannelClass::E2ee,
+                    };
+                    ChannelInfoV2 { base: c, class }
+                })
+                .collect();
+            ok(ServerResponse::ServerInfoV2 {
+                name: String::new(),      // patched by connection handler
+                member_count,
+                channels: channels_v2,
+                categories: categories_list,
+                roles: roles_list,
+                owner_public_key: None,   // patched by connection handler
+                server_id: state.genesis.lock().unwrap().as_ref().map(|g| g.server_id()),
+            })
+        }
+
+        ServerRequest::FetchHistoryV2 { channel_id, before_id, limit } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // The SAME permission check as `FetchHistory` — the v2 surface is a
+            // wider encoding, never a wider authorization.
+            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::READ_MESSAGES) {
+                return err("missing READ_MESSAGES permission");
+            }
+            let limit = limit.min(500);
+            let msgs = messages::fetch_history_v2(conn, channel_id, before_id, limit, member)?;
+            ok(ServerResponse::HistoryV2 { messages: msgs })
+        }
+
+        ServerRequest::FetchWelcomes { channel_id, since_accept_seq } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // `member` is the AUTHENTICATED connection key. The request's
+            // `channel_id` can only narrow this; there is deliberately no
+            // recipient field, so no caller can ask for anyone else's Welcomes.
+            let events = crate::event_ingest::fetch_welcomes_for(
+                conn,
+                member,
+                channel_id,
+                since_accept_seq,
+            )?;
+            ok(ServerResponse::Welcomes { events })
+        }
+
+        ServerRequest::FetchKeyPackages { member: target, device } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // Membership-gated by the request gate at the top of `handle_request`
+            // (this variant is NOT in the bootstrap allow-list). KeyPackages are
+            // public WITHIN the server by design — a committer must be able to
+            // fetch the packages of the member it is adding.
+            let events = crate::event_ingest::fetch_key_packages(conn, &target, &device)?;
+            ok(ServerResponse::KeyPackages { events })
         }
 
         ServerRequest::GetMembershipStatus => {
@@ -1461,7 +1616,7 @@ pub fn handle_request(
             // i.e. a plaintext channel hanging under a sealed message, whose
             // every post the host can read (spec Coexistence row 12). Refused
             // this rung; E2EE thread groups are a later build.
-            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
                 return denied;
             }
             let parent_channel = channels::get_channel(conn, msg.channel_id)?
@@ -1497,7 +1652,7 @@ pub fn handle_request(
             // `ReactionAdded { message_id, emoji, public_key }` would tell the
             // host exactly WHO reacted WITH WHAT to WHICH sealed message — a
             // content leak dressed as metadata (spec Coexistence row 11).
-            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
                 return denied;
             }
             let inserted = crate::reactions::add_reaction(conn, message_id, member, &emoji, file_id)?;
@@ -1521,7 +1676,7 @@ pub fn handle_request(
                 .ok_or_else(|| anyhow::anyhow!("message not found"))?;
             // Symmetric with AddReaction: `ReactionRemoved` carries the same
             // (who, what, which sealed message) triple.
-            if let Some(denied) = require_plaintext_channel(conn, msg.channel_id) {
+            if let Some(denied) = require_plaintext_channel(conn, state, member, msg.channel_id) {
                 return denied;
             }
             crate::reactions::remove_reaction(conn, message_id, member, &emoji, file_id)?;
@@ -2407,7 +2562,7 @@ pub fn handle_request(
             // is host-readable by construction (spec Coexistence row 3).
             // Refused at CREATE here and again at DELIVERY (`webhooks::deliver`)
             // so an already-issued token cannot survive a class change.
-            if let Some(denied) = require_plaintext_channel(conn, channel_id) {
+            if let Some(denied) = require_plaintext_channel(conn, state, member, channel_id) {
                 return denied;
             }
             let name = name.trim().to_string();
@@ -3216,6 +3371,22 @@ mod tests {
 
     fn fake_state() -> Arc<ServerState> {
         Arc::new(ServerState::new_for_test().unwrap())
+    }
+
+    /// A state in which `who` has negotiated v2.
+    ///
+    /// The class-gate tests use this deliberately: refusing a v1 client is the
+    /// easy half. The property worth pinning is that a FULLY CAPABLE, v2-aware
+    /// client still cannot write server-readable content into a sealed channel —
+    /// the class gate is about the channel, not about the client's vintage.
+    fn fake_state_v2(who: &PublicKey) -> Arc<ServerState> {
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        state
+            .client_protocol
+            .write()
+            .unwrap()
+            .insert(*who.as_bytes(), farder_protocol::server::SERVER_PROTOCOL_VERSION);
+        state
     }
 
     // -----------------------------------------------------------------------
@@ -8338,7 +8509,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
-            &fake_state(),
+            &fake_state_v2(&owner),
         )
         .unwrap();
         assert_eq!(err_reason(&r), E2EE_REFUSED);
@@ -8359,7 +8530,7 @@ mod tests {
                 attachment_ids: vec![],
             },
             "",
-            &fake_state(),
+            &fake_state_v2(&owner),
         )
         .unwrap();
         assert!(matches!(r.response, ServerResponse::MessageSent { .. }));
@@ -8385,7 +8556,7 @@ mod tests {
                 new_content: "rewritten in the clear".to_string(),
             },
             "",
-            &fake_state(),
+            &fake_state_v2(&owner),
         )
         .unwrap();
         assert_eq!(err_reason(&r), E2EE_REFUSED);
@@ -8431,7 +8602,7 @@ mod tests {
                 file_id: None,
             },
         ] {
-            let r = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
+            let r = handle_request(&conn, &owner, true, req, "", &fake_state_v2(&owner)).unwrap();
             assert_eq!(err_reason(&r), E2EE_REFUSED);
             assert!(r.events.is_empty(), "a refused reaction broadcasts nothing");
         }
@@ -8466,7 +8637,7 @@ mod tests {
                 name: Some("leaky thread".to_string()),
             },
             "",
-            &fake_state(),
+            &fake_state_v2(&owner),
         )
         .unwrap();
         assert_eq!(err_reason(&r), E2EE_REFUSED);
@@ -8509,7 +8680,7 @@ mod tests {
                     unit: None,
                 },
                 "",
-                &fake_state(),
+                &fake_state_v2(&owner),
             )
             .unwrap();
             assert!(matches!(r.response, ServerResponse::Ok), "AddCommand {kind}");
@@ -8550,7 +8721,7 @@ mod tests {
                 name: "CI".to_string(),
             },
             "",
-            &fake_state(),
+            &fake_state_v2(&owner),
         )
         .unwrap();
         assert_eq!(err_reason(&r), E2EE_REFUSED);
@@ -8663,6 +8834,230 @@ mod tests {
         assert_eq!(row.title, "Party", "a refused EditEvent rewrote nothing");
     }
 
+    /// The V1 read surface never lists a sealed channel — for ANY caller.
+    ///
+    /// `ChannelInfo` has no class field, so a client handed a sealed channel here
+    /// could not tell it was sealed and would render a working composer over it.
+    /// Filtering unconditionally (not merely for un-negotiated connections) means
+    /// a v2 client that forgets to use `GetServerInfoV2` is still safe.
+    #[test]
+    fn the_v1_server_info_surface_never_lists_an_e2ee_channel() {
+        let (conn, owner) = setup();
+        let plain = make_channel(&conn);
+        let sealed = make_e2ee_channel(&conn);
+
+        for (label, state) in [
+            ("un-negotiated (v1)", fake_state()),
+            ("negotiated v2", fake_state_v2(&owner)),
+        ] {
+            let r =
+                handle_request(&conn, &owner, true, ServerRequest::GetServerInfo, "", &state)
+                    .unwrap();
+            let ServerResponse::ServerInfo { channels, .. } = r.response else {
+                panic!("{label}: expected ServerInfo");
+            };
+            let ids: Vec<u64> = channels.iter().map(|c| c.id).collect();
+            assert!(ids.contains(&plain), "{label}: the plaintext channel vanished");
+            assert!(
+                !ids.contains(&sealed),
+                "{label}: the V1 surface leaked a sealed channel: {ids:?}"
+            );
+        }
+    }
+
+    /// `GetServerInfoV2` is the surface that CAN carry a class — and it needs a
+    /// negotiated v2 connection to reach.
+    #[test]
+    fn the_v2_server_info_surface_carries_classes_and_needs_negotiation() {
+        let (conn, owner) = setup();
+        let plain = make_channel(&conn);
+        let sealed = make_e2ee_channel(&conn);
+
+        // v1 cannot reach it at all.
+        let r =
+            handle_request(&conn, &owner, true, ServerRequest::GetServerInfoV2, "", &fake_state())
+                .unwrap();
+        assert_eq!(err_reason(&r), UPGRADE_REQUIRED);
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::GetServerInfoV2,
+            "",
+            &fake_state_v2(&owner),
+        )
+        .unwrap();
+        let ServerResponse::ServerInfoV2 { channels, .. } = r.response else {
+            panic!("expected ServerInfoV2");
+        };
+        let class_of = |id: u64| {
+            channels.iter().find(|c| c.base.id == id).map(|c| c.class).unwrap_or_else(|| {
+                panic!("channel {id} missing from ServerInfoV2")
+            })
+        };
+        assert_eq!(class_of(plain), farder_crypto::event_log::ChannelClass::Plaintext);
+        assert_eq!(class_of(sealed), farder_crypto::event_log::ChannelClass::E2ee);
+    }
+
+    /// A v1 connection naming a sealed channel is told to upgrade rather than
+    /// handed the bare class refusal.
+    ///
+    /// **This does not reopen the existence oracle.** The assertion that matters
+    /// is the second one: a channel that does NOT EXIST answers identically, so a
+    /// v1 client learns "not for you", never "this id exists and is sealed".
+    #[test]
+    fn a_v1_request_naming_an_e2ee_channel_gets_the_upgrade_error() {
+        let (conn, owner) = setup();
+        let sealed = make_e2ee_channel(&conn);
+        let nonexistent = 999_999_u64;
+
+        let send = |channel_id: u64, state: &Arc<ServerState>| {
+            let r = handle_request(
+                &conn,
+                &owner,
+                true,
+                ServerRequest::SendMessage {
+                    channel_id,
+                    content: "x".to_string(),
+                    reply_to: None,
+                    attachment_ids: vec![],
+                },
+                "",
+                state,
+            )
+            .unwrap();
+            err_reason(&r)
+        };
+
+        let v1 = fake_state();
+        assert_eq!(send(sealed, &v1), UPGRADE_REQUIRED);
+        assert_eq!(
+            send(nonexistent, &v1),
+            UPGRADE_REQUIRED,
+            "a sealed channel and a nonexistent one must answer IDENTICALLY"
+        );
+
+        // A v2 client gets the class refusal, and the same non-oracle holds there.
+        let v2 = fake_state_v2(&owner);
+        assert_eq!(send(sealed, &v2), E2EE_REFUSED);
+        assert_eq!(send(nonexistent, &v2), E2EE_REFUSED);
+    }
+
+    /// The new fetch surfaces are membership-gated, need v2, and — for Welcomes —
+    /// serve the AUTHENTICATED connection key's own events and nobody else's.
+    #[test]
+    fn new_fetch_surfaces_are_membership_gated_and_actor_is_the_connection_key() {
+        let (conn, owner) = setup();
+        let stranger = Keypair::generate().public_key();
+
+        let reqs = || {
+            vec![
+                ServerRequest::FetchWelcomes { channel_id: None, since_accept_seq: 0 },
+                ServerRequest::FetchKeyPackages {
+                    member: owner.clone(),
+                    device: "dev".to_string(),
+                },
+                ServerRequest::GetServerInfoV2,
+                ServerRequest::FetchHistoryV2 { channel_id: 1, before_id: None, limit: 10 },
+            ]
+        };
+
+        // 1. None of the four is in the bootstrap allow-list.
+        for req in reqs() {
+            assert!(
+                request_requires_membership(&req),
+                "{req:?} must be membership-gated"
+            );
+        }
+
+        // 2. All four refuse an un-negotiated (v1) connection.
+        for req in reqs() {
+            let label = format!("{req:?}");
+            let r = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
+            assert_eq!(err_reason(&r), UPGRADE_REQUIRED, "{label}");
+        }
+
+        // 3. `FetchWelcomes` has no recipient field AT ALL — the only way to name
+        //    a recipient is to BE one. With no Welcomes stored, both the owner and
+        //    a stranger get an empty list; neither can ask for the other's.
+        let state = fake_state_v2(&owner);
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::FetchWelcomes { channel_id: None, since_accept_seq: 0 },
+            "",
+            &state,
+        )
+        .unwrap();
+        let ServerResponse::Welcomes { events } = r.response else {
+            panic!("expected Welcomes");
+        };
+        assert!(events.is_empty());
+
+        // The stranger has not negotiated, so it is refused before it reads
+        // anything — the version gate and the membership gate stack.
+        let r = handle_request(
+            &conn,
+            &stranger,
+            false,
+            ServerRequest::FetchWelcomes { channel_id: None, since_accept_seq: 0 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), UPGRADE_REQUIRED);
+    }
+
+    /// `NegotiateProtocol` records ONLY the caller's own slot, keyed by the
+    /// authenticated connection key.
+    #[test]
+    fn negotiate_protocol_records_only_the_callers_own_version() {
+        let (conn, owner) = setup();
+        let other = Keypair::generate().public_key();
+        let state = fake_state();
+
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::NegotiateProtocol { client_version: 2 },
+            "",
+            &state,
+        )
+        .unwrap();
+        let ServerResponse::ProtocolVersion { server_version, min_client_version_for_e2ee } =
+            r.response
+        else {
+            panic!("expected ProtocolVersion");
+        };
+        assert_eq!(server_version, farder_protocol::server::SERVER_PROTOCOL_VERSION);
+        assert_eq!(
+            min_client_version_for_e2ee,
+            farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
+        );
+
+        assert!(connection_speaks_v2(&state, &owner));
+        assert!(
+            !connection_speaks_v2(&state, &other),
+            "negotiating on one connection must not upgrade another"
+        );
+
+        // A client may also downgrade itself; the server believes the claim in
+        // the safe direction without argument.
+        handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::NegotiateProtocol { client_version: 1 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert!(!connection_speaks_v2(&state, &owner));
+    }
+
     /// Default-deny, stated exhaustively. The `match` below is EXHAUSTIVE over
     /// `ServerRequest`, so a newly added variant fails to COMPILE until someone
     /// classifies it — which is the point: the bootstrap allow-list must never
@@ -8671,13 +9066,20 @@ mod tests {
     fn no_new_request_variant_escapes_default_deny_request_requires_membership() {
         fn expected(req: &ServerRequest) -> bool {
             match req {
-                // THE BOOTSTRAP ALLOW-LIST — exactly four, and growing it is a
-                // deliberate, reviewed act (Task 5 adds `NegotiateProtocol` and
-                // nothing else).
+                // THE BOOTSTRAP ALLOW-LIST — exactly five, and growing it is a
+                // deliberate, reviewed act. `NegotiateProtocol` is the ONLY
+                // variant Task 5 added to it: a joiner must be able to declare
+                // its version before it is a member, and it reads nothing.
                 ServerRequest::SubmitEvent { .. }
                 | ServerRequest::ResolveInvite { .. }
                 | ServerRequest::GetServerInfo
-                | ServerRequest::GetMembershipStatus => false,
+                | ServerRequest::GetMembershipStatus
+                | ServerRequest::NegotiateProtocol { .. } => false,
+                // The other four v2 surfaces are GATED like everything else.
+                ServerRequest::FetchWelcomes { .. }
+                | ServerRequest::FetchKeyPackages { .. }
+                | ServerRequest::GetServerInfoV2
+                | ServerRequest::FetchHistoryV2 { .. } => true,
                 // Everything else is gated. Enumerated, not `_`-defaulted.
                 ServerRequest::AddBot { .. }
                 | ServerRequest::AddBotAlert { .. }

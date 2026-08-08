@@ -353,6 +353,15 @@ Custom monitor bots let an owner point a bot at any public JSON API; the server 
   stores the Ed25519 key encrypted (Argon2id + AES-256-GCM) behind a 4-digit
   PIN; `farder-crypto::recovery` provides a BIP39 recovery phrase. See
   `docs/superpowers/audits/2026-06-05-privacy-security-wiring-audit.md` Gap #2.
+- **The wire is v1/v2 split, and old clients cannot ignore what they cannot
+  parse.** MessagePack fails a decode on an unknown variant name or a
+  wrong-length field array, and it fails the WHOLE frame — so one v2-only event
+  sent to a v1 client breaks that client's stream in plaintext channels too.
+  Consequences: never add or reorder a field on a shipped struct (add a new
+  `...V2` struct instead — that is why `ChannelInfoV2` / `MessageInfoV2` exist);
+  a connection that has not sent `NegotiateProtocol` is treated as v1; and
+  v2-only events are filtered at the send in `connection::may_receive`. See
+  `docs/modules/protocol.md` and `docs/modules/server-connection.md`.
 - **The untyped command seam** (above). Keep `invoke("...")` names, the
   `#[tauri::command]`, and the `generate_handler!` list in `main.rs` in sync.
 - **The event bus** (`bridge.rs`): every `ServerEvent` maps to exactly one

@@ -750,6 +750,88 @@ pub fn repair_reply_links(conn: &Connection) -> Result<usize> {
     Ok(repaired)
 }
 
+/// The most raw events one fetch may return. A resync after a long absence is
+/// paged with `since_accept_seq`, not served in one unbounded response.
+pub const MAX_FETCH_EVENTS: usize = 500;
+
+/// Raw signed-`Event` bytes for the MLS Welcomes addressed to `recipient`,
+/// oldest-first, starting after `since_accept_seq`.
+///
+/// **`recipient` is the authenticated connection key at every call site** — the
+/// request's own fields can narrow this result (by channel) but can never widen
+/// it, so `FetchWelcomes` is not a "fetch anyone's Welcomes" oracle. The
+/// recipient test is against the SIGNED payload's `for_member`, not against
+/// anything the fetcher said.
+///
+/// The bytes are handed back opaque. The server stores and orders MLS traffic;
+/// it does not interpret it, and a Welcome is useless to anyone but its holder.
+pub fn fetch_welcomes_for(
+    conn: &Connection,
+    recipient: &PublicKey,
+    channel_filter: Option<u64>,
+    since_accept_seq: u64,
+) -> Result<Vec<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_body FROM events \
+         WHERE payload_type = 'MlsWelcome' AND accept_seq > ?1 \
+         ORDER BY accept_seq ASC",
+    )?;
+    let rows = stmt.query_map(params![since_accept_seq as i64], |r| r.get::<_, Vec<u8>>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let body = row?;
+        let event = Event::from_bytes(&body).context("decode welcome event")?;
+        let EventPayload::MlsWelcome { channel_id, for_member, .. } = &event.core.payload else {
+            continue;
+        };
+        if for_member.as_bytes() != recipient.as_bytes() {
+            continue;
+        }
+        if let Some(want) = channel_filter {
+            if *channel_id != want {
+                continue;
+            }
+        }
+        out.push(body);
+        if out.len() >= MAX_FETCH_EVENTS {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Raw signed-`Event` bytes for the KeyPackages one `(member, device)` published,
+/// oldest-first.
+///
+/// KeyPackages are public by design — a committer must be able to fetch the
+/// packages of a member it is adding — so this one really is keyed by the
+/// request's fields. Membership gating still applies at the request layer:
+/// public *within the server* is not public to the world.
+///
+/// Both `author` and `device` are matched against the columns the ingest path
+/// denormalized from the SIGNED event core, not against anything the publisher
+/// asserted separately.
+pub fn fetch_key_packages(
+    conn: &Connection,
+    member: &PublicKey,
+    device: &str,
+) -> Result<Vec<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_body FROM events \
+         WHERE payload_type = 'MlsKeyPackagePublished' AND author = ?1 AND device = ?2 \
+         ORDER BY accept_seq ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(
+        params![member.as_bytes().as_slice(), device, MAX_FETCH_EVENTS as i64],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Repair drift: for every stored `MessagePosted` event that already has a derived
 /// `messages` row, (re)materialize any missing VALID attachment rows. Idempotent
 /// (each cap is guarded inside `derive_attachments`). Returns the number of attachment
