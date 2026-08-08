@@ -388,6 +388,7 @@ legitimate E2EE door can state its own, opposite rule:
 | `edit_message` (the `UPDATE`) | `pub` | `require_plaintext`, resolved from the row's own `channel_id` |
 | `insert_derived_row` | `pub(crate)` | `require_plaintext_for_derived` — the `MessagePosted` read-view door, used by `event_ingest` |
 | `insert_sealed_row` | `pub(crate)` | `require_e2ee` — the **only** door into an E2EE channel, used by `event_ingest`'s sealed derive path |
+| `update_sealed_row` (the `UPDATE`) | `pub(crate)` | `require_e2ee` resolved from the row's own `channel_id`, **plus** the row itself must be sealed — the sealed-edit door, used by `event_ingest::apply_sealed_edit`. Never touches `content` or `messages_fts` |
 
 The three `insert_message*` signatures are **unchanged**, so all ~18 existing
 writers (legacy `SendMessage`, slash-command replies, webhooks, poll/giveaway/
@@ -442,10 +443,92 @@ inside the transaction, and the assertion is that the `events` count, the
 `channels` count and `LogState::log_pos()` are all unchanged afterwards, and that
 the next well-shaped event on the same chain slot is still accepted.
 
+### Rung-2 derivation: sealed rows, reply mapping, edits, tombstones
+
+Every Rung-2 read-view write addresses its row through `messages.event_hash`,
+which a `UNIQUE` index makes a real key. That is a correctness property, not a
+performance one: reply mapping, sealed edits and content-blind deletes all mean
+"the row this event derived", and a second row carrying the same hash would make
+that target ambiguous — on the moderation path, ambiguity is a bug. SQLite
+treats `NULL`s in a unique index as distinct, so every legacy row keeps its
+`NULL` hash and is unaffected.
+
+**Reply mapping (spec F9).** A log reply cites an event *hash*; the client
+renders threading off a numeric row *id*. `resolve_reply_target` bridges the two
+by looking the hash up in `messages.event_hash`. An **unresolvable** target
+derives `reply_to = NULL` rather than failing the event — the edge is repaired
+later by `repair_reply_links`, so out-of-order arrival (or a future replicated
+log) costs a render, never the message. Without this, replies in an E2EE
+channel would be silently dropped, since such channels are log-only.
+
+**Sealed edits.** `apply_sealed_edit` runs inside the persist transaction.
+`LogState` keeps no per-message index by design, so the fold authorizes
+`MessageEditedE2ee` on the send gates plus "not tombstoned" and leaves **target
+authorship** to ingest, which owns the only per-message index there is. The
+target must exist, sit in the cited channel, be sealed, and belong to the same
+author: only an author rewrites their own message — moderators delete, they do
+not rewrite. `update_sealed_row` touches `sealed` and `edited_at` only, so
+`content` stays `''` and the row never reaches `messages_fts` through the back
+door `edit_message`'s re-index would open.
+
+**Tombstones (spec F2).** `apply_tombstone` **hard-deletes** the derived row and
+returns its orphaned blob ids so the handler can hand them to the same file-GC
+path the legacy `DeleteMessage` arm uses. Authorship splits exactly where the
+fold splits it: `DeleteReason::Moderation` is fully authorized by the fold (it
+checks the `kick` capability), while `DeleteReason::Author` needs the index the
+fold omits, so ingest requires the deleter to be the row's author. The delete
+takes effect live through the **shipped** `ServerEvent::MessageDeleted` — no new
+variant, so v1 clients act on it too, and its payload (an id and a channel) is
+public metadata, so it stays content-blind in a sealed channel. Content-blind
+delete is the *only* moderation mechanism in an E2EE channel, so this path is
+load-bearing rather than cleanup.
+
+**Unknown targets are refused, and that is what bounds the fold.** Both
+`apply_sealed_edit` and `apply_tombstone` return `Err` for a target no row
+carries, which rolls the persist transaction back: nothing stored, no log
+advance. The fold cannot tell a real target from a fabricated one, so without
+this refusal `MessageEditedE2ee` would be a free write into a sealed channel's
+history and the fold's `tombstones` set would accept anything.
+
+**Sealed posts and sealed edits are deliberately NOT broadcast.**
+`NewMessage`/`MessageEdited` carry a `String` body; stuffing ciphertext into one
+would ship garbage to every v1 client. Their delivery rides the v2 surfaces
+(sub-3 Task 5).
+
+**`reconcile_messages(conn, log_state: Option<&LogState>)`** — the signature
+change is the point. At startup it now runs four passes, and is idempotent (a
+second run in a row repairs nothing):
+
+1. **Derive missing rows** for both `MessagePosted` and `MessagePostedE2ee`,
+   in `accept_seq` order, **skipping any event the log has tombstoned**. Without
+   that skip, deletion would silently undo itself on the next boot — the event
+   is still stored, so re-derivation would resurrect the row.
+2. **Sweep** any row a stored tombstone still targets (the crash-window heal),
+   logged at `warn!`.
+3. **Replay sealed edits** in accept order, last edit wins. Derivation alone
+   gives every row its *original* ciphertext, so a wiped-and-rebuilt view would
+   otherwise roll back every edit ever made. An absent target — tombstoned, or
+   not yet derived — is skipped, not an error.
+4. **Repair reply links** left `NULL` at derive time.
+
+Together these are what make `derived_view_rebuild_from_events` equal the live
+view: wipe `messages`, re-run reconcile, and the result matches row for row,
+with tombstoned rows staying absent and reply edges restored.
+
+**Search.** `search_messages` adds `AND is_e2ee = 0` as belt-and-braces behind
+the FTS skip (coexistence row 7a). A sealed row never enters `messages_fts` so
+it cannot match — but the index is a mutable artifact and search is the one
+surface whose whole job is reading content, so the filter is stated in the query
+too. Retention, redaction and anonymization already operate on the ciphertext
+row without reading it (row 7b), which the tests verify rather than assert.
+
 ### Schema (`db.rs`)
 
 - `channels.content_class TEXT NOT NULL DEFAULT 'plaintext'` — the class mirror.
 - `messages.is_e2ee INTEGER NOT NULL DEFAULT 0`, `messages.sealed BLOB`.
+- `idx_messages_event_hash` — a `UNIQUE` index on `messages.event_hash`,
+  enforcing exactly one derived row per log event (see "Rung-2 derivation"
+  above). Created unconditionally, not via the column migration.
 
 All three are added by the idempotent `PRAGMA table_info` migration pattern, so
 existing databases pick them up on the next open with legacy rows defaulting to

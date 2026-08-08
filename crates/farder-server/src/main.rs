@@ -113,18 +113,28 @@ async fn main() -> Result<()> {
             let ls = farder_server::event_ingest::build_log_state(&conn)?;
             *server_state.genesis.lock().unwrap() = Some(g);
             *server_state.log_state.lock().unwrap() = ls;
-            let repaired = farder_server::event_ingest::reconcile_messages(&conn).unwrap_or(0);
-            if repaired > 0 {
-                tracing::info!("reconciled {} event-sourced messages missing from the view", repaired);
-            }
-            // Re-derive the channel-class mirror from the log. The column is only
-            // a mirror of an accepted `ChannelCreated`; this re-asserts it, and
-            // refuses (rather than resolves) any disagreement that would WIDEN a
-            // channel the DB currently treats as sealed.
+            // Re-derive the channel-class mirror from the log FIRST. The column is
+            // only a mirror of an accepted `ChannelCreated`; this re-asserts it,
+            // and refuses (rather than resolves) any disagreement that would WIDEN
+            // a channel the DB currently treats as sealed. It runs before
+            // `reconcile_messages` because the message choke point resolves class
+            // from that very column: a drifted mirror would make the sealed derive
+            // door refuse the rows it is there to rebuild.
             let reclassed =
                 farder_server::channel_class::reconcile_channel_classes(&conn).unwrap_or(0);
             if reclassed > 0 {
                 tracing::info!(count = reclassed, "repaired drifted channel class mirrors from the event log");
+            }
+            // The `LogState` is handed in so deletions survive the restart: this
+            // pass re-derives every log message lacking a row, and without the
+            // fold's tombstones it would re-derive the deleted ones too (spec F2).
+            let repaired = farder_server::event_ingest::reconcile_messages(
+                &conn,
+                server_state.log_state.lock().unwrap().as_ref(),
+            )
+            .unwrap_or(0);
+            if repaired > 0 {
+                tracing::info!("reconciled {} event-sourced messages missing from the view", repaired);
             }
             let repaired_att = farder_server::event_ingest::reconcile_attachments(&conn).unwrap_or(0);
             if repaired_att > 0 {

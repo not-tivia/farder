@@ -204,11 +204,6 @@ pub(crate) fn insert_derived_row(
 /// channel too — it is the sealed door, not a general bypass.
 ///
 /// `content` is stored as `''` and the FTS insert is skipped entirely.
-///
-/// Dormant until the sealed derive path lands (`event_ingest` gains its
-/// `MessagePostedE2ee` arm); exercised now by `messages.rs`'s tests, which are
-/// what pin the door's guard in both directions.
-#[allow(dead_code)]
 pub(crate) fn insert_sealed_row(
     conn: &Connection,
     channel_id: u64,
@@ -232,6 +227,38 @@ pub(crate) fn insert_sealed_row(
         Some(sealed),
         true,
     )
+}
+
+/// The sealed-EDIT door: replace a sealed row's ciphertext in place, from a
+/// signature-verified `MessageEditedE2ee` the fold accepted. Callable solely
+/// from `event_ingest`.
+///
+/// Same shape as `edit_message`'s guard, mirrored: the channel is resolved from
+/// the row about to be updated and must be definitely E2EE, and the row must
+/// itself be sealed — a sealed edit landing on a plaintext row would replace a
+/// server-readable body with opaque bytes nobody can render.
+///
+/// `content` is never touched (it stays `''`) and `messages_fts` is never
+/// touched, so an edited sealed row cannot enter the plaintext index by the
+/// back door the way `edit_message`'s re-index would.
+pub(crate) fn update_sealed_row(
+    conn: &Connection,
+    id: u64,
+    sealed: &[u8],
+    edited_at: u64,
+) -> Result<()> {
+    let (channel_id, is_e2ee): (i64, i64) = conn.query_row(
+        "SELECT channel_id, is_e2ee FROM messages WHERE id = ?1",
+        params![id as i64],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    crate::channel_class::require_e2ee(conn, channel_id as u64)?;
+    anyhow::ensure!(is_e2ee != 0, "sealed edits only apply to sealed rows");
+    conn.execute(
+        "UPDATE messages SET sealed = ?2, edited_at = ?3 WHERE id = ?1",
+        params![id as i64, sealed, edited_at as i64],
+    )?;
+    Ok(())
 }
 
 /// Stamps the widget JSON on an already-inserted message (insert-then-set-widget idiom:
@@ -377,21 +404,26 @@ pub fn delete_message(conn: &Connection, id: u64) -> Result<Vec<u64>> {
 
     crate::reactions::delete_reactions_for_message(conn, id)?;
 
-    // Fetch the content before deleting so we can remove it from FTS5.
-    let content: Option<String> = conn
+    // Fetch the content before deleting so we can remove it from FTS5. A SEALED
+    // row was never indexed (`insert_row` skips the FTS insert for it), and an
+    // FTS5 'delete' command for a row that was never inserted is an index
+    // corruption hazard, so it is skipped rather than issued against `''`.
+    let row: Option<(String, i64)> = conn
         .query_row(
-            "SELECT content FROM messages WHERE id = ?1",
+            "SELECT content, is_e2ee FROM messages WHERE id = ?1",
             params![id as i64],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
 
-    if let Some(old_content) = content {
-        // Use the 'delete' command for the content-backed FTS5 table.
-        conn.execute(
-            "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?1, ?2)",
-            params![id as i64, old_content],
-        )?;
+    if let Some((old_content, is_e2ee)) = row {
+        if is_e2ee == 0 {
+            // Use the 'delete' command for the content-backed FTS5 table.
+            conn.execute(
+                "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?1, ?2)",
+                params![id as i64, old_content],
+            )?;
+        }
     }
 
     conn.execute(
@@ -426,10 +458,16 @@ pub fn search_messages(
 ) -> Result<Vec<MessageInfo>> {
     let mut messages = Vec::new();
 
+    // `AND is_e2ee = 0` is belt-and-braces behind the FTS skip (coexistence row
+    // 7a): a sealed row never enters `messages_fts`, so it cannot match — but the
+    // index is a mutable artifact and search is the one surface whose whole job
+    // is reading content, so the filter is stated in the query too. Client-side
+    // search over the local decrypted store is sub-4's job.
     if let Some(cid) = channel_id {
         let sql = format!(
             "SELECT {} FROM messages \
-             WHERE channel_id = ?2 AND id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1) \
+             WHERE channel_id = ?2 AND is_e2ee = 0 \
+               AND id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1) \
              ORDER BY id DESC LIMIT ?3",
             MSG_SELECT
         );
@@ -444,7 +482,8 @@ pub fn search_messages(
     } else {
         let sql = format!(
             "SELECT {} FROM messages \
-             WHERE id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1) \
+             WHERE is_e2ee = 0 \
+               AND id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1) \
              ORDER BY id DESC LIMIT ?2",
             MSG_SELECT
         );
@@ -496,24 +535,30 @@ pub fn delete_messages_before(
     // row individually (the bulk DELETE via subquery does not work for this FTS5
     // variant).  Collect the rows to delete first, then remove them one-by-one.
     let mut stmt = conn.prepare(
-        "SELECT id, content FROM messages WHERE channel_id = ?1 AND timestamp < ?2",
+        "SELECT id, content, is_e2ee FROM messages WHERE channel_id = ?1 AND timestamp < ?2",
     )?;
-    let rows: Vec<(i64, String)> = stmt
+    let rows: Vec<(i64, String, i64)> = stmt
         .query_map(
             params![channel_id as i64, cutoff_timestamp as i64],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let count = rows.len() as u64;
 
     // Delete attachments for each message before deleting the messages.
-    for (rid, _) in &rows {
+    for (rid, _, _) in &rows {
         let _ = crate::attachments::delete_attachments_for_message(conn, *rid as u64)?;
         crate::reactions::delete_reactions_for_message(conn, *rid as u64)?;
     }
 
-    for (rid, content) in &rows {
+    // Sealed rows were never indexed, so there is nothing to un-index for them
+    // (see `delete_message`). Retention itself is content-blind: the DELETE below
+    // is driven purely by channel + timestamp and covers ciphertext identically.
+    for (rid, content, is_e2ee) in &rows {
+        if *is_e2ee != 0 {
+            continue;
+        }
         conn.execute(
             "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?1, ?2)",
             params![rid, content],
@@ -533,21 +578,34 @@ pub fn delete_messages_before(
 /// - Sets author = DELETED_USER_KEY, content = '[deleted]' in the messages table
 ///
 /// Returns the count of messages updated.
+///
+/// SEALED rows are anonymized too — the author sentinel is exactly the point of
+/// the mechanism, and it is pure metadata, so it works on ciphertext unchanged.
+/// Two things are deliberately NOT done to them: their `content` stays `''`
+/// (writing `'[deleted]'` there would break the "a sealed row carries no
+/// plaintext column" invariant every reader leans on), and they are kept out of
+/// `messages_fts` (they were never in it; re-indexing them as `'[deleted]'`
+/// would put sealed rows into the plaintext index by the back door, which
+/// coexistence row 7a forbids). The ciphertext itself is left intact, matching
+/// the plaintext behaviour where the body survives with the author erased.
 pub fn anonymize_messages_by_author(conn: &Connection, author: &PublicKey) -> Result<u64> {
-    // Collect all (id, content) for this author.
+    // Collect all (id, content, is_e2ee) for this author.
     let mut stmt = conn.prepare(
-        "SELECT id, content FROM messages WHERE author = ?1",
+        "SELECT id, content, is_e2ee FROM messages WHERE author = ?1",
     )?;
-    let rows: Vec<(i64, String)> = stmt
+    let rows: Vec<(i64, String, i64)> = stmt
         .query_map(params![author.as_bytes().as_slice()], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let count = rows.len() as u64;
 
-    // Update FTS5 for each message: delete old content, insert "[deleted]".
-    for (id, old_content) in &rows {
+    // Update FTS5 for each PLAINTEXT message: delete old content, insert "[deleted]".
+    for (id, old_content, is_e2ee) in &rows {
+        if *is_e2ee != 0 {
+            continue;
+        }
         conn.execute(
             "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?1, ?2)",
             params![id, old_content],
@@ -558,9 +616,12 @@ pub fn anonymize_messages_by_author(conn: &Connection, author: &PublicKey) -> Re
         )?;
     }
 
-    // Bulk UPDATE: set author sentinel and content.
+    // Bulk UPDATE: set the author sentinel on every row; rewrite `content` only
+    // where there is a plaintext body to rewrite.
     conn.execute(
-        "UPDATE messages SET author = ?1, content = '[deleted]' WHERE author = ?2",
+        "UPDATE messages SET author = ?1, \
+                content = CASE WHEN is_e2ee = 0 THEN '[deleted]' ELSE content END \
+         WHERE author = ?2",
         params![DELETED_USER_KEY.as_slice(), author.as_bytes().as_slice()],
     )?;
 

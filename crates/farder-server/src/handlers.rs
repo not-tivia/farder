@@ -2148,7 +2148,7 @@ pub fn handle_request(
                 None
             };
 
-            let (derived_id, created_class) = {
+            let (derived_id, created_class, tombstoned) = {
                 let tx = conn.unchecked_transaction()
                     .map_err(|e| anyhow::anyhow!("failed to begin tx: {}", e))?;
                 crate::event_ingest::store_event(&tx, &event)
@@ -2171,8 +2171,23 @@ pub fn handle_request(
                     crate::attachments::redact_blob(&tx, &state.storage_dir, content_hash, &event.core.author)
                         .map_err(|e| anyhow::anyhow!("failed to redact attachment: {}", e))?;
                 }
+                // A sealed EDIT rewrites its target's ciphertext in place, and a
+                // tombstone HARD-DELETES its target's row. Both address the row
+                // through `messages.event_hash` and both REFUSE an unknown target,
+                // which rolls this transaction back — nothing stored, no log
+                // advance. That refusal is what bounds the fold's `tombstones` set
+                // and keeps `MessageEditedE2ee` from being a free write: the fold
+                // authorizes them on the send gates and leaves target existence +
+                // authorship to ingest, which owns the only per-message index.
+                if let Err(e) = crate::event_ingest::apply_sealed_edit(&tx, &event) {
+                    return err(&format!("event rejected: {}", e));
+                }
+                let tombstoned = match crate::event_ingest::apply_tombstone(&tx, &event) {
+                    Ok(t) => t,
+                    Err(e) => return err(&format!("event rejected: {}", e)),
+                };
                 tx.commit().map_err(|e| anyhow::anyhow!("failed to commit event: {}", e))?;
-                (id, created_class)
+                (id, created_class, tombstoned)
             };
 
             // 5. Commit the advanced authorization state in memory.
@@ -2237,7 +2252,34 @@ pub fn handle_request(
                 });
             }
 
-            ok_with(ServerResponse::EventAccepted { event_hash: event.hash(), timestamp }, events)
+            // A tombstone takes effect live, through the SHIPPED `MessageDeleted`
+            // event — no new variant, so v1 clients act on it too. The payload is
+            // an id and a channel, both already public metadata, so it is
+            // content-blind in a sealed channel exactly as it is in a plaintext
+            // one. Without this the moderator's only tool would appear to do
+            // nothing until every client reconnected.
+            //
+            // Sealed POSTS and sealed EDITS are deliberately NOT broadcast here:
+            // `NewMessage`/`MessageEdited` carry a `String` body, and stuffing
+            // ciphertext into one would ship garbage to every v1 client. Their
+            // delivery rides the v2 surfaces (Task 5).
+            let mut orphaned_file_ids = Vec::new();
+            if let Some(t) = tombstoned {
+                orphaned_file_ids = t.orphaned_file_ids;
+                events.push(BroadcastEvent {
+                    target: EventTarget::Subscribers(t.channel_id),
+                    event: ServerEvent::MessageDeleted {
+                        message_id: t.message_id,
+                        channel_id: t.channel_id,
+                    },
+                });
+            }
+
+            Ok(HandleResult {
+                response: ServerResponse::EventAccepted { event_hash: event.hash(), timestamp },
+                events,
+                orphaned_file_ids,
+            })
         }
 
         ServerRequest::AddBot { coin_id, label } => {
@@ -9460,5 +9502,250 @@ mod tests {
         let ok = f.channel_created(E2EE_CHANNEL_ID_FLOOR + 63, ChannelClass::E2ee);
         f.accept(&conn, &ok);
         assert!(f.log_pos() > before_pos);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rung 2 — DERIVATION on the REAL `SubmitEvent` path (spec "Derivation" +
+    // F2). The unit-level rules are pinned in `event_ingest`'s tests; these
+    // three drive the shipped handler and assert the BYTES that were persisted
+    // and the events that were broadcast, per CLAUDE.md's verify-by-observation
+    // rule for security features.
+    // -----------------------------------------------------------------------
+
+    impl LogFixture {
+        /// An E2EE channel whose MLS group has been bootstrapped by its creator
+        /// (epoch-0 commit ⇒ the creator's own leaf is confirmed), which is the
+        /// minimum state in which the fold authorizes sealed content at all.
+        fn sealed_channel(&mut self, conn: &Connection, id: u64) -> u64 {
+            let ch = self.channel_created(id, ChannelClass::E2ee);
+            self.accept(conn, &ch);
+            let boot = self.sign(
+                now_ts(),
+                EP::MlsCommit {
+                    channel_id: id,
+                    generation: 0,
+                    epoch: 0,
+                    mls_message: vec![0xC0],
+                    adds: vec![],
+                    removes: vec![],
+                    prev_epoch_authenticator: [0u8; 32],
+                    post_epoch_authenticator: [11u8; 32],
+                    post_tree_hash: [21u8; 32],
+                    authz_head: "a".repeat(64),
+                    store_instance_hash: [3u8; 32],
+                },
+            );
+            self.accept(conn, &boot);
+            id
+        }
+
+        fn sealed_epoch(&self, channel_id: u64) -> u64 {
+            self.state
+                .log_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .mls_current_epoch(channel_id)
+                .expect("the group exists")
+                .1
+        }
+
+        fn sealed_post(
+            &mut self,
+            conn: &Connection,
+            channel_id: u64,
+            ciphertext: &[u8],
+        ) -> (Event, HandleResult) {
+            let epoch = self.sealed_epoch(channel_id);
+            let e = self.sign(
+                now_ts(),
+                EP::MessagePostedE2ee {
+                    channel_id,
+                    generation: 0,
+                    epoch,
+                    ciphertext: ciphertext.to_vec(),
+                    reply_to: None,
+                    attachments: vec![],
+                    authz_head: "a".repeat(64),
+                },
+            );
+            let r = self.accept(conn, &e);
+            (e, r)
+        }
+    }
+
+    #[test]
+    fn a_sealed_post_ingests_as_ciphertext_and_broadcasts_no_plaintext() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = f.sealed_channel(&conn, E2EE_CHANNEL_ID_FLOOR + 71);
+
+        // The payload carries a readable needle: every assertion below is on the
+        // bytes that actually landed, not on which function got called.
+        let needle = "SECRETNEEDLE";
+        let ciphertext = format!("{needle} pretending to be a PrivateMessage").into_bytes();
+        let (posted, accepted) = f.sealed_post(&conn, ch, &ciphertext);
+
+        let (id, content, sealed, is_e2ee): (i64, String, Option<Vec<u8>>, i64) = conn
+            .query_row(
+                "SELECT id, content, sealed, is_e2ee FROM messages WHERE event_hash = ?1",
+                rusqlite::params![posted.hash()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "", "no plaintext column for a sealed row");
+        assert_eq!(sealed.as_deref(), Some(ciphertext.as_slice()), "ciphertext stored verbatim");
+        assert_eq!(is_e2ee, 1);
+
+        // Not in the plaintext index, and not reachable through search.
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?1",
+                rusqlite::params![needle],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 0, "a sealed row must never enter messages_fts");
+        assert!(
+            messages::search_messages(&conn, needle, None, 50, &f.owner.public_key())
+                .unwrap()
+                .is_empty()
+        );
+
+        // And nothing about it went out on the wire: `NewMessage` carries a
+        // `String` body, so broadcasting a sealed post through it would ship
+        // garbage (or worse) to every v1 client. Delivery is Task 5's v2 surface.
+        assert!(matches!(accepted.response, ServerResponse::EventAccepted { .. }));
+        assert!(
+            accepted.events.is_empty(),
+            "a sealed post broadcasts nothing on the v1 surfaces: {:?}",
+            accepted.events
+        );
+        assert!(accepted.orphaned_file_ids.is_empty());
+        let _ = id;
+    }
+
+    #[test]
+    fn a_log_tombstone_deletes_the_derived_row_and_survives_a_restart() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = f.sealed_channel(&conn, E2EE_CHANNEL_ID_FLOOR + 72);
+        let (keep, _) = f.sealed_post(&conn, ch, b"survivor");
+        let (doomed, _) = f.sealed_post(&conn, ch, b"doomed");
+        let doomed_id: i64 = conn
+            .query_row(
+                "SELECT id FROM messages WHERE event_hash = ?1",
+                rusqlite::params![doomed.hash()],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let del = f.sign(
+            now_ts(),
+            EP::MessageDeleted {
+                channel_id: ch,
+                target: doomed.hash(),
+                reason: farder_crypto::event_log::DeleteReason::Author,
+            },
+        );
+        let r = f.accept(&conn, &del);
+
+        // The row is gone...
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE event_hash = ?1",
+                rusqlite::params![doomed.hash()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "a tombstone hard-deletes the derived row");
+        // ...clients are told through the SHIPPED event (id + channel only — no
+        // content, so it is as content-blind in a sealed channel as anywhere)...
+        assert_eq!(r.events.len(), 1);
+        match (&r.events[0].target, &r.events[0].event) {
+            (EventTarget::Subscribers(c), ServerEvent::MessageDeleted { message_id, channel_id }) => {
+                assert_eq!(*c, ch);
+                assert_eq!(*channel_id, ch);
+                assert_eq!(*message_id as i64, doomed_id);
+            }
+            other => panic!("expected a MessageDeleted broadcast, got {other:?}"),
+        }
+
+        // ...and THE F2 INVARIANT: the next startup's reconcile must not
+        // resurrect it from the still-stored event.
+        let ls = state.log_state.lock().unwrap();
+        assert_eq!(
+            crate::event_ingest::reconcile_messages(&conn, ls.as_ref()).unwrap(),
+            0
+        );
+        drop(ls);
+        let remaining: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT event_hash FROM messages WHERE channel_id = ?1")
+                .unwrap();
+            let rows = stmt.query_map(rusqlite::params![ch as i64], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(remaining, vec![keep.hash()], "only the survivor is left");
+    }
+
+    #[test]
+    fn a_sealed_edit_or_tombstone_with_an_unknown_target_leaves_no_trace() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = f.sealed_channel(&conn, E2EE_CHANNEL_ID_FLOOR + 73);
+        let (post, _) = f.sealed_post(&conn, ch, b"v1");
+
+        // Both refusals are INGEST's: the fold has no per-message index, so it
+        // authorizes an edit/delete citing a target that does not exist. That
+        // refusal is what bounds the fold's tombstone set.
+        let before = f.log_pos();
+        let ghost_edit = f.sign(
+            now_ts(),
+            EP::MessageEditedE2ee {
+                channel_id: ch,
+                target: "f".repeat(64),
+                generation: 0,
+                epoch: f.sealed_epoch(ch),
+                ciphertext: b"nowhere".to_vec(),
+                authz_head: "a".repeat(64),
+            },
+        );
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&ghost_edit).expect("the FOLD accepts it; only ingest refuses");
+        let reason = err_reason(&f.submit(&conn, &ghost_edit));
+        assert!(reason.contains("has not derived"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &ghost_edit, before);
+
+        let ghost_del = f.sign(
+            now_ts(),
+            EP::MessageDeleted {
+                channel_id: ch,
+                target: "e".repeat(64),
+                reason: farder_crypto::event_log::DeleteReason::Moderation,
+            },
+        );
+        let mut trial = state.log_state.lock().unwrap().as_ref().unwrap().clone();
+        trial.apply(&ghost_del).expect("the FOLD accepts it; only ingest refuses");
+        let reason = err_reason(&f.submit(&conn, &ghost_del));
+        assert!(reason.contains("has not derived"), "{reason}");
+        assert_ingest_left_no_trace(&f, &conn, &ghost_del, before);
+
+        // The real message is untouched by either attempt, byte for byte.
+        let sealed: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT sealed FROM messages WHERE event_hash = ?1",
+                rusqlite::params![post.hash()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sealed.as_deref(), Some(&b"v1"[..]));
+        assert!(
+            !state.log_state.lock().unwrap().as_ref().unwrap().is_tombstoned(&"e".repeat(64))
+        );
     }
 }

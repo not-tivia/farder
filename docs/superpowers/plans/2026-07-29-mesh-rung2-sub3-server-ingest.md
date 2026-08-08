@@ -477,7 +477,7 @@ git add -A && git commit -m "feat(e2ee): single message-write choke point + fail
 **Files:** `handlers.rs`, `connection.rs`, `webhooks.rs`, `widgets.rs`;
 `docs/modules/{server-handlers,server-connection,server-widgets,server-system-identity}.md`.
 
-- [ ] **Step 1: Write the failing tests** (all in `handlers.rs` tests except
+- [x] **Step 1: Write the failing tests** (all in `handlers.rs` tests except
   where noted; each drives the REAL request path against an E2EE channel and
   asserts the refusal **and** that `SELECT COUNT(*) FROM messages WHERE
   channel_id = ?` is still 0):
@@ -512,7 +512,7 @@ git add -A && git commit -m "feat(e2ee): single message-write choke point + fail
   the one deliberate exception (`NegotiateProtocol`, Task 5). Write it now with
   the variants that exist; extend in Task 5.
 
-- [ ] **Step 2: Implement the refusals**
+- [x] **Step 2: Implement the refusals**
 
 A shared helper in `handlers.rs`:
 
@@ -552,7 +552,7 @@ Applied at:
   not abort**: an E2EE channel that somehow held a widget must not stop the
   sweeper servicing every other channel.
 
-- [ ] **Step 3: Gates + docs + commit**
+- [x] **Step 3: Gates + docs + commit**
 
 Update the four module docs (`server-handlers.md` request table gains a "class"
 column note; `server-widgets.md` records the sweeper skip; `server-connection.md`
@@ -577,7 +577,7 @@ stated sub-3 residual (bound `core.timestamp` against server time).
 `handlers.rs` (`SubmitEvent` arm), `channel_class.rs`, `main.rs`;
 `docs/modules/{crypto,server-handlers}.md`.
 
-- [ ] **Step 1: Measure the real ciphertext cap, then set it**
+- [x] **Step 1: Measure the real ciphertext cap, then set it**
 
 Create `crates/farder-mls/tests/ciphertext_cap.rs`: build a real two-member
 group with `MlsChannelGroup`, seal a `MessageEnvelope` whose encoded length sits
@@ -623,7 +623,7 @@ pub const E2EE_CHANNEL_ID_FLOOR: u64 = 1 << 32;
 pub const MAX_EVENT_FUTURE_SKEW_SECS: u64 = 300;
 ```
 
-- [ ] **Step 2: Write the failing ingest tests** (`handlers.rs` tests, driving
+- [x] **Step 2: Write the failing ingest tests** (`handlers.rs` tests, driving
   the real `SubmitEvent` arm):
 
 - `oversized_sealed_ciphertext_is_refused_before_the_fold_runs` — a
@@ -649,7 +649,7 @@ pub const MAX_EVENT_FUTURE_SKEW_SECS: u64 = 300;
 - `a_failed_ingest_transaction_leaves_no_channel_row_and_no_log_advance` —
   atomicity: the derived write and the `LogState` advance stand or fall together.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `handlers.rs`'s `SubmitEvent` arm, **before** step 2's `trial.apply`, insert a
 `check_ingest_caps(&event)?` pass (a free function in `event_ingest.rs`) that
@@ -688,7 +688,7 @@ side).
 `deleted = 1`? no — leave the row and let `resolve` return `E2ee`) on any
 mismatch. Call it from `main.rs` beside `reconcile_messages`.
 
-- [ ] **Step 4: Gates + docs + commit**
+- [x] **Step 4: Gates + docs + commit**
 
 `crypto.md` gains an "Ingest caps" section (constants + the explicit note that
 the fold never reads them). `server-handlers.md` documents the `SubmitEvent`
@@ -708,7 +708,7 @@ git commit -m "feat(e2ee): ingest caps, stale-epoch bounce, timestamp bound, ato
 **Files:** `db.rs`, `event_ingest.rs`, `messages.rs`, `main.rs`;
 `docs/modules/server-handlers.md`.
 
-- [ ] **Step 1: Write the failing tests** (`event_ingest.rs` tests + `handlers.rs`
+- [x] **Step 1: Write the failing tests** (`event_ingest.rs` tests + `handlers.rs`
   integration tests):
 
 - `a_sealed_post_derives_a_row_carrying_ciphertext_and_no_plaintext_column`
@@ -737,7 +737,7 @@ git commit -m "feat(e2ee): ingest caps, stale-epoch bounce, timestamp bound, ato
   existing mechanisms work unchanged against sealed rows (row 7b's
   "works-on-ciphertext server-side" claim, verified rather than asserted).
 
-- [ ] **Step 2: Schema**
+- [x] **Step 2: Schema**
 
 `messages.is_e2ee INTEGER NOT NULL DEFAULT 0`, `messages.sealed BLOB` (both via
 the idempotent PRAGMA migration pattern; add in Task 1 if convenient), plus:
@@ -749,7 +749,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_event_hash ON messages(event_hash
 (SQLite permits many NULLs in a unique index, so legacy rows are unaffected —
 and the index is what makes reply mapping and edit/delete targeting O(log n).)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - `derive_message_row` gains a `MessagePostedE2ee` arm: resolve `reply_to`
   (`SELECT id FROM messages WHERE event_hash = ?`), call
@@ -769,7 +769,7 @@ and the index is what makes reply mapping and edit/delete targeting O(log n).)
 - `search_messages` adds `AND m.is_e2ee = 0` — belt-and-braces behind the FTS
   skip.
 
-- [ ] **Step 4: Gates + docs + commit**
+- [x] **Step 4: Gates + docs + commit**
 
 ```bash
 git commit -m "feat(e2ee): sealed derivation, FTS skip, reply id mapping, tombstone-aware derive and reconcile"

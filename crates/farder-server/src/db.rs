@@ -441,6 +441,25 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE messages ADD COLUMN sealed BLOB", [])?;
     }
 
+    // Rung 2: EXACTLY ONE derived row per log event. Reply mapping, sealed edits
+    // and content-blind tombstones all address a row THROUGH its `event_hash`, so
+    // a second row carrying the same hash would make "the message this event
+    // derived" ambiguous — and on the moderation path (blind delete is the ONLY
+    // moderation tool in a sealed channel) an ambiguous target is a correctness
+    // bug, not a performance one. It is also what makes those three lookups
+    // O(log n) instead of a table scan.
+    //
+    // SQLite treats NULLs as distinct in a UNIQUE index, so every legacy
+    // (non-log) row keeps its NULL `event_hash` and is unaffected. Duplicates are
+    // structurally impossible today — `insert_derived_row`/`insert_sealed_row`
+    // are the only writers of the column and reconcile derives only events with
+    // no row — so a failure here means the derived view is already corrupt, and
+    // refusing to boot is the loud, fail-closed answer.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_event_hash ON messages(event_hash)",
+        [],
+    )?;
+
     // Migration: attachment redaction — who took the blob down (NULL = live).
     let has_redacted_by: bool = {
         let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
