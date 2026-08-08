@@ -522,6 +522,41 @@ surface whose whole job is reading content, so the filter is stated in the query
 too. Retention, redaction and anonymization already operate on the ciphertext
 row without reading it (row 7b), which the tests verify rather than assert.
 
+### Observation tests (`crates/farder-server/tests/e2ee_observation.rs`)
+
+The unit tests in `handlers.rs` pin the refusal *strings*. This file pins the
+thing those strings are supposed to guarantee, by driving the REAL path and then
+observing the bytes that actually landed — CLAUDE.md's rule that a test asserting
+a function was called does not count.
+
+`assert_no_plaintext_anywhere(conn, needle)` enumerates the schema from
+`sqlite_master` **at runtime** and scans every value of every row of every table
+at the byte level. That design matters more than any individual test: a path
+added later that writes into a NEW table is covered without anyone remembering to
+extend a list, and a needle buried inside a serialized blob (`events.event_body`,
+a widget's JSON) trips it as loudly as one in a `content` column.
+`the_observer_finds_a_needle_that_is_really_there` is the self-check that keeps
+the rest from being vacuously green.
+
+Paths observed: legacy send, legacy edit (on a channel sealed *after* the message
+was posted, so the class is resolved from the row), reactions, threads, all six
+slash-command kinds (including `reminder` and `api`, which post no message at all
+and would slip past a message-count assertion), webhook creation, `FetchUrl`,
+search, retention/anonymization, the sweeper, and every public `insert_message*`
+door.
+
+Two tests are deliberately adversarial rather than confirmatory:
+
+- `a_sealed_row_is_unreachable_by_search_even_with_a_poisoned_fts_index` plants a
+  sealed row **and a matching FTS entry for it** — the state a corrupted or
+  tampered index would be in — and asserts search still cannot surface it. It
+  proves the `AND is_e2ee = 0` second guard holds with the first one defeated.
+  (Verified by breaking the filter: the test fails.)
+- `the_sweeper_announces_nothing_into_a_sealed_channel_even_on_drift` builds the
+  event through the real doors while the channel is plaintext, then reclassifies —
+  a row that today's rules would refuse to create. The sweeper is the one writer
+  with no user request behind it, so there is nobody to return a refusal to.
+
 ### Schema (`db.rs`)
 
 - `channels.content_class TEXT NOT NULL DEFAULT 'plaintext'` — the class mirror.

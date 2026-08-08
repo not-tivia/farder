@@ -869,7 +869,7 @@ called does not count.**
 
 **Files:** create `crates/farder-server/tests/e2ee_observation.rs`.
 
-- [ ] **Step 1: The shared observer**
+- [x] **Step 1: The shared observer**
 
 ```rust
 /// Scan every place a byte could land and assert the plaintext needle is in
@@ -884,7 +884,7 @@ fn assert_no_plaintext_anywhere(conn: &Connection, needle: &str);
 fn assert_broadcast_is_ciphertext(frames: &[ServerEvent], needle: &str);
 ```
 
-- [ ] **Step 2: One test per path** (each drives the REAL path, then observes):
+- [x] **Step 2: One test per path** (each drives the REAL path, then observes):
 
 | Path | Test |
 |---|---|
@@ -916,7 +916,7 @@ The four rows in **bold** are paths the spec's C8 enumeration does not contain
 at all — they shipped 2026-07-28, after the spec was written. They are the
 reason this task enumerates from the code.
 
-- [ ] **Step 3: Full gate run + final docs sweep**
+- [x] **Step 3: Full gate run + final docs sweep**
 
 Run every gate. Then confirm the documentation checklist: `server-handlers.md`,
 `server-connection.md`, `server-widgets.md`, `server-system-identity.md`,
