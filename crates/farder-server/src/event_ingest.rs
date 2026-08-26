@@ -824,14 +824,26 @@ pub fn fetch_welcomes_for(
     let mut out = Vec::new();
     let mut cursor = since_accept_seq;
     let mut more = false;
+    let mut scanned = 0usize;
     for row in rows {
         let (seq, body) = row?;
         // Cap on ROWS SCANNED, not rows matched: bounding only the matches would
         // let one request walk the entire table when nothing matches.
-        if out.len() >= MAX_FETCH_EVENTS || (seq as u64) > cursor + MAX_FETCH_EVENTS as u64 {
+        //
+        // The bound is a COUNT of examined rows, never a distance in accept_seq.
+        // A range cap (`seq > cursor + MAX`) breaks BEFORE `cursor = seq`
+        // whenever the next matching row sits more than MAX positions past the
+        // cursor -- i.e. behind a gap of rows this query's WHERE clause excludes,
+        // which is the normal case on any busy server. It then returns
+        // `more = true` with an UNMOVED cursor, and a client feeding
+        // next_accept_seq back asks the identical question forever and never
+        // reaches its event. Counting examined rows always advances the cursor
+        // past what was examined, which is the invariant promised above.
+        if out.len() >= MAX_FETCH_EVENTS || scanned >= MAX_FETCH_EVENTS {
             more = true;
             break;
         }
+        scanned += 1;
         cursor = seq as u64;
         let event = Event::from_bytes(&body).context("decode welcome event")?;
         let EventPayload::MlsWelcome { channel_id, for_member, .. } = &event.core.payload else {
@@ -887,15 +899,27 @@ pub fn fetch_mls_control(
     let mut out = Vec::new();
     let mut cursor = since_accept_seq;
     let mut more = false;
+    let mut scanned = 0usize;
     for row in rows {
         let (seq, body) = row?;
         // Cap on ROWS SCANNED, not rows matched: bounding only the matches would
         // let one request walk the entire table when nothing matches. Identical
         // to `fetch_welcomes_for`.
-        if out.len() >= MAX_FETCH_EVENTS || (seq as u64) > cursor + MAX_FETCH_EVENTS as u64 {
+        //
+        // The bound is a COUNT of examined rows, never a distance in accept_seq.
+        // A range cap (`seq > cursor + MAX`) breaks BEFORE `cursor = seq`
+        // whenever the next matching row sits more than MAX positions past the
+        // cursor -- i.e. behind a gap of rows this query's WHERE clause excludes,
+        // which is the normal case on any busy server. It then returns
+        // `more = true` with an UNMOVED cursor, and a client feeding
+        // next_accept_seq back asks the identical question forever and never
+        // reaches its event. Counting examined rows always advances the cursor
+        // past what was examined, which is the invariant promised above.
+        if out.len() >= MAX_FETCH_EVENTS || scanned >= MAX_FETCH_EVENTS {
             more = true;
             break;
         }
+        scanned += 1;
         cursor = seq as u64;
         let event = Event::from_bytes(&body).context("decode mls control event")?;
         let want = match &event.core.payload {
@@ -2234,12 +2258,27 @@ mod tests {
         }
         store_control(&conn, &dev, &owner.public_key(), &g, a, 7);
 
-        let (events, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
-        assert_eq!(control_markers(&events), vec![(a, 7)]);
-        // The cursor advanced past every one of the 600 non-matching rows it
-        // examined — a client feeding this back never re-scans the same prefix.
-        assert_eq!(cursor, 601);
-        assert!(!more);
+        // Drive the documented client loop. 601 rows exceed one page, so this
+        // takes two -- the property under test is that the target IS reached and
+        // that every `more` page strictly advances the cursor, never that a
+        // single call swallows an unbounded number of rows.
+        let mut cursor = 0u64;
+        let mut seen = Vec::new();
+        let mut pages = 0;
+        loop {
+            let (events, next, more) = fetch_mls_control(&conn, a, cursor).unwrap();
+            seen.extend(control_markers(&events));
+            pages += 1;
+            assert!(pages <= 8, "pagination should converge, not grind");
+            if !more {
+                cursor = next;
+                break;
+            }
+            assert!(next > cursor, "a `more` page must advance the cursor past what it examined");
+            cursor = next;
+        }
+        assert_eq!(seen, vec![(a, 7)], "the target behind 600 non-matching rows is reachable");
+        assert_eq!(cursor, 601, "the cursor ends past every row examined");
     }
 
     #[test]
@@ -2254,11 +2293,73 @@ mod tests {
             store_control(&conn, &dev, &owner.public_key(), &g, b, marker);
         }
 
-        // Nothing for A at all: the page is empty but the cursor still moves, so
-        // the caller is not stuck re-scanning B's 600 rows from 0 forever.
-        let (events, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
-        assert!(events.is_empty());
-        assert_eq!(cursor, 600);
-        assert!(!more);
+        // Nothing for A at all: every page is empty but the cursor still moves,
+        // so the caller is not stuck re-scanning B's 600 rows from 0 forever.
+        let mut cursor = 0u64;
+        let mut pages = 0;
+        loop {
+            let (events, next, more) = fetch_mls_control(&conn, a, cursor).unwrap();
+            assert!(events.is_empty());
+            pages += 1;
+            assert!(pages <= 8, "pagination should converge, not grind");
+            if !more {
+                cursor = next;
+                break;
+            }
+            assert!(next > cursor, "an empty `more` page must still advance the cursor");
+            cursor = next;
+        }
+        assert_eq!(cursor, 600, "the cursor ends past every row examined");
+    }
+    /// A control event sitting behind a GAP of rows the SQL filter excludes.
+    ///
+    /// The dense case (600 rows of the same payload family) advances the cursor
+    /// one row at a time and never trips the range cap. The real world is the
+    /// gap case: 600 ordinary events, then the control event at accept_seq 601.
+    /// The range cap `seq > cursor + MAX_FETCH_EVENTS` then fires on the FIRST
+    /// row and breaks BEFORE `cursor = seq`, so the page is empty, `more` is
+    /// true, and the cursor has not moved. A client feeding `next_accept_seq`
+    /// back asks the identical question forever and never reaches its event.
+    #[test]
+    fn a_more_page_always_advances_the_cursor_across_a_filtered_out_gap() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+
+        // Noise of a payload type the SQL filter excludes, so these rows are
+        // never examined and cannot advance the cursor one-by-one.
+        for marker in 1..=600u64 {
+            let ev = Event::next(
+                &dev,
+                owner.public_key(),
+                g.server_id(),
+                None,
+                0,
+                marker,
+                EP::DeviceRevoked { device: format!("{marker:064x}") },
+            );
+            store_event(&conn, &ev).unwrap();
+        }
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 7);
+
+        // Drive the documented client loop: feed next_accept_seq back while `more`.
+        let mut cursor = 0u64;
+        let mut seen = Vec::new();
+        for _ in 0..16 {
+            let (events, next, more) = fetch_mls_control(&conn, a, cursor).unwrap();
+            seen.extend(control_markers(&events));
+            assert!(
+                next > cursor || !more,
+                "a `more` page MUST advance the cursor or the client loops \
+                 forever; it stayed at {cursor}"
+            );
+            cursor = next;
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(seen, vec![(a, 7)], "the event behind the gap must be reachable");
     }
 }
