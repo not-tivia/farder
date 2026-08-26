@@ -212,3 +212,42 @@ that must be proven this way in 4a: the `verify_leaf_binding` second gate (Task 
 stale-epoch retry bound (Task 6), the v1 withholding of sealed events (Task 7), and the
 no-plaintext observer (Task 8). A fix to any of these gets its own adversarial review pass —
 on sub-2, half the findings came from fixing the first half.
+
+---
+
+## Findings recorded during the build (controller)
+
+### F1 — the plan was wrong about `CommitOutcome` (fixed in Task 2, no action)
+
+Task 2's step list said the `MlsCommit` fields come "from the real `CommitOutcome`",
+including `post_epoch_authenticator`. **That field does not exist on `CommitOutcome`**
+(`crates/farder-mls/src/group.rs:72-85` carries `prev_epoch_authenticator`,
+`post_tree_hash`, `epoch`, `adds`, `removes`, `commit_bytes`, `welcome_bytes`).
+Task 2 correctly derived it as `group.epoch_authenticator()` read immediately after the
+merge — which IS the post-commit authenticator — and asserted `group.epoch() == outcome.epoch + 1`.
+Verified by the controller against the source. No further action.
+
+### F2 — KeyPackage expiry is effectively infinite (accepted for 4a, carry-forward)
+
+`expires_at_log_pos` must exceed the server's `log_pos` at publish time
+(`event_log_state.rs:1021-1024`), but **the client cannot know `log_pos`**: it is a
+server-wide counter of every accepted event, no `ServerResponse` exposes it, and
+`EventAccepted` returns only `event_hash` + `timestamp`. Task 2's strategy is
+`expires_at_log_pos = chain.next_seq + 1 + (1 << 40)` — guaranteed to pass the check, at
+the cost of making KeyPackage expiry meaningless in practice.
+
+Consequence to be aware of: the fold caps **live (unexpired)** KeyPackages at 10 per
+device (`"device already has the maximum number of live key packages"`). Consumption by an
+Add frees a slot, so the normal path self-drains. But a device that publishes 10
+KeyPackages none of which are ever consumed can **never publish another**, and because
+nothing expires, that state does not clear on its own.
+
+Scope of the risk is narrower than it first appears: a device is pinned to one
+`store_instance_hash` for life (`"store_instance_hash does not match this device's pinned
+instance"`), so store re-provisioning already requires a new device via `DeviceRevoked` —
+which is explicitly sub-5's territory. So F2 bites only within a single device's lifetime.
+
+**Carry-forward for sub-5:** either surface the server's `log_pos` (a NEW response
+variant, never a field added to a shipped struct) so expiry becomes meaningful, or make
+the pool top-up logic aware of the 10-live cap so it cannot wedge itself. Do not "fix"
+this by raising the cap.
