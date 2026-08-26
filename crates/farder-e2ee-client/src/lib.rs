@@ -14,6 +14,7 @@
 pub mod chain;
 pub mod channel;
 pub mod channel_key;
+pub mod join;
 pub mod transport;
 
 #[cfg(test)]
@@ -26,4 +27,9 @@ pub use channel::{
     CreateChannelOutcome, E2eeError, KeyPackageOutcome, KEY_PACKAGE_LIFETIME_LOG_POSITIONS,
 };
 pub use channel_key::{validate_log_server_id, ChannelKey};
+pub use farder_mls::group::JoinInfo;
+pub use join::{
+    confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,
+    LeafConfirmation, PendingWelcome, SendEligibility,
+};
 pub use transport::{E2eeTransport, EventAccepted, TransportError, Welcomes};

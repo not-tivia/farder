@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use farder_crypto::event_log::{ChannelClass, EventPayload, E2EE_CHANNEL_ID_FLOOR};
 use farder_mls::credential::{credential_with_key, generate_key_package, DeviceSigner};
 use farder_mls::group::MlsChannelGroup;
-use farder_mls::store::FarderMlsStore;
+use farder_mls::store::{FarderMlsStore, StoreResumeError};
 use tls_codec::Serialize as TlsSerialize;
 
 use crate::chain::{build_next_event, event_now_secs, Actor, ChainState};
@@ -118,10 +118,22 @@ pub enum E2eeError {
     Chain(String),
     /// MLS / store / serialization / filesystem failure.
     Mls(anyhow::Error),
+    /// A sealed send was attempted before this device's own leaf was confirmed.
+    /// This is a **local** refusal (fact A2.6): the fold rejects with
+    /// `"sealed content author does not hold a confirmed leaf"` until
+    /// `MlsLeafConfirmed` lands, so the client refuses up front rather than
+    /// round-tripping a doomed event. Task 5's `send_sealed` keys on this.
+    NotConfirmed,
+    /// The on-disk MLS store could not be resumed. Terminal for that store:
+    /// `InstanceMismatch` / `MissingInstanceId` mean the store is cloned,
+    /// restored or poisoned, and deleting + re-creating it in place would
+    /// silently destroy group state — the caller must self-`DeviceRevoked` and
+    /// re-provision (sub-5's job). This is never papered over here.
+    StoreResumeTerminal(StoreResumeError),
 }
 
 impl E2eeError {
-    fn chain(msg: impl Into<String>) -> Self {
+    pub(crate) fn chain(msg: impl Into<String>) -> Self {
         Self::Chain(msg.into())
     }
 
@@ -148,6 +160,10 @@ impl fmt::Display for E2eeError {
             ),
             Self::Chain(msg) => write!(f, "event chain: {msg}"),
             Self::Mls(e) => write!(f, "mls: {e}"),
+            Self::NotConfirmed => {
+                write!(f, "cannot send sealed content before this device's leaf is confirmed")
+            }
+            Self::StoreResumeTerminal(e) => write!(f, "MLS store resume is terminal: {e}"),
         }
     }
 }
@@ -157,6 +173,7 @@ impl std::error::Error for E2eeError {
         match self {
             Self::Transport(e) => Some(e),
             Self::Mls(e) => e.source(),
+            Self::StoreResumeTerminal(e) => Some(e),
             _ => None,
         }
     }
