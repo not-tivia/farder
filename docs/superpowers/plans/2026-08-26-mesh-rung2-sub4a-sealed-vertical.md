@@ -251,3 +251,39 @@ which is explicitly sub-5's territory. So F2 bites only within a single device's
 variant, never a field added to a shipped struct) so expiry becomes meaningful, or make
 the pool top-up logic aware of the 10-live cap so it cannot wedge itself. Do not "fix"
 this by raising the cap.
+
+### F3 — there is NO client-facing surface to fetch `MlsCommit` events (real gap in sub-3)
+
+Found while sequencing Task 4. `ServerEvent::MlsControlEvent { channel_id, event_hash,
+payload_type }` (`farder-protocol/src/server.rs:886`) is a **pointer only** — hash and type,
+no body. And an enumeration of every `Fetch*`/`Get*` request variant confirms **no request
+returns log events to a client**: `FetchWelcomes` filters to `MlsWelcome`,
+`FetchKeyPackages` to `MlsKeyPackagePublished`, `GetEvent { event_id: i64 }` is the RSVP
+widget, and `FetchHistoryV2` returns derived `messages` rows, not events.
+
+**Consequence:** a client cannot obtain an incoming `MlsCommit`, therefore cannot call
+`process_commit_checked`, therefore can never advance its group when another member commits.
+A joiner works exactly once (a Welcome encodes the post-add state and IS fetchable); after
+any subsequent add or rekey by anyone else, that member falls behind and silently stops
+being able to decrypt. Rung-1 deferred "client-side verification of received broadcast
+events (server doesn't broadcast the signed Event yet — a 3c)"; sub-3's fetch surfaces did
+not close it for MLS control traffic.
+
+**Why this does not block Task 4, and how it is sequenced:** the two receive-side gates
+(`process_commit_checked` + `verify_leaf_binding`) are a pure function of
+`(commit_bytes, declared_adds, declared_removes, declared_post_tree_hash, DeviceCert)`.
+Task 4 therefore builds `process_incoming_commit` **delivery-agnostic**, taking those as
+parameters, and is fully testable — including the impostor test — without any fetch
+surface. The 4a happy-path harness (Task 8: create → bootstrap → add → join → confirm →
+exchange) also does not need it, because the joiner joins from the Welcome and both parties
+then sit at the same epoch.
+
+**New Task 9 (added to this plan):** add a `FetchMlsControl { channel_id, since_accept_seq }`
+request + `MlsControl { events, next_accept_seq, more }` response, modelled directly on
+`FetchWelcomes`/`fetch_welcomes_for` (`farder-server/src/event_ingest.rs:810-851`, which
+already returns raw signed event bytes and has the correct cursor semantics), plus the
+matching `E2eeTransport` method. **New variants only — never a field added to a shipped
+struct** (rmp_serde encodes a struct as a positional array; adding a variant is safe,
+mutating a shipped struct is not). Without Task 9 the vertical is single-add-only, so it is
+required for 4a to be honestly complete — it is sequenced after Task 4 purely because
+Task 4 does not depend on it.
