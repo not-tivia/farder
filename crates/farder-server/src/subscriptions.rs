@@ -185,7 +185,7 @@ mod tests {
     use crate::events::EventTarget;
     use crate::{channels, members, messages, permissions};
     use farder_crypto::identity::Keypair;
-    use farder_protocol::server::ChannelType;
+    use farder_protocol::server::{ChannelType, MessageInfo, MessageInfoV2};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -276,6 +276,94 @@ mod tests {
             crate::handlers::widget_channel_visible_for_test(&conn, &owner, sealed, true).unwrap()
         };
         assert!(!widget_sees, "widgets must not see a sealed channel");
+    }
+
+    /// A sealed channel for the delivery tests: a normal text channel whose
+    /// mirrored class is `e2ee`, exactly as a log-declared channel materializes.
+    fn make_e2ee_channel(state: &ServerState, name: &str) -> u64 {
+        let id = text_channel(state, name);
+        let conn = state.db.lock().unwrap();
+        crate::channel_class::set_class(&conn, id, farder_crypto::event_log::ChannelClass::E2ee)
+            .unwrap();
+        id
+    }
+
+    /// The exact v2-only event the `SubmitEvent` accept path now emits for an
+    /// accepted `MessagePostedE2ee` (Task 7's emit site).
+    fn sealed_message_event(channel_id: u64) -> ServerEvent {
+        ServerEvent::SealedMessage {
+            channel_id,
+            message: MessageInfoV2 {
+                base: MessageInfo {
+                    id: 1,
+                    channel_id,
+                    author: Keypair::generate().public_key(),
+                    content: String::new(),
+                    timestamp: 0,
+                    edited_at: None,
+                    reply_to: None,
+                    pinned: false,
+                    attachments: vec![],
+                    reactions: vec![],
+                    thread_id: None,
+                    thread_message_count: None,
+                    author_name_override: None,
+                    author_badge: None,
+                    widget: None,
+                },
+                is_e2ee: true,
+                sealed: Some(vec![9, 9, 9]),
+                event_hash: Some("deadbeef".to_string()),
+            },
+        }
+    }
+
+    fn received_sealed(rx: &mut mpsc::Receiver<ServerEvent>, channel_id: u64) -> bool {
+        let mut seen = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let ServerEvent::SealedMessage { channel_id: c, .. } = ev {
+                if c == channel_id {
+                    seen = true;
+                }
+            }
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_v2_negotiated_subscriber_receives_sealed_message() {
+        let (state, _owner) = setup().await;
+        let ch = make_e2ee_channel(&state, "sealed");
+        let v2 = add_member(&state, "V2");
+        let mut v2_rx = connect(&state, &v2).await;
+        state
+            .client_protocol
+            .write()
+            .unwrap()
+            .insert(*v2.as_bytes(), farder_protocol::server::SERVER_PROTOCOL_VERSION);
+        apply_subscribe(&state, &v2, false, vec![ch]).await;
+        assert!(is_subscribed(&state, ch, &v2).await);
+
+        broadcast_event(&state, EventTarget::Subscribers(ch), sealed_message_event(ch)).await;
+        assert!(received_sealed(&mut v2_rx, ch), "a v2 subscriber must receive SealedMessage");
+    }
+
+    #[tokio::test]
+    async fn a_v1_subscriber_on_the_same_channel_receives_nothing_for_a_sealed_message() {
+        let (state, _owner) = setup().await;
+        let ch = make_e2ee_channel(&state, "sealed");
+        // No `client_protocol` entry: absent negotiation => version 1, so
+        // `may_receive` must withhold the v2-only `SealedMessage`.
+        let v1 = add_member(&state, "V1");
+        let mut v1_rx = connect(&state, &v1).await;
+        apply_subscribe(&state, &v1, false, vec![ch]).await;
+        assert!(is_subscribed(&state, ch, &v1).await);
+
+        broadcast_event(&state, EventTarget::Subscribers(ch), sealed_message_event(ch)).await;
+        assert!(
+            !received_sealed(&mut v1_rx, ch),
+            "a v1 (non-negotiated) subscriber must receive nothing for a sealed message"
+        );
     }
 
     fn everyone_role_id_with(conn: &Connection) -> u64 {

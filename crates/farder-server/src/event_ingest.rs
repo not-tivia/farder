@@ -33,7 +33,7 @@ pub fn load_genesis(conn: &Connection) -> Result<Option<Genesis>> {
     }
 }
 
-fn payload_type(p: &EventPayload) -> &'static str {
+pub(crate) fn payload_type(p: &EventPayload) -> &'static str {
     match p {
         EventPayload::MessagePosted { .. } => "MessagePosted",
         EventPayload::DeviceAuthorized { .. } => "DeviceAuthorized",

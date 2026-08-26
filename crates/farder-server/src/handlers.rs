@@ -2340,7 +2340,7 @@ pub fn handle_request(
                 None
             };
 
-            let (derived_id, created_class, tombstoned) = {
+            let (derived_id, edited_id, created_class, tombstoned) = {
                 let tx = conn.unchecked_transaction()
                     .map_err(|e| anyhow::anyhow!("failed to begin tx: {}", e))?;
                 crate::event_ingest::store_event(&tx, &event)
@@ -2371,15 +2371,16 @@ pub fn handle_request(
                 // and keeps `MessageEditedE2ee` from being a free write: the fold
                 // authorizes them on the send gates and leaves target existence +
                 // authorship to ingest, which owns the only per-message index.
-                if let Err(e) = crate::event_ingest::apply_sealed_edit(&tx, &event) {
-                    return err(&format!("event rejected: {}", e));
-                }
+                let edited_id = match crate::event_ingest::apply_sealed_edit(&tx, &event) {
+                    Ok(id) => id,
+                    Err(e) => return err(&format!("event rejected: {}", e)),
+                };
                 let tombstoned = match crate::event_ingest::apply_tombstone(&tx, &event) {
                     Ok(t) => t,
                     Err(e) => return err(&format!("event rejected: {}", e)),
                 };
                 tx.commit().map_err(|e| anyhow::anyhow!("failed to commit event: {}", e))?;
-                (id, created_class, tombstoned)
+                (id, edited_id, created_class, tombstoned)
             };
 
             // 5. Commit the advanced authorization state in memory.
@@ -2387,35 +2388,113 @@ pub fn handle_request(
             *ls_guard = Some(trial);
             drop(ls_guard);
 
-            // 6. Broadcast: for a derived message, send NewMessage so the existing
-            //    client render path works unchanged.
+            // 6. Broadcast.
             let mut events = Vec::new();
+
+            // A derived PLAINTEXT message rides `NewMessage`, so the existing v1
+            // render path works unchanged. A derived SEALED message cannot ride it
+            // — `NewMessage` carries a `String` body and ciphertext is not a
+            // string — so it rides `SealedMessage`, which `may_receive` withholds
+            // from unnegotiated (v1) connections.
             if let Some(mid) = derived_id {
-                if let EventPayload::MessagePosted { channel_id, .. } = &event.core.payload {
-                    if let Some(msg) = messages::get_message(conn, mid, member)? {
+                match &event.core.payload {
+                    EventPayload::MessagePosted { channel_id, .. } => {
+                        if let Some(msg) = messages::get_message(conn, mid, member)? {
+                            events.push(BroadcastEvent {
+                                target: EventTarget::Subscribers(*channel_id),
+                                event: ServerEvent::NewMessage { message: msg },
+                            });
+                        }
+                    }
+                    EventPayload::MessagePostedE2ee { channel_id, .. } => {
+                        if let Some(msg) = messages::get_message_v2(conn, mid, member)? {
+                            events.push(BroadcastEvent {
+                                target: EventTarget::Subscribers(*channel_id),
+                                event: ServerEvent::SealedMessage { channel_id: *channel_id, message: msg },
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // A sealed edit rewrites its target row in place; announce the whole
+            // row (not a diff — the server cannot read either version) so v2
+            // subscribers re-render without a refetch. `edited_id` is `Some` only
+            // for `MessageEditedE2ee`, and the payload match is kept for the same
+            // belt-and-braces clarity as the post arm above.
+            if let Some(edited_id) = edited_id {
+                if let EventPayload::MessageEditedE2ee { channel_id, .. } = &event.core.payload {
+                    if let Some(msg) = messages::get_message_v2(conn, edited_id, member)? {
                         events.push(BroadcastEvent {
                             target: EventTarget::Subscribers(*channel_id),
-                            event: ServerEvent::NewMessage { message: msg },
+                            event: ServerEvent::SealedMessageEdited { channel_id: *channel_id, message: msg },
                         });
                     }
                 }
             }
 
-            // A log-declared channel is announced to clients ONLY when it is
-            // plaintext: `ChannelInfo` has no class field and cannot gain one
-            // without breaking every un-updated client's decode of plaintext
-            // channels too (spec M2). Announcing a sealed channel through it would
-            // hand v1 clients a normal-looking channel with a working composer —
-            // worse than not seeing it. The E2EE announcement rides
-            // `ChannelInfoV2` (Task 5); until then an E2EE channel is simply not
-            // announced, which is the fail-closed side.
-            if created_class == Some(farder_crypto::event_log::ChannelClass::Plaintext) {
-                if let EventPayload::ChannelCreated { channel_id, .. } = &event.core.payload {
-                    if let Some(channel) = channels::get_channel(conn, *channel_id)? {
-                        events.push(BroadcastEvent {
-                            target: EventTarget::All,
-                            event: ServerEvent::ChannelCreated { channel },
-                        });
+            // MLS control events: members learn of epoch/key changes live instead
+            // of polling `FetchWelcomes` / `FetchKeyPackages`. The channel-scoped
+            // variants ride `Subscribers(channel_id)` — the same fan-out as sealed
+            // content, and exactly the parties that must know (every server member
+            // belongs to every E2EE group this rung, so subscribers are the group).
+            // `MlsKeyPackagePublished` has no channel; it rides `All`, which is
+            // consistent with `FetchKeyPackages`: KeyPackages are public WITHIN the
+            // server by design (a committer must be able to fetch the packages of
+            // the member it is adding), so a server-wide pointer leaks nothing the
+            // fetch surface does not already expose.
+            let mls_control: Option<Option<u64>> = match &event.core.payload {
+                EventPayload::MlsCommit { channel_id, .. }
+                | EventPayload::MlsWelcome { channel_id, .. }
+                | EventPayload::MlsLeafConfirmed { channel_id, .. }
+                | EventPayload::MlsGroupReset { channel_id, .. } => Some(Some(*channel_id)),
+                EventPayload::MlsKeyPackagePublished { .. } => Some(None),
+                _ => None,
+            };
+            if let Some(channel_id) = mls_control {
+                events.push(BroadcastEvent {
+                    target: match channel_id {
+                        Some(id) => EventTarget::Subscribers(id),
+                        None => EventTarget::All,
+                    },
+                    event: ServerEvent::MlsControlEvent {
+                        channel_id,
+                        event_hash: event.hash(),
+                        payload_type: crate::event_ingest::payload_type(&event.core.payload).to_string(),
+                    },
+                });
+            }
+
+            // A log-declared channel is announced according to its class. A
+            // PLAINTEXT channel rides the shipped `ChannelCreated`: `ChannelInfo`
+            // has no class field and cannot gain one without breaking every
+            // un-updated client's decode of plaintext channels too (spec M2). An
+            // E2EE channel rides `ChannelCreatedV2`, which carries `ChannelInfoV2`
+            // and is withheld from v1 connections by `may_receive` — so a v1 client
+            // is never handed a normal-looking channel with a working composer for
+            // a channel it cannot write plaintext into.
+            if let EventPayload::ChannelCreated { channel_id, .. } = &event.core.payload {
+                if let Some(channel) = channels::get_channel(conn, *channel_id)? {
+                    match created_class {
+                        Some(farder_crypto::event_log::ChannelClass::Plaintext) => {
+                            events.push(BroadcastEvent {
+                                target: EventTarget::All,
+                                event: ServerEvent::ChannelCreated { channel },
+                            });
+                        }
+                        Some(farder_crypto::event_log::ChannelClass::E2ee) => {
+                            events.push(BroadcastEvent {
+                                target: EventTarget::All,
+                                event: ServerEvent::ChannelCreatedV2 {
+                                    channel: ChannelInfoV2 {
+                                        base: channel,
+                                        class: farder_crypto::event_log::ChannelClass::E2ee,
+                                    },
+                                },
+                            });
+                        }
+                        None => {}
                     }
                 }
             }
@@ -2444,17 +2523,14 @@ pub fn handle_request(
                 });
             }
 
-            // A tombstone takes effect live, through the SHIPPED `MessageDeleted`
-            // event — no new variant, so v1 clients act on it too. The payload is
-            // an id and a channel, both already public metadata, so it is
-            // content-blind in a sealed channel exactly as it is in a plaintext
-            // one. Without this the moderator's only tool would appear to do
-            // nothing until every client reconnected.
-            //
-            // Sealed POSTS and sealed EDITS are deliberately NOT broadcast here:
-            // `NewMessage`/`MessageEdited` carry a `String` body, and stuffing
-            // ciphertext into one would ship garbage to every v1 client. Their
-            // delivery rides the v2 surfaces (Task 5).
+            // A tombstone takes effect live. The shipped `MessageDeleted` stays so
+            // v1 clients act on it too (payload is an id and a channel — public
+            // metadata, content-blind in a sealed channel exactly as in a plaintext
+            // one). A sealed-channel tombstone ALSO emits `MessageTombstoned`, which
+            // `may_receive` withholds from v1: its whole job is to let a v2 client
+            // tell the durable log-tombstone path apart from the legacy
+            // `DeleteMessage` path. Both carry the same id, so a v2 client's removal
+            // is idempotent; the extra event is a marker, not a second deletion.
             let mut orphaned_file_ids = Vec::new();
             if let Some(t) = tombstoned {
                 orphaned_file_ids = t.orphaned_file_ids;
@@ -2465,6 +2541,15 @@ pub fn handle_request(
                         channel_id: t.channel_id,
                     },
                 });
+                if crate::channel_class::resolve(conn, t.channel_id).refuses_server_authored_content() {
+                    events.push(BroadcastEvent {
+                        target: EventTarget::Subscribers(t.channel_id),
+                        event: ServerEvent::MessageTombstoned {
+                            message_id: t.message_id,
+                            channel_id: t.channel_id,
+                        },
+                    });
+                }
             }
 
             Ok(HandleResult {
@@ -9739,12 +9824,21 @@ mod tests {
             ChannelWriteClass::E2ee,
             "the mirror and the log must agree the instant the event is accepted"
         );
-        // A sealed channel is NOT announced: `ChannelInfo` has no class field, so
-        // a v1 client would get a normal-looking channel with a working composer.
+        // A sealed channel is NOT announced over the v1 `ChannelInfo` event —
+        // `ChannelInfo` has no class field, so a v1 client would get a
+        // normal-looking channel with a working composer. It IS announced over
+        // `ChannelCreatedV2`, which `may_receive` withholds from v1 clients.
         assert!(
             !r.events.iter().any(|b| matches!(b.event, ServerEvent::ChannelCreated { .. })),
             "an E2EE channel must not be announced over the v1 `ChannelInfo` event"
         );
+        let v2_announced = r.events.iter().any(|b| match &b.event {
+            ServerEvent::ChannelCreatedV2 { channel } => {
+                channel.base.id == sealed && channel.class == ChannelClass::E2ee
+            }
+            _ => false,
+        });
+        assert!(v2_announced, "an E2EE channel is announced over ChannelCreatedV2");
         // The observation that matters: the choke point is now closed for it.
         assert!(
             messages::insert_message(&conn, sealed, &f.owner.public_key(), "host text", None)
@@ -10058,17 +10152,161 @@ mod tests {
                 .is_empty()
         );
 
-        // And nothing about it went out on the wire: `NewMessage` carries a
+        // Nothing plaintext goes out on the wire: `NewMessage` carries a
         // `String` body, so broadcasting a sealed post through it would ship
-        // garbage (or worse) to every v1 client. Delivery is Task 5's v2 surface.
+        // garbage (or worse) to every v1 client. The sealed post is announced
+        // over `SealedMessage`, which `may_receive` withholds from v1 clients.
         assert!(matches!(accepted.response, ServerResponse::EventAccepted { .. }));
         assert!(
-            accepted.events.is_empty(),
-            "a sealed post broadcasts nothing on the v1 surfaces: {:?}",
+            accepted.events.iter().all(|b| !matches!(b.event, ServerEvent::NewMessage { .. })),
+            "a sealed post must never broadcast `NewMessage`: {:?}",
             accepted.events
         );
+        let sealed_events: Vec<&ServerEvent> = accepted
+            .events
+            .iter()
+            .filter(|b| matches!(b.event, ServerEvent::SealedMessage { .. }))
+            .map(|b| &b.event)
+            .collect();
+        assert_eq!(sealed_events.len(), 1, "a sealed post broadcasts one SealedMessage: {:?}", accepted.events);
+        let broadcast = accepted.events.iter().find(|b| matches!(b.event, ServerEvent::SealedMessage { .. })).unwrap();
+        match (&broadcast.target, &broadcast.event) {
+            (EventTarget::Subscribers(c), ServerEvent::SealedMessage { channel_id, message }) => {
+                assert_eq!(*c, ch);
+                assert_eq!(*channel_id, ch);
+                assert!(message.is_e2ee, "the announced message must be marked e2ee");
+                assert_eq!(message.sealed.as_deref(), Some(ciphertext.as_slice()), "ciphertext rides the v2 event verbatim");
+                assert_eq!(message.base.content, "", "no plaintext body on a sealed announcement");
+            }
+            other => panic!("expected a SealedMessage broadcast, got {other:?}"),
+        }
         assert!(accepted.orphaned_file_ids.is_empty());
         let _ = id;
+    }
+
+    #[test]
+    fn a_sealed_edit_broadcasts_sealed_message_edited() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = f.sealed_channel(&conn, E2EE_CHANNEL_ID_FLOOR + 74);
+        let (post, _) = f.sealed_post(&conn, ch, b"v1");
+        let new_cipher = b"v2-ciphertext".to_vec();
+
+        let edit = f.sign(
+            now_ts(),
+            EP::MessageEditedE2ee {
+                channel_id: ch,
+                target: post.hash(),
+                generation: 0,
+                epoch: f.sealed_epoch(ch),
+                ciphertext: new_cipher.clone(),
+                authz_head: "a".repeat(64),
+            },
+        );
+        let r = f.accept(&conn, &edit);
+
+        // The row was rewritten in place...
+        let sealed: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT sealed FROM messages WHERE event_hash = ?1",
+                rusqlite::params![post.hash()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sealed.as_deref(), Some(new_cipher.as_slice()));
+        // ...and subscribers are told through the v2-only whole-row event.
+        let evt = r
+            .events
+            .iter()
+            .find(|b| matches!(&b.event, ServerEvent::SealedMessageEdited { .. }))
+            .expect("a sealed edit broadcasts SealedMessageEdited");
+        match (&evt.target, &evt.event) {
+            (EventTarget::Subscribers(c), ServerEvent::SealedMessageEdited { channel_id, message }) => {
+                assert_eq!(*c, ch);
+                assert_eq!(*channel_id, ch);
+                assert!(message.is_e2ee, "the announced row must be marked e2ee");
+                assert_eq!(message.sealed.as_deref(), Some(new_cipher.as_slice()), "the edited ciphertext rides the v2 event");
+                assert_eq!(message.base.content, "", "no plaintext body on a sealed edit announcement");
+            }
+            other => panic!("expected a SealedMessageEdited broadcast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_mls_commit_broadcasts_an_mls_control_event_to_subscribers() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 75;
+        let created = f.channel_created(ch, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+
+        let boot = f.sign(
+            now_ts(),
+            EP::MlsCommit {
+                channel_id: ch,
+                generation: 0,
+                epoch: 0,
+                mls_message: vec![0xC0],
+                adds: vec![],
+                removes: vec![],
+                prev_epoch_authenticator: [0u8; 32],
+                post_epoch_authenticator: [11u8; 32],
+                post_tree_hash: [21u8; 32],
+                authz_head: "a".repeat(64),
+                store_instance_hash: [3u8; 32],
+            },
+        );
+        let r = f.accept(&conn, &boot);
+
+        let ctl = r
+            .events
+            .iter()
+            .find(|b| matches!(&b.event, ServerEvent::MlsControlEvent { .. }))
+            .expect("a commit broadcasts MlsControlEvent");
+        match (&ctl.target, &ctl.event) {
+            (EventTarget::Subscribers(c), ServerEvent::MlsControlEvent { channel_id, event_hash, payload_type }) => {
+                assert_eq!(*c, ch, "an epoch change is announced to the channel's subscribers");
+                assert_eq!(*channel_id, Some(ch));
+                assert_eq!(event_hash, &boot.hash(), "the event is a pointer, not a summary");
+                assert_eq!(payload_type, "MlsCommit");
+            }
+            other => panic!("expected MlsControlEvent to Subscribers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_mls_key_package_published_broadcasts_an_mls_control_event_to_all() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // No channel: KeyPackages are server-scoped. A fresh LogFixture's owner
+        // device is unpinned, so any store-instance hash passes.
+        let kp = f.sign(
+            now_ts(),
+            EP::MlsKeyPackagePublished {
+                key_package: vec![0xAB],
+                store_instance_hash: [7u8; 32],
+                expires_at_log_pos: f.log_pos() + 100,
+            },
+        );
+        let r = f.accept(&conn, &kp);
+
+        let ctl = r
+            .events
+            .iter()
+            .find(|b| matches!(&b.event, ServerEvent::MlsControlEvent { .. }))
+            .expect("a key package publication broadcasts MlsControlEvent");
+        match (&ctl.target, &ctl.event) {
+            (EventTarget::All, ServerEvent::MlsControlEvent { channel_id, event_hash, payload_type }) => {
+                assert_eq!(*channel_id, None, "a KeyPackage publication has no channel to scope to");
+                assert_eq!(event_hash, &kp.hash());
+                assert_eq!(payload_type, "MlsKeyPackagePublished");
+            }
+            other => panic!("expected MlsControlEvent to All, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10107,15 +10345,36 @@ mod tests {
             .unwrap();
         assert_eq!(rows, 0, "a tombstone hard-deletes the derived row");
         // ...clients are told through the SHIPPED event (id + channel only — no
-        // content, so it is as content-blind in a sealed channel as anywhere)...
-        assert_eq!(r.events.len(), 1);
-        match (&r.events[0].target, &r.events[0].event) {
+        // content, so it is as content-blind in a sealed channel as anywhere)
+        // AND, because the target is sealed, through `MessageTombstoned`, which a
+        // v2 client uses to tell the durable log-delete apart from a legacy
+        // `DeleteMessage`. Both carry the same id, so removal is idempotent.
+        assert_eq!(r.events.len(), 2, "MessageDeleted + MessageTombstoned for a sealed tombstone");
+        let deleted = r
+            .events
+            .iter()
+            .find(|b| matches!(b.event, ServerEvent::MessageDeleted { .. }))
+            .unwrap();
+        match (&deleted.target, &deleted.event) {
             (EventTarget::Subscribers(c), ServerEvent::MessageDeleted { message_id, channel_id }) => {
                 assert_eq!(*c, ch);
                 assert_eq!(*channel_id, ch);
                 assert_eq!(*message_id as i64, doomed_id);
             }
             other => panic!("expected a MessageDeleted broadcast, got {other:?}"),
+        }
+        let tombstone_evt = r
+            .events
+            .iter()
+            .find(|b| matches!(b.event, ServerEvent::MessageTombstoned { .. }))
+            .unwrap();
+        match (&tombstone_evt.target, &tombstone_evt.event) {
+            (EventTarget::Subscribers(c), ServerEvent::MessageTombstoned { message_id, channel_id }) => {
+                assert_eq!(*c, ch);
+                assert_eq!(*channel_id, ch);
+                assert_eq!(*message_id as i64, doomed_id);
+            }
+            other => panic!("expected a MessageTombstoned broadcast, got {other:?}"),
         }
 
         // ...and THE F2 INVARIANT: the next startup's reconcile must not
