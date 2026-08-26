@@ -9,6 +9,7 @@ members = [
     "crates/farder-demo",
     "crates/farder-server",
     "crates/farder-mls",
+    "crates/farder-e2ee-client",
 ]
 
 [package]

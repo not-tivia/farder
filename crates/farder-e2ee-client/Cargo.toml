@@ -1,0 +1,13 @@
+[package]
+name = "farder-e2ee-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+farder-mls = { workspace = true }
+farder-crypto = { workspace = true }
+farder-protocol = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+rmp-serde = "1"

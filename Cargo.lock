@@ -803,6 +803,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "farder-e2ee-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "farder-crypto",
+ "farder-mls",
+ "farder-protocol",
+ "rmp-serde",
+ "serde",
+]
+
+[[package]]
 name = "farder-mls"
 version = "0.1.0"
 dependencies = [

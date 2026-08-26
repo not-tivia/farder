@@ -1,0 +1,18 @@
+//! `farder-e2ee-client` — transport-agnostic E2EE control-plane logic for
+//! Farder's sealed channels (mesh rung 2, sub-project 4).
+//!
+//! This crate is the headless "vertical": it holds the MLS steward/group logic
+//! and talks to a server only through the [`E2eeTransport`] trait, so it can be
+//! driven both by the real Tauri client (sub-project 4b) and by the in-process
+//! test harness (sub-project 4a) against the *shipped* code rather than a
+//! reimplementation. See `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`
+//! and the rung-2 E2EE design spec.
+//!
+//! This crate deliberately has **no networking dependency** (no `quinn`, no
+//! `tauri`): the transport is supplied by the caller behind the trait.
+
+pub mod channel_key;
+pub mod transport;
+
+pub use channel_key::{validate_log_server_id, ChannelKey};
+pub use transport::{E2eeTransport, EventAccepted, TransportError, Welcomes};
