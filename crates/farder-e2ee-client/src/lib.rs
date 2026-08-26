@@ -11,8 +11,19 @@
 //! This crate deliberately has **no networking dependency** (no `quinn`, no
 //! `tauri`): the transport is supplied by the caller behind the trait.
 
+pub mod chain;
+pub mod channel;
 pub mod channel_key;
 pub mod transport;
 
+#[cfg(test)]
+pub mod testing;
+
+pub use chain::{build_next_event, event_now_secs, Actor, ChainState};
+pub use channel::{
+    bootstrap_group, channel_group_id, create_e2ee_channel, publish_key_package,
+    persist_store_instance_hash, read_store_instance_hash, ChannelSpec, CommitSubmitted,
+    CreateChannelOutcome, E2eeError, KeyPackageOutcome, KEY_PACKAGE_LIFETIME_LOG_POSITIONS,
+};
 pub use channel_key::{validate_log_server_id, ChannelKey};
 pub use transport::{E2eeTransport, EventAccepted, TransportError, Welcomes};

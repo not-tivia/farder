@@ -11,3 +11,11 @@ farder-protocol = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 rmp-serde = "1"
+# Serializing a KeyPackage to its RFC 9420 TLS bytes before publishing it.
+# `tls_codec 0.4` is the exact crate openmls 0.8.1 already pulls in (see
+# `farder-mls`), so this promotes an existing transitive dep to a direct one
+# rather than adding a new third-party crate.
+tls_codec = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true }
