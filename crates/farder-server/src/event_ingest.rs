@@ -850,6 +850,69 @@ pub fn fetch_welcomes_for(
     Ok((out, cursor, more))
 }
 
+/// Raw signed-`Event` bytes for one channel's MLS control plane, oldest-first,
+/// starting after `since_accept_seq`.
+///
+/// The control plane is the four channel-scoped MLS payloads a member needs to
+/// advance (or rebuild) its group state when *another* member commits:
+/// `MlsCommit`, `MlsWelcome`, `MlsLeafConfirmed` and `MlsGroupReset`.
+/// `MlsKeyPackagePublished` is deliberately NOT here — it carries no
+/// `channel_id` (it is server-scoped, published before any group exists) and is
+/// already served by [`fetch_key_packages`].
+///
+/// `channel_id` is matched against the SIGNED payload, never against the
+/// `events.channel_id` column: ingest only denormalizes that column for
+/// `MessagePosted`, so for the MLS variants the body is the only source of
+/// truth. The bytes are handed back opaque — the server stores and orders MLS
+/// traffic, it does not interpret it.
+///
+/// Returns `(events, next_accept_seq, more)` with the SAME cursor semantics as
+/// [`fetch_welcomes_for`]: the cursor advances past every row EXAMINED, not just
+/// the ones returned, so a channel whose control events sit behind thousands of
+/// other channels' is not stuck re-scanning the same prefix forever.
+pub fn fetch_mls_control(
+    conn: &Connection,
+    channel_id: u64,
+    since_accept_seq: u64,
+) -> Result<(Vec<Vec<u8>>, u64, bool)> {
+    let mut stmt = conn.prepare(
+        "SELECT accept_seq, event_body FROM events \
+         WHERE payload_type IN ('MlsCommit', 'MlsWelcome', 'MlsLeafConfirmed', 'MlsGroupReset') \
+           AND accept_seq > ?1 \
+         ORDER BY accept_seq ASC",
+    )?;
+    let rows = stmt.query_map(params![since_accept_seq as i64], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut out = Vec::new();
+    let mut cursor = since_accept_seq;
+    let mut more = false;
+    for row in rows {
+        let (seq, body) = row?;
+        // Cap on ROWS SCANNED, not rows matched: bounding only the matches would
+        // let one request walk the entire table when nothing matches. Identical
+        // to `fetch_welcomes_for`.
+        if out.len() >= MAX_FETCH_EVENTS || (seq as u64) > cursor + MAX_FETCH_EVENTS as u64 {
+            more = true;
+            break;
+        }
+        cursor = seq as u64;
+        let event = Event::from_bytes(&body).context("decode mls control event")?;
+        let want = match &event.core.payload {
+            EventPayload::MlsCommit { channel_id, .. }
+            | EventPayload::MlsWelcome { channel_id, .. }
+            | EventPayload::MlsLeafConfirmed { channel_id, .. }
+            | EventPayload::MlsGroupReset { channel_id, .. } => *channel_id,
+            _ => continue,
+        };
+        if want != channel_id {
+            continue;
+        }
+        out.push(body);
+    }
+    Ok((out, cursor, more))
+}
+
 /// Raw signed-`Event` bytes for the KeyPackages one `(member, device)` published,
 /// oldest-first.
 ///
@@ -2068,5 +2131,134 @@ mod tests {
             Some(&b"FRESH ciphertext"[..]),
             "redaction touched no message row at all"
         );
+    }
+
+    /// Store one `MlsLeafConfirmed` control event for `channel_id`. `marker`
+    /// lands in `epoch`/`generation`/`tree_hash`, which also makes every event's
+    /// content hash unique across the test.
+    fn store_control(
+        conn: &Connection,
+        dev: &Keypair,
+        author: &farder_crypto::identity::PublicKey,
+        g: &Genesis,
+        channel_id: u64,
+        marker: u64,
+    ) -> Event {
+        let ev = Event::next(
+            dev,
+            author.clone(),
+            g.server_id(),
+            None,
+            0,
+            marker,
+            EP::MlsLeafConfirmed {
+                channel_id,
+                generation: marker,
+                epoch: marker,
+                tree_hash: [marker as u8; 32],
+                store_instance_hash: [0u8; 32],
+            },
+        );
+        store_event(conn, &ev).unwrap();
+        ev
+    }
+
+    fn control_markers(events: &[Vec<u8>]) -> Vec<(u64, u64)> {
+        events
+            .iter()
+            .map(|b| {
+                let e = Event::from_bytes(b).unwrap();
+                match e.core.payload {
+                    EP::MlsLeafConfirmed { channel_id, epoch, .. } => (channel_id, epoch),
+                    other => panic!("expected MlsLeafConfirmed, got {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fetch_mls_control_returns_the_channels_events_oldest_first() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        let b = 200u64;
+        // Interleave A and B control events; A's are 1, 3, 5 by accept order.
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 1);
+        store_control(&conn, &dev, &owner.public_key(), &g, b, 2);
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 3);
+        store_control(&conn, &dev, &owner.public_key(), &g, b, 4);
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 5);
+
+        let (events, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
+        assert_eq!(control_markers(&events), vec![(a, 1), (a, 3), (a, 5)]);
+        assert_eq!(cursor, 5, "the cursor is the last accept_seq examined");
+        assert!(!more);
+    }
+
+    #[test]
+    fn fetch_mls_control_pages_matching_rows_and_returns_more() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        for marker in 1..=(MAX_FETCH_EVENTS as u64 + 1) {
+            store_control(&conn, &dev, &owner.public_key(), &g, a, marker);
+        }
+
+        let (first, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
+        assert_eq!(first.len(), MAX_FETCH_EVENTS);
+        assert!(more);
+        assert_eq!(cursor, MAX_FETCH_EVENTS as u64);
+
+        let (second, cursor2, more2) = fetch_mls_control(&conn, a, cursor).unwrap();
+        assert_eq!(second.len(), 1, "feeding next_accept_seq back reaches the tail");
+        assert_eq!(control_markers(&second), vec![(a, MAX_FETCH_EVENTS as u64 + 1)]);
+        assert_eq!(cursor2, MAX_FETCH_EVENTS as u64 + 1);
+        assert!(!more2);
+    }
+
+    #[test]
+    fn fetch_mls_control_reaches_a_target_behind_many_non_matching_rows() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        let b = 200u64;
+        // 600 control events for channel B, then the ONE for channel A.
+        for marker in 1..=600u64 {
+            store_control(&conn, &dev, &owner.public_key(), &g, b, marker);
+        }
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 7);
+
+        let (events, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
+        assert_eq!(control_markers(&events), vec![(a, 7)]);
+        // The cursor advanced past every one of the 600 non-matching rows it
+        // examined — a client feeding this back never re-scans the same prefix.
+        assert_eq!(cursor, 601);
+        assert!(!more);
+    }
+
+    #[test]
+    fn fetch_mls_control_advances_the_cursor_past_non_matching_rows_with_no_matches() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        let b = 200u64;
+        for marker in 1..=600u64 {
+            store_control(&conn, &dev, &owner.public_key(), &g, b, marker);
+        }
+
+        // Nothing for A at all: the page is empty but the cursor still moves, so
+        // the caller is not stuck re-scanning B's 600 rows from 0 forever.
+        let (events, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(cursor, 600);
+        assert!(!more);
     }
 }

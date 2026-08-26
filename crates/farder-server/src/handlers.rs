@@ -1501,6 +1501,27 @@ pub fn handle_request(
             ok(ServerResponse::KeyPackages { events })
         }
 
+        ServerRequest::FetchMlsControl { channel_id, since_accept_seq } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // Membership-gated by the request gate at the top of `handle_request`
+            // (this variant is NOT in the bootstrap allow-list). Channel-scoped,
+            // so it gets the SAME read gate as `FetchHistory`/`FetchHistoryV2`:
+            // READ_MESSAGES. A channel the caller cannot read and a channel that
+            // does not exist both answer `missing READ_MESSAGES permission` (the
+            // permission resolves identically for a missing row), so the channel
+            // id is never an existence oracle — exactly the discipline those
+            // sibling read surfaces already keep.
+            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::READ_MESSAGES) {
+                return err("missing READ_MESSAGES permission");
+            }
+            let (events, next_accept_seq, more) =
+                crate::event_ingest::fetch_mls_control(conn, channel_id, since_accept_seq)?;
+            ok(ServerResponse::MlsControl { events, next_accept_seq, more })
+        }
+
         ServerRequest::GetMembershipStatus => {
             let status = {
                 let guard = state.log_state.lock().unwrap();
@@ -9082,10 +9103,11 @@ mod tests {
                 },
                 ServerRequest::GetServerInfoV2,
                 ServerRequest::FetchHistoryV2 { channel_id: 1, before_id: None, limit: 10 },
+                ServerRequest::FetchMlsControl { channel_id: 1, since_accept_seq: 0 },
             ]
         };
 
-        // 1. None of the four is in the bootstrap allow-list.
+        // 1. None of them is in the bootstrap allow-list.
         for req in reqs() {
             assert!(
                 request_requires_membership(&req),
@@ -9093,7 +9115,7 @@ mod tests {
             );
         }
 
-        // 2. All four refuse an un-negotiated (v1) connection.
+        // 2. All of them refuse an un-negotiated (v1) connection.
         for req in reqs() {
             let label = format!("{req:?}");
             let r = handle_request(&conn, &owner, true, req, "", &fake_state()).unwrap();
@@ -9135,6 +9157,93 @@ mod tests {
         )
         .unwrap();
         assert_eq!(err_reason(&r), UPGRADE_REQUIRED);
+    }
+
+    /// `FetchMlsControl` is a channel-scoped read, so it gets the SAME gate as
+    /// `FetchHistory`/`FetchHistoryV2` (READ_MESSAGES) rather than the class
+    /// gate — the MLS control plane is what a member needs to decrypt the
+    /// channel's messages, not widget content. The refusal string is the same
+    /// for a readable channel the caller is denied and for a channel that does
+    /// not exist, so the id is never an existence oracle.
+    #[test]
+    fn fetch_mls_control_is_read_gated_and_not_an_existence_oracle() {
+        use farder_crypto::event_log::Event;
+
+        let (conn, owner) = setup();
+        let channel = make_channel(&conn);
+
+        // One control event for the channel, so a READ-capable member has
+        // something to fetch (the positive half).
+        let dev = Keypair::generate();
+        crate::event_ingest::store_event(
+            &conn,
+            &Event::next(
+                &dev,
+                owner.clone(),
+                "test-server".to_string(),
+                None,
+                0,
+                1,
+                EventPayload::MlsLeafConfirmed {
+                    channel_id: channel,
+                    generation: 1,
+                    epoch: 1,
+                    tree_hash: [1u8; 32],
+                    store_instance_hash: [0u8; 32],
+                },
+            ),
+        )
+        .unwrap();
+
+        // A member with the default @everyone (READ_MESSAGES included) can read it.
+        let member = add_member(&conn, "reader");
+        let state = fake_state_v2(&member);
+        let r = handle_request(
+            &conn,
+            &member,
+            false,
+            ServerRequest::FetchMlsControl { channel_id: channel, since_accept_seq: 0 },
+            "",
+            &state,
+        )
+        .unwrap();
+        let ServerResponse::MlsControl { events, next_accept_seq, more } = r.response else {
+            panic!("expected MlsControl");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(next_accept_seq, 1);
+        assert!(!more);
+
+        // Strip READ_MESSAGES from @everyone: the same member can no longer read
+        // the channel's control plane.
+        conn.execute(
+            "UPDATE roles SET permissions = ?1 WHERE name = '@everyone' AND builtin = 1",
+            rusqlite::params![permissions::VIEW_CHANNEL as i64],
+        )
+        .unwrap();
+        let r = handle_request(
+            &conn,
+            &member,
+            false,
+            ServerRequest::FetchMlsControl { channel_id: channel, since_accept_seq: 0 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), "missing READ_MESSAGES permission");
+
+        // Non-oracle: once READ is denied, a channel id that does not exist
+        // answers IDENTICALLY, so the id is never an existence oracle.
+        let r = handle_request(
+            &conn,
+            &member,
+            false,
+            ServerRequest::FetchMlsControl { channel_id: 999_999, since_accept_seq: 0 },
+            "",
+            &state,
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), "missing READ_MESSAGES permission");
     }
 
     /// `NegotiateProtocol` records ONLY the caller's own slot, keyed by the
@@ -9202,11 +9311,12 @@ mod tests {
                 | ServerRequest::GetServerInfo
                 | ServerRequest::GetMembershipStatus
                 | ServerRequest::NegotiateProtocol { .. } => false,
-                // The other four v2 surfaces are GATED like everything else.
+                // The other v2 surfaces are GATED like everything else.
                 ServerRequest::FetchWelcomes { .. }
                 | ServerRequest::FetchKeyPackages { .. }
                 | ServerRequest::GetServerInfoV2
-                | ServerRequest::FetchHistoryV2 { .. } => true,
+                | ServerRequest::FetchHistoryV2 { .. }
+                | ServerRequest::FetchMlsControl { .. } => true,
                 // Everything else is gated. Enumerated, not `_`-defaulted.
                 ServerRequest::AddBot { .. }
                 | ServerRequest::AddBotAlert { .. }

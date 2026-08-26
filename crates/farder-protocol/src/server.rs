@@ -636,6 +636,16 @@ pub enum ServerRequest {
     GetServerInfoV2,
     /// `FetchHistory` that can carry sealed rows.
     FetchHistoryV2 { channel_id: u64, before_id: Option<u64>, limit: u32 },
+    /// Fetch one channel's MLS control plane — the raw signed `Event` bytes for
+    /// `MlsCommit`, `MlsWelcome`, `MlsLeafConfirmed` and `MlsGroupReset` —
+    /// oldest-first, starting after `since_accept_seq`. This is what a member
+    /// uses to advance its group when ANOTHER member commits: `FetchWelcomes`
+    /// only serves Welcomes addressed to the caller, so without this surface a
+    /// client can never obtain the incoming `MlsCommit` it must feed to
+    /// `process_commit_checked`. Channel-scoped and visibility-gated like
+    /// `FetchHistoryV2`; `MlsKeyPackagePublished` is deliberately NOT here (it
+    /// has no channel and is already served by `FetchKeyPackages`).
+    FetchMlsControl { channel_id: u64, since_accept_seq: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -750,6 +760,12 @@ pub enum ServerResponse {
         server_id: Option<String>,
     },
     HistoryV2 { messages: Vec<MessageInfoV2> },
+    /// Answer to `FetchMlsControl`: raw signed `Event` bytes (the four
+    /// channel-scoped MLS control payloads), oldest-first. Same cursor contract
+    /// as [`ServerResponse::Welcomes`]: `next_accept_seq` is the cursor for the
+    /// next request's `since_accept_seq`, and `more` says whether the server
+    /// truncated the page.
+    MlsControl { events: Vec<Vec<u8>>, next_accept_seq: u64, more: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1063,6 +1079,37 @@ mod tests {
         assert!(!event_requires_v2(&ServerEvent::MembershipChanged {
             public_key: Keypair::generate().public_key()
         }));
+    }
+
+    /// The two Task-9 additions round-trip through `codec` and — because they are
+    /// NEW variants, not fields added to a shipped struct — leave every shipped
+    /// variant's bytes untouched (pinned by the byte-stability test above).
+    #[test]
+    fn fetch_mls_control_variants_roundtrip() {
+        let req = ServerRequest::FetchMlsControl { channel_id: 42, since_accept_seq: 7 };
+        let req_bytes = codec::encode(&req).unwrap();
+        match codec::decode::<ServerRequest>(&req_bytes).unwrap() {
+            ServerRequest::FetchMlsControl { channel_id, since_accept_seq } => {
+                assert_eq!(channel_id, 42);
+                assert_eq!(since_accept_seq, 7);
+            }
+            other => panic!("wrong request variant: {other:?}"),
+        }
+
+        let resp = ServerResponse::MlsControl {
+            events: vec![vec![1, 2, 3], vec![4, 5]],
+            next_accept_seq: 99,
+            more: true,
+        };
+        let resp_bytes = codec::encode(&resp).unwrap();
+        match codec::decode::<ServerResponse>(&resp_bytes).unwrap() {
+            ServerResponse::MlsControl { events, next_accept_seq, more } => {
+                assert_eq!(events, vec![vec![1, 2, 3], vec![4, 5]]);
+                assert_eq!(next_accept_seq, 99);
+                assert!(more);
+            }
+            other => panic!("wrong response variant: {other:?}"),
+        }
     }
 
     #[test]
