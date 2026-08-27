@@ -286,4 +286,37 @@ mod tests {
         let other = Keypair::generate();
         assert!(resolver.device_cert(&other.public_key(), "nope").is_none());
     }
+
+    /// Pins the DEVICE filter: an identity may hold several authorized devices,
+    /// and a cert for the WRONG device must never be handed to Gate 2. If this
+    /// filter were removed, `resolve_device_cert` would return the last cert in
+    /// the batch -- the wrong device's -- and `verify_leaf_binding` would accept
+    /// a leaf signed by that other device's key, letting an impostor through on a
+    /// multi-device identity.
+    #[tokio::test]
+    async fn a_cert_for_a_different_device_is_never_returned_even_when_batched() {
+        let identity = Keypair::generate();
+        let device_a = Keypair::generate();
+        let device_b = Keypair::generate();
+
+        // Both devices are genuinely authorized by this identity; the server
+        // returns the whole batch (it keys the fetch by identity, not device).
+        let bytes = vec![
+            device_authorized_bytes(&identity, &device_a, 1),
+            device_authorized_bytes(&identity, &device_b, 2),
+        ];
+        let transport = CertTransport::new(bytes);
+
+        // Ask for device_a: we must get device_a's cert, not device_b's.
+        let cert = resolve_device_cert(&transport, &identity.public_key(), &device_id(&device_a.public_key()))
+            .await
+            .unwrap()
+            .expect("a genuine cert must resolve");
+        assert_eq!(
+            cert.core.device_id,
+            device_id(&device_a.public_key()),
+            "the resolver must return the cert for the requested device, not a sibling device"
+        );
+        assert_eq!(cert.core.identity, identity.public_key());
+    }
 }
