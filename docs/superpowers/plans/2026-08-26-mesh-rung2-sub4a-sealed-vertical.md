@@ -200,7 +200,7 @@ Deferred to **sub-6/7**: encrypted attachments, PIN-wrapped local history.
 
 - `cargo test --workspace` green (baseline 764 — never fewer).
 - `cargo build --workspace` with no new warnings.
-- `cargo clippy -p farder-e2ee-client -- -D warnings` clean (new crate starts clean and stays clean; do NOT put `-D warnings` on the pre-existing crates — that forced a whole-crate cleanup sweep on sub-2).
+- `cargo clippy -p farder-e2ee-client --no-deps -- -D warnings` clean (the `--no-deps` is REQUIRED: without it `-D warnings` propagates to the whole dependency graph and trips a pre-existing `large_enum_variant` in `farder-protocol`) (new crate starts clean and stays clean; do NOT put `-D warnings` on the pre-existing crates — that forced a whole-crate cleanup sweep on sub-2).
 - Client crate builds separately (`cd client/src-tauri && cargo build`) once it depends on the new crate — `cargo build --workspace` does NOT cover it.
 - Check `git ls-files --eol` after any scripted edit: python `io.open(p,'w')` strips CRLF and destroyed blame on a wire-protocol file during sub-3.
 
@@ -359,3 +359,26 @@ emit the SAME `"stale-epoch"` code for `MessagePostedE2ee` and `MessageEditedE2e
 
 The fold keeps its own check as the authoritative backstop — the pre-check is an early,
 machine-readable bounce, not a replacement for validation.
+
+### F7 — Gate 2's trust anchor has no production data source (found by final review, FIXED as Task 10)
+
+`process_incoming_commit`'s second gate resolves a `DeviceCert` through the
+`DeviceCertResolver` trait and runs `verify_leaf_binding` against it. Verified against the
+tree: **no protocol request or response carries a `DeviceCert` or a `DeviceAuthorized`
+event** (`grep -nE "DeviceCert|DeviceAuthorized" crates/farder-protocol/src/server.rs` →
+nothing), no fetch function selects that payload type, and the only implementations of the
+trait in the repo are test doubles (`MapCertResolver`, `EmptyCerts`).
+
+4a is not incorrect — the gate fails CLOSED (absent cert ⇒ `LeafBindingFailure` ⇒ poisoned
+⇒ abort) and the harness never drives commit processing over the wire. The danger is what
+happens next: a 4b implementer finds that every incoming commit is rejected, and makes it
+work by handing the resolver certs taken **from the commit being validated**. That defeats
+Gate 2 completely and reintroduces exactly the impostor-leaf attack it exists to stop.
+Sub-project 1's carry-forward M1 states the rule explicitly: the validator must derive the
+device key from a verified `DeviceCert` bound to `(author, device)`, **never from the event
+itself**. A code comment on the trait claimed the certs come from `fetch_mls_control`, which
+is factually wrong and points a future implementer straight at the unsafe shortcut.
+
+This is the same shape as F3 and F6 — one half of a mechanism built, the other half never
+exercised because everything upstream shipped dormant. Fixed in 4a rather than deferred,
+because a security gate with no safe data source is an invitation to wire an unsafe one.
