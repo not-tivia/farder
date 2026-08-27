@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
-import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo } from "../lib/types";
-import { publicKeyToString } from "../lib/types";
+import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo, MessageInfoV2, ChannelInfoV2 } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2 } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 
@@ -193,6 +193,56 @@ export function useServerEvents(): void {
         type: "MESSAGE_DELETED",
         serverId,
         payload: { channelId: data.channel_id, messageId: data.message_id },
+      });
+    }).then(safePush);
+
+    listen("server:sealed_message", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      const message = flattenMessageInfoV2([data.message])[0];
+      dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
+    }).then(safePush);
+
+    listen("server:sealed_message_edited", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      const message = flattenMessageInfoV2([data.message])[0];
+      dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
+    }).then(safePush);
+
+    listen("server:message_tombstoned", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message_id: number };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      dispatch({
+        type: "MESSAGE_DELETED",
+        serverId,
+        payload: { channelId: data.channel_id, messageId: data.message_id },
+      });
+    }).then(safePush);
+
+    listen("server:channel_created_v2", (e) => {
+      const data = e.payload as { server_id: string; channel: ChannelInfoV2 };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      const channel = flattenChannelInfoV2([data.channel])[0];
+      dispatch({ type: "CHANNEL_CREATED", serverId, payload: channel });
+    }).then(safePush);
+
+    listen("server:mls_control_event", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number | null; event_hash: string; payload_type: string };
+      // Record for the steward (T9). No active-server filter: a commit/welcome
+      // for a background server must still advance that server's ratchet.
+      dispatch({
+        type: "MLS_CONTROL_EVENT",
+        serverId: data.server_id,
+        payload: {
+          channelId: data.channel_id,
+          eventHash: data.event_hash,
+          payloadType: data.payload_type,
+        },
       });
     }).then(safePush);
 

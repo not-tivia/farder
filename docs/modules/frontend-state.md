@@ -48,6 +48,7 @@ These three files together are the entire client-side state layer. `ServerContex
 | `giveaways` | `Record<number, { giveaway: GiveawayInfo; myEntered: boolean }>` | Live giveaway state keyed by giveaway id. Populated lazily by `GiveawayWidget` (`GIVEAWAY_STATE` after `getGiveaway` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `GIVEAWAY_UPDATED` broadcasts and `GIVEAWAY_MY_ENTERED` |
 | `events` | `Record<number, { event: EventInfo; myRsvp: string \| null }>` | Live event-card state keyed by event id. Populated lazily by `EventWidget` (`EVENT_STATE` after `getEvent` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `EVENT_UPDATED` broadcasts and `EVENT_MY_RSVP`. `myRsvp` is `"going"`/`"maybe"`/`"no"`/`null` and is **self-only** — it never arrives in a broadcast |
 | `activeWidgets` | `{ channelId: number; polls: number[]; giveaways: number[]; events: number[] } \| null` | The viewed channel's open-widget **id lists** for the active-widgets bar (`ActiveWidgetsBar.tsx`); the infos are upserted into `polls`/`giveaways`/`events` so chips share one source of truth with the widgets. Replaced whole by `ACTIVE_WIDGETS` (fetched via `listActiveWidgets` on channel switch/reconnect), maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`/`EVENT_UPDATED` (append on open/upcoming-and-missing, remove on closed/ended/cancelled/started, 20 cap **combined across all three lists**). `null` until the first fetch |
+| `mlsControlEvents` | `MlsControlEventInfo[]` | Pending MLS control events (KeyPackage / Commit / Welcome / LeafConfirmed / GroupReset) received via `server:mls_control_event`. Record-only in T4 — the steward (T9, 4b-2) drains the queue; deduplicated by `eventHash` |
 
 ---
 
@@ -120,6 +121,7 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | `NEW_MESSAGE` | Appends one message; deduplicates by id |
 | `MESSAGE_EDITED` | Patches `content` and `edited_at` on the matching message |
 | `MESSAGE_DELETED` | Removes the matching message |
+| `ADD_OR_UPDATE_MESSAGE` | Whole-row upsert by id (append if absent, replace if present); used for sealed rows, where a sealed edit replaces the entire row (new ciphertext + `event_hash`) rather than patching `content`/`edited_at` |
 | `ATTACHMENT_REDACTED` | Sets `redacted_by_moderator` on every `AttachmentInfo` whose `content_hash` matches, across all channels; leaves the message/attachment in place (placeholder stays) |
 | `REACTION_ADDED` | Increments a reaction counter (or creates a new reaction entry); sets `me = true` if the reactor is the local user |
 | `REACTION_REMOVED` | Decrements a reaction counter; removes the entry when count reaches 0 |
@@ -141,6 +143,12 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | `ROLE_UPDATED` | Replaces the matching role in `roles` by id; appends if not present |
 | `VIEW_THREAD` | Sets `threadChannelId` (pass `null` to close) |
 | `MARK_READ` | Updates `readState[channelId]` to `lastMessageId` |
+
+### Rung-2 actions (per-server)
+
+| Action type | What it mutates |
+|---|---|
+| `MLS_CONTROL_EVENT` | Appends an `MlsControlEventInfo` to `mlsControlEvents` (deduplicated by `eventHash`). Record-only — the steward (T9) drains the queue and processes each event via `fetch_mls_control` |
 
 ### DM actions (per-server)
 
@@ -202,6 +210,11 @@ Two module-level caches are populated at import time (not inside the effect): `n
 | `server:new_message` | none (DM decrypt path runs for all servers; unread increment runs for non-active) | `NEW_MESSAGE` (active server) or `INCREMENT_UNREAD` (background) | DM messages are decrypted via `api.dmDecrypt` before dispatch; on decryption failure the ciphertext is dispatched as-is. Triggers `api.showNotification` for background servers if `notifPrefs` allow it. |
 | `server:message_edited` | active only | `MESSAGE_EDITED` | |
 | `server:message_deleted` | active only | `MESSAGE_DELETED` | |
+| `server:sealed_message` | active only | `ADD_OR_UPDATE_MESSAGE` | Flattens the `MessageInfoV2` payload (sealed row: `content` "", ciphertext in `sealed`, `is_e2ee` true) and upserts by id. No unread/notification — a sealed row has no plaintext to show (unread semantics are T5/T11's call) |
+| `server:sealed_message_edited` | active only | `ADD_OR_UPDATE_MESSAGE` | Whole-row replace (new ciphertext + `event_hash`); `MESSAGE_EDITED` cannot express a sealed edit |
+| `server:message_tombstoned` | active only | `MESSAGE_DELETED` | Content-blind delete in a sealed channel; same row-removal as the v1 delete |
+| `server:channel_created_v2` | active only | `CHANNEL_CREATED` | Flattens the `ChannelInfoV2` payload onto `base` + `class` so a newly created E2EE channel appears live |
+| `server:mls_control_event` | none (all servers) | `MLS_CONTROL_EVENT` | Record-only: appends to `mlsControlEvents` (deduped by `eventHash`). The steward (T9) drains the queue and processes each event via `fetch_mls_control` |
 | `server:attachment_redacted` | active only | `ATTACHMENT_REDACTED` | Scans all channels' message lists for attachments matching `content_hash`; sets `redacted_by_moderator` in-place |
 | `server:reaction_added` | active only | `REACTION_ADDED` | Sets `me: true` if `data.public_key === cachedOwnPk` |
 | `server:reaction_removed` | active only | `REACTION_REMOVED` | |

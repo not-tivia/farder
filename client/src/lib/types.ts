@@ -264,6 +264,16 @@ export function isE2eeChannel(channel: ChannelInfo | null | undefined): boolean 
   return (channel?.class ?? "Plaintext") === "E2ee";
 }
 
+/** An MLS control event pointer as broadcast by the server
+ *  (`MlsControlEvent`). Carries only a pointer - the client fetches and
+ *  verifies the signed event itself (the steward, T9). `channelId` is null
+ *  for server-scoped events (e.g. a KeyPackage publication). */
+export interface MlsControlEventInfo {
+  channelId: number | null;
+  eventHash: string;
+  payloadType: string;
+}
+
 export interface SendMessageResult {
   id: number;
   timestamp: number;

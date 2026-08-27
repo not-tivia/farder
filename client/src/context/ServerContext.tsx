@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2 } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo } from "../lib/types";
 import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 
 export interface PerServerState {
@@ -37,6 +37,11 @@ export interface PerServerState {
    *  switch/reconnect; maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`/
    *  `EVENT_UPDATED`. `null` until the first fetch. */
   activeWidgets: { channelId: number; polls: number[]; giveaways: number[]; events: number[] } | null;
+  /** Pending MLS control events (KeyPackage / Commit / Welcome /
+   *  LeafConfirmed / GroupReset) received via `server:mls_control_event`.
+   *  The steward (T9, 4b-2) drains these - T4 only records them, deduped by
+   *  `eventHash`. */
+  mlsControlEvents: MlsControlEventInfo[];
 }
 
 export interface AppState {
@@ -77,6 +82,7 @@ const initialPerServerState: PerServerState = {
   giveaways: {},
   events: {},
   activeWidgets: null,
+  mlsControlEvents: [],
 };
 
 /** Combined chip cap for the active-widgets bar — mirrors the server's
@@ -159,7 +165,9 @@ export type AppAction =
   | { type: "EVENT_UPDATED"; serverId: string; payload: EventInfo }
   | { type: "EVENT_STATE"; serverId: string; payload: { event: EventInfo; myRsvp: string | null } }
   | { type: "EVENT_MY_RSVP"; serverId: string; payload: { eventId: number; myRsvp: string | null } }
-  | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] } };
+  | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] } }
+  | { type: "ADD_OR_UPDATE_MESSAGE"; serverId: string; payload: MessageInfo }
+  | { type: "MLS_CONTROL_EVENT"; serverId: string; payload: MlsControlEventInfo };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -241,6 +249,20 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ...state,
         messages: { ...state.messages, [channelId]: [...existing, action.payload] },
       };
+    }
+    case "ADD_OR_UPDATE_MESSAGE": {
+      // Whole-row upsert (sealed rows replace, never merge): a sealed edit
+      // carries the entire row - new ciphertext, new event_hash - so the
+      // v1 MESSAGE_EDITED content/edited_at patch cannot express it.
+      const channelId = action.payload.channel_id;
+      const existing = state.messages[channelId] ?? [];
+      const idx = existing.findIndex((m) => m.id === action.payload.id);
+      if (idx === -1) {
+        return { ...state, messages: { ...state.messages, [channelId]: [...existing, action.payload] } };
+      }
+      const next = existing.slice();
+      next[idx] = action.payload;
+      return { ...state, messages: { ...state.messages, [channelId]: next } };
     }
     case "MESSAGE_EDITED": {
       const { channelId, messageId, newContent, editedAt } = action.payload;
@@ -328,6 +350,13 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
           (m) => publicKeyToString(m.public_key) !== leftPk,
         ),
       };
+    }
+    case "MLS_CONTROL_EVENT": {
+      // Record-only: the steward (T9) drains this queue and processes each
+      // event via fetch_mls_control. Dedupe by event_hash so a replayed
+      // broadcast is not processed twice.
+      if (state.mlsControlEvents.some((e) => e.eventHash === action.payload.eventHash)) return state;
+      return { ...state, mlsControlEvents: [...state.mlsControlEvents, action.payload] };
     }
     case "CHANNEL_CREATED":
       if (state.channels.some(c => c.id === action.payload.id)) return state;
