@@ -288,11 +288,42 @@ mod tests {
     }
 
     /// Pins the DEVICE filter: an identity may hold several authorized devices,
-    /// and a cert for the WRONG device must never be handed to Gate 2. If this
-    /// filter were removed, `resolve_device_cert` would return the last cert in
-    /// the batch -- the wrong device's -- and `verify_leaf_binding` would accept
-    /// a leaf signed by that other device's key, letting an impostor through on a
-    /// multi-device identity.
+    /// and a cert for the WRONG device must never be handed to Gate 2. This is
+    /// defense-in-depth -- `verify_leaf_binding` independently checks the
+    /// device, so a wrong-device cert would be rejected there too -- but the
+    /// resolver is a public primitive whose contract is "the cert for the
+    /// requested device", and pinning it prevents a future caller from relying
+    /// on `verify_leaf_binding` to catch a mismatch it was never asked to catch.
+    /// Pins the IDENTITY half of the binding check: a batch containing another
+    /// identity's cert must never resolve to it, even though that cert is
+    /// genuine and verifies under ITS OWN identity key.
+    #[tokio::test]
+    async fn a_cert_for_a_different_identity_is_never_returned_even_when_batched() {
+        let identity_a = Keypair::generate();
+        let identity_b = Keypair::generate();
+        let shared_device = Keypair::generate();
+
+        // Two DIFFERENT identities, but the SAME device id -- so the device
+        // check cannot distinguish them and only the identity filter can. If the
+        // identity filter is removed, the resolver returns the last matching
+        // cert (identity_b's) and this test's identity assertion fails.
+        let bytes = vec![
+            device_authorized_bytes(&identity_a, &shared_device, 1),
+            device_authorized_bytes(&identity_b, &shared_device, 2),
+        ];
+        let transport = CertTransport::new(bytes);
+
+        let cert = resolve_device_cert(&transport, &identity_a.public_key(), &device_id(&shared_device.public_key()))
+            .await
+            .unwrap()
+            .expect("a genuine cert must resolve");
+        assert_eq!(
+            cert.core.identity,
+            identity_a.public_key(),
+            "the resolver must return the requested identity's cert, not another identity's"
+        );
+    }
+
     #[tokio::test]
     async fn a_cert_for_a_different_device_is_never_returned_even_when_batched() {
         let identity = Keypair::generate();
