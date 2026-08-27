@@ -65,9 +65,9 @@ impl FakeTransport {
             .insert((member.clone(), device.to_string()), events);
     }
 
-    /// Serve the raw signed `DeviceAuthorized` event bytes that
-    /// `fetch_device_certs(identity)` should return, keyed by the identity
-    /// public key (the event's `author`).
+    /// Serve the raw signed device-lifecycle event bytes (`DeviceAuthorized` +
+    /// `DeviceRevoked`) that `fetch_device_certs(identity)` should return, keyed
+    /// by the identity public key (the event's `author`).
     pub fn serve_device_certs(&self, identity: &PublicKey, events: Vec<Vec<u8>>) {
         self.device_certs.lock().unwrap().insert(identity.clone(), events);
     }

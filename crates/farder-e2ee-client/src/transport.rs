@@ -193,9 +193,12 @@ pub trait E2eeTransport {
         device: &str,
     ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send;
 
-    /// Fetch the `DeviceAuthorized` events for one identity
-    /// (`ServerRequest::FetchDeviceCerts`). Returns the raw signed `Event`
-    /// bytes from `ServerResponse::DeviceCerts`, oldest-first.
+    /// Fetch the device-lifecycle events for one identity
+    /// (`ServerRequest::FetchDeviceCerts`): its `DeviceAuthorized` events and,
+    /// since sub-5 S1, its `DeviceRevoked` events. Returns the raw signed
+    /// `Event` bytes from `ServerResponse::DeviceCerts`, oldest-first, mixed;
+    /// a caller tells the two payloads apart by decoding each event's payload
+    /// enum.
     ///
     /// This is the ONLY production source of the `DeviceCert`s the receive-side
     /// leaf-binding gate (Gate 2) verifies against — a cert must come from HERE

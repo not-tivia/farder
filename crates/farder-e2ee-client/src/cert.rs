@@ -30,6 +30,12 @@
 //! that awareness belongs to sub-5, which owns `DeviceRevoked`, rekey cadence
 //! and re-provisioning. This resolver verifies the **cryptographic binding**,
 //! not the **fold liveness**. Do not read "log-valid" as "un-revoked".
+//!
+//! Sub-5 (S1) widened the server's `FetchDeviceCerts` stream to mix the
+//! identity's `DeviceRevoked` events in alongside its `DeviceAuthorized` ones.
+//! This resolver SKIPS any non-`DeviceAuthorized` payload (told apart by
+//! decoding the event's payload enum), preserving its pre-C1 behavior exactly;
+//! the revocation-aware fold that rejects a revoked device lands in sub-5 C1.
 
 use std::collections::HashMap;
 
@@ -60,11 +66,13 @@ impl DeviceCertResolver for VerifiedCertResolver {
 /// Fetch and verify the [`DeviceCert`] for one `(identity, device)`.
 ///
 /// This is the production counterpart to the test doubles: it asks the transport
-/// for the identity's `DeviceAuthorized` events, decodes each one, and returns a
-/// cert only if every check in the module doc passes. A non-matching device, a
-/// non-`DeviceAuthorized` payload, or a cert whose signature does not verify all
-/// fail **closed**: a non-matching/foreign event is skipped, a tampered cert is
-/// skipped, and if nothing survives the result is `None` — which
+/// for the identity's device-lifecycle events (`DeviceAuthorized` +
+/// `DeviceRevoked` since sub-5 S1), decodes each one, and returns a cert only if
+/// every check in the module doc passes. A non-matching device, a
+/// non-`DeviceAuthorized` payload (e.g. `DeviceRevoked`), or a cert whose
+/// signature does not verify all fail **closed**: a non-matching/foreign event is
+/// skipped, a tampered cert is skipped, and if nothing survives the result is
+/// `None` — which
 /// [`process_incoming_commit`](crate::commit::process_incoming_commit) turns into
 /// [`LeafBindingFailure`](crate::commit::IncomingCommitOutcome::LeafBindingFailure).
 ///
@@ -78,11 +86,16 @@ pub async fn resolve_device_cert<T: E2eeTransport + Sync>(
     let mut found: Option<DeviceCert> = None;
     for bytes in events {
         let event = Event::from_bytes(&bytes)
-            .map_err(|e| E2eeError::Mls(anyhow::anyhow!("decode DeviceAuthorized event: {e}")))?;
+            .map_err(|e| E2eeError::Mls(anyhow::anyhow!("decode device-lifecycle event: {e}")))?;
+        // Sub-5 (S1) widened the fetch to mix `DeviceAuthorized` and
+        // `DeviceRevoked` in one byte stream. The resolver distinguishes them by
+        // decoding the payload enum; a `DeviceRevoked` (or any other) payload is
+        // SKIPPED here — folding revocations into a "reject this device" verdict
+        // is the revocation-aware resolver's job (sub-5 C1), not this primitive's.
+        // Skipping rather than erroring keeps the pre-C1 behavior exactly as it
+        // was for a stream that now legitimately contains revocations.
         let EventPayload::DeviceAuthorized { cert } = &event.core.payload else {
-            return Err(E2eeError::chain(
-                "fetch_device_certs returned a non-DeviceAuthorized event",
-            ));
+            continue;
         };
         // Only a cert that names exactly this identity and exactly this device,
         // and that verifies under the identity key, is eligible. Anything else is

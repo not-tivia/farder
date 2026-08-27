@@ -49,7 +49,8 @@ The method signatures mirror `farder-protocol::server` request/response shapes.
 serves one channel's MLS control plane (`MlsCommit` / `MlsWelcome` /
 `MlsLeafConfirmed` / `MlsGroupReset`) with the same `next_accept_seq` + `more`
 cursor contract as `fetch_welcomes`. `fetch_device_certs` serves one identity's
-`DeviceAuthorized` events — the production source of the Gate 2 trust anchor (see
+device-lifecycle events — `DeviceAuthorized` plus, since sub-5 S1, `DeviceRevoked`
+— the production source of the Gate 2 trust anchor (see
 `cert.rs` below). `#[cfg(test)]` `testing::FakeTransport` is an in-memory double
 for unit tests; `MlsControl` and `Welcomes` are the two page-shaped value structs
 the trait hands back.
@@ -189,7 +190,8 @@ race.
 
 The production [`DeviceCertResolver`] trust anchor, closing finding F7 (Gate 2
 had no production cert source). `resolve_device_cert(transport, identity, device)`
-is the primitive: it fetches the identity's `DeviceAuthorized` events over
+is the primitive: it fetches the identity's device-lifecycle events
+(`DeviceAuthorized` + `DeviceRevoked`, since sub-5 S1) over
 `fetch_device_certs`, decodes each one, and returns a [`DeviceCert`] only after
 **all three** checks pass. `build_cert_resolver(transport, members)` batches it
 into a sync [`VerifiedCertResolver`] for [`process_incoming_commit`] (which is
@@ -215,6 +217,10 @@ sync and runs Gate 2 over the already-merged commit).
   Revocation/expiry awareness belongs to sub-5 (which owns `DeviceRevoked`, rekey
   cadence and re-provisioning). This resolver verifies the **cryptographic
   binding**, not the **fold liveness**; do not read "log-valid" as "un-revoked".
+- Since sub-5 S1 the fetch stream mixes `DeviceRevoked` in; the resolver tells
+  the payloads apart by decoding the event's payload enum and **skips**
+  non-`DeviceAuthorized` payloads, preserving the pre-C1 behavior. The fold that
+  actually rejects a revoked device is sub-5 C1, on top of this primitive.
 
 ### Sealed send + receive (`sealed.rs`)
 
