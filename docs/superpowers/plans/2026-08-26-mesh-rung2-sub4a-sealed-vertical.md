@@ -321,3 +321,41 @@ this repo remains `handlers::tests::test_timeout_member_rejects_invalid_duration
 test commands in it. Either make controller-side fixes in a scratch worktree and cherry-pick,
 or wait for a quiet window. The concurrency saved wall-clock but cost an agent real time
 chasing a phantom.
+
+### F6 — `stale-epoch` fires ONLY for `MlsCommit`; the plan's Task 6 trigger was wrong
+
+Found by Task 5, verified by the controller against source. The ingest pre-check at
+`crates/farder-server/src/handlers.rs:2322` matches a single payload:
+
+```rust
+if let EventPayload::MlsCommit { channel_id, generation, epoch, .. } = &event.core.payload {
+    ... return err("stale-epoch");
+}
+```
+
+A stale `MessagePostedE2ee` / `MessageEditedE2ee` never reaches it. It falls through to the
+fold and is rejected by `check_sealed_send` (`event_log_state.rs:1442`) as
+`"sealed content does not cite the group's current epoch"`, which ingest wraps as
+`"event rejected: sealed content does not cite the group's current epoch"`.
+
+**Consequence:** this plan's Task 6 said the resync keys on `TransportError::is_stale_epoch()`
+(the bare-string predicate from Task 1). That predicate would NEVER fire for a sealed send —
+i.e. for the single most common way to lose an epoch race, an ordinary message. The resync
+loop would have been dead code that looks correct and tests green against commits only.
+
+**Resolution (chosen over client-side string matching):** extend the ingest pre-check to
+emit the SAME `"stale-epoch"` code for `MessagePostedE2ee` and `MessageEditedE2ee` whose
+`(generation, epoch)` does not match `mls_current_epoch`. Rationale:
+
+- It matches the pre-check's own documented intent ("a distinct, machine-readable code its
+  resync loop keys on") and the remedy is identical for both payloads: process the winning
+  commits, re-seal at the new epoch, resubmit.
+- The alternative — the client matching on the fold's `ensure!` message — is fragile: any
+  rewording of that string silently disables resync, with no compile error and no test
+  failure. A machine-readable code is the whole reason `stale-epoch` exists.
+- The information-leak argument the existing comment makes carries over unchanged: the
+  pre-check runs before authz, but a group's epoch is already public server-wide log state
+  by this rung's design, so distinguishing "current epoch" from "not current" leaks nothing.
+
+The fold keeps its own check as the authoritative backstop — the pre-check is an early,
+machine-readable bounce, not a replacement for validation.
