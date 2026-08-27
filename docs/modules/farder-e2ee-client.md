@@ -336,3 +336,34 @@ not pre-empted client-side.
   live; this crate never links the server.
 - **Task 8 harness** (`tests/e2ee_two_client.rs`) — drives two identities through
   this crate over a real QUIC `E2eeTransport`, exercising the shipped vertical.
+
+---
+
+## How to run the two-client harness
+
+The Task 8 headless harness lives in the root package's `tests/e2ee_two_client.rs`
+(registered as a `[[test]]` in the root `Cargo.toml`). It drives two independent
+identities through this crate against an in-process QUIC server — the shipped
+vertical, not a reimplementation (plan Decision 1).
+
+```
+cargo test --test e2ee_two_client
+```
+
+Three tests:
+
+- `two_clients_seal_and_decrypt_end_to_end` — the full path: create the E2EE
+  channel → publish KeyPackages → bootstrap → add the joiner → fetch Welcome /
+  join / confirm the leaf → sealed exchange, asserting the **exact plaintext**
+  in both directions.
+- `no_plaintext_reaches_any_table` — after the exchange, byte-scans every table
+  of the in-process server's database and asserts the sealed plaintexts appear
+  nowhere.
+- `a_server_member_not_in_the_mls_group_cannot_decrypt` — a third identity that
+  is a server log member (so it *can* fetch the ciphertext) but not in the MLS
+  group cannot decrypt it.
+
+The no-plaintext observer is shared with
+`crates/farder-server/tests/e2ee_observation.rs` via `tests/common/mod.rs`; the
+self-check that keeps that assertion from going vacuously green is
+`the_observer_finds_a_needle_that_is_really_there` in that file.

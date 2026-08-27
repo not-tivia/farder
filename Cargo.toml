@@ -23,6 +23,8 @@ farder-crypto = { path = "crates/farder-crypto" }
 farder-protocol = { path = "crates/farder-protocol" }
 farder-node = { path = "crates/farder-node" }
 farder-server = { path = "crates/farder-server" }
+farder-mls = { path = "crates/farder-mls" }
+farder-e2ee-client = { path = "crates/farder-e2ee-client" }
 quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.13"
@@ -31,6 +33,11 @@ hex = "0.4"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+# The shared `tests/common/mod.rs` observer scans the in-process server's
+# database at the byte level; rusqlite is already a transitive dependency via
+# farder-server, promoted here to a direct dev-dependency so the root harness
+# can name `rusqlite::Connection`.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[test]]
 name = "e2e_dm"
@@ -39,6 +46,10 @@ path = "tests/e2e_dm.rs"
 [[test]]
 name = "e2e_server"
 path = "tests/e2e_server.rs"
+
+[[test]]
+name = "e2ee_two_client"
+path = "tests/e2ee_two_client.rs"
 
 [[test]]
 name = "security_observation"
