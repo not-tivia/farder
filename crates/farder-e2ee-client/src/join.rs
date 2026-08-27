@@ -75,8 +75,10 @@ impl SendEligibility {
         Self { confirmed: false }
     }
 
-    /// The post-confirmation state (also returned by [`confirm_leaf`]).
-    fn confirmed() -> Self {
+    /// The post-confirmation state (also returned by [`confirm_leaf`]). Public
+    /// so a caller that already knows its leaf is confirmed (e.g. a resumed
+    /// session) can reconstruct the belief without re-running `confirm_leaf`.
+    pub fn confirmed() -> Self {
         Self { confirmed: true }
     }
 

@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,sealed}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-26
 
@@ -20,9 +20,9 @@ and the MLS store is opened/closed by the caller via the lifecycle helpers
 below. The server emit sites, the Tauri command layer, and the harness are
 other tasks.
 
-**Status:** Tasks 1-4 COMPLETE (transport seam + channel create / KeyPackage
+**Status:** Tasks 1-5 COMPLETE (transport seam + channel create / KeyPackage
 publish / bootstrap / join + leaf confirmation / steward add + the two
-receive-side gates), per
+receive-side gates / sealed send + receive), per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 
 ---
@@ -170,6 +170,44 @@ for `"event rejected"` would miss it. The resync loop (Task 6) keys on this.
   read from `group.epoch_authenticator()` immediately after the merge (it is
   NOT a field on `CommitOutcome`, finding F1).
 
+### Sealed send + receive (`sealed.rs`)
+
+- `send_sealed(transport, actor, chain, ctx, group, eligibility) -> SealedSendOutcome`
+  (async) — build a `MessageEnvelope` (attachments are sub-6, so
+  `attachment_keys`/`filenames`/`mimes` are empty vecs), then submit
+  `MessagePostedE2ee { channel_id, generation, epoch, ciphertext, reply_to,
+  attachments: vec![], authz_head }` citing the group's **current** epoch. The
+  gates, in order, each returning a typed [`E2eeError`] and none of them
+  round-tripping:
+  1. `SendEligibility::ensure_can_send()` — pre-confirmation send is refused
+     locally as `E2eeError::NotConfirmed` (fact A2.6).
+  2. `check_preseal_limits` — content ≤ `MAX_CONTENT_CHARS` AND encoded
+     envelope ≤ `MAX_PRESEAL_BYTES`, enforced **before** sealing, failing as
+     `E2eeError::SealedOverCap`.
+  3. `MlsChannelGroup::seal_message` — encode → pad → encrypt.
+  4. `MAX_E2EE_CIPHERTEXT_BYTES` — a cheap pre-submit check of the server's
+     ciphertext cap (unreachable for any envelope that passed step 2, kept as
+     insurance against a framing-cost regression), failing as
+     `E2eeError::SealedOverCap`.
+  `authz_head` is this device's own folded chain head (`chain.last_event_hash`),
+  carried opaque. A `stale-epoch` rejection is NOT handled here (a sealed send
+  is not a commit; it merges nothing locally), so any rejection surfaces as
+  `E2eeError::Transport` — Task 6's resync loop keys on
+  `TransportError::is_stale_epoch()`.
+- `SealContext<'a> { key, generation, store, content, reply_to }` — the fixed
+  inputs for one send (bundled like `StewardContext` to stay under the clippy
+  arg bound).
+- `SealedSendOutcome { event_hash, epoch }` — `epoch` is the group's current
+  epoch at seal time (sealing never advances the epoch).
+- `receive_sealed(store, group, ciphertext: Vec<u8>) -> SealedOutcome` (sync) —
+  open exactly one ciphertext. **Takes the ciphertext by value** and returns an
+  outcome that cannot be fed back in, so a second `open_message` on the same
+  bytes is structurally impossible (see the module doc in `sealed.rs`).
+  `SealedOutcome::{ Decrypted(MessageEnvelope), Undecryptable { reason } }` —
+  never a plaintext fallback, never a retry. The OpenMLS AEAD `debug_assert`
+  panic is contained to a clean `Err` by farder-mls in both build profiles, so
+  tampered ciphertext yields `Undecryptable`, never a panic.
+
 ### `E2eeError`
 
 The crate's one error type. Notable variants:
@@ -177,6 +215,8 @@ The crate's one error type. Notable variants:
 - `StaleEpochDiverged { local_epoch }` — an own-commit was rejected as
   `stale-epoch` (see the divergence contract).
 - `NotConfirmed` — a sealed send before our leaf was confirmed (local refusal).
+- `SealedOverCap { reason }` — a sealed message exceeded a size cap before
+  submission (content chars, pre-seal bytes, or ciphertext bytes).
 - `StoreResumeTerminal(StoreResumeError)` — the store could not be resumed;
   terminal for that store, never papered over.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.

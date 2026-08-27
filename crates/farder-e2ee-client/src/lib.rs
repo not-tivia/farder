@@ -16,6 +16,7 @@ pub mod channel;
 pub mod channel_key;
 pub mod commit;
 pub mod join;
+pub mod sealed;
 pub mod transport;
 
 #[cfg(test)]
@@ -36,5 +37,8 @@ pub use farder_mls::group::JoinInfo;
 pub use join::{
     confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,
     LeafConfirmation, PendingWelcome, SendEligibility,
+};
+pub use sealed::{
+    receive_sealed, send_sealed, SealContext, SealedOutcome, SealedSendOutcome,
 };
 pub use transport::{E2eeTransport, EventAccepted, TransportError, Welcomes};

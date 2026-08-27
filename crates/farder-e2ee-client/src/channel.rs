@@ -124,6 +124,12 @@ pub enum E2eeError {
     /// `MlsLeafConfirmed` lands, so the client refuses up front rather than
     /// round-tripping a doomed event. Task 5's `send_sealed` keys on this.
     NotConfirmed,
+    /// A sealed message exceeded a size cap before submission. Covers the
+    /// client-side pre-seal caps (`MAX_CONTENT_CHARS` / `MAX_PRESEAL_BYTES`,
+    /// enforced *before* sealing) and the server's
+    /// `MAX_E2EE_CIPHERTEXT_BYTES` ciphertext cap (enforced after sealing,
+    /// before submit). `reason` describes which cap and by how much.
+    SealedOverCap { reason: String },
     /// The on-disk MLS store could not be resumed. Terminal for that store:
     /// `InstanceMismatch` / `MissingInstanceId` mean the store is cloned,
     /// restored or poisoned, and deleting + re-creating it in place would
@@ -163,6 +169,7 @@ impl fmt::Display for E2eeError {
             Self::NotConfirmed => {
                 write!(f, "cannot send sealed content before this device's leaf is confirmed")
             }
+            Self::SealedOverCap { reason } => write!(f, "sealed message over cap: {reason}"),
             Self::StoreResumeTerminal(e) => write!(f, "MLS store resume is terminal: {e}"),
         }
     }
