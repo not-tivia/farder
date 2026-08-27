@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import { parseInviteLink } from "../lib/invite";
+import { refreshServerClasses } from "../lib/refreshServerClasses";
 
 type Step = "choice" | "create-1" | "create-2" | "join";
 
@@ -69,6 +70,7 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
       );
       const { address, ...connectPayload } = result;
       dispatch({ type: "SERVER_ADDED", serverId: address, payload: connectPayload });
+      refreshServerClasses(address, dispatch, api);
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: address });
       onClose();
     } catch (e) {
@@ -101,6 +103,7 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
 
       const result = await api.connectServer(address, parsed.inviteCode, parsed.setupToken);
       dispatch({ type: "SERVER_ADDED", serverId: address, payload: result });
+      refreshServerClasses(address, dispatch, api);
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: address });
       try {
         const members = await api.getMembers(address);

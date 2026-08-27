@@ -10,10 +10,13 @@ import * as api from "../lib/tauri-bridge";
 //  1. Terminal cache — `PerServerState.sealedDecrypts[messageId]` holds the
 //     result once a decrypt has settled (decrypted or undecryptable). A row
 //     whose (messageId, eventHash) pair is already cached is never re-opened.
-//  2. In-flight dedupe — this module-level map keys `${serverId}:${messageId}`
-//     to the single outstanding `invoke` promise. A re-render (or React
-//     StrictMode's double-mount) that sees the same sealed row again joins the
-//     existing promise instead of issuing a second `invoke`.
+//  2. In-flight dedupe — this module-level map keys `${serverId}:${messageId}:
+//     ${eventHash}` to the single outstanding `invoke` promise. A re-render (or
+//     React StrictMode's double-mount) that sees the same sealed row again joins
+//     the existing promise instead of issuing a second `invoke`. `eventHash` is
+//     part of the key so a sealed edit (same id, new ciphertext/event hash)
+//     arriving mid-decrypt issues a fresh open rather than re-using the stale
+//     in-flight result.
 //
 // Even if a caller kept a byte-for-byte clone of the ciphertext and forced a
 // second open, the backend is still structurally once: `receive_sealed` takes
@@ -56,7 +59,7 @@ export function useSealedDecrypt(): void {
         // never re-open it.
         if (existing && existing.eventHash === eventHash) continue;
 
-        const key = `${activeServerId}:${msg.id}`;
+        const key = `${activeServerId}:${msg.id}:${eventHash}`;
         if (inFlight.has(key)) continue; // an open is already in flight; join it
 
         const promise = api

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
 import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo, MessageInfoV2, ChannelInfoV2 } from "../lib/types";
-import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2 } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 
@@ -405,6 +405,28 @@ export function useServerEvents(): void {
       api.getMembers(serverId).then(members =>
         dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
       // The approval queue component refetches getPendingMembers on this event (Task 8).
+
+      // A member who joins AFTER an E2EE channel exists is never added by the
+      // creation-time add loop, so the owner auto-adds them here. The command is
+      // owner-gated server-side (a non-owner commit is rejected), but gate on the
+      // frontend too — only when our own public key is known AND matches the
+      // per-server `ownerPublicKey` — so a non-owner never surfaces those
+      // rejections. One pass per membership_changed event, no poll loop: the add
+      // loop is idempotent (already-present leaves are skipped), so a redundant
+      // pass is a cheap no-op, never a spin.
+      const serverState = stateRef.current.servers[serverId];
+      const logServerId = serverState?.logServerId ?? null;
+      if (!logServerId) return;
+      const e2eeChannelIds = (serverState?.channels ?? [])
+        .filter(isE2eeChannel)
+        .map((c) => c.id);
+      if (e2eeChannelIds.length === 0) return;
+      getOwnPk().then((ownPk) => {
+        if (!ownPk || ownPk !== serverState?.ownerPublicKey) return;
+        for (const channelId of e2eeChannelIds) {
+          api.addMembersToE2eeChannel(serverId, logServerId, channelId).catch(() => {});
+        }
+      }).catch(() => {});
     }).then(safePush);
 
     listen("server:permissions_changed", (e) => {

@@ -4915,6 +4915,36 @@ async fn add_current_members_to_group(
         }
 
         for device_id in device_ids {
+            // Idempotency guard (REQUIRED before any auto-add trigger): skip any
+            // `(identity, device)` already present as a leaf in the group, so a
+            // re-add never submits a redundant `MlsCommit` — which would advance
+            // the epoch and could trip the server's commit-rate rule. We use
+            // `leaves()` (the ACTUAL view: real credential + signature key), not
+            // `members()` (the claimed view), matching the add loop's own
+            // security posture. A non-farder leaf in the tree fails the whole
+            // add (fail-closed) rather than being silently treated as absent.
+            {
+                let already_present = match group.leaves() {
+                    Ok(leaves) => leaves
+                        .iter()
+                        .any(|l| l.member.identity == member_identity && l.member.device == device_id),
+                    Err(e) => return Err(format!("read group leaves: {e}")),
+                };
+                if already_present {
+                    eprintln!(
+                        "E2EE add: skipping member {} ({member_identity}) device \
+                         {device_id} — already a member",
+                        member_name
+                    );
+                    result.skipped.push(SkippedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: Some(device_id.clone()),
+                        reason: "already a member".to_string(),
+                    });
+                    continue;
+                }
+            }
+
             // 1. Fetch + decode the newest key package, failing closed on a
             //    non-farder credential BEFORE `add_member` merges anything. This
             //    is what lets a member with no package (or a bad one) be skipped

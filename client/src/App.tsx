@@ -14,6 +14,7 @@ import ToastContainer from "./components/ToastContainer";
 import JoinConfirmModal from "./components/JoinConfirmModal";
 import * as api from "./lib/tauri-bridge";
 import { parseInviteLink } from "./lib/invite";
+import { refreshServerClasses } from "./lib/refreshServerClasses";
 
 // Module-level guard: React StrictMode in dev mounts the root twice, which
 // would otherwise run init() twice — spawning duplicate local servers and
@@ -64,6 +65,7 @@ function AppInner() {
         try {
           const result = await api.connectServer(server.id);
           dispatch({ type: "SERVER_ADDED", serverId: server.id, payload: result });
+          refreshServerClasses(server.id, dispatch, api);
         } catch (e) {
           console.error(`[init] failed to connect to ${server.name} (${server.id}):`, e);
         }
@@ -99,6 +101,7 @@ function AppInner() {
     try {
       const result = await api.connectServer(parsed.address, parsed.inviteCode, parsed.setupToken);
       dispatch({ type: "SERVER_ADDED", serverId: parsed.address, payload: result });
+      refreshServerClasses(parsed.address, dispatch, api);
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: parsed.address });
       if (parsed.inviteCode && result.server_id) {
         try { await api.joinLogServer(parsed.address, result.server_id, parsed.inviteCode); }

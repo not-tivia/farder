@@ -61,7 +61,12 @@ export function useMlsSteward(): void {
         // is the persisted flag, false when `mls_state.json` is absent OR has
         // `confirmed === false` — exactly the publish gate. Already confirmed →
         // skip the publish entirely.
-        if (!result.confirmed) {
+        //
+        // `outcome === "equivocation"` is the F4-terminal poisoned state: an
+        // impostor leaf could not be bound, so the group is read-frozen and must
+        // NEVER be overwritten back to `poisoned: None` / `confirmed: false` by
+        // a publish. Skip the publish on equivocation too.
+        if (!result.confirmed && result.outcome !== "equivocation") {
           return api.publishOwnKeyPackage(activeServerId, logServerId, channelId);
         }
         return undefined;
