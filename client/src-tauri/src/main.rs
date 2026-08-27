@@ -121,6 +121,8 @@ fn main() {
             commands::create_invite,
             commands::create_channel,
             commands::create_e2ee_channel,
+            commands::add_members_to_e2ee_channel,
+            commands::publish_own_key_package,
             commands::create_category,
             commands::delete_channel,
             commands::delete_category,

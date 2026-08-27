@@ -399,6 +399,45 @@ resume record at `servers/<log_server_id>/mls/<channel_id>.mls_state.json`
 
 ---
 
+### `add_members_to_e2ee_channel(state, server_id, log_server_id, channel_id) -> Result<AddMembersResult, String>`
+
+**What it does:** adds every current server member's device to an E2EE channel's
+MLS group (the steward side of the membership bridge). Lists members via
+`GetMembers`, excludes the owner, enumerates each member's devices from their
+`DeviceAuthorized` events, then per `(identity, device)` calls the crate's
+`fetch_key_packages` → `decode_key_package` (fails closed on non-farder
+credentials) → `add_member`, which submits the `MlsCommit` + `MlsWelcome`.
+Also invoked automatically at the end of `create_e2ee_channel`.
+**Parameters:** `server_id` — the connection key (address); `log_server_id` —
+the genesis hash keying the device chain; `channel_id` — the E2EE channel id.
+**Returns:** `AddMembersResult { added: [{ identity, device, epoch }], skipped:
+[{ identity, device, reason }] }`. A member with no key package (or a
+non-farder one) is skipped, not an error; a `stale-epoch` divergence aborts.
+**Side effects:** advances + persists the device chain and
+`servers/<log_server_id>/mls/<channel_id>.mls_state.json` after each accepted
+commit.
+**invoke name:** `"add_members_to_e2ee_channel"` →
+`addMembersToE2eeChannel()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `publish_own_key_package(state, server_id, log_server_id, channel_id) -> Result<PublishOwnKeyPackageResult, String>`
+
+**What it does:** publishes THIS device's KeyPackage for an E2EE channel so a
+steward can add it to the group. Creates (or resumes) the joiner MLS store,
+publishes via the crate's `publish_key_package`, and records a
+`confirmed: false` resume point. A member calls this when it opens an E2EE
+channel it is not yet a confirmed member of (T9/T10 wire the trigger).
+**Parameters:** as `add_members_to_e2ee_channel`.
+**Returns:** `PublishOwnKeyPackageResult { channel_id, event_hash }`.
+**Side effects:** advances + persists the device chain; persists
+`servers/<log_server_id>/mls/<channel_id>.mls_state.json` with
+`{ generation: 0, epoch: 0, store_instance_hash, confirmed: false }`.
+**invoke name:** `"publish_own_key_package"` → `publishOwnKeyPackage()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
 ### `create_category(state, server_id, name) -> Result<(), String>`
 
 **ServerRequest:** `CreateCategory { name, position: None }`.

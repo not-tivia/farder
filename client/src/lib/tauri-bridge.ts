@@ -238,6 +238,14 @@ export async function createE2eeChannel(serverId: string, logServerId: string, n
   return invoke("create_e2ee_channel", { serverId, logServerId, name });
 }
 
+export async function addMembersToE2eeChannel(serverId: string, logServerId: string, channelId: number): Promise<{ added: Array<{ identity: string; device: string; epoch: number }>; skipped: Array<{ identity: string; device: string | null; reason: string }> }> {
+  return invoke("add_members_to_e2ee_channel", { serverId, logServerId, channelId });
+}
+
+export async function publishOwnKeyPackage(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; event_hash: string }> {
+  return invoke("publish_own_key_package", { serverId, logServerId, channelId });
+}
+
 export async function createCategory(serverId: string, name: string): Promise<void> {
   return invoke<void>("create_category", { serverId, name });
 }
