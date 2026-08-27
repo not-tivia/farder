@@ -48,6 +48,7 @@ export default function ChatPanel() {
     : null;
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
+  const undecryptableCount = channelMessages.filter((m) => activeServer?.sealedDecrypts?.[m.id]?.kind === "undecryptable").length;
 
   const highlightMessageId = activeServer?.highlightMessageId ?? null;
   useEffect(() => {
@@ -119,6 +120,46 @@ export default function ChatPanel() {
     );
   }
 
+  const isE2ee = isE2eeChannel(currentChannel);
+  const mlsState = activeServer?.mlsStates?.[currentChannelId];
+  const equivocated = isE2ee && mlsState != null && mlsState.outcome === "equivocation";
+
+  // Equivocation is terminal (F4): it takes precedence over every other E2EE
+  // state, so it is checked first and never mistaken for "waiting for keys".
+  if (isE2ee && mlsState != null && !equivocated && mlsState.confirmed === false) {
+    return (
+      <div className="chat-panel">
+        <div className="channel-header">
+          <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
+          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
+        </div>
+        <div className="e2ee-interstitial">
+          <div className="e2ee-interstitial-heading">Waiting for keys</div>
+          <div className="e2ee-interstitial-text">
+            This channel is end-to-end encrypted. You'll be able to read and send messages once a member who already holds the channel's keys is online to add you.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isE2ee && mlsState != null && !equivocated && mlsState.confirmed === true && channelMessages.length === 0) {
+    return (
+      <div className="chat-panel">
+        <div className="channel-header">
+          <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
+          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
+        </div>
+        <div className="e2ee-interstitial">
+          <div className="e2ee-interstitial-heading">No history before you joined</div>
+          <div className="e2ee-interstitial-text">
+            Messages sent before you joined this encrypted channel are not visible to you. New messages will appear here as they arrive.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="chat-panel">
       <div className="channel-header">
@@ -153,9 +194,19 @@ export default function ChatPanel() {
           🔍
         </button>
       </div>
+      {equivocated && (
+        <div className="e2ee-equivocation-banner">
+          <strong>Channel state could not be confirmed.</strong>{" "}This channel's encryption keys failed verification{mlsState && mlsState.reason ? `: ${mlsState.reason}` : ""}. It has been frozen to protect you.
+        </div>
+      )}
       <ActiveWidgetsBar serverId={serverId} channelId={currentChannelId} />
       <div className="message-list" onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
+        {undecryptableCount > 0 && (
+          <div className="e2ee-unverified-marker">
+            {undecryptableCount} message{undecryptableCount === 1 ? "" : "s"} could not be verified
+          </div>
+        )}
         {channelMessages.map((msg, i) => {
           const prev = i > 0 ? channelMessages[i - 1] : null;
           const sameAuthor = prev &&

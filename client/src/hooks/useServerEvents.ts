@@ -253,7 +253,23 @@ export function useServerEvents(): void {
       if (data.channel_id != null) {
         const logServerId = stateRef.current.servers[data.server_id]?.logServerId ?? null;
         if (logServerId) {
-          api.processMlsControlEvents(data.server_id, logServerId, data.channel_id).catch(() => {});
+          api.processMlsControlEvents(data.server_id, logServerId, data.channel_id)
+            .then((result) => {
+              // Surface the steward's verdict into state (T11 renders T9's
+              // result). No active-server filter: a background server's ratchet
+              // state is still valid and should render if it becomes active.
+              dispatch({
+                type: "MLS_STATE",
+                serverId: data.server_id,
+                payload: {
+                  channelId: result.channel_id,
+                  confirmed: result.confirmed,
+                  outcome: result.outcome as ("advanced" | "equivocation"),
+                  reason: result.reason,
+                },
+              });
+            })
+            .catch(() => {});
         }
       }
     }).then(safePush);

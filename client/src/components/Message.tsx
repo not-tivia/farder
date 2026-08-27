@@ -624,7 +624,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
       {/* Attachment-only messages (voice notes, captionless images) have empty
           content — the body must still render so the attachments do. */}
       {(deleted || isSealed || undecryptable || displayContent || message.attachments.length > 0) && !showWidget && (
-        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed || undecryptable ? " sealed-content" : ""}`}>
+        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed || undecryptable ? " sealed-content" : ""}${undecryptable ? " sealed-undecryptable" : ""}`}>
           {deleted ? (
             <em>This message has been deleted.</em>
           ) : isSealed ? (

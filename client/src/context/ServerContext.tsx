@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, SealedDecryptEntry } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, MlsChannelStateInfo, SealedDecryptEntry } from "../lib/types";
 import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 
 export interface PerServerState {
@@ -42,6 +42,10 @@ export interface PerServerState {
    *  The steward (T9, 4b-2) drains these - T4 only records them, deduped by
    *  `eventHash`. */
   mlsControlEvents: MlsControlEventInfo[];
+  /** Per-channel MLS group state derived from the T9 steward result (keyed by
+   *  channel id). Absent entry = unknown; the UI never gates a channel on it.
+   *  `outcome === "equivocation"` is the terminal poisoned state (F4). */
+  mlsStates: Record<number, MlsChannelStateInfo>;
   /** Per-message decrypt results for sealed rows (D2/D4): keyed by message id.
    *  A sealed row is decrypted exactly once (the ratchet is consumed on open);
    *  the result is cached here so a re-render never re-opens the ciphertext.
@@ -89,6 +93,7 @@ const initialPerServerState: PerServerState = {
   events: {},
   activeWidgets: null,
   mlsControlEvents: [],
+  mlsStates: {},
   sealedDecrypts: {},
 };
 
@@ -176,7 +181,8 @@ export type AppAction =
   | { type: "ADD_OR_UPDATE_MESSAGE"; serverId: string; payload: MessageInfo }
   | { type: "MLS_CONTROL_EVENT"; serverId: string; payload: MlsControlEventInfo }
   | { type: "SEALED_DECRYPTED"; serverId: string; payload: { messageId: number; eventHash: string | null; content: string } }
-  | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } };
+  | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } }
+  | { type: "MLS_STATE"; serverId: string; payload: { channelId: number; confirmed: boolean; outcome: "advanced" | "equivocation"; reason: string | null } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -388,6 +394,18 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
             kind: "undecryptable",
             reason: action.payload.reason,
             eventHash: action.payload.eventHash,
+          },
+        },
+      };
+    case "MLS_STATE":
+      return {
+        ...state,
+        mlsStates: {
+          ...state.mlsStates,
+          [action.payload.channelId]: {
+            confirmed: action.payload.confirmed,
+            outcome: action.payload.outcome,
+            reason: action.payload.reason,
           },
         },
       };

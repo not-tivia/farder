@@ -14,7 +14,7 @@ import * as api from "../lib/tauri-bridge";
 // channel) pair changes (tracked in a ref, not a dependency), and the steward
 // command itself is cursor-based + idempotent, so a re-run is a cheap no-op.
 export function useMlsSteward(): void {
-  const { state } = useApp();
+  const { state, dispatch } = useApp();
   const activeServerId = state.activeServerId;
   const activeServer = activeServerId ? state.servers[activeServerId] : undefined;
   const channelId = activeServer?.currentChannelId ?? null;
@@ -41,6 +41,19 @@ export function useMlsSteward(): void {
     // backend log / the T11 UI states, never retried in a loop.
     api.processMlsControlEvents(activeServerId, logServerId, channelId)
       .then((result) => {
+        // Surface the steward's verdict into state so T11 can render it
+        // (waiting-for-keys / no-history interstitials and the equivocation
+        // banner). Rendering T9's result - the steward logic is unchanged.
+        dispatch({
+          type: "MLS_STATE",
+          serverId: activeServerId,
+          payload: {
+            channelId: result.channel_id,
+            confirmed: result.confirmed,
+            outcome: result.outcome as ("advanced" | "equivocation"),
+            reason: result.reason,
+          },
+        });
         // Publish our KeyPackage only if we are NOT yet a confirmed member.
         // CRITICAL non-destructive guard (T9's flag): `publish_own_key_package`
         // overwrites `mls_state.json` back to `confirmed: false` / epoch 0, so
@@ -54,5 +67,5 @@ export function useMlsSteward(): void {
         return undefined;
       })
       .catch(() => {});
-  }, [activeServerId, channelId, logServerId, channel]);
+  }, [activeServerId, channelId, logServerId, channel, dispatch]);
 }

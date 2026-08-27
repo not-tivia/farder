@@ -19,6 +19,8 @@
   --xp-font-size-small: 10px;
   --xp-live: #cc0000;
   --xp-e2ee: #2E8B57;
+  --xp-e2ee-error: #B22222;
+  --xp-e2ee-error-soft: rgba(178,34,34,0.10);
 }
 
 * {
@@ -474,6 +476,10 @@ body {
   font-style: italic;
 }
 
+.message-content.sealed-undecryptable {
+  color: var(--xp-e2ee-error);
+}
+
 .message-edited {
   color: #aaa;
   font-size: 10px;
@@ -716,6 +722,15 @@ body {
   border-top-color: var(--xp-blue);
   border-left-color: var(--xp-blue);
   box-shadow: inset 1px 1px 3px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,88,230,0.2);
+}
+
+/* E2EE composer affordance (F16): a distinct accent border so a sealed
+   channel's composer reads as encrypted. */
+.message-input.e2ee {
+  border: 1px solid var(--xp-e2ee);
+}
+.message-input.e2ee:focus {
+  border-color: var(--xp-e2ee);
 }
 
 /* ── XP Button ──────────────────────────────────────────── */
@@ -1214,6 +1229,47 @@ body {
   text-align: center;
   max-width: 400px;
   line-height: 1.5;
+}
+
+/* ── E2EE channel states ─────────────────────────────────── */
+.e2ee-interstitial {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--xp-panel-bg);
+  padding: 32px;
+  gap: 12px;
+}
+
+.e2ee-interstitial-heading {
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--xp-text-normal, #1a1a1a);
+}
+
+.e2ee-interstitial-text {
+  font-size: 12px;
+  color: var(--xp-text-muted);
+  text-align: center;
+  max-width: 420px;
+  line-height: 1.5;
+}
+
+.e2ee-equivocation-banner {
+  padding: 6px 12px;
+  background: var(--xp-e2ee-error-soft);
+  border-bottom: 1px solid var(--xp-e2ee-error);
+  color: var(--xp-e2ee-error);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.e2ee-unverified-marker {
+  font-size: 11px;
+  color: var(--xp-e2ee-error);
+  padding: 2px 0;
 }
 
 /* ── Favorites Panel ────────────────────────────────────── */

@@ -285,6 +285,18 @@ export interface MlsControlEventInfo {
   payloadType: string;
 }
 
+/** Frontend view of one E2EE channel's persisted MLS group state, derived from
+ *  the T9 steward's `process_mls_control_events` result and stored in
+ *  `PerServerState.mlsStates` (keyed by channel id). Absent entry = unknown -
+ *  the UI defaults to plaintext behavior and never gates a channel on it.
+ *  `outcome === "equivocation"` is the F4-terminal poisoned state (an impostor
+ *  leaf could not be bound), after which the channel is read-frozen. */
+export interface MlsChannelStateInfo {
+  confirmed: boolean;
+  outcome: "advanced" | "equivocation";
+  reason: string | null;
+}
+
 export interface SendMessageResult {
   id: number;
   timestamp: number;

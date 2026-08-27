@@ -64,6 +64,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
 
   const activeServer = useActiveServer();
   const members = activeServer?.members ?? [];
+  const isE2ee = isE2eeChannel(activeServer?.channels.find((c) => c.id === channelId) ?? null);
 
   const [ownPk, setOwnPk] = useState<string | null>(null);
   useEffect(() => {
@@ -253,8 +254,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     // and attachment paths are all EXCLUDED here — a sealed message is text-only
     // this rung (sub-6 owns attachments) and replies stay top-level (a numeric
     // replyTo is not mapped to an event-hash ref yet).
-    const currentChannel = activeServer?.channels.find((c) => c.id === channelId) ?? null;
-    if (isE2eeChannel(currentChannel)) {
+    if (isE2ee) {
       const logServerId = activeServer?.logServerId ?? null;
       if (!logServerId) {
         setError("This channel is encrypted but the server has no log id");
@@ -579,11 +579,11 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
               )}
               <textarea
                 ref={textareaRef}
-                className="message-input"
+                className={`message-input${isE2ee ? " e2ee" : ""}`}
                 value={content}
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
-                placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+                placeholder={isE2ee ? "Encrypted message…" : "Type a message… (Enter to send, Shift+Enter for newline)"}
                 rows={1}
                 disabled={sending || timeoutActive}
                 style={{ width: "100%", boxSizing: "border-box" }}
