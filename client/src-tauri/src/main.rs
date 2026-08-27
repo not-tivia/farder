@@ -6,12 +6,14 @@ mod tenor;
 mod bridge;
 mod commands;
 mod connection;
+mod e2ee_transport;
 mod device;
 mod default_relay;
 mod display;
 #[cfg(windows)]
 mod display_wgc;
 mod identity;
+mod mls_state;
 mod opus_codec;
 mod state;
 mod server_manager;
@@ -106,8 +108,10 @@ fn main() {
             commands::disconnect_server,
             commands::list_servers,
             commands::get_server_info,
+            commands::get_server_info_v2,
             commands::send_message,
             commands::fetch_history,
+            commands::fetch_history_v2,
             commands::subscribe_channels,
             commands::get_members,
             commands::add_reaction,
@@ -116,6 +120,12 @@ fn main() {
             commands::search_messages,
             commands::create_invite,
             commands::create_channel,
+            commands::create_e2ee_channel,
+            commands::add_members_to_e2ee_channel,
+            commands::publish_own_key_package,
+            commands::process_mls_control_events,
+            commands::send_sealed_message,
+            commands::decrypt_sealed_message,
             commands::create_category,
             commands::delete_channel,
             commands::delete_category,

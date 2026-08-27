@@ -377,6 +377,154 @@ All send a `ServerRequest` and expect `ServerResponse::Ok` or an error.
 
 ---
 
+### `create_e2ee_channel(state, server_id, log_server_id, name) -> Result<CreateE2eeChannelResult, String>`
+
+**What it does:** the owner-side create + bootstrap for an encrypted channel.
+Submits `ChannelCreated { class: E2ee }` as a LOG event (never
+`ServerRequest::CreateChannel`), mints the on-disk MLS store + one-member group,
+publishes the owner's KeyPackage, then bootstraps the owner's own leaf so the
+channel is addable. This rung the server only accepts `kind == "text"` with no
+parent, so the command hardcodes those and the create form disables the type +
+category selects when "Encrypted" is checked.
+**Parameters:** `server_id` — the connection key (address) that routes the
+request; `log_server_id` — the genesis hash that stamps the events and keys the
+per-(server, device) chain.
+**Returns:** `CreateE2eeChannelResult { channel_id: u64, class: String, event_hash: String }`.
+**Side effects:** advances + persists the device chain (`device_state.json`)
+after each accepted event (mirrors `submit_event`); persists a per-channel MLS
+resume record at `servers/<log_server_id>/mls/<channel_id>.mls_state.json`
+(`{ generation, epoch, store_instance_hash, confirmed }`) for T9/T10.
+**invoke name:** `"create_e2ee_channel"` → `createE2eeChannel()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `add_members_to_e2ee_channel(state, server_id, log_server_id, channel_id) -> Result<AddMembersResult, String>`
+
+**What it does:** adds every current server member's device to an E2EE channel's
+MLS group (the steward side of the membership bridge). Lists members via
+`GetMembers`, excludes the owner, enumerates each member's devices from their
+`DeviceAuthorized` events, then per `(identity, device)` calls the crate's
+`fetch_key_packages` → `decode_key_package` (fails closed on non-farder
+credentials) → `add_member`, which submits the `MlsCommit` + `MlsWelcome`.
+Also invoked automatically at the end of `create_e2ee_channel`.
+**Parameters:** `server_id` — the connection key (address); `log_server_id` —
+the genesis hash keying the device chain; `channel_id` — the E2EE channel id.
+**Returns:** `AddMembersResult { added: [{ identity, device, epoch }], skipped:
+[{ identity, device, reason }] }`. A member with no key package (or a
+non-farder one) is skipped, not an error; a `stale-epoch` divergence aborts.
+**Side effects:** advances + persists the device chain and
+`servers/<log_server_id>/mls/<channel_id>.mls_state.json` after each accepted
+commit.
+**invoke name:** `"add_members_to_e2ee_channel"` →
+`addMembersToE2eeChannel()` in `client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `publish_own_key_package(state, server_id, log_server_id, channel_id) -> Result<PublishOwnKeyPackageResult, String>`
+
+**What it does:** publishes THIS device's KeyPackage for an E2EE channel so a
+steward can add it to the group. Creates (or resumes) the joiner MLS store,
+publishes via the crate's `publish_key_package`, and records a
+`confirmed: false` resume point. A member calls this when it opens an E2EE
+channel it is not yet a confirmed member of (T9/T10 wire the trigger).
+**Parameters:** as `add_members_to_e2ee_channel`.
+**Returns:** `PublishOwnKeyPackageResult { channel_id, event_hash }`.
+**Side effects:** advances + persists the device chain; persists
+`servers/<log_server_id>/mls/<channel_id>.mls_state.json` with
+`{ generation: 0, epoch: 0, store_instance_hash, confirmed: false }`.
+**invoke name:** `"publish_own_key_package"` → `publishOwnKeyPackage()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `process_mls_control_events(state, server_id, log_server_id, channel_id) -> Result<ProcessMlsControlEventsResult, String>`
+
+**What it does:** the receive-side steward (T9). Advances one E2EE channel's MLS
+group to the server's current control-plane state: resumes the on-disk store +
+group (`resume_store` + `MlsChannelGroup::load`), fetches outstanding
+`MlsCommit`/`MlsWelcome`/`MlsLeafConfirmed`/`MlsGroupReset` events from the
+cursor recorded in `mls_state.json` via `fetch_mls_control_exhaustive`, applies
+each `MlsCommit` **in order** through the crate's two receive-side gates
+(Gate 1 `process_commit_checked`, Gate 2 leaf-binding via `build_cert_resolver`
+over `fetch_device_certs`), and on a `MlsWelcome` addressed to this device runs
+`join_channel` + `confirm_leaf` so the member becomes a confirmed leaf ("waiting
+for keys" → confirmed, enabling T10's send). Persists the advanced
+epoch/generation/cursor after each accepted step. A
+`LeafBindingFailure` is terminal (4a finding F4): the impostor leaf is already
+merged and cannot be rolled back, so the group is POISONED — the command
+persists a `poisoned` flag and returns `outcome: "equivocation"`, never
+retrying or continuing.
+**Parameters:** `server_id` — the connection key (address); `log_server_id` —
+the genesis hash keying the device chain; `channel_id` — the E2EE channel id.
+**Returns:** `ProcessMlsControlEventsResult { channel_id, outcome, reason,
+processed, epoch, generation, confirmed, cursor }`. `outcome` is `"advanced"`
+(normal, possibly zero steps) or `"equivocation"` (poisoned; `reason` set).
+**Side effects:** persists `servers/<log_server_id>/mls/<channel_id>.mls_state.json`
+(`generation`, `epoch`, `confirmed`, `cursor`, `poisoned`); on a confirmed
+Welcome also advances + persists the device chain (`device_state.json`).
+**Trigger:** invoked on channel open (draining the queue) and on each incoming
+`server:mls_control_event` — see `client/src/hooks/useMlsSteward.ts` and
+`client/src/hooks/useServerEvents.ts`.
+**invoke name:** `"process_mls_control_events"` → `processMlsControlEvents()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `send_sealed_message(state, server_id, log_server_id, channel_id, content, reply_to) -> Result<SendSealedMessageResult, String>`
+
+**What it does:** seals + submits one E2EE channel message (T10). Runs under
+`run_e2ee` (spawn_blocking + nested runtime) because the vertical holds
+`&FarderMlsStore` across awaits. Resumes the on-disk store + group, refuses a
+poisoned group (F4), then calls the crate's proven `send_sealed` (build the
+`MessageEnvelope` with empty attachment vecs, enforce the client-side caps,
+seal against the current epoch, submit `MessagePostedE2ee`). On a bare
+`"stale-epoch"` rejection it runs the crate's bounded `send_sealed_resync`
+(fetch winning commits → apply through the two gates with a roster-built
+`VerifiedCertResolver` → re-seal → resubmit) and persists the advanced
+control-plane cursor. Never hand-rolls an MLS path.
+**Parameters:** `server_id` — the connection key (address) that routes the
+request; `log_server_id` — the genesis hash that stamps the events and keys the
+device chain; `channel_id` — the E2EE channel id; `content` — the message text;
+`reply_to` — an optional event-hash ref (`null` for a top-level post; legacy
+numeric replies are not mapped yet).
+**Returns:** `SendSealedMessageResult { event_hash, epoch }`.
+**Side effects:** advances + persists the device chain (`device_state.json`) on
+acceptance; on resync persists the advanced epoch/cursor to
+`servers/<log_server_id>/mls/<channel_id>.mls_state.json`.
+**invoke name:** `"send_sealed_message"` → `sendSealedMessage()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
+### `decrypt_sealed_message(state, server_id, log_server_id, channel_id, ciphertext) -> Result<DecryptSealedMessageResult, String>`
+
+**What it does:** opens ONE sealed ciphertext (T10). Resumes the on-disk store +
+group and calls the crate's `receive_sealed` **exactly once**; the ciphertext is
+taken by value and the returned `SealedOutcome` carries the bytes in neither
+variant, so a re-open is structurally impossible (the ratchet is consumed on
+open — 4a). Returns a tag-discriminated `DecryptSealedMessageResult`: either
+`{ kind: "decrypted", envelope: MessageEnvelope }` or
+`{ kind: "undecryptable", reason: String }`. A missing store / no local group /
+poisoned group surface as `undecryptable`, never a command error, so the
+frontend renders a fail-closed state rather than garbage. Deliberately NOT
+`run_e2ee`: decryption is a local, read-only open that needs only the device
+subkey + on-disk store (not the unlocked identity, not device authorization); it
+still holds `device_chain_lock` so the synchronous open cannot race a concurrent
+send/steward write to the same sqlite store.
+**Parameters:** `server_id` — the connection key (diagnostics only; the store is
+keyed by `log_server_id`); `log_server_id` — the genesis hash keying the
+per-channel store; `channel_id` — the E2EE channel id; `ciphertext` — the sealed
+bytes (the row's `sealed` field).
+**Returns:** `DecryptSealedMessageResult` (see above).
+**Side effects:** consumes that generation's decryption key (forward secrecy) —
+irreversible. Decrypted content is returned to the caller and held in frontend
+memory only (D4), never persisted to disk in 4b.
+**invoke name:** `"decrypt_sealed_message"` → `decryptSealedMessage()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
 ### `create_category(state, server_id, name) -> Result<(), String>`
 
 **ServerRequest:** `CreateCategory { name, position: None }`.

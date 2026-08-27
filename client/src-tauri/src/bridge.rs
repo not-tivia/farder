@@ -219,6 +219,20 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
         // the get_event response.
         ServerEvent::EventUpdated { event } =>
             app.emit("server:event_updated", serde_json::json!({ "server_id": sid, "event": event })),
+        // Rung-2 (v2-only) events. Same wire rule as the v2-only requests:
+        // only delivered to a connection that negotiated E2EE, so a v1 client
+        // never receives these. `channel_id` on MlsControlEvent is `Option`
+        // and serializes as JSON null for server-scoped events.
+        ServerEvent::SealedMessage { channel_id, message } =>
+            app.emit("server:sealed_message", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "message": message })),
+        ServerEvent::SealedMessageEdited { channel_id, message } =>
+            app.emit("server:sealed_message_edited", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "message": message })),
+        ServerEvent::MessageTombstoned { channel_id, message_id } =>
+            app.emit("server:message_tombstoned", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "message_id": message_id })),
+        ServerEvent::MlsControlEvent { channel_id, event_hash, payload_type } =>
+            app.emit("server:mls_control_event", serde_json::json!({ "server_id": sid, "channel_id": channel_id, "event_hash": event_hash, "payload_type": payload_type })),
+        ServerEvent::ChannelCreatedV2 { channel } =>
+            app.emit("server:channel_created_v2", serde_json::json!({ "server_id": sid, "channel": channel })),
         _ => Ok(()),
     };
 }

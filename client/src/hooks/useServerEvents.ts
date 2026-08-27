@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../context/ServerContext";
-import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo } from "../lib/types";
-import { publicKeyToString } from "../lib/types";
+import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo, MessageInfoV2, ChannelInfoV2 } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 
@@ -196,6 +196,107 @@ export function useServerEvents(): void {
       });
     }).then(safePush);
 
+    listen("server:sealed_message", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      const message = flattenMessageInfoV2([data.message])[0];
+      dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
+    }).then(safePush);
+
+    listen("server:sealed_message_edited", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      const message = flattenMessageInfoV2([data.message])[0];
+      dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
+    }).then(safePush);
+
+    listen("server:message_tombstoned", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message_id: number };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      dispatch({
+        type: "MESSAGE_DELETED",
+        serverId,
+        payload: { channelId: data.channel_id, messageId: data.message_id },
+      });
+    }).then(safePush);
+
+    listen("server:channel_created_v2", (e) => {
+      const data = e.payload as { server_id: string; channel: ChannelInfoV2 };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      const channel = flattenChannelInfoV2([data.channel])[0];
+      dispatch({ type: "CHANNEL_CREATED", serverId, payload: channel });
+    }).then(safePush);
+
+    listen("server:mls_control_event", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number | null; event_hash: string; payload_type: string };
+      // Record for the steward (T9). No active-server filter: a commit/welcome
+      // for a background server must still advance that server's ratchet.
+      dispatch({
+        type: "MLS_CONTROL_EVENT",
+        serverId: data.server_id,
+        payload: {
+          channelId: data.channel_id,
+          eventHash: data.event_hash,
+          payloadType: data.payload_type,
+        },
+      });
+      // A server-scoped MlsKeyPackagePublished (channel_id == null) is the
+      // signal that a member just became addable. This closes the C2 race: a
+      // late joiner is skipped by the membership_changed auto-add (they have no
+      // package until they open the channel), so the owner retries the add here,
+      // when the package actually exists. Owner-gated on the frontend (the add
+      // path has no server-side owner check); the add loop is idempotent so a
+      // redundant pass is a cheap no-op, never a spin.
+      if (data.channel_id == null && data.payload_type === "MlsKeyPackagePublished") {
+        const logServerId = stateRef.current.servers[data.server_id]?.logServerId ?? null;
+        const serverState = stateRef.current.servers[data.server_id];
+        const e2eeChannelIds = (serverState?.channels ?? [])
+          .filter(isE2eeChannel)
+          .map((c) => c.id);
+        if (logServerId && e2eeChannelIds.length > 0) {
+          getOwnPk().then((ownPk) => {
+            if (!ownPk || ownPk !== serverState?.ownerPublicKey) return;
+            for (const channelId of e2eeChannelIds) {
+              api.addMembersToE2eeChannel(data.server_id, logServerId, channelId).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      }
+
+      // Trigger the steward (T9): fetch + apply the channel's MLS control plane
+      // in order. Channel-scoped events only (a server-scoped KeyPackage
+      // publication carries channel_id == null and has no group to advance).
+      // The steward is cursor-based + idempotent, so firing per event is cheap
+      // and never spins; failures (e.g. identity still locked, no key package
+      // published yet) are non-fatal and logged by the backend.
+      if (data.channel_id != null) {
+        const logServerId = stateRef.current.servers[data.server_id]?.logServerId ?? null;
+        if (logServerId) {
+          api.processMlsControlEvents(data.server_id, logServerId, data.channel_id)
+            .then((result) => {
+              // Surface the steward's verdict into state (T11 renders T9's
+              // result). No active-server filter: a background server's ratchet
+              // state is still valid and should render if it becomes active.
+              dispatch({
+                type: "MLS_STATE",
+                serverId: data.server_id,
+                payload: {
+                  channelId: result.channel_id,
+                  confirmed: result.confirmed,
+                  outcome: result.outcome as ("advanced" | "equivocation"),
+                  reason: result.reason,
+                },
+              });
+            })
+            .catch(() => {});
+        }
+      }
+    }).then(safePush);
+
     listen("server:attachment_redacted", (e) => {
       const data = e.payload as { server_id: string; content_hash: string; by_moderator: boolean };
       if (data.server_id !== activeRef.current) return;
@@ -327,6 +428,27 @@ export function useServerEvents(): void {
       api.getMembers(serverId).then(members =>
         dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
       // The approval queue component refetches getPendingMembers on this event (Task 8).
+
+      // A member who joins AFTER an E2EE channel exists is never added by the
+      // creation-time add loop, so the owner auto-adds them here. NOTE: there is
+      // no server-side owner gate on the add path (the fold authorizes any full
+      // member holding a confirmed leaf to author an add-commit); the frontend
+      // gate below is the real protection, so keep it. Gate on our own public
+      // key matching the per-server `ownerPublicKey`. One pass per event, no
+      // poll loop: the add loop is idempotent, so a redundant pass is a no-op.
+      const serverState = stateRef.current.servers[serverId];
+      const logServerId = serverState?.logServerId ?? null;
+      if (!logServerId) return;
+      const e2eeChannelIds = (serverState?.channels ?? [])
+        .filter(isE2eeChannel)
+        .map((c) => c.id);
+      if (e2eeChannelIds.length === 0) return;
+      getOwnPk().then((ownPk) => {
+        if (!ownPk || ownPk !== serverState?.ownerPublicKey) return;
+        for (const channelId of e2eeChannelIds) {
+          api.addMembersToE2eeChannel(serverId, logServerId, channelId).catch(() => {});
+        }
+      }).catch(() => {});
     }).then(safePush);
 
     listen("server:permissions_changed", (e) => {
@@ -338,7 +460,7 @@ export function useServerEvents(): void {
       // the change is reflected immediately.
       api.getMembers(serverId).then(members =>
         dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
-      api.getServerInfo(serverId).then(info =>
+      api.getServerInfoV2(serverId).then(info =>
         dispatch({ type: "SERVER_REFRESHED", serverId, payload: info })).catch(() => {});
     }).then(safePush);
 

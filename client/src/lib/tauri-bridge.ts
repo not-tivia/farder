@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo, PollInfo, GiveawayInfo, EventInfo, EventState, ReminderInfo } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MessageInfoV2, ServerInfoV2, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo, PollInfo, GiveawayInfo, EventInfo, EventState, ReminderInfo } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -194,12 +194,20 @@ export async function fetchHistory(serverId: string, channelId: number, beforeId
   return invoke<MessageInfo[]>("fetch_history", { serverId, channelId, beforeId: beforeId ?? null, limit: limit ?? null });
 }
 
+export async function fetchHistoryV2(serverId: string, channelId: number, beforeId?: number, limit?: number): Promise<MessageInfoV2[]> {
+  return invoke<MessageInfoV2[]>("fetch_history_v2", { serverId, channelId, beforeId: beforeId ?? null, limit: limit ?? null });
+}
+
 export async function subscribeChannels(serverId: string, channelIds: number[]): Promise<void> {
   return invoke<void>("subscribe_channels", { serverId, channelIds });
 }
 
 export async function getServerInfo(serverId: string): Promise<ConnectResult> {
   return invoke<ConnectResult>("get_server_info", { serverId });
+}
+
+export async function getServerInfoV2(serverId: string): Promise<ServerInfoV2> {
+  return invoke<ServerInfoV2>("get_server_info_v2", { serverId });
 }
 
 export async function getMembers(serverId: string): Promise<MemberInfo[]> {
@@ -224,6 +232,43 @@ export async function searchMessages(serverId: string, query: string, channelId?
 
 export async function createChannel(serverId: string, name: string, channelType: string, categoryId?: number): Promise<void> {
   return invoke<void>("create_channel", { serverId, name, channelType, categoryId: categoryId ?? null });
+}
+
+export async function createE2eeChannel(serverId: string, logServerId: string, name: string): Promise<{ channel_id: number; class: string; event_hash: string }> {
+  return invoke("create_e2ee_channel", { serverId, logServerId, name });
+}
+
+export async function addMembersToE2eeChannel(serverId: string, logServerId: string, channelId: number): Promise<{ added: Array<{ identity: string; device: string; epoch: number }>; skipped: Array<{ identity: string; device: string | null; reason: string }> }> {
+  return invoke("add_members_to_e2ee_channel", { serverId, logServerId, channelId });
+}
+
+export async function publishOwnKeyPackage(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; event_hash: string }> {
+  return invoke("publish_own_key_package", { serverId, logServerId, channelId });
+}
+
+export async function processMlsControlEvents(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; outcome: string; reason: string | null; processed: number; epoch: number; generation: number; confirmed: boolean; cursor: number }> {
+  return invoke("process_mls_control_events", { serverId, logServerId, channelId });
+}
+
+/** Seal + submit one E2EE channel message (T10). Returns the accepted event hash
+ *  and the epoch the ciphertext was sealed in. `replyTo` is an event-hash ref;
+ *  pass null for a top-level post (legacy numeric replies are not mapped yet). */
+export async function sendSealedMessage(serverId: string, logServerId: string, channelId: number, content: string, replyTo: string | null): Promise<{ event_hash: string; epoch: number }> {
+  return invoke("send_sealed_message", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null });
+}
+
+/** The wire shape of `decrypt_sealed_message`: a tag-discriminated result.
+ *  `decrypted` carries the opened `MessageEnvelope`; `undecryptable` is the
+ *  fail-closed marker (the ratchet is consumed on open — never retry). */
+export type SealedDecryptResult =
+  | { kind: "decrypted"; envelope: { content: string; attachment_keys: number[][]; filenames: string[]; mimes: string[] } }
+  | { kind: "undecryptable"; reason: string };
+
+/** Open ONE sealed ciphertext (T10). The frontend must call this exactly once
+ *  per sealed message and cache the result — a second open is impossible (the
+ *  ratchet is consumed) and destructive. See `useSealedDecrypt.ts`. */
+export async function decryptSealedMessage(serverId: string, logServerId: string, channelId: number, ciphertext: number[]): Promise<SealedDecryptResult> {
+  return invoke<SealedDecryptResult>("decrypt_sealed_message", { serverId, logServerId, channelId, ciphertext });
 }
 
 export async function createCategory(serverId: string, name: string): Promise<void> {

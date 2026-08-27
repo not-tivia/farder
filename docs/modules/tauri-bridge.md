@@ -79,6 +79,11 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `PollUpdated` | `server:poll_updated` | `poll` (`PollInfo` — counts/closed state, never voter identities) | `useServerEvents` → `POLL_UPDATED` (dropped for background servers; widgets re-hydrate via `getPoll` on next mount) |
 | `GiveawayUpdated` | `server:giveaway_updated` | `giveaway` (frontend JSON shape via `commands::giveaway_json` — `winner` as `"vk_<hex>"` string/null, `entry_count`, `status`; never entrant identities) | `useServerEvents` → `GIVEAWAY_UPDATED` (dropped for background servers; widgets re-hydrate via `getGiveaway` on next mount) |
 | `EventUpdated` | `server:event_updated` | `event` (`EventInfo`, plain serde — no remapping, it has no optional `PublicKey`; carries counts + the display-name roster capped at 10 per option, never attendee public keys, never the per-viewer `my_rsvp`) | `useServerEvents` → `EVENT_UPDATED` (dropped for background servers; widgets re-hydrate via `getEvent` on next mount) |
+| `SealedMessage` | `server:sealed_message` | `channel_id, message` (`MessageInfoV2` — sealed row) | `useServerEvents` → `ADD_OR_UPDATE_MESSAGE` (active server; flattened via `flattenMessageInfoV2`) |
+| `SealedMessageEdited` | `server:sealed_message_edited` | `channel_id, message` (`MessageInfoV2` — whole replacement row) | `useServerEvents` → `ADD_OR_UPDATE_MESSAGE` (active server) |
+| `MessageTombstoned` | `server:message_tombstoned` | `channel_id, message_id` | `useServerEvents` → `MESSAGE_DELETED` (active server) |
+| `MlsControlEvent` | `server:mls_control_event` | `channel_id` (`null` for server-scoped), `event_hash`, `payload_type` | `useServerEvents` → `MLS_CONTROL_EVENT` (all servers — the steward T9 drains the queue) |
+| `ChannelCreatedV2` | `server:channel_created_v2` | `channel` (`ChannelInfoV2` — with `class`) | `useServerEvents` → `CHANNEL_CREATED` (active server; flattened via `flattenChannelInfoV2`) |
 
 **`server:member_presence_updated` payload fields:**
 - `server_id` — the server this event came from (added by `dispatch_event`, common to all `server:*` events).

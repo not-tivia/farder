@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import type { MessageInfo, AttachmentInfo } from "../lib/types";
+import type { MessageInfo, AttachmentInfo, SealedDecryptEntry } from "../lib/types";
 import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
@@ -47,6 +47,9 @@ interface MessageProps {
   serverId: string;
   highlighted?: boolean;
   onReply?: (message: MessageInfo) => void;
+  /** The terminal decrypt result for this sealed row (decrypted plaintext or
+   *  the undecryptable marker). Absent = decrypt not yet run (T5 placeholder). */
+  sealedDecrypt?: SealedDecryptEntry;
 }
 
 /** Derive a deterministic color from a string (public key or name). */
@@ -273,7 +276,7 @@ function renderContent(
   });
 }
 
-export default function Message({ message, memberNames, grouped = false, serverId, highlighted = false, onReply }: MessageProps) {
+export default function Message({ message, memberNames, grouped = false, serverId, highlighted = false, onReply, sealedDecrypt }: MessageProps) {
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const [showPicker, setShowPicker] = useState(false);
@@ -469,12 +472,26 @@ export default function Message({ message, memberNames, grouped = false, serverI
   // Keep the editor reachable: editing always shows the plain-content branch.
   const showWidget = widgetNode !== null && !editing;
 
+  // Sealed E2EE row (content is empty; ciphertext rides in `sealed`).
+  const isSealedRow = message.is_e2ee === true && message.sealed != null && message.content === "";
+  // Decrypted plaintext comes from the per-message cache (D4), never the row:
+  // the row keeps `content === ""` so the sealed shape stays canonical.
+  const decryptedContent = sealedDecrypt?.kind === "decrypted" ? sealedDecrypt.content : null;
+  // Distinct fail-closed state: the ciphertext was opened once and could not
+  // be verified (tampered / wrong group / no keys). Full styling in T11; the
+  // data distinction lives here.
+  const undecryptable = isSealedRow && sealedDecrypt?.kind === "undecryptable";
+  // No decrypt result yet -> the 4b-1 placeholder (T5).
+  const isSealed = isSealedRow && sealedDecrypt === undefined;
+
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
     ? message.content
-    : message.attachments.length > 0
-      ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
-      : message.content;
+    : decryptedContent !== null
+      ? decryptedContent
+      : message.attachments.length > 0
+        ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
+        : message.content;
 
   async function handleReactionClick(emoji: string, alreadyMe: boolean, fileId?: number) {
     if (reacting) return;
@@ -606,10 +623,14 @@ export default function Message({ message, memberNames, grouped = false, serverI
       )}
       {/* Attachment-only messages (voice notes, captionless images) have empty
           content — the body must still render so the attachments do. */}
-      {(deleted || displayContent || message.attachments.length > 0) && !showWidget && (
-        <div className={`message-content${deleted ? " deleted-content" : ""}`}>
+      {(deleted || isSealed || undecryptable || displayContent || message.attachments.length > 0) && !showWidget && (
+        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed || undecryptable ? " sealed-content" : ""}${undecryptable ? " sealed-undecryptable" : ""}`}>
           {deleted ? (
             <em>This message has been deleted.</em>
+          ) : isSealed ? (
+            <em title="Encrypted message — awaiting decryption">🔒 Encrypted message</em>
+          ) : undecryptable ? (
+            <em title={sealedDecrypt?.kind === "undecryptable" ? sealedDecrypt.reason : undefined}>🔒 Encrypted message — couldn't decrypt</em>
           ) : editing ? (
             <div className="message-edit-area">
               <textarea

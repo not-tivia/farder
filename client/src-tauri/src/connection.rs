@@ -633,6 +633,9 @@ mod relay_it {
         /// Token + first frame received on a `Session` stream (file-framing test).
         session_token: Option<Vec<u8>>,
         session_first_frame: Option<Vec<u8>>,
+        /// Token + body received on a `Webhook` stream (parity arm).
+        webhook_token: Option<String>,
+        webhook_body: Option<Vec<u8>>,
     }
 
     /// Start a mock server: it dials the relay, registers under `server_id`,
@@ -743,6 +746,13 @@ mod relay_it {
                 let mut g = observed.lock().unwrap();
                 g.session_token = Some(token);
                 g.session_first_frame = Some(first);
+            }
+            RelayStreamRole::Webhook { token, body } => {
+                // Record the webhook delivery. No test asserts these yet;
+                // the arm exists so the test harness covers the full enum.
+                let mut g = observed.lock().unwrap();
+                g.webhook_token = Some(token);
+                g.webhook_body = Some(body);
             }
         }
     }

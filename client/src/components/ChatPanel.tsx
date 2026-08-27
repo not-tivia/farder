@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
 import type { MessageInfo } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
@@ -48,6 +48,7 @@ export default function ChatPanel() {
     : null;
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
+  const undecryptableCount = channelMessages.filter((m) => activeServer?.sealedDecrypts?.[m.id]?.kind === "undecryptable").length;
 
   const highlightMessageId = activeServer?.highlightMessageId ?? null;
   useEffect(() => {
@@ -84,7 +85,9 @@ export default function ChatPanel() {
       if (!oldest) return;
       setLoadingMore(true);
       try {
-        const older = await api.fetchHistory(serverId, currentChannelId, oldest.id, 50);
+        const older = currentChannel?.class === "E2ee"
+          ? flattenMessageInfoV2(await api.fetchHistoryV2(serverId, currentChannelId, oldest.id, 50))
+          : await api.fetchHistory(serverId, currentChannelId, oldest.id, 50);
         if (older.length === 0) {
           setHasMore(false);
         } else {
@@ -117,6 +120,46 @@ export default function ChatPanel() {
     );
   }
 
+  const isE2ee = isE2eeChannel(currentChannel);
+  const mlsState = activeServer?.mlsStates?.[currentChannelId];
+  const equivocated = isE2ee && mlsState != null && mlsState.outcome === "equivocation";
+
+  // Equivocation is terminal (F4): it takes precedence over every other E2EE
+  // state, so it is checked first and never mistaken for "waiting for keys".
+  if (isE2ee && mlsState != null && !equivocated && mlsState.confirmed === false) {
+    return (
+      <div className="chat-panel">
+        <div className="channel-header">
+          <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
+          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
+        </div>
+        <div className="e2ee-interstitial">
+          <div className="e2ee-interstitial-heading">Waiting for keys</div>
+          <div className="e2ee-interstitial-text">
+            This channel is end-to-end encrypted. You'll be able to read and send messages once a member who already holds the channel's keys is online to add you.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isE2ee && mlsState != null && !equivocated && mlsState.confirmed === true && channelMessages.length === 0) {
+    return (
+      <div className="chat-panel">
+        <div className="channel-header">
+          <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
+          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
+        </div>
+        <div className="e2ee-interstitial">
+          <div className="e2ee-interstitial-heading">No history before you joined</div>
+          <div className="e2ee-interstitial-text">
+            Messages sent before you joined this encrypted channel are not visible to you. New messages will appear here as they arrive.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="chat-panel">
       <div className="channel-header">
@@ -125,6 +168,9 @@ export default function ChatPanel() {
             ? dms.find(d => d.channel.id === currentChannelId)?.participant.display_name ?? "DM"
             : `# ${currentChannel?.name ?? "unknown"}`}
         </span>
+        {isE2eeChannel(currentChannel) && (
+          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
+        )}
         {currentChannel?.topic && (
           <span className="channel-header-topic">{currentChannel.topic}</span>
         )}
@@ -148,9 +194,19 @@ export default function ChatPanel() {
           🔍
         </button>
       </div>
+      {equivocated && (
+        <div className="e2ee-equivocation-banner">
+          <strong>Channel state could not be confirmed.</strong>{" "}This channel's encryption keys failed verification{mlsState && mlsState.reason ? `: ${mlsState.reason}` : ""}. It has been frozen to protect you.
+        </div>
+      )}
       <ActiveWidgetsBar serverId={serverId} channelId={currentChannelId} />
       <div className="message-list" onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
+        {undecryptableCount > 0 && (
+          <div className="e2ee-unverified-marker">
+            {undecryptableCount} message{undecryptableCount === 1 ? "" : "s"} could not be verified
+          </div>
+        )}
         {channelMessages.map((msg, i) => {
           const prev = i > 0 ? channelMessages[i - 1] : null;
           const sameAuthor = prev &&
@@ -158,7 +214,7 @@ export default function ChatPanel() {
           const withinWindow = prev &&
             (msg.timestamp - prev.timestamp) < 300;
           const grouped = !!(sameAuthor && withinWindow);
-          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} onReply={(msg) => setReplyTo(msg)} />;
+          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} sealedDecrypt={activeServer.sealedDecrypts?.[msg.id]} onReply={(msg) => setReplyTo(msg)} />;
         })}
         <div ref={bottomRef} />
       </div>

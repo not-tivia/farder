@@ -9,6 +9,23 @@ export interface ChannelInfo {
   slow_mode_secs: number | null;
   retention_secs: number | null;
   thread_parent_message_id: number | null;
+  /** Rung-2 client-side channel class. Absent on raw v1 frames — Rust
+   *  `ChannelInfo` has no `class`; it rides in `ChannelInfoV2` and the client
+   *  flattens it onto each entry on connect. `undefined` means plaintext. */
+  class?: ChannelClass;
+}
+
+/** A channel's content class — immutable, set at creation (Rung-2).
+ *  Mirrors Rust `farder_crypto::event_log::ChannelClass`. */
+export type ChannelClass = "Plaintext" | "E2ee";
+
+/** `ChannelInfo` plus its content class (Rung-2 v2 surface). The wire shape is
+ *  `{ base: ChannelInfo, class: ChannelClass }` — serde serializes the Rust
+ *  `ChannelInfoV2` struct by field name, so the class rides alongside `base`,
+ *  never flattened into it. */
+export interface ChannelInfoV2 {
+  base: ChannelInfo;
+  class: ChannelClass;
 }
 
 export interface CategoryInfo {
@@ -81,6 +98,24 @@ export interface MessageInfo {
   /** Server-written widget marker JSON (e.g. `{"type":"poll","id":7}`); null/absent
    *  for normal messages. Treat as untrusted: try/catch parse, numeric id check. */
   widget?: string | null;
+  /** Rung-2 sealed-row fields, absent on v1/plaintext rows. A sealed row has
+   *  empty `content` and ciphertext in `sealed`; `event_hash` cites the log
+   *  event for reply/edit/delete. `is_e2ee` undefined = plaintext. */
+  is_e2ee?: boolean;
+  sealed?: number[] | null;
+  event_hash?: string | null;
+}
+
+/** A message plus the sealed-row fields a v1 client cannot render (Rung-2 v2
+ *  surface). For a sealed row `base.content` is "" — the server holds ciphertext
+ *  and cannot fill it — and the payload rides in `sealed`. `event_hash` is the
+ *  hash a client cites when replying/editing/deleting over the log.
+ *  Mirrors Rust `MessageInfoV2 { base, is_e2ee, sealed, event_hash }`. */
+export interface MessageInfoV2 {
+  base: MessageInfo;
+  is_e2ee: boolean;
+  sealed: number[] | null;
+  event_hash: string | null;
 }
 
 /** Live poll state, broadcast whole on every change (`server:poll_updated`) and
@@ -196,6 +231,70 @@ export interface ConnectResult {
   owner_public_key?: { bytes: number[] } | null;
   relayed?: boolean;
   server_id?: string | null;
+}
+
+/** The v2 server-info surface (`getServerInfoV2`): `ConnectResult`'s shape
+ *  minus the connection-only `relayed` flag, with a class-carrying channel
+ *  list. Mirrors Rust `ServerInfoV2Result`. */
+export interface ServerInfoV2 {
+  server_name: string;
+  member_count: number;
+  channels: ChannelInfoV2[];
+  categories: CategoryInfo[];
+  roles: RoleInfo[];
+  owner_public_key?: { bytes: number[] } | null;
+  server_id?: string | null;
+}
+
+/** Flatten a v2 channel into the client-side `ChannelInfo` entry, merging its
+ *  `class` onto `base`. The `channels` state entries are the flattened form. */
+export function flattenChannelInfoV2(channels: ChannelInfoV2[]): ChannelInfo[] {
+  return channels.map((c) => ({ ...c.base, class: c.class }));
+}
+
+/** Flatten a v2 message row into the client-side `MessageInfo` entry, merging
+ *  the sealed-row fields onto `base`. Plaintext rows pass through with the
+ *  fields undefined. */
+export function flattenMessageInfoV2(messages: MessageInfoV2[]): MessageInfo[] {
+  return messages.map((m) => ({ ...m.base, is_e2ee: m.is_e2ee, sealed: m.sealed, event_hash: m.event_hash }));
+}
+
+/** Ask "is this channel E2EE?" — unknown/absent class defaults to plaintext. */
+export function isE2eeChannel(channel: ChannelInfo | null | undefined): boolean {
+  return (channel?.class ?? "Plaintext") === "E2ee";
+}
+
+/** The terminal result of decrypting one sealed message (D2/D4): either the
+ *  plaintext content or a fail-closed "couldn't decrypt" marker. Keyed by
+ *  message id in `PerServerState.sealedDecrypts`; each sealed row is decrypted
+ *  exactly once (the ratchet is consumed on open) and cached here. `eventHash`
+ *  is the log event hash of the ciphertext that was opened, so a sealed edit
+ *  (same id, new ciphertext) triggers a fresh decrypt rather than re-using a
+ *  stale plaintext. */
+export type SealedDecryptEntry =
+  | { kind: "decrypted"; content: string; eventHash: string | null }
+  | { kind: "undecryptable"; reason: string; eventHash: string | null };
+
+/** An MLS control event pointer as broadcast by the server
+ *  (`MlsControlEvent`). Carries only a pointer - the client fetches and
+ *  verifies the signed event itself (the steward, T9). `channelId` is null
+ *  for server-scoped events (e.g. a KeyPackage publication). */
+export interface MlsControlEventInfo {
+  channelId: number | null;
+  eventHash: string;
+  payloadType: string;
+}
+
+/** Frontend view of one E2EE channel's persisted MLS group state, derived from
+ *  the T9 steward's `process_mls_control_events` result and stored in
+ *  `PerServerState.mlsStates` (keyed by channel id). Absent entry = unknown -
+ *  the UI defaults to plaintext behavior and never gates a channel on it.
+ *  `outcome === "equivocation"` is the F4-terminal poisoned state (an impostor
+ *  leaf could not be bound), after which the channel is read-frozen. */
+export interface MlsChannelStateInfo {
+  confirmed: boolean;
+  outcome: "advanced" | "equivocation";
+  reason: string | null;
 }
 
 export interface SendMessageResult {

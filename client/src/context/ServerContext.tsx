@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo } from "../lib/types";
-import { publicKeyToString } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, MlsChannelStateInfo, SealedDecryptEntry } from "../lib/types";
+import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 
 export interface PerServerState {
   serverName: string;
@@ -37,6 +37,21 @@ export interface PerServerState {
    *  switch/reconnect; maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`/
    *  `EVENT_UPDATED`. `null` until the first fetch. */
   activeWidgets: { channelId: number; polls: number[]; giveaways: number[]; events: number[] } | null;
+  /** Pending MLS control events (KeyPackage / Commit / Welcome /
+   *  LeafConfirmed / GroupReset) received via `server:mls_control_event`.
+   *  The steward (T9, 4b-2) drains these - T4 only records them, deduped by
+   *  `eventHash`. */
+  mlsControlEvents: MlsControlEventInfo[];
+  /** Per-channel MLS group state derived from the T9 steward result (keyed by
+   *  channel id). Absent entry = unknown; the UI never gates a channel on it.
+   *  `outcome === "equivocation"` is the terminal poisoned state (F4). */
+  mlsStates: Record<number, MlsChannelStateInfo>;
+  /** Per-message decrypt results for sealed rows (D2/D4): keyed by message id.
+   *  A sealed row is decrypted exactly once (the ratchet is consumed on open);
+   *  the result is cached here so a re-render never re-opens the ciphertext.
+   *  `decrypted` holds the plaintext; `undecryptable` is the distinct
+   *  "couldn't decrypt" marker. Absent = not yet decrypted (T5 placeholder). */
+  sealedDecrypts: Record<number, SealedDecryptEntry>;
 }
 
 export interface AppState {
@@ -77,6 +92,9 @@ const initialPerServerState: PerServerState = {
   giveaways: {},
   events: {},
   activeWidgets: null,
+  mlsControlEvents: [],
+  mlsStates: {},
+  sealedDecrypts: {},
 };
 
 /** Combined chip cap for the active-widgets bar — mirrors the server's
@@ -102,8 +120,8 @@ export type AppAction =
   | { type: "INCREMENT_UNREAD"; serverId: string }
   | { type: "CLEAR_UNREAD"; serverId: string }
   // Per-server actions (all require serverId)
-  | { type: "CONNECTED"; serverId: string; payload: ConnectResult }
-  | { type: "SERVER_REFRESHED"; serverId: string; payload: ConnectResult }
+  | { type: "CONNECTED"; serverId: string; payload: ServerInfoV2 }
+  | { type: "SERVER_REFRESHED"; serverId: string; payload: ServerInfoV2 }
   | { type: "DISCONNECTED"; serverId: string }
   | { type: "CONNECTION_LOST"; serverId: string }
   | { type: "RECONNECTED"; serverId: string }
@@ -159,7 +177,12 @@ export type AppAction =
   | { type: "EVENT_UPDATED"; serverId: string; payload: EventInfo }
   | { type: "EVENT_STATE"; serverId: string; payload: { event: EventInfo; myRsvp: string | null } }
   | { type: "EVENT_MY_RSVP"; serverId: string; payload: { eventId: number; myRsvp: string | null } }
-  | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] } };
+  | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] } }
+  | { type: "ADD_OR_UPDATE_MESSAGE"; serverId: string; payload: MessageInfo }
+  | { type: "MLS_CONTROL_EVENT"; serverId: string; payload: MlsControlEventInfo }
+  | { type: "SEALED_DECRYPTED"; serverId: string; payload: { messageId: number; eventHash: string | null; content: string } }
+  | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } }
+  | { type: "MLS_STATE"; serverId: string; payload: { channelId: number; confirmed: boolean; outcome: "advanced" | "equivocation"; reason: string | null } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -173,7 +196,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         connected: true,
         connectionLost: false,
         serverName: action.payload.server_name,
-        channels: action.payload.channels,
+        channels: flattenChannelInfoV2(action.payload.channels),
         categories: action.payload.categories,
         roles: action.payload.roles,
         ownerPublicKey: action.payload.owner_public_key
@@ -241,6 +264,20 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ...state,
         messages: { ...state.messages, [channelId]: [...existing, action.payload] },
       };
+    }
+    case "ADD_OR_UPDATE_MESSAGE": {
+      // Whole-row upsert (sealed rows replace, never merge): a sealed edit
+      // carries the entire row - new ciphertext, new event_hash - so the
+      // v1 MESSAGE_EDITED content/edited_at patch cannot express it.
+      const channelId = action.payload.channel_id;
+      const existing = state.messages[channelId] ?? [];
+      const idx = existing.findIndex((m) => m.id === action.payload.id);
+      if (idx === -1) {
+        return { ...state, messages: { ...state.messages, [channelId]: [...existing, action.payload] } };
+      }
+      const next = existing.slice();
+      next[idx] = action.payload;
+      return { ...state, messages: { ...state.messages, [channelId]: next } };
     }
     case "MESSAGE_EDITED": {
       const { channelId, messageId, newContent, editedAt } = action.payload;
@@ -329,9 +366,52 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ),
       };
     }
+    case "MLS_CONTROL_EVENT": {
+      // Record-only: the steward (T9) drains this queue and processes each
+      // event via fetch_mls_control. Dedupe by event_hash so a replayed
+      // broadcast is not processed twice.
+      if (state.mlsControlEvents.some((e) => e.eventHash === action.payload.eventHash)) return state;
+      return { ...state, mlsControlEvents: [...state.mlsControlEvents, action.payload] };
+    }
+    case "SEALED_DECRYPTED":
+      return {
+        ...state,
+        sealedDecrypts: {
+          ...state.sealedDecrypts,
+          [action.payload.messageId]: {
+            kind: "decrypted",
+            content: action.payload.content,
+            eventHash: action.payload.eventHash,
+          },
+        },
+      };
+    case "SEALED_UNDECRYPTABLE":
+      return {
+        ...state,
+        sealedDecrypts: {
+          ...state.sealedDecrypts,
+          [action.payload.messageId]: {
+            kind: "undecryptable",
+            reason: action.payload.reason,
+            eventHash: action.payload.eventHash,
+          },
+        },
+      };
+    case "MLS_STATE":
+      return {
+        ...state,
+        mlsStates: {
+          ...state.mlsStates,
+          [action.payload.channelId]: {
+            confirmed: action.payload.confirmed,
+            outcome: action.payload.outcome,
+            reason: action.payload.reason,
+          },
+        },
+      };
     case "CHANNEL_CREATED":
       if (state.channels.some(c => c.id === action.payload.id)) return state;
-      return { ...state, channels: [...state.channels, action.payload] };
+      return { ...state, channels: [...state.channels, { ...action.payload, class: action.payload.class ?? "Plaintext" }] };
     case "CHANNEL_DELETED": {
       const { channelId } = action.payload;
       // Prune the stale voice roster for the deleted channel, and exit voice if
@@ -352,7 +432,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     case "CATEGORY_UPDATED":
       return { ...state, categories: state.categories.map((c) => c.id === action.payload.id ? action.payload : c) };
     case "CHANNEL_UPDATED":
-      return { ...state, channels: state.channels.map((c) => c.id === action.payload.id ? action.payload : c) };
+      return { ...state, channels: state.channels.map((c) => c.id === action.payload.id ? { ...action.payload, class: c.class ?? "Plaintext" } : c) };
     case "VIEW_THREAD":
       return { ...state, threadChannelId: action.payload };
     case "MARK_READ": {
@@ -571,7 +651,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         connected: true,
         connectionLost: false,
         serverName: payload.server_name,
-        channels: payload.channels,
+        channels: payload.channels.map((c) => ({ ...c, class: c.class ?? "Plaintext" })),
         categories: payload.categories,
         roles: payload.roles,
         ownerPublicKey: payload.owner_public_key

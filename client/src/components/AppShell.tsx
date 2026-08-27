@@ -87,9 +87,10 @@ export default function AppShell() {
       while (!cancelled && serverId) {
         try {
           await api.getPublicKey();
-          const result = await api.connectServer(serverId);
+          await api.connectServer(serverId);
           dispatch({ type: "RECONNECTED", serverId });
-          dispatch({ type: "CONNECTED", serverId, payload: result });
+          const info = await api.getServerInfoV2(serverId);
+          dispatch({ type: "CONNECTED", serverId, payload: info });
           const members = await api.getMembers(serverId);
           dispatch({ type: "SET_MEMBERS", serverId, payload: members });
           try {

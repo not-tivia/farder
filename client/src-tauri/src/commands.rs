@@ -5,8 +5,9 @@ use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
-    BotAlertInfo, CategoryInfo, ChannelInfo, CommandInfo, EventInfo, GiveawayInfo, MemberInfo,
-    MessageInfo, PollInfo, ReminderInfo, RoleInfo, ServerRequest, ServerResponse, WebhookInfo,
+    BotAlertInfo, CategoryInfo, ChannelInfo, ChannelInfoV2, CommandInfo, EventInfo, GiveawayInfo,
+    MemberInfo, MessageInfo, MessageInfoV2, PollInfo, ReminderInfo, RoleInfo, ServerRequest,
+    ServerResponse, WebhookInfo, SERVER_PROTOCOL_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -57,6 +58,21 @@ pub struct ConnectResult {
 pub struct SendMessageResult {
     pub id: u64,
     pub timestamp: u64,
+}
+
+/// The v2 server-info surface (`GetServerInfoV2`): `ConnectResult`'s shape
+/// minus the connection-only `relayed` flag, with the class-carrying channel
+/// list. Field names mirror `ConnectResult` so the frontend can reuse the same
+/// consumption path once it threads `class` through (T3).
+#[derive(serde::Serialize)]
+pub struct ServerInfoV2Result {
+    pub server_name: String,
+    pub member_count: u32,
+    pub channels: Vec<ChannelInfoV2>,
+    pub categories: Vec<CategoryInfo>,
+    pub roles: Vec<RoleInfo>,
+    pub owner_public_key: Option<farder_crypto::identity::PublicKey>,
+    pub server_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -975,6 +991,40 @@ pub fn get_saved_servers() -> Vec<ServerEntry> {
 // Server commands
 // ---------------------------------------------------------------------------
 
+/// Negotiate the protocol version on a freshly-connected server (D3).
+///
+/// This is PER-CONNECTION state the server clears on disconnect, so it must run
+/// on every connect and reconnect — never just the first. An older sidecar
+/// cannot decode `NegotiateProtocol` (unknown rmp_serde variant name breaks the
+/// whole frame) and will either answer `Error` or drop the connection; either
+/// way we log a `[protocol]` line and keep going rather than hard-fail. The v1
+/// surfaces still work, and any v2 command will then surface the server's own
+/// `UPGRADE_REQUIRED` refusal.
+async fn negotiate_protocol(state: &AppState, server_id: &str) {
+    let negotiated = bridge::send_request(
+        state,
+        server_id,
+        ServerRequest::NegotiateProtocol { client_version: SERVER_PROTOCOL_VERSION },
+    )
+    .await;
+    match negotiated {
+        Ok(ServerResponse::ProtocolVersion { server_version, min_client_version_for_e2ee }) => {
+            eprintln!(
+                "[protocol] {}: negotiated client={} server={} min_client_for_e2ee={}",
+                server_id, SERVER_PROTOCOL_VERSION, server_version, min_client_version_for_e2ee
+            );
+        }
+        Ok(other) => eprintln!(
+            "[protocol] {}: NegotiateProtocol returned {:?}; treating as v1",
+            server_id, other
+        ),
+        Err(e) => eprintln!(
+            "[protocol] {}: negotiate failed: {}; treating as v1",
+            server_id, e
+        ),
+    }
+}
+
 /// Connect to a Farder server, authenticate, and return initial server info.
 #[tauri::command]
 pub async fn connect_server(
@@ -1079,6 +1129,11 @@ pub async fn connect_server(
                     }
                 });
             }
+            // Negotiate v2 BEFORE returning: the frontend's next call (T3) is
+            // `get_server_info_v2`, which the server refuses with
+            // `UPGRADE_REQUIRED` unless this connection has already negotiated.
+            negotiate_protocol(&state, &address).await;
+
             Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed, server_id })
         }
         ServerResponse::Error { reason } => Err(reason),
@@ -1128,6 +1183,30 @@ pub async fn get_server_info(
     match response {
         ServerResponse::ServerInfo { name, member_count, channels, categories, roles, owner_public_key, server_id } => {
             Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed: false, server_id })
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Re-fetch server info with per-channel classes (the v2 surface).
+///
+/// Mirrors [`get_server_info`] but sends `GetServerInfoV2`, so the returned
+/// channel list carries each channel's [`ChannelInfoV2::class`]. Requires the
+/// connection to have negotiated v2 (done automatically in `connect_server`
+/// and `create_local_server`); before negotiation the server refuses with
+/// `UPGRADE_REQUIRED`.
+#[tauri::command]
+pub async fn get_server_info_v2(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<ServerInfoV2Result, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetServerInfoV2)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::ServerInfoV2 { name, member_count, channels, categories, roles, owner_public_key, server_id } => {
+            Ok(ServerInfoV2Result { server_name: name, member_count, channels, categories, roles, owner_public_key, server_id })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
@@ -1187,6 +1266,39 @@ pub async fn fetch_history(
 
     match response {
         ServerResponse::History { messages } => Ok(messages),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Fetch message history for a channel, carrying sealed rows (the v2 surface).
+///
+/// Mirrors [`fetch_history`] but sends `FetchHistoryV2` and returns
+/// [`MessageInfoV2`] rows (base message + `is_e2ee`/`sealed`/`event_hash`).
+/// Requires the connection to have negotiated v2 (done automatically in
+/// `connect_server` and `create_local_server`).
+#[tauri::command]
+pub async fn fetch_history_v2(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    before_id: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<MessageInfoV2>, String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::FetchHistoryV2 {
+            channel_id,
+            before_id,
+            limit: limit.unwrap_or(50),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match response {
+        ServerResponse::HistoryV2 { messages } => Ok(messages),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }
@@ -4035,6 +4147,11 @@ pub async fn create_local_server(
                     }
                 });
             }
+            // Negotiate v2 on this freshly-created connection too: a server the
+            // user just created is the FIRST one they'll open, so its connection
+            // must be v2-negotiated before the frontend's `get_server_info_v2`.
+            negotiate_protocol(&state, &address).await;
+
             Ok(serde_json::json!({
                 "address": address,
                 "server_name": srv_name,
@@ -4343,6 +4460,1461 @@ async fn event_send_submit(
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run_e2ee — the shared skeleton for the E2EE vertical (T7-T10)
+//
+// Every E2EE command (create / add-members / publish-key-package / steward)
+// loads the identity + device keypair, then runs a `!Send` body: the vertical
+// holds `&FarderMlsStore` across awaits, and `FarderMlsStore` is `Send` but NOT
+// `Sync` (rusqlite's Connection holds a RefCell), so those futures are `!Send`
+// and cannot run on a Tauri command's `Send` future. The body therefore runs on
+// a dedicated current-thread runtime inside `spawn_blocking`, under the same
+// `device_chain_lock` critical section as `submit_event`, after the device is
+// authorized and the `ChainState` is built from `DeviceState`.
+// ---------------------------------------------------------------------------
+
+/// Run one E2EE body on the nested runtime, wired for identity + device +
+/// device-chain lock. The body receives the already-authorized `DeviceState`
+/// and the `ChainState` built from it; it owns both and must persist them
+/// itself (the same load → mutate → save contract as the direct commands).
+async fn run_e2ee<F, Fut, T>(
+    state: &Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    body: F,
+) -> Result<T, String>
+where
+    F: FnOnce(
+            Arc<AppState>,
+            String,
+            String,
+            Keypair,
+            Keypair,
+            crate::device::DeviceState,
+            farder_e2ee_client::ChainState,
+        ) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<Output = Result<T, String>>,
+    T: Send + 'static,
+{
+    // Identity (must be unlocked) + device key. Both are Send, so they move
+    // into the blocking task where the `Actor` borrows them across awaits.
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair()?;
+
+    let state_arc = Arc::clone(state);
+    let result = tokio::task::spawn_blocking(move || -> Result<T, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        rt.block_on(async move {
+            // Serialize all chain writes: load → mutate → save must not
+            // interleave with concurrent commands (submit_event, create_invite,
+            // join_log_server) that touch the same per-(server, device) state
+            // file. Held across awaits.
+            let _chain_guard = state_arc.device_chain_lock.lock().await;
+
+            // Per-(server, device) chain state. Keyed by the log server_id.
+            let mut ds = crate::device::DeviceState::load(&log_server_id)?
+                .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+            authorize_device_if_needed(
+                &state_arc,
+                &server_id,
+                &log_server_id,
+                &identity,
+                &device,
+                &mut ds,
+            )
+            .await?;
+
+            let chain = farder_e2ee_client::ChainState {
+                next_seq: ds.next_seq,
+                last_event_hash: ds.last_event_hash.clone(),
+                lamport: ds.lamport,
+            };
+
+            // The body gets its own clone: the chain guard still borrows
+            // `state_arc` and is dropped at the end of this block.
+            body(
+                Arc::clone(&state_arc),
+                server_id,
+                log_server_id,
+                identity,
+                device,
+                ds,
+                chain,
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// create_e2ee_channel — owner creates an E2EE channel (LOG event, not
+// CreateChannel): submit ChannelCreated { class: E2ee }, mint the group + store,
+// publish the owner's KeyPackage, then bootstrap so the owner's leaf is
+// confirmed. Persists both the device chain and the per-channel MLS state.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct CreateE2eeChannelResult {
+    pub channel_id: u64,
+    pub class: String,
+    pub event_hash: String,
+}
+
+#[tauri::command]
+pub async fn create_e2ee_channel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — stamps EventCore.server_id + keys the device chain
+    name: String,
+) -> Result<CreateE2eeChannelResult, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("channel name cannot be empty".to_string());
+    }
+
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, ds, chain| async move {
+            run_create_e2ee_channel(
+                state, server_id, log_server_id, identity, device, name, ds, chain,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// The non-Send body of [`create_e2ee_channel`], driven on a current-thread
+/// runtime by [`run_e2ee`] (which already holds the device-chain lock,
+/// authorized the device, and built `chain` from `ds`).
+async fn run_create_e2ee_channel(
+    state: Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    identity: Keypair,
+    device: Keypair,
+    name: String,
+    mut ds: crate::device::DeviceState,
+    mut chain: farder_e2ee_client::ChainState,
+) -> Result<CreateE2eeChannelResult, String> {
+    use farder_crypto::event_log::E2EE_CHANNEL_ID_FLOOR;
+    use farder_e2ee_client::{
+        bootstrap_group, create_e2ee_channel, publish_key_package, Actor, ChainState, ChannelKey,
+        ChannelSpec,
+    };
+
+    // channel_id is CLIENT-chosen and must clear the legacy DB AUTOINCREMENT
+    // space (>= E2EE_CHANNEL_ID_FLOOR). The crate validates the floor; we pick
+    // a fresh value at/above it (never a hand-rolled small id).
+    let channel_id = E2EE_CHANNEL_ID_FLOOR + (rand::random::<u32>() as u64);
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let spec = ChannelSpec {
+        key: key.clone(),
+        name,
+        // This rung the server only accepts `kind == "text"` with no parent
+        // (event_ingest::materialize_channel_created), so encrypted channels are
+        // text-only and uncategorized regardless of the legacy type select.
+        kind: "text".to_string(),
+        parent: None,
+    };
+
+    let actor = Actor {
+        device: &device,
+        identity: &identity,
+        log_server_id: &log_server_id,
+    };
+    let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+    let data_dir = farder_data_dir();
+
+    // Advance + persist the device chain only on accepted events. Each of the
+    // three crate calls submits exactly one event and advances `chain` only
+    // after the server accepts it, so we sync + save after each (mirrors the
+    // per-event save in submit_event).
+    let sync_chain = |ds: &mut crate::device::DeviceState, chain: &ChainState| {
+        ds.next_seq = chain.next_seq;
+        ds.last_event_hash = chain.last_event_hash.clone();
+        ds.lamport = chain.lamport;
+    };
+
+    // 2. Submit ChannelCreated { class: E2ee } + mint the group/store.
+    let mut created = create_e2ee_channel(&transport, &actor, &mut chain, &spec, &data_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    sync_chain(&mut ds, &chain);
+    ds.save(&log_server_id)?;
+
+    // 3. Publish this device's KeyPackage so members can add it (T8).
+    let _published = publish_key_package(
+        &transport,
+        &actor,
+        &mut chain,
+        &created.store,
+        &created.store_instance_hash,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    sync_chain(&mut ds, &chain);
+    ds.save(&log_server_id)?;
+
+    // 4. Bootstrap the creator's own leaf (generation 0 / epoch 0 -> 1).
+    let commit = bootstrap_group(
+        &transport,
+        &actor,
+        &mut chain,
+        &key,
+        &mut created.group,
+        &created.store,
+        &created.store_instance_hash,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    sync_chain(&mut ds, &chain);
+    ds.save(&log_server_id)?;
+
+    // 5. Persist the per-channel MLS state so T9/T10 can resume the group.
+    crate::mls_state::MlsChannelState {
+        generation: 0,
+        epoch: commit.local_epoch,
+        store_instance_hash: hex::encode(created.store_instance_hash),
+        confirmed: true,
+        cursor: 0,
+        poisoned: None,
+    }
+    .save(&log_server_id, channel_id)?;
+
+    // 6. Auto-add current server members (T8): every current member's device is
+    //    added to the group so the fresh channel is usable without another
+    //    click. Best-effort per member — a member with no (or a non-farder)
+    //    key package is skipped with a log line, never failing the create; a
+    //    stale-epoch divergence is terminal and surfaces as an error.
+    add_current_members_to_group(
+        &state,
+        &server_id,
+        &log_server_id,
+        channel_id,
+        &identity,
+        &device,
+        &mut ds,
+        &mut chain,
+        &key,
+        0,
+        &created.store,
+        &created.store_instance_hash,
+        &mut created.group,
+    )
+    .await?;
+
+    Ok(CreateE2eeChannelResult {
+        channel_id,
+        class: "E2ee".to_string(),
+        event_hash: created.event_hash,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// add_members_to_e2ee_channel + publish_own_key_package (T8)
+//
+// Both run the same `spawn_blocking` + nested current-thread runtime bridge as
+// `create_e2ee_channel` (T7): the E2EE vertical holds `&FarderMlsStore` across
+// awaits, and `FarderMlsStore` is `Send` but NOT `Sync`, so those futures are
+// `!Send` and cannot run on a Tauri command's `Send` future. The whole
+// sequence therefore runs on a dedicated current-thread runtime inside
+// `spawn_blocking`, under the same `device_chain_lock` critical section as
+// `submit_event` / `create_e2ee_channel`.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct AddMembersResult {
+    pub added: Vec<AddedE2eeMember>,
+    pub skipped: Vec<SkippedE2eeMember>,
+}
+
+#[derive(serde::Serialize)]
+pub struct AddedE2eeMember {
+    pub identity: String,
+    pub device: String,
+    pub epoch: u64,
+}
+
+#[derive(serde::Serialize)]
+pub struct SkippedE2eeMember {
+    pub identity: String,
+    pub device: Option<String>,
+    pub reason: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct PublishOwnKeyPackageResult {
+    pub channel_id: u64,
+    pub event_hash: String,
+}
+
+/// Authorize this device on the server (one `DeviceAuthorized` event) the first
+/// time it acts — mirrors the head of `run_create_e2ee_channel` and
+/// `submit_event`. Advances + persists `ds` only on acceptance.
+async fn authorize_device_if_needed(
+    state: &AppState,
+    server_id: &str,
+    log_server_id: &str,
+    identity: &Keypair,
+    device: &Keypair,
+    ds: &mut crate::device::DeviceState,
+) -> Result<(), String> {
+    use farder_crypto::event_log::EventPayload;
+
+    if ds.authorized {
+        return Ok(());
+    }
+    let cert = crate::device::device_cert(identity, device);
+    let da = event_build_next(
+        device,
+        identity,
+        log_server_id,
+        ds.last_event_hash.clone(),
+        ds.next_seq,
+        ds.lamport,
+        EventPayload::DeviceAuthorized { cert },
+    );
+    event_send_submit(state, server_id, &da).await?;
+    ds.next_seq = da.core.seq + 1;
+    ds.last_event_hash = Some(da.hash());
+    ds.lamport = da.core.lamport;
+    ds.authorized = true;
+    ds.save(log_server_id)?;
+    Ok(())
+}
+
+/// Add every current server member's device to `group` (the steward side of the
+/// membership bridge at channel-creation time). Reuses the crate's
+/// `fetch_key_packages` / `decode_key_package` / `add_member` — never a
+/// hand-rolled MLS path.
+///
+/// Resilience contract: a member (or one of its devices) with NO published
+/// key package, or a key package that fails the farder-credential gate, is
+/// SKIPPED with a clear `eprintln!` and a structured reason — it must not fail
+/// the whole channel create. A `stale-epoch` divergence from `add_member` is
+/// terminal (the local group is then one epoch ahead of the server) and aborts.
+///
+/// Advances + saves both the device chain and `mls_state.json` after each
+/// accepted commit, so a later failure leaves an honest resume point.
+async fn add_current_members_to_group(
+    state: &AppState,
+    server_id: &str,
+    log_server_id: &str,
+    channel_id: u64,
+    identity: &Keypair,
+    device: &Keypair,
+    ds: &mut crate::device::DeviceState,
+    chain: &mut farder_e2ee_client::ChainState,
+    key: &farder_e2ee_client::ChannelKey,
+    generation: u64,
+    store: &farder_mls::store::FarderMlsStore,
+    store_instance_hash: &[u8; 32],
+    group: &mut farder_mls::group::MlsChannelGroup,
+) -> Result<AddMembersResult, String> {
+    use farder_crypto::event_log::{Event, EventPayload};
+    use farder_e2ee_client::{add_member, Actor, E2eeTransport, StewardContext};
+    use farder_mls::group::{decode_key_package, DeclaredMember};
+
+    let members: Vec<MemberInfo> = {
+        let response = bridge::send_request(state, server_id, ServerRequest::GetMembers)
+            .await
+            .map_err(|e| e.to_string())?;
+        match response {
+            ServerResponse::Members { members } => members,
+            ServerResponse::Error { reason } => return Err(reason),
+            other => return Err(format!("unexpected response to GetMembers: {:?}", other)),
+        }
+    };
+
+    let actor = Actor {
+        device,
+        identity,
+        log_server_id,
+    };
+    let transport = crate::e2ee_transport::E2eeTransportImpl::new(state, server_id.to_string());
+    let ctx = StewardContext {
+        key,
+        generation,
+        store,
+        store_instance_hash,
+    };
+
+    let mut result = AddMembersResult {
+        added: Vec::new(),
+        skipped: Vec::new(),
+    };
+
+    for member in members {
+        if member.public_key == identity.public_key() {
+            continue; // the owner is already the creator + bootstrapped leaf
+        }
+        let member_identity = member.public_key.clone();
+        let member_name = member.display_name.clone();
+
+        // Enumerate this identity's authorized devices (the roster carries only
+        // the identity, not the device id — leaves are per (identity, device)).
+        let device_ids: Vec<String> = {
+            let events = match transport.fetch_device_certs(&member_identity).await {
+                Ok(events) => events,
+                Err(e) => {
+                    let reason = format!("fetch device certs: {e}");
+                    eprintln!(
+                        "E2EE add: skipping member {} ({member_identity}) — {reason}",
+                        member_name
+                    );
+                    result.skipped.push(SkippedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: None,
+                        reason,
+                    });
+                    continue;
+                }
+            };
+            let mut ids: Vec<String> = events
+                .iter()
+                .filter_map(|bytes| Event::from_bytes(bytes).ok().map(|ev| ev.core.device))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+
+        if device_ids.is_empty() {
+            let reason = "no authorized device".to_string();
+            eprintln!(
+                "E2EE add: skipping member {} ({member_identity}) — {reason}",
+                member_name
+            );
+            result.skipped.push(SkippedE2eeMember {
+                identity: member_identity.to_string(),
+                device: None,
+                reason,
+            });
+            continue;
+        }
+
+        for device_id in device_ids {
+            // Idempotency guard (REQUIRED before any auto-add trigger): skip any
+            // `(identity, device)` already present as a leaf in the group, so a
+            // re-add never submits a redundant `MlsCommit` — which would advance
+            // the epoch and could trip the server's commit-rate rule. We use
+            // `leaves()` (the ACTUAL view: real credential + signature key), not
+            // `members()` (the claimed view), matching the add loop's own
+            // security posture. A non-farder leaf in the tree fails the whole
+            // add (fail-closed) rather than being silently treated as absent.
+            {
+                let already_present = match group.leaves() {
+                    Ok(leaves) => leaves
+                        .iter()
+                        .any(|l| l.member.identity == member_identity && l.member.device == device_id),
+                    Err(e) => return Err(format!("read group leaves: {e}")),
+                };
+                if already_present {
+                    eprintln!(
+                        "E2EE add: skipping member {} ({member_identity}) device \
+                         {device_id} — already a member",
+                        member_name
+                    );
+                    result.skipped.push(SkippedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: Some(device_id.clone()),
+                        reason: "already a member".to_string(),
+                    });
+                    continue;
+                }
+            }
+
+            // 1. Fetch + decode the newest key package, failing closed on a
+            //    non-farder credential BEFORE `add_member` merges anything. This
+            //    is what lets a member with no package (or a bad one) be skipped
+            //    precisely instead of aborted. `add_member` re-fetches +
+            //    re-decodes internally — this is the sanctioned pre-gate, not a
+            //    reimplementation of the add path.
+            let key_package_bytes: Vec<u8> = {
+                let events =
+                    match transport.fetch_key_packages(&member_identity, &device_id).await {
+                        Ok(events) => events,
+                        Err(e) => {
+                            let reason = format!("fetch key packages: {e}");
+                            eprintln!(
+                                "E2EE add: skipping member {} ({member_identity}) device \
+                                 {device_id} — {reason}",
+                                member_name
+                            );
+                            result.skipped.push(SkippedE2eeMember {
+                                identity: member_identity.to_string(),
+                                device: Some(device_id.clone()),
+                                reason,
+                            });
+                            continue;
+                        }
+                    };
+                let Some(last) = events.into_iter().last() else {
+                    let reason = "no published key package".to_string();
+                    eprintln!(
+                        "E2EE add: skipping member {} ({member_identity}) device \
+                         {device_id} — {reason}",
+                        member_name
+                    );
+                    result.skipped.push(SkippedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: Some(device_id.clone()),
+                        reason,
+                    });
+                    continue;
+                };
+                let kp_event = match Event::from_bytes(&last) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        let reason = format!("decode key package event: {e}");
+                        eprintln!(
+                            "E2EE add: skipping member {} ({member_identity}) device \
+                             {device_id} — {reason}",
+                            member_name
+                        );
+                        result.skipped.push(SkippedE2eeMember {
+                            identity: member_identity.to_string(),
+                            device: Some(device_id.clone()),
+                            reason,
+                        });
+                        continue;
+                    }
+                };
+                match &kp_event.core.payload {
+                    EventPayload::MlsKeyPackagePublished { key_package, .. } => key_package.clone(),
+                    _ => {
+                        let reason =
+                            "fetch_key_packages returned a non-key-package event".to_string();
+                        eprintln!(
+                            "E2EE add: skipping member {} ({member_identity}) device \
+                             {device_id} — {reason}",
+                            member_name
+                        );
+                        result.skipped.push(SkippedE2eeMember {
+                            identity: member_identity.to_string(),
+                            device: Some(device_id.clone()),
+                            reason,
+                        });
+                        continue;
+                    }
+                }
+            };
+
+            if let Err(e) = decode_key_package(store, &key_package_bytes) {
+                let reason = format!("key package fails the farder-credential gate: {e}");
+                eprintln!(
+                    "E2EE add: skipping member {} ({member_identity}) device {device_id} — \
+                     {reason}",
+                    member_name
+                );
+                result.skipped.push(SkippedE2eeMember {
+                    identity: member_identity.to_string(),
+                    device: Some(device_id.clone()),
+                    reason,
+                });
+                continue;
+            }
+
+            // 2. The crate's full steward add: re-fetch, re-decode, add locally,
+            //    then submit MlsCommit + MlsWelcome. Any error here is a skip
+            //    EXCEPT a stale-epoch divergence (the local group is then one
+            //    epoch ahead of the server — continuing would emit doomed commits).
+            let declared = DeclaredMember {
+                identity: member_identity.clone(),
+                device: device_id.clone(),
+            };
+            match add_member(&transport, &actor, chain, &ctx, group, &declared).await {
+                Ok(outcome) => {
+                    ds.next_seq = chain.next_seq;
+                    ds.last_event_hash = chain.last_event_hash.clone();
+                    ds.lamport = chain.lamport;
+                    ds.save(log_server_id)?;
+                    crate::mls_state::MlsChannelState {
+                        generation,
+                        epoch: outcome.local_epoch,
+                        store_instance_hash: hex::encode(store_instance_hash),
+                        confirmed: true,
+                        cursor: 0,
+                        poisoned: None,
+                    }
+                    .save(log_server_id, channel_id)?;
+                    result.added.push(AddedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: device_id.clone(),
+                        epoch: outcome.local_epoch,
+                    });
+                }
+                Err(e) if e.is_stale_epoch_diverged() => {
+                    return Err(format!(
+                        "add member {member_identity} / {device_id} diverged (stale-epoch): \
+                         the local group is one epoch ahead of the server — aborting: {e}"
+                    ));
+                }
+                Err(e) => {
+                    let reason = format!("add member: {e}");
+                    eprintln!(
+                        "E2EE add: skipping member {} ({member_identity}) device {device_id} — \
+                         {reason}",
+                        member_name
+                    );
+                    result.skipped.push(SkippedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: Some(device_id.clone()),
+                        reason,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Auto-add current server members to an existing E2EE channel's group.
+/// Standalone entry for retry/T9/T10; `create_e2ee_channel` calls the same
+/// [`add_current_members_to_group`] helper inline after bootstrap.
+#[tauri::command]
+pub async fn add_members_to_e2ee_channel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — keys the device chain
+    channel_id: u64,
+) -> Result<AddMembersResult, String> {
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, ds, chain| async move {
+            run_add_members_to_e2ee_channel(
+                state, server_id, log_server_id, channel_id, identity, device, ds, chain,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// The non-Send body of [`add_members_to_e2ee_channel`]: resume the store +
+/// group this device persisted at create time, then run the add loop.
+async fn run_add_members_to_e2ee_channel(
+    state: Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+    identity: Keypair,
+    device: Keypair,
+    mut ds: crate::device::DeviceState,
+    mut chain: farder_e2ee_client::ChainState,
+) -> Result<AddMembersResult, String> {
+    use farder_e2ee_client::{resume_store, ChannelKey};
+
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let data_dir = farder_data_dir();
+
+    // Resume the MLS store + group this device persisted at create/bootstrap
+    // time. `resume_store` is terminal on a missing/mismatched instance hash.
+    let (store, store_instance_hash) = resume_store(&data_dir, &key).map_err(|e| e.to_string())?;
+    let generation = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+        .map(|s| s.generation)
+        .unwrap_or(0);
+    let mut group = farder_mls::group::MlsChannelGroup::load(
+        &store,
+        &farder_mls::credential::DeviceSigner(&device),
+        farder_e2ee_client::channel_group_id(&log_server_id, channel_id, generation).as_bytes(),
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "no MLS group for this channel".to_string())?;
+
+    add_current_members_to_group(
+        &state,
+        &server_id,
+        &log_server_id,
+        channel_id,
+        &identity,
+        &device,
+        &mut ds,
+        &mut chain,
+        &key,
+        generation,
+        &store,
+        &store_instance_hash,
+        &mut group,
+    )
+    .await
+}
+
+/// Publish THIS device's KeyPackage for an E2EE channel so a steward can add it
+/// to the group. A member calls this when it first opens an E2EE channel it is
+/// not yet a confirmed member of (T9/T10 wire the trigger). Creates (or resumes)
+/// the joiner store, publishes, and records `mls_state.json` (`confirmed: false`).
+#[tauri::command]
+pub async fn publish_own_key_package(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — keys the device chain
+    channel_id: u64,
+) -> Result<PublishOwnKeyPackageResult, String> {
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, ds, chain| async move {
+            run_publish_own_key_package(
+                state, server_id, log_server_id, channel_id, identity, device, ds, chain,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// The non-Send body of [`publish_own_key_package`]: create-once or resume the
+/// joiner store, publish the KeyPackage, and record the resume point.
+async fn run_publish_own_key_package(
+    state: Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+    identity: Keypair,
+    device: Keypair,
+    mut ds: crate::device::DeviceState,
+    mut chain: farder_e2ee_client::ChainState,
+) -> Result<PublishOwnKeyPackageResult, String> {
+    use farder_e2ee_client::{
+        create_joiner_store, publish_key_package, resume_store, Actor, ChannelKey,
+    };
+
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let data_dir = farder_data_dir();
+
+    // Create-once or resume the joiner store: the KeyPackage's private material
+    // must live in the same store that later joins from the Welcome (the store
+    // lifecycle contract in `join.rs`).
+    let store_path = key.mls_store_path(&data_dir).map_err(|e| e.to_string())?;
+    let (store, store_instance_hash) = if store_path.exists() {
+        resume_store(&data_dir, &key).map_err(|e| e.to_string())?
+    } else {
+        create_joiner_store(&data_dir, &key).map_err(|e| e.to_string())?
+    };
+
+    let actor = Actor {
+        device: &device,
+        identity: &identity,
+        log_server_id: &log_server_id,
+    };
+    let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+
+    let published = publish_key_package(&transport, &actor, &mut chain, &store, &store_instance_hash)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ds.next_seq = chain.next_seq;
+    ds.last_event_hash = chain.last_event_hash.clone();
+    ds.lamport = chain.lamport;
+    ds.save(&log_server_id)?;
+
+    // Record the resume point: not yet joined/confirmed (T9/T10 complete the join).
+    crate::mls_state::MlsChannelState {
+        generation: 0,
+        epoch: 0,
+        store_instance_hash: hex::encode(store_instance_hash),
+        confirmed: false,
+        cursor: 0,
+        poisoned: None,
+    }
+    .save(&log_server_id, channel_id)?;
+
+    Ok(PublishOwnKeyPackageResult {
+        channel_id,
+        event_hash: published.event_hash,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// process_mls_control_events — the steward (T9): advance a member's MLS group
+// when someone else commits, and join + confirm our own leaf from a Welcome.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct ProcessMlsControlEventsResult {
+    pub channel_id: u64,
+    /// `"advanced"` (the group advanced, possibly zero steps) or
+    /// `"equivocation"` (F4: the group is POISONED by an impostor leaf and must
+    /// never be used further — the frontend maps this to the "channel state
+    /// could not be confirmed" terminal state).
+    pub outcome: String,
+    /// Set when `outcome == "equivocation"`; the impostor-leaf detail.
+    pub reason: Option<String>,
+    /// How many accepted steps (applied commits / joined welcomes) ran.
+    pub processed: usize,
+    pub epoch: u64,
+    pub generation: u64,
+    pub confirmed: bool,
+    pub cursor: u64,
+}
+
+/// Advance one E2EE channel's MLS group to the server's current control-plane
+/// state: resume the store + group, fetch outstanding
+/// `MlsCommit`/`MlsWelcome`/`MlsLeafConfirmed`/`MlsGroupReset` events from the
+/// recorded cursor, apply each commit in order through the crate's two
+/// receive-side gates, and confirm our own leaf when a Welcome is aimed at us.
+#[tauri::command]
+pub async fn process_mls_control_events(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — keys the device chain
+    channel_id: u64,
+) -> Result<ProcessMlsControlEventsResult, String> {
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, ds, chain| async move {
+            run_process_mls_control_events(
+                state,
+                server_id,
+                log_server_id,
+                channel_id,
+                identity,
+                device,
+                ds,
+                chain,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// The non-Send body of [`process_mls_control_events`], driven on a
+/// current-thread runtime by [`run_e2ee`].
+async fn run_process_mls_control_events(
+    state: Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+    identity: Keypair,
+    device: Keypair,
+    mut ds: crate::device::DeviceState,
+    mut chain: farder_e2ee_client::ChainState,
+) -> Result<ProcessMlsControlEventsResult, String> {
+    use farder_crypto::event_log::{device_id, EventPayload};
+    use farder_e2ee_client::{
+        build_cert_resolver, channel_group_id, confirm_leaf, fetch_mls_control_exhaustive,
+        join_channel, process_incoming_commit, resume_store, Actor, ChannelKey, DeclaredCommit,
+        IncomingCommitOutcome, PendingWelcome,
+    };
+    use farder_mls::group::{DeclaredMember, MlsChannelGroup};
+
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let data_dir = farder_data_dir();
+
+    // No store => this device has never published a KeyPackage for the channel
+    // (the joiner store is created on first open, T8), so there is nothing to
+    // steward yet. Report an honest no-op advance rather than erroring: the
+    // steward fires on every control event, including for channels we have not
+    // opened.
+    let store_path = key.mls_store_path(&data_dir).map_err(|e| e.to_string())?;
+    if !store_path.exists() {
+        return Ok(ProcessMlsControlEventsResult {
+            channel_id,
+            outcome: "advanced".to_string(),
+            reason: None,
+            processed: 0,
+            epoch: 0,
+            generation: 0,
+            confirmed: false,
+            cursor: 0,
+        });
+    }
+
+    let (store, store_instance_hash) = resume_store(&data_dir, &key).map_err(|e| e.to_string())?;
+
+    let mut mls = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+        .unwrap_or(crate::mls_state::MlsChannelState {
+            generation: 0,
+            epoch: 0,
+            store_instance_hash: hex::encode(store_instance_hash),
+            confirmed: false,
+            cursor: 0,
+            poisoned: None,
+        });
+
+    // Terminal from a previous run (F4): the impostor leaf is already merged
+    // and cannot be rolled back. Refuse to continue, ever.
+    if let Some(reason) = mls.poisoned.clone() {
+        return Ok(ProcessMlsControlEventsResult {
+            channel_id,
+            outcome: "equivocation".to_string(),
+            reason: Some(reason),
+            processed: 0,
+            epoch: mls.epoch,
+            generation: mls.generation,
+            confirmed: mls.confirmed,
+            cursor: mls.cursor,
+        });
+    }
+
+    let generation = mls.generation;
+    let cursor = mls.cursor;
+
+    // `None` until we have joined from our own Welcome (a member that published
+    // its KeyPackage but has not yet been added).
+    let mut group = MlsChannelGroup::load(
+        &store,
+        &farder_mls::credential::DeviceSigner(&device),
+        channel_group_id(&log_server_id, channel_id, generation).as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let actor = Actor {
+        device: &device,
+        identity: &identity,
+        log_server_id: &log_server_id,
+    };
+    let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+
+    let (events, next_cursor) = fetch_mls_control_exhaustive(&transport, channel_id, cursor)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let my_identity = identity.public_key();
+    let my_device = device_id(&device.public_key());
+
+    let mut processed = 0usize;
+
+    for event in &events {
+        match &event.core.payload {
+            EventPayload::MlsCommit {
+                epoch,
+                mls_message,
+                adds,
+                removes,
+                post_tree_hash,
+                ..
+            } => {
+                // Before we have joined from our own Welcome, every commit in
+                // the control plane predates our membership (the Welcome carries
+                // the post-add tree, so we join at its epoch directly). Skip
+                // them — once joined, later commits are applied below.
+                let Some(g) = group.as_mut() else { continue };
+
+                let declared = DeclaredCommit {
+                    epoch: *epoch,
+                    adds: adds.clone(),
+                    removes: removes.clone(),
+                    post_tree_hash: *post_tree_hash,
+                };
+                // Gate 2's trust anchor is built over the commit's declared
+                // adds, fetched from the log (never from the commit itself).
+                let members: Vec<DeclaredMember> = declared
+                    .adds
+                    .iter()
+                    .map(|a| DeclaredMember {
+                        identity: a.identity.clone(),
+                        device: a.device.clone(),
+                    })
+                    .collect();
+                let certs = build_cert_resolver(&transport, &members)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                match process_incoming_commit(&store, g, mls_message, &declared, &certs)
+                    .map_err(|e| e.to_string())?
+                {
+                    IncomingCommitOutcome::Applied { epoch, .. } => {
+                        mls.epoch = epoch;
+                        processed += 1;
+                        // Persist after each accepted step so a later failure
+                        // leaves an honest resume point (the cursor is only
+                        // advanced at the end — a gap is retried, never skipped).
+                        mls.save(&log_server_id, channel_id)?;
+                    }
+                    IncomingCommitOutcome::OutOfOrder { current_epoch, received_epoch }
+                        if received_epoch < current_epoch =>
+                    {
+                        // Replay of a commit we already applied (e.g. after a
+                        // crash before the cursor persisted): skip it.
+                    }
+                    IncomingCommitOutcome::OutOfOrder { received_epoch, .. } => {
+                        return Err(format!(
+                            "commit at epoch {received_epoch} arrived out of order — a gap \
+                             blocks advancing the group"
+                        ));
+                    }
+                    IncomingCommitOutcome::LeafBindingFailure { member, reason } => {
+                        // F4 (terminal): Gate 1 already merged the impostor
+                        // leaf and farder-mls offers no rollback. Persist the
+                        // poisoned flag and stop — never retry, never continue.
+                        let reason = format!(
+                            "impostor leaf for {} / {}: {reason}",
+                            member.identity, member.device
+                        );
+                        mls.poisoned = Some(reason.clone());
+                        mls.cursor = next_cursor;
+                        mls.save(&log_server_id, channel_id)?;
+                        return Ok(ProcessMlsControlEventsResult {
+                            channel_id,
+                            outcome: "equivocation".to_string(),
+                            reason: Some(reason),
+                            processed,
+                            epoch: mls.epoch,
+                            generation: mls.generation,
+                            confirmed: mls.confirmed,
+                            cursor: next_cursor,
+                        });
+                    }
+                }
+            }
+            EventPayload::MlsWelcome {
+                channel_id: wc,
+                generation: wgen,
+                for_member,
+                for_device,
+                welcome,
+                ..
+            } => {
+                // Only a Welcome addressed to THIS device advances us; others'
+                // Welcomes are skipped (they are for the steward/other members).
+                if for_member != &my_identity || for_device.as_str() != my_device {
+                    continue;
+                }
+                if group.is_none() {
+                    let (g, join_info) =
+                        join_channel(&store, welcome).map_err(|e| e.to_string())?;
+                    group = Some(g);
+
+                    let pending = PendingWelcome {
+                        channel_id: *wc,
+                        generation: *wgen,
+                        welcome: welcome.clone(),
+                    };
+                    let confirmation = confirm_leaf(
+                        &transport,
+                        &actor,
+                        &mut chain,
+                        &key,
+                        &store_instance_hash,
+                        &pending,
+                        &join_info,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                    // `confirm_leaf` advanced the device chain; sync + persist
+                    // the same way the other E2EE commands do.
+                    ds.next_seq = chain.next_seq;
+                    ds.last_event_hash = chain.last_event_hash.clone();
+                    ds.lamport = chain.lamport;
+                    ds.save(&log_server_id)?;
+
+                    mls.epoch = confirmation.epoch;
+                    mls.generation = *wgen;
+                    mls.confirmed = true;
+                    processed += 1;
+                    mls.save(&log_server_id, channel_id)?;
+                }
+                // Already joined (replay / idempotent): nothing to do.
+            }
+            // MlsLeafConfirmed / MlsGroupReset / anything else: not needed to
+            // advance the group. MlsGroupReset (generation bump) is out of T9's
+            // scope — it arrives here and is skipped, not mis-handled.
+            _ => {}
+        }
+    }
+
+    // Advance the fetch cursor past everything we just consumed, so the next
+    // run starts after this page (idempotent: an already-applied commit is a
+    // replay, an un-joined member skips pre-membership commits).
+    mls.cursor = next_cursor;
+    mls.save(&log_server_id, channel_id)?;
+
+    Ok(ProcessMlsControlEventsResult {
+        channel_id,
+        outcome: "advanced".to_string(),
+        reason: None,
+        processed,
+        epoch: mls.epoch,
+        generation: mls.generation,
+        confirmed: mls.confirmed,
+        cursor: next_cursor,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// send_sealed_message — seal + submit one E2EE channel message (T10)
+//
+// Wraps the crate's proven `send_sealed` path (build MessageEnvelope with empty
+// attachment vecs, enforce the client-side caps, seal, submit
+// `MessagePostedE2ee`); on a bare `stale-epoch` rejection it runs the crate's
+// bounded `send_sealed_resync` loop. Both call the crate, never a hand-rolled
+// MLS path. Runs under `run_e2ee` (spawn_blocking + nested runtime) because the
+// vertical holds `&FarderMlsStore` across awaits.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct SendSealedMessageResult {
+    /// Server-assigned hash of the accepted `MessagePostedE2ee` event.
+    pub event_hash: String,
+    /// The epoch the ciphertext was sealed in (the group's current epoch at
+    /// seal time; sealing never advances it).
+    pub epoch: u64,
+}
+
+#[tauri::command]
+pub async fn send_sealed_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — stamps the event + keys the device chain
+    channel_id: u64,
+    content: String,
+    reply_to: Option<String>, // event-hash ref; None for top-level (legacy numeric replies are not mapped yet)
+) -> Result<SendSealedMessageResult, String> {
+    let content = content.trim().to_string();
+    if content.is_empty() {
+        return Err("message content cannot be empty".to_string());
+    }
+
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, ds, chain| async move {
+            run_send_sealed_message(
+                state,
+                server_id,
+                log_server_id,
+                channel_id,
+                identity,
+                device,
+                ds,
+                chain,
+                content,
+                reply_to,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// The non-Send body of [`send_sealed_message`], driven on a current-thread
+/// runtime by [`run_e2ee`] (which already holds the device-chain lock and
+/// authorized the device). `send_sealed` advances `chain` only after the server
+/// accepts the event, so the chain is synced + persisted once on success.
+async fn run_send_sealed_message(
+    state: Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+    identity: Keypair,
+    device: Keypair,
+    mut ds: crate::device::DeviceState,
+    mut chain: farder_e2ee_client::ChainState,
+    content: String,
+    reply_to: Option<String>,
+) -> Result<SendSealedMessageResult, String> {
+    use farder_e2ee_client::{
+        channel_group_id, resume_store, send_sealed, send_sealed_resync, Actor, ChannelKey,
+        ResyncRequest, SealContext, SendEligibility,
+    };
+    use farder_mls::credential::DeviceSigner;
+    use farder_mls::group::MlsChannelGroup;
+
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let data_dir = farder_data_dir();
+
+    let (store, store_instance_hash) = resume_store(&data_dir, &key).map_err(|e| e.to_string())?;
+    let mut mls = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+        .unwrap_or(crate::mls_state::MlsChannelState {
+            generation: 0,
+            epoch: 0,
+            store_instance_hash: hex::encode(store_instance_hash),
+            confirmed: false,
+            cursor: 0,
+            poisoned: None,
+        });
+
+    // F4 (terminal): the group is poisoned by an impostor leaf. Never send into
+    // it; surface the equivocation state rather than continuing.
+    if let Some(reason) = mls.poisoned.clone() {
+        return Err(format!(
+            "channel state could not be confirmed (poisoned): {reason}"
+        ));
+    }
+
+    let generation = mls.generation;
+    let mut group = MlsChannelGroup::load(
+        &store,
+        &DeviceSigner(&device),
+        channel_group_id(&log_server_id, channel_id, generation).as_bytes(),
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "no MLS group for this channel".to_string())?;
+
+    let actor = Actor {
+        device: &device,
+        identity: &identity,
+        log_server_id: &log_server_id,
+    };
+    let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+
+    let ctx = SealContext {
+        key: &key,
+        generation,
+        store: &store,
+        content: &content,
+        reply_to: reply_to.clone(),
+    };
+    let eligibility = if mls.confirmed {
+        SendEligibility::confirmed()
+    } else {
+        SendEligibility::not_confirmed()
+    };
+
+    let outcome = match send_sealed(&transport, &actor, &mut chain, &ctx, &mut group, &eligibility)
+        .await
+    {
+        Ok(send) => send,
+        // F6: the bare "stale-epoch" rejection also fires for
+        // MessagePostedE2ee. Resync is bounded (unproductive + total caps) and
+        // terminates under every transport behaviour; it never spins.
+        Err(farder_e2ee_client::E2eeError::Transport(e)) if e.is_stale_epoch() => {
+            let request = ResyncRequest {
+                eligibility: &eligibility,
+                since_accept_seq: mls.cursor,
+            };
+            let certs =
+                build_roster_cert_resolver(&transport, &state, &server_id, &identity).await?;
+            let resynced = match send_sealed_resync(
+                &transport,
+                &actor,
+                &mut chain,
+                &ctx,
+                &mut group,
+                &request,
+                &certs,
+            )
+            .await
+            {
+                Ok(resynced) => resynced,
+                // F4 (terminal): an impostor leaf is already merged and cannot
+                // be rolled back. Persist the poisoned flag so a later send or
+                // decrypt refuses this group, then surface the equivocation.
+                Err(farder_e2ee_client::E2eeError::ResyncPoisoned { member, reason }) => {
+                    let reason = format!(
+                        "impostor leaf for {} / {}: {reason}",
+                        member.identity, member.device
+                    );
+                    mls.poisoned = Some(reason.clone());
+                    mls.save(&log_server_id, channel_id)?;
+                    return Err(format!(
+                        "channel state could not be confirmed (poisoned): {reason}"
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+            // Persist the advanced control-plane cursor + the group's new epoch
+            // so the next resync/steward starts where this one left off.
+            mls.cursor = resynced.next_accept_seq;
+            mls.epoch = group.epoch();
+            mls.save(&log_server_id, channel_id)?;
+            resynced.send
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+
+    // Advance + persist the device chain on acceptance (mirrors submit_event).
+    ds.next_seq = chain.next_seq;
+    ds.last_event_hash = chain.last_event_hash.clone();
+    ds.lamport = chain.lamport;
+    ds.save(&log_server_id)?;
+
+    Ok(SendSealedMessageResult {
+        event_hash: outcome.event_hash,
+        epoch: outcome.epoch,
+    })
+}
+
+/// Build the Gate-2 trust anchor for the bounded resync loop: a
+/// [`farder_e2ee_client::VerifiedCertResolver`] over every current server
+/// member's authorized devices. A `stale-epoch` winning commit may add a
+/// member, and `send_sealed_resync` resolves each fetched commit's declared
+/// `adds` against this resolver — so it must cover the roster, fetched from the
+/// log via the crate's own `resolve_device_cert` (never synthesized from the
+/// commit). Reuses the same device-enumeration shape as
+/// `add_current_members_to_group`.
+async fn build_roster_cert_resolver(
+    transport: &crate::e2ee_transport::E2eeTransportImpl<'_>,
+    state: &AppState,
+    server_id: &str,
+    identity: &Keypair,
+) -> Result<farder_e2ee_client::VerifiedCertResolver, String> {
+    use farder_crypto::event_log::Event;
+    use farder_e2ee_client::{build_cert_resolver, E2eeTransport};
+    use farder_mls::group::DeclaredMember;
+
+    let members: Vec<MemberInfo> = {
+        let response = bridge::send_request(state, server_id, ServerRequest::GetMembers)
+            .await
+            .map_err(|e| e.to_string())?;
+        match response {
+            ServerResponse::Members { members } => members,
+            ServerResponse::Error { reason } => return Err(reason),
+            other => return Err(format!("unexpected response to GetMembers: {other:?}")),
+        }
+    };
+
+    let mut declared: Vec<DeclaredMember> = Vec::new();
+    for member in members {
+        // Our own leaf is already in the group; Gate 2 only resolves a commit's
+        // declared ADDS (other members), so self is irrelevant here.
+        if member.public_key == identity.public_key() {
+            continue;
+        }
+        let events = transport
+            .fetch_device_certs(&member.public_key)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut ids: Vec<String> = events
+            .iter()
+            .filter_map(|bytes| Event::from_bytes(bytes).ok().map(|ev| ev.core.device))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        for device_id in ids {
+            declared.push(DeclaredMember {
+                identity: member.public_key.clone(),
+                device: device_id,
+            });
+        }
+    }
+    build_cert_resolver(transport, &declared)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// decrypt_sealed_message — open ONE ciphertext (T10)
+//
+// The ratchet is consumed on open (4a): this command is the ONLY place that
+// opens a given ciphertext, and it calls `receive_sealed` exactly once. The
+// ciphertext is taken by value and moved into `receive_sealed`; the returned
+// `SealedOutcome` carries the bytes in neither variant, so a re-open is
+// structurally impossible. The frontend must call this once per sealed message
+// and cache the result (see useSealedDecrypt.ts).
+//
+// This is deliberately NOT `run_e2ee`: decryption is a local, read-only open
+// that needs only the device subkey + on-disk store (not the unlocked identity,
+// and not device authorization). It holds `device_chain_lock` so the
+// synchronous store open cannot race a concurrent send/steward write to the
+// same sqlite store.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DecryptSealedMessageResult {
+    /// The ciphertext opened and decoded to a valid [`MessageEnvelope`].
+    Decrypted {
+        envelope: farder_mls::envelope::MessageEnvelope,
+    },
+    /// The ciphertext could not be opened — tampered, wrong group/epoch, no
+    /// local group yet, or a poisoned group. The generation's decryption key is
+    /// already consumed; a retry on the same bytes is impossible and pointless.
+    Undecryptable { reason: String },
+}
+
+#[tauri::command]
+pub async fn decrypt_sealed_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — only used for diagnostics (the store is keyed by log_server_id)
+    log_server_id: String, // genesis hash — keys the per-channel MLS store
+    channel_id: u64,
+    ciphertext: Vec<u8>,
+) -> Result<DecryptSealedMessageResult, String> {
+    let device = crate::device::load_or_create_device_keypair()?;
+    let data_dir = farder_data_dir();
+    let key = farder_e2ee_client::ChannelKey::new(log_server_id.clone(), channel_id)?;
+
+    // Serialize with the other E2EE commands that write the same sqlite store
+    // (send/steward) so a concurrent `open_message` never hits SQLITE_BUSY.
+    let _store_guard = state.device_chain_lock.lock().await;
+
+    // A missing store (never published a KeyPackage / not yet added) is the
+    // honest "cannot decrypt yet" case, not a command failure — surfaced as
+    // Undecryptable so the frontend renders a fail-closed state (T11 refines
+    // the channel-level "waiting for keys" interstitial).
+    let (store, store_instance_hash) = match farder_e2ee_client::resume_store(&data_dir, &key) {
+        Ok(store) => store,
+        Err(e) => {
+            return Ok(DecryptSealedMessageResult::Undecryptable {
+                reason: format!("no usable MLS store for channel {channel_id} on {server_id}: {e}"),
+            });
+        }
+    };
+
+    let mls = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+        .unwrap_or(crate::mls_state::MlsChannelState {
+            generation: 0,
+            epoch: 0,
+            store_instance_hash: hex::encode(store_instance_hash),
+            confirmed: false,
+            cursor: 0,
+            poisoned: None,
+        });
+
+    if let Some(reason) = mls.poisoned.clone() {
+        return Ok(DecryptSealedMessageResult::Undecryptable {
+            reason: format!("channel state could not be confirmed (poisoned): {reason}"),
+        });
+    }
+
+    let generation = mls.generation;
+    let mut group = match farder_mls::group::MlsChannelGroup::load(
+        &store,
+        &farder_mls::credential::DeviceSigner(&device),
+        farder_e2ee_client::channel_group_id(&log_server_id, channel_id, generation).as_bytes(),
+    ) {
+        Ok(Some(group)) => group,
+        Ok(None) => {
+            return Ok(DecryptSealedMessageResult::Undecryptable {
+                reason: format!("no MLS group for channel {channel_id} on {server_id}"),
+            });
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+
+    // The ratchet is consumed on open: `receive_sealed` takes the ciphertext BY
+    // VALUE and is invoked exactly once here — the bytes are moved in and never
+    // referenced again, so there is no path that re-opens them.
+    match farder_e2ee_client::receive_sealed(&store, &mut group, ciphertext) {
+        farder_e2ee_client::SealedOutcome::Decrypted(envelope) => {
+            Ok(DecryptSealedMessageResult::Decrypted { envelope })
+        }
+        farder_e2ee_client::SealedOutcome::Undecryptable { reason } => {
+            Ok(DecryptSealedMessageResult::Undecryptable { reason })
+        }
     }
 }
 
