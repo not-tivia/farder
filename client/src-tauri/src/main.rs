@@ -6,6 +6,7 @@ mod tenor;
 mod bridge;
 mod commands;
 mod connection;
+mod e2ee_transport;
 mod device;
 mod default_relay;
 mod display;
