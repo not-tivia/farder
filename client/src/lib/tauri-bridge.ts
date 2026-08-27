@@ -246,6 +246,10 @@ export async function publishOwnKeyPackage(serverId: string, logServerId: string
   return invoke("publish_own_key_package", { serverId, logServerId, channelId });
 }
 
+export async function processMlsControlEvents(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; outcome: string; reason: string | null; processed: number; epoch: number; generation: number; confirmed: boolean; cursor: number }> {
+  return invoke("process_mls_control_events", { serverId, logServerId, channelId });
+}
+
 export async function createCategory(serverId: string, name: string): Promise<void> {
   return invoke<void>("create_category", { serverId, name });
 }

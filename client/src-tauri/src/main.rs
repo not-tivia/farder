@@ -123,6 +123,7 @@ fn main() {
             commands::create_e2ee_channel,
             commands::add_members_to_e2ee_channel,
             commands::publish_own_key_package,
+            commands::process_mls_control_events,
             commands::create_category,
             commands::delete_channel,
             commands::delete_category,

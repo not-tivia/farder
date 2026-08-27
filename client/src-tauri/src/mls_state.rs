@@ -7,9 +7,10 @@
 //! plus the raw 32-byte instance hash beside it — both owned by the
 //! `farder-e2ee-client` crate. This file records the small amount of metadata
 //! later tasks need to resume the group without re-deriving it from the log:
-//! the generation, the local epoch, the (hex) store instance hash, and whether
-//! this device's own leaf has been confirmed. T9 (steward) and T10 (decrypt)
-//! read it back.
+//! the generation, the local epoch, the (hex) store instance hash, whether
+//! this device's own leaf has been confirmed, the control-plane fetch cursor,
+//! and a terminal "poisoned" flag (set on a Gate-2 `LeafBindingFailure`, per
+//! 4a's finding F4). T9 (steward) and T10 (decrypt) read it back.
 //!
 //! Plain JSON, keyed by the validated hex `log_server_id`, mirroring the
 //! path-traversal guard in `device.rs` (and the crate's
@@ -31,6 +32,19 @@ pub struct MlsChannelState {
     pub store_instance_hash: String,
     /// Whether this device's own leaf has been confirmed.
     pub confirmed: bool,
+    /// The MLS control-plane fetch cursor (`next_accept_seq`) the steward
+    /// feeds back as `since_accept_seq` on its next `fetch_mls_control` (T9).
+    /// `#[serde(default)]` so a pre-T9 record without the field resumes from 0.
+    #[serde(default)]
+    pub cursor: u64,
+    /// `Some(reason)` once the group hit a `LeafBindingFailure` (finding F4 of
+    /// the 4a vertical): the impostor leaf is already merged and cannot be
+    /// rolled back, so the group is POISONED and must never be used further.
+    /// The steward (T9) checks this on entry and refuses to continue; the
+    /// frontend (T11) maps it to the "could not be confirmed" state.
+    /// `#[serde(default)]` so a pre-T9 record without the field is healthy.
+    #[serde(default)]
+    pub poisoned: Option<String>,
 }
 
 impl MlsChannelState {
@@ -93,6 +107,8 @@ mod tests {
             epoch: 1,
             store_instance_hash: "ab".repeat(32),
             confirmed: true,
+            cursor: 7,
+            poisoned: None,
         };
         assert!(state.validate().is_ok());
 
@@ -109,6 +125,8 @@ mod tests {
             epoch: 0,
             store_instance_hash: "zz".repeat(32),
             confirmed: false,
+            cursor: 0,
+            poisoned: None,
         };
         assert!(non_hex.validate().is_err());
 
@@ -117,7 +135,24 @@ mod tests {
             epoch: 0,
             store_instance_hash: "ab".repeat(31),
             confirmed: false,
+            cursor: 0,
+            poisoned: None,
         };
         assert!(short.validate().is_err());
+    }
+
+    #[test]
+    fn mls_channel_state_loads_a_pre_t9_record_with_default_cursor_and_poison() {
+        // A record written before T9 has no `cursor` / `poisoned` fields. The
+        // serde defaults must fill them (cursor 0, healthy) so an upgrade never
+        // refuses to resume a previously-working group.
+        let legacy = format!(
+            r#"{{"generation":0,"epoch":2,"store_instance_hash":"{}","confirmed":true}}"#,
+            "ab".repeat(32)
+        );
+        let state: MlsChannelState = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(state.cursor, 0);
+        assert_eq!(state.poisoned, None);
+        assert!(state.validate().is_ok());
     }
 }

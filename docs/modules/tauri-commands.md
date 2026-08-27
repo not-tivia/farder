@@ -438,6 +438,39 @@ channel it is not yet a confirmed member of (T9/T10 wire the trigger).
 
 ---
 
+### `process_mls_control_events(state, server_id, log_server_id, channel_id) -> Result<ProcessMlsControlEventsResult, String>`
+
+**What it does:** the receive-side steward (T9). Advances one E2EE channel's MLS
+group to the server's current control-plane state: resumes the on-disk store +
+group (`resume_store` + `MlsChannelGroup::load`), fetches outstanding
+`MlsCommit`/`MlsWelcome`/`MlsLeafConfirmed`/`MlsGroupReset` events from the
+cursor recorded in `mls_state.json` via `fetch_mls_control_exhaustive`, applies
+each `MlsCommit` **in order** through the crate's two receive-side gates
+(Gate 1 `process_commit_checked`, Gate 2 leaf-binding via `build_cert_resolver`
+over `fetch_device_certs`), and on a `MlsWelcome` addressed to this device runs
+`join_channel` + `confirm_leaf` so the member becomes a confirmed leaf ("waiting
+for keys" → confirmed, enabling T10's send). Persists the advanced
+epoch/generation/cursor after each accepted step. A
+`LeafBindingFailure` is terminal (4a finding F4): the impostor leaf is already
+merged and cannot be rolled back, so the group is POISONED — the command
+persists a `poisoned` flag and returns `outcome: "equivocation"`, never
+retrying or continuing.
+**Parameters:** `server_id` — the connection key (address); `log_server_id` —
+the genesis hash keying the device chain; `channel_id` — the E2EE channel id.
+**Returns:** `ProcessMlsControlEventsResult { channel_id, outcome, reason,
+processed, epoch, generation, confirmed, cursor }`. `outcome` is `"advanced"`
+(normal, possibly zero steps) or `"equivocation"` (poisoned; `reason` set).
+**Side effects:** persists `servers/<log_server_id>/mls/<channel_id>.mls_state.json`
+(`generation`, `epoch`, `confirmed`, `cursor`, `poisoned`); on a confirmed
+Welcome also advances + persists the device chain (`device_state.json`).
+**Trigger:** invoked on channel open (draining the queue) and on each incoming
+`server:mls_control_event` — see `client/src/hooks/useMlsSteward.ts` and
+`client/src/hooks/useServerEvents.ts`.
+**invoke name:** `"process_mls_control_events"` → `processMlsControlEvents()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
 ### `create_category(state, server_id, name) -> Result<(), String>`
 
 **ServerRequest:** `CreateCategory { name, position: None }`.

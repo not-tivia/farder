@@ -372,6 +372,14 @@ not pre-empted client-side.
   method returns.
 - **farder-server** — the emit sites (Task 7) make the events this crate submits
   live; this crate never links the server.
+- **farder-client (Tauri, sub-4b)** — the T9 steward command
+  `process_mls_control_events` (see `tauri-commands.md`) is the receive-side
+  consumer: it resumes the store, calls `fetch_mls_control_exhaustive` from a
+  persisted cursor, applies each `MlsCommit` through `process_incoming_commit`
+  (Gate 1 + Gate 2 via `build_cert_resolver`), and `join_channel` +
+  `confirm_leaf` on our own Welcome. A `LeafBindingFailure` is persisted as a
+  terminal "poisoned" flag and surfaced as an equivocation outcome, never
+  continued past.
 - **Task 8 harness** (`tests/e2ee_two_client.rs`) — drives two identities through
   this crate over a real QUIC `E2eeTransport`, exercising the shipped vertical.
 

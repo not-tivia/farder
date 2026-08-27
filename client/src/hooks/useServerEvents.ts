@@ -244,6 +244,18 @@ export function useServerEvents(): void {
           payloadType: data.payload_type,
         },
       });
+      // Trigger the steward (T9): fetch + apply the channel's MLS control plane
+      // in order. Channel-scoped events only (a server-scoped KeyPackage
+      // publication carries channel_id == null and has no group to advance).
+      // The steward is cursor-based + idempotent, so firing per event is cheap
+      // and never spins; failures (e.g. identity still locked, no key package
+      // published yet) are non-fatal and logged by the backend.
+      if (data.channel_id != null) {
+        const logServerId = stateRef.current.servers[data.server_id]?.logServerId ?? null;
+        if (logServerId) {
+          api.processMlsControlEvents(data.server_id, logServerId, data.channel_id).catch(() => {});
+        }
+      }
     }).then(safePush);
 
     listen("server:attachment_redacted", (e) => {
