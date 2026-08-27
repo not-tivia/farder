@@ -13,6 +13,7 @@ mod display;
 #[cfg(windows)]
 mod display_wgc;
 mod identity;
+mod mls_state;
 mod opus_codec;
 mod state;
 mod server_manager;
@@ -119,6 +120,7 @@ fn main() {
             commands::search_messages,
             commands::create_invite,
             commands::create_channel,
+            commands::create_e2ee_channel,
             commands::create_category,
             commands::delete_channel,
             commands::delete_category,

@@ -377,6 +377,28 @@ All send a `ServerRequest` and expect `ServerResponse::Ok` or an error.
 
 ---
 
+### `create_e2ee_channel(state, server_id, log_server_id, name) -> Result<CreateE2eeChannelResult, String>`
+
+**What it does:** the owner-side create + bootstrap for an encrypted channel.
+Submits `ChannelCreated { class: E2ee }` as a LOG event (never
+`ServerRequest::CreateChannel`), mints the on-disk MLS store + one-member group,
+publishes the owner's KeyPackage, then bootstraps the owner's own leaf so the
+channel is addable. This rung the server only accepts `kind == "text"` with no
+parent, so the command hardcodes those and the create form disables the type +
+category selects when "Encrypted" is checked.
+**Parameters:** `server_id` — the connection key (address) that routes the
+request; `log_server_id` — the genesis hash that stamps the events and keys the
+per-(server, device) chain.
+**Returns:** `CreateE2eeChannelResult { channel_id: u64, class: String, event_hash: String }`.
+**Side effects:** advances + persists the device chain (`device_state.json`)
+after each accepted event (mirrors `submit_event`); persists a per-channel MLS
+resume record at `servers/<log_server_id>/mls/<channel_id>.mls_state.json`
+(`{ generation, epoch, store_instance_hash, confirmed }`) for T9/T10.
+**invoke name:** `"create_e2ee_channel"` → `createE2eeChannel()` in
+`client/src/lib/tauri-bridge.ts`.
+
+---
+
 ### `create_category(state, server_id, name) -> Result<(), String>`
 
 **ServerRequest:** `CreateCategory { name, position: None }`.

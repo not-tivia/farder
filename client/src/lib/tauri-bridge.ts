@@ -234,6 +234,10 @@ export async function createChannel(serverId: string, name: string, channelType:
   return invoke<void>("create_channel", { serverId, name, channelType, categoryId: categoryId ?? null });
 }
 
+export async function createE2eeChannel(serverId: string, logServerId: string, name: string): Promise<{ channel_id: number; class: string; event_hash: string }> {
+  return invoke("create_e2ee_channel", { serverId, logServerId, name });
+}
+
 export async function createCategory(serverId: string, name: string): Promise<void> {
   return invoke<void>("create_category", { serverId, name });
 }

@@ -18,6 +18,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newChName, setNewChName] = useState("");
   const [newChType, setNewChType] = useState("Text");
   const [newChCatId, setNewChCatId] = useState<number | undefined>(undefined);
+  const [newChE2ee, setNewChE2ee] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleColor, setNewRoleColor] = useState("#3169C6");
@@ -113,8 +114,15 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   async function handleCreateChannel() {
     if (!newChName.trim() || !serverId) return;
     try {
-      await api.createChannel(serverId, newChName.trim(), newChType, newChCatId);
+      if (newChE2ee) {
+        const logServerId = activeServer?.logServerId ?? null;
+        if (!logServerId) { setError("This server has no event log"); return; }
+        await api.createE2eeChannel(serverId, logServerId, newChName.trim());
+      } else {
+        await api.createChannel(serverId, newChName.trim(), newChType, newChCatId);
+      }
       setNewChName("");
+      setNewChE2ee(false);
     } catch (e) { setError(String(e)); }
   }
 
@@ -271,16 +279,23 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                 <label className="connect-label">New Channel</label>
                 <input className="connect-input" value={newChName} onChange={(e) => setNewChName(e.target.value)} placeholder="Channel name" />
               </div>
-              <select className="connect-input" style={{ width: 100 }} value={newChType} onChange={(e) => setNewChType(e.target.value)}>
+              <select className="connect-input" style={{ width: 100 }} value={newChType} disabled={newChE2ee} title={newChE2ee ? "Encrypted channels are text-only" : undefined} onChange={(e) => setNewChType(e.target.value)}>
                 <option value="Text">Text</option>
                 <option value="Announcement">Announce</option>
                 <option value="Voice">Voice</option>
               </select>
-              <select className="connect-input" style={{ width: 120 }} value={newChCatId ?? ""} onChange={(e) => setNewChCatId(e.target.value ? Number(e.target.value) : undefined)}>
+              <select className="connect-input" style={{ width: 120 }} value={newChCatId ?? ""} disabled={newChE2ee} title={newChE2ee ? "Encrypted channels can't be categorized yet" : undefined} onChange={(e) => setNewChCatId(e.target.value ? Number(e.target.value) : undefined)}>
                 <option value="">No category</option>
                 {sortedCategories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
+              <label className="connect-label" style={{ display: "flex", alignItems: "center", gap: 4, margin: 0, whiteSpace: "nowrap" }} title="End-to-end encrypted — the server can't read messages">
+                <input type="checkbox" checked={newChE2ee} onChange={(e) => setNewChE2ee(e.target.checked)} />
+                Encrypted
+              </label>
               <button className="xp-button" onClick={handleCreateChannel} disabled={!newChName.trim()}>Add</button>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <span className="connect-label">End-to-end encrypted — the server can't read messages.</span>
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "flex-end" }}>
               <div style={{ flex: 1 }}>

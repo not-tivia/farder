@@ -4464,6 +4464,208 @@ async fn event_send_submit(
 }
 
 // ---------------------------------------------------------------------------
+// create_e2ee_channel — owner creates an E2EE channel (LOG event, not
+// CreateChannel): submit ChannelCreated { class: E2ee }, mint the group + store,
+// publish the owner's KeyPackage, then bootstrap so the owner's leaf is
+// confirmed. Persists both the device chain and the per-channel MLS state.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct CreateE2eeChannelResult {
+    pub channel_id: u64,
+    pub class: String,
+    pub event_hash: String,
+}
+
+#[tauri::command]
+pub async fn create_e2ee_channel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — stamps EventCore.server_id + keys the device chain
+    name: String,
+) -> Result<CreateE2eeChannelResult, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("channel name cannot be empty".to_string());
+    }
+
+    // Identity (must be unlocked) + device key. Both are Send, so they move
+    // into the blocking task where the `Actor` borrows them across awaits.
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair()?;
+
+    // The E2EE vertical is !Send: `FarderMlsStore` is Send but NOT Sync
+    // (rusqlite's Connection holds a RefCell), so `publish_key_package` /
+    // `bootstrap_group` — which hold `&FarderMlsStore` across their awaits —
+    // return !Send futures. A Tauri command future must be Send, so the whole
+    // create → publish → bootstrap sequence runs on a dedicated current-thread
+    // runtime inside `spawn_blocking` (which only requires the closure + result
+    // to be Send). `AppState` is Send + Sync, so the transport still reaches
+    // the QUIC connection from that thread.
+    let state_arc = Arc::clone(state.inner());
+    let created = tokio::task::spawn_blocking(move || -> Result<CreateE2eeChannelResult, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        rt.block_on(run_create_e2ee_channel(
+            state_arc,
+            server_id,
+            log_server_id,
+            identity,
+            device,
+            name,
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    Ok(created)
+}
+
+/// The non-Send body of [`create_e2ee_channel`], driven on a current-thread
+/// runtime. Holds the device-chain lock across every await (the same
+/// load → mutate → save critical section as `submit_event`).
+async fn run_create_e2ee_channel(
+    state: Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    identity: Keypair,
+    device: Keypair,
+    name: String,
+) -> Result<CreateE2eeChannelResult, String> {
+    use farder_crypto::event_log::{EventPayload, E2EE_CHANNEL_ID_FLOOR};
+    use farder_e2ee_client::{
+        bootstrap_group, create_e2ee_channel, publish_key_package, Actor, ChainState, ChannelKey,
+        ChannelSpec,
+    };
+
+    // Serialize all chain writes: load → mutate → save must not interleave with
+    // concurrent commands (submit_event, create_invite, join_log_server) that
+    // touch the same per-(server,device) state file. Held across awaits.
+    let _chain_guard = state.device_chain_lock.lock().await;
+
+    // Per-(server, device) chain state. Keyed by the log server_id (genesis hash).
+    let mut ds = crate::device::DeviceState::load(&log_server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    // 1. First time on this server: authorize the device (mirrors submit_event).
+    if !ds.authorized {
+        let cert = crate::device::device_cert(&identity, &device);
+        let da = event_build_next(
+            &device,
+            &identity,
+            &log_server_id,
+            ds.last_event_hash.clone(),
+            ds.next_seq,
+            ds.lamport,
+            EventPayload::DeviceAuthorized { cert },
+        );
+        event_send_submit(&state, &server_id, &da).await?;
+        ds.next_seq = da.core.seq + 1;
+        ds.last_event_hash = Some(da.hash());
+        ds.lamport = da.core.lamport;
+        ds.authorized = true;
+        ds.save(&log_server_id)?;
+    }
+
+    // The crate's ChainState mirrors DeviceState 1:1 (next_seq, last_event_hash,
+    // lamport) — both are the same three fields. `EventHash` is a `String` alias.
+    let mut chain = ChainState {
+        next_seq: ds.next_seq,
+        last_event_hash: ds.last_event_hash.clone(),
+        lamport: ds.lamport,
+    };
+
+    // channel_id is CLIENT-chosen and must clear the legacy DB AUTOINCREMENT
+    // space (>= E2EE_CHANNEL_ID_FLOOR). The crate validates the floor; we pick
+    // a fresh value at/above it (never a hand-rolled small id).
+    let channel_id = E2EE_CHANNEL_ID_FLOOR + (rand::random::<u32>() as u64);
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let spec = ChannelSpec {
+        key: key.clone(),
+        name,
+        // This rung the server only accepts `kind == "text"` with no parent
+        // (event_ingest::materialize_channel_created), so encrypted channels are
+        // text-only and uncategorized regardless of the legacy type select.
+        kind: "text".to_string(),
+        parent: None,
+    };
+
+    let actor = Actor {
+        device: &device,
+        identity: &identity,
+        log_server_id: &log_server_id,
+    };
+    let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+    let data_dir = farder_data_dir();
+
+    // Advance + persist the device chain only on accepted events. Each of the
+    // three crate calls submits exactly one event and advances `chain` only
+    // after the server accepts it, so we sync + save after each (mirrors the
+    // per-event save in submit_event).
+    let sync_chain = |ds: &mut crate::device::DeviceState, chain: &ChainState| {
+        ds.next_seq = chain.next_seq;
+        ds.last_event_hash = chain.last_event_hash.clone();
+        ds.lamport = chain.lamport;
+    };
+
+    // 2. Submit ChannelCreated { class: E2ee } + mint the group/store.
+    let mut created = create_e2ee_channel(&transport, &actor, &mut chain, &spec, &data_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    sync_chain(&mut ds, &chain);
+    ds.save(&log_server_id)?;
+
+    // 3. Publish this device's KeyPackage so members can add it (T8).
+    let _published = publish_key_package(
+        &transport,
+        &actor,
+        &mut chain,
+        &created.store,
+        &created.store_instance_hash,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    sync_chain(&mut ds, &chain);
+    ds.save(&log_server_id)?;
+
+    // 4. Bootstrap the creator's own leaf (generation 0 / epoch 0 -> 1).
+    let commit = bootstrap_group(
+        &transport,
+        &actor,
+        &mut chain,
+        &key,
+        &mut created.group,
+        &created.store,
+        &created.store_instance_hash,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    sync_chain(&mut ds, &chain);
+    ds.save(&log_server_id)?;
+
+    // 5. Persist the per-channel MLS state so T9/T10 can resume the group.
+    crate::mls_state::MlsChannelState {
+        generation: 0,
+        epoch: commit.local_epoch,
+        store_instance_hash: hex::encode(created.store_instance_hash),
+        confirmed: true,
+    }
+    .save(&log_server_id, channel_id)?;
+
+    Ok(CreateE2eeChannelResult {
+        channel_id,
+        class: "E2ee".to_string(),
+        event_hash: created.event_hash,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // redact_attachment — moderator redacts an attachment from the log
 // ---------------------------------------------------------------------------
 
