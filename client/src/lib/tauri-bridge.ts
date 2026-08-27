@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConnectResult, SendMessageResult, MessageInfo, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo, PollInfo, GiveawayInfo, EventInfo, EventState, ReminderInfo } from "./types";
+import type { ConnectResult, SendMessageResult, MessageInfo, MessageInfoV2, ServerInfoV2, MemberInfo, ChannelInfo, CategoryInfo, RoleInfo, DmEntry, BannedMember, BotAlertInfo, WebhookInfo, WebhookTokenResult, CommandInfo, PollInfo, GiveawayInfo, EventInfo, EventState, ReminderInfo } from "./types";
 import type { EmbedOutcome } from "./linkEmbed";
 
 export interface UploadOutcome {
@@ -194,12 +194,20 @@ export async function fetchHistory(serverId: string, channelId: number, beforeId
   return invoke<MessageInfo[]>("fetch_history", { serverId, channelId, beforeId: beforeId ?? null, limit: limit ?? null });
 }
 
+export async function fetchHistoryV2(serverId: string, channelId: number, beforeId?: number, limit?: number): Promise<MessageInfoV2[]> {
+  return invoke<MessageInfoV2[]>("fetch_history_v2", { serverId, channelId, beforeId: beforeId ?? null, limit: limit ?? null });
+}
+
 export async function subscribeChannels(serverId: string, channelIds: number[]): Promise<void> {
   return invoke<void>("subscribe_channels", { serverId, channelIds });
 }
 
 export async function getServerInfo(serverId: string): Promise<ConnectResult> {
   return invoke<ConnectResult>("get_server_info", { serverId });
+}
+
+export async function getServerInfoV2(serverId: string): Promise<ServerInfoV2> {
+  return invoke<ServerInfoV2>("get_server_info_v2", { serverId });
 }
 
 export async function getMembers(serverId: string): Promise<MemberInfo[]> {

@@ -11,6 +11,19 @@ export interface ChannelInfo {
   thread_parent_message_id: number | null;
 }
 
+/** A channel's content class — immutable, set at creation (Rung-2).
+ *  Mirrors Rust `farder_crypto::event_log::ChannelClass`. */
+export type ChannelClass = "Plaintext" | "E2ee";
+
+/** `ChannelInfo` plus its content class (Rung-2 v2 surface). The wire shape is
+ *  `{ base: ChannelInfo, class: ChannelClass }` — serde serializes the Rust
+ *  `ChannelInfoV2` struct by field name, so the class rides alongside `base`,
+ *  never flattened into it. */
+export interface ChannelInfoV2 {
+  base: ChannelInfo;
+  class: ChannelClass;
+}
+
 export interface CategoryInfo {
   id: number;
   name: string;
@@ -81,6 +94,18 @@ export interface MessageInfo {
   /** Server-written widget marker JSON (e.g. `{"type":"poll","id":7}`); null/absent
    *  for normal messages. Treat as untrusted: try/catch parse, numeric id check. */
   widget?: string | null;
+}
+
+/** A message plus the sealed-row fields a v1 client cannot render (Rung-2 v2
+ *  surface). For a sealed row `base.content` is "" — the server holds ciphertext
+ *  and cannot fill it — and the payload rides in `sealed`. `event_hash` is the
+ *  hash a client cites when replying/editing/deleting over the log.
+ *  Mirrors Rust `MessageInfoV2 { base, is_e2ee, sealed, event_hash }`. */
+export interface MessageInfoV2 {
+  base: MessageInfo;
+  is_e2ee: boolean;
+  sealed: number[] | null;
+  event_hash: string | null;
 }
 
 /** Live poll state, broadcast whole on every change (`server:poll_updated`) and
@@ -195,6 +220,19 @@ export interface ConnectResult {
   roles: RoleInfo[];
   owner_public_key?: { bytes: number[] } | null;
   relayed?: boolean;
+  server_id?: string | null;
+}
+
+/** The v2 server-info surface (`getServerInfoV2`): `ConnectResult`'s shape
+ *  minus the connection-only `relayed` flag, with a class-carrying channel
+ *  list. Mirrors Rust `ServerInfoV2Result`. */
+export interface ServerInfoV2 {
+  server_name: string;
+  member_count: number;
+  channels: ChannelInfoV2[];
+  categories: CategoryInfo[];
+  roles: RoleInfo[];
+  owner_public_key?: { bytes: number[] } | null;
   server_id?: string | null;
 }
 

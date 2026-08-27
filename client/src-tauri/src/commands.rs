@@ -5,8 +5,9 @@ use crate::state::{AppState, ServerConnection};
 use crate::tls::make_client_endpoint;
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::{
-    BotAlertInfo, CategoryInfo, ChannelInfo, CommandInfo, EventInfo, GiveawayInfo, MemberInfo,
-    MessageInfo, PollInfo, ReminderInfo, RoleInfo, ServerRequest, ServerResponse, WebhookInfo,
+    BotAlertInfo, CategoryInfo, ChannelInfo, ChannelInfoV2, CommandInfo, EventInfo, GiveawayInfo,
+    MemberInfo, MessageInfo, MessageInfoV2, PollInfo, ReminderInfo, RoleInfo, ServerRequest,
+    ServerResponse, WebhookInfo, SERVER_PROTOCOL_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -57,6 +58,21 @@ pub struct ConnectResult {
 pub struct SendMessageResult {
     pub id: u64,
     pub timestamp: u64,
+}
+
+/// The v2 server-info surface (`GetServerInfoV2`): `ConnectResult`'s shape
+/// minus the connection-only `relayed` flag, with the class-carrying channel
+/// list. Field names mirror `ConnectResult` so the frontend can reuse the same
+/// consumption path once it threads `class` through (T3).
+#[derive(serde::Serialize)]
+pub struct ServerInfoV2Result {
+    pub server_name: String,
+    pub member_count: u32,
+    pub channels: Vec<ChannelInfoV2>,
+    pub categories: Vec<CategoryInfo>,
+    pub roles: Vec<RoleInfo>,
+    pub owner_public_key: Option<farder_crypto::identity::PublicKey>,
+    pub server_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -975,6 +991,40 @@ pub fn get_saved_servers() -> Vec<ServerEntry> {
 // Server commands
 // ---------------------------------------------------------------------------
 
+/// Negotiate the protocol version on a freshly-connected server (D3).
+///
+/// This is PER-CONNECTION state the server clears on disconnect, so it must run
+/// on every connect and reconnect — never just the first. An older sidecar
+/// cannot decode `NegotiateProtocol` (unknown rmp_serde variant name breaks the
+/// whole frame) and will either answer `Error` or drop the connection; either
+/// way we log a `[protocol]` line and keep going rather than hard-fail. The v1
+/// surfaces still work, and any v2 command will then surface the server's own
+/// `UPGRADE_REQUIRED` refusal.
+async fn negotiate_protocol(state: &AppState, server_id: &str) {
+    let negotiated = bridge::send_request(
+        state,
+        server_id,
+        ServerRequest::NegotiateProtocol { client_version: SERVER_PROTOCOL_VERSION },
+    )
+    .await;
+    match negotiated {
+        Ok(ServerResponse::ProtocolVersion { server_version, min_client_version_for_e2ee }) => {
+            eprintln!(
+                "[protocol] {}: negotiated client={} server={} min_client_for_e2ee={}",
+                server_id, SERVER_PROTOCOL_VERSION, server_version, min_client_version_for_e2ee
+            );
+        }
+        Ok(other) => eprintln!(
+            "[protocol] {}: NegotiateProtocol returned {:?}; treating as v1",
+            server_id, other
+        ),
+        Err(e) => eprintln!(
+            "[protocol] {}: negotiate failed: {}; treating as v1",
+            server_id, e
+        ),
+    }
+}
+
 /// Connect to a Farder server, authenticate, and return initial server info.
 #[tauri::command]
 pub async fn connect_server(
@@ -1079,6 +1129,11 @@ pub async fn connect_server(
                     }
                 });
             }
+            // Negotiate v2 BEFORE returning: the frontend's next call (T3) is
+            // `get_server_info_v2`, which the server refuses with
+            // `UPGRADE_REQUIRED` unless this connection has already negotiated.
+            negotiate_protocol(&state, &address).await;
+
             Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed, server_id })
         }
         ServerResponse::Error { reason } => Err(reason),
@@ -1128,6 +1183,30 @@ pub async fn get_server_info(
     match response {
         ServerResponse::ServerInfo { name, member_count, channels, categories, roles, owner_public_key, server_id } => {
             Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed: false, server_id })
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Re-fetch server info with per-channel classes (the v2 surface).
+///
+/// Mirrors [`get_server_info`] but sends `GetServerInfoV2`, so the returned
+/// channel list carries each channel's [`ChannelInfoV2::class`]. Requires the
+/// connection to have negotiated v2 (done automatically in `connect_server`
+/// and `create_local_server`); before negotiation the server refuses with
+/// `UPGRADE_REQUIRED`.
+#[tauri::command]
+pub async fn get_server_info_v2(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<ServerInfoV2Result, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetServerInfoV2)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::ServerInfoV2 { name, member_count, channels, categories, roles, owner_public_key, server_id } => {
+            Ok(ServerInfoV2Result { server_name: name, member_count, channels, categories, roles, owner_public_key, server_id })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
@@ -1187,6 +1266,39 @@ pub async fn fetch_history(
 
     match response {
         ServerResponse::History { messages } => Ok(messages),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Fetch message history for a channel, carrying sealed rows (the v2 surface).
+///
+/// Mirrors [`fetch_history`] but sends `FetchHistoryV2` and returns
+/// [`MessageInfoV2`] rows (base message + `is_e2ee`/`sealed`/`event_hash`).
+/// Requires the connection to have negotiated v2 (done automatically in
+/// `connect_server` and `create_local_server`).
+#[tauri::command]
+pub async fn fetch_history_v2(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    before_id: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<MessageInfoV2>, String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::FetchHistoryV2 {
+            channel_id,
+            before_id,
+            limit: limit.unwrap_or(50),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match response {
+        ServerResponse::HistoryV2 { messages } => Ok(messages),
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }
@@ -4035,6 +4147,11 @@ pub async fn create_local_server(
                     }
                 });
             }
+            // Negotiate v2 on this freshly-created connection too: a server the
+            // user just created is the FIRST one they'll open, so its connection
+            // must be v2-negotiated before the frontend's `get_server_info_v2`.
+            negotiate_protocol(&state, &address).await;
+
             Ok(serde_json::json!({
                 "address": address,
                 "server_name": srv_name,
