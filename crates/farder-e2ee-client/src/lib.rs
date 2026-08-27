@@ -14,6 +14,7 @@
 pub mod chain;
 pub mod channel;
 pub mod channel_key;
+pub mod commit;
 pub mod join;
 pub mod transport;
 
@@ -27,6 +28,10 @@ pub use channel::{
     CreateChannelOutcome, E2eeError, KeyPackageOutcome, KEY_PACKAGE_LIFETIME_LOG_POSITIONS,
 };
 pub use channel_key::{validate_log_server_id, ChannelKey};
+pub use commit::{
+    add_member, process_incoming_commit, AddMemberOutcome, DeclaredCommit, DeviceCertResolver,
+    IncomingCommitOutcome, StewardContext,
+};
 pub use farder_mls::group::JoinInfo;
 pub use join::{
     confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,

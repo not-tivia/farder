@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-26
 
@@ -20,8 +20,9 @@ and the MLS store is opened/closed by the caller via the lifecycle helpers
 below. The server emit sites, the Tauri command layer, and the harness are
 other tasks.
 
-**Status:** Tasks 1-3 COMPLETE (transport seam + channel create / KeyPackage
-publish / bootstrap / join + leaf confirmation), per
+**Status:** Tasks 1-4 COMPLETE (transport seam + channel create / KeyPackage
+publish / bootstrap / join + leaf confirmation / steward add + the two
+receive-side gates), per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 
 ---
@@ -127,6 +128,47 @@ for `"event rejected"` would miss it. The resync loop (Task 6) keys on this.
   `ensure_can_send()`) and `LeafConfirmation { event_hash, epoch, eligibility }`
   with `can_send()` — the local send-eligibility belief (see below).
 - Re-exported: `farder_mls::group::JoinInfo { epoch, tree_hash }`.
+
+### Steward add + receive-side commit processing (`commit.rs`)
+
+- `add_member(transport, actor, chain, ctx, group, member) -> AddMemberOutcome`
+  (async) — the steward path: `fetch_key_packages` → `decode_key_package`
+  (fails closed on a non-farder credential, and refuses a package whose
+  credential does not claim the exact member being added) →
+  `MlsChannelGroup::add_members` → submit `MlsCommit` (declared adds/removes +
+  the real chaining values) → submit `MlsWelcome` whose `commit` cites the
+  accepted `MlsCommit`'s event hash. A `stale-epoch` rejection surfaces as
+  `E2eeError::StaleEpochDiverged` (the add has already merged locally).
+- `StewardContext<'a> { key, generation, store, store_instance_hash }` — the
+  "where am I committing" bundle (keeps `add_member` under the 7-arg clippy
+  bound).
+- `process_incoming_commit(store, group, commit_bytes, declared, certs) -> IncomingCommitOutcome`
+  (sync, **delivery-agnostic** — no transport) — apply someone else's commit,
+  in order, through **two gates**:
+  1. **Ordering** — `declared.epoch` must equal the group's current epoch;
+     a gap or replay returns `IncomingCommitOutcome::OutOfOrder` without
+     merging.
+  2. **Gate 1** — `MlsChannelGroup::process_commit_checked` ONLY (never
+     `process_commit`): declared adds/removes/post-tree-hash must match the
+     staged commit, else it is discarded unmerged and the error surfaced.
+  3. **Gate 2** — every `ProcessedCommit::actual_adds` entry must pass
+     `credential::verify_leaf_binding` against a `DeviceCert` that
+     `DeviceCertResolver` attests is log-valid for that `(identity, device)`.
+     A failure returns `IncomingCommitOutcome::LeafBindingFailure`
+     (equivocation-class); because Gate 1 already merged, the local group is
+     poisoned and must be resynced/aborted, never continued.
+- `DeclaredCommit { epoch, adds, removes, post_tree_hash }` — the declared
+  fields of the `MlsCommit` event, grouped for `process_incoming_commit`.
+- `DeviceCertResolver` — trait; `device_cert(identity, device) -> Option<DeviceCert>`
+  supplies the log-valid trust anchor for Gate 2. The cryptographic binding is
+  checked separately by `verify_leaf_binding`.
+- `IncomingCommitOutcome::{ Applied, OutOfOrder, LeafBindingFailure }` — the
+  typed result: success, an ordering gap/replay (blocked, not skipped), or an
+  impostor-leaf rejection.
+- `AddMemberOutcome { commit_event_hash, welcome_event_hash, local_epoch,
+  post_epoch_authenticator, post_tree_hash }` — `post_epoch_authenticator` is
+  read from `group.epoch_authenticator()` immediately after the merge (it is
+  NOT a field on `CommitOutcome`, finding F1).
 
 ### `E2eeError`
 

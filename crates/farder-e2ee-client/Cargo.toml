@@ -19,3 +19,8 @@ tls_codec = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Dev-only: mint the impostor KeyPackage (cloned credential bytes over
+# attacker-owned keys) for the security-critical Gate-2 test. `openmls 0.8.1`
+# is the exact crate `farder-mls` already pins, so this promotes an existing
+# transitive dep to a test-only direct one rather than adding a new crate.
+openmls = "=0.8.1"

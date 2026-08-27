@@ -6,7 +6,7 @@
 //! it does not want a fake — so there is no non-test consumer that would need
 //! the double compiled into the shipped library.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Mutex;
 
@@ -23,6 +23,7 @@ use crate::transport::{E2eeTransport, EventAccepted, TransportError, Welcomes};
 pub struct FakeTransport {
     submitted: Mutex<Vec<Event>>,
     responses: Mutex<VecDeque<Result<EventAccepted, TransportError>>>,
+    key_packages: Mutex<HashMap<(PublicKey, String), Vec<Vec<u8>>>>,
 }
 
 impl FakeTransport {
@@ -46,6 +47,21 @@ impl FakeTransport {
             .lock()
             .unwrap()
             .push_back(Err(TransportError::rejected(reason)));
+    }
+
+    /// Serve the raw signed `MlsKeyPackagePublished` event bytes that
+    /// `fetch_key_packages(member, device)` should return, keyed exactly the
+    /// way the server keys them: by the event's `(author, device)`.
+    pub fn serve_key_packages(
+        &self,
+        member: &PublicKey,
+        device: &str,
+        events: Vec<Vec<u8>>,
+    ) {
+        self.key_packages
+            .lock()
+            .unwrap()
+            .insert((member.clone(), device.to_string()), events);
     }
 
     /// Program the next `submit_event` call to be accepted with `event_hash`.
@@ -97,10 +113,17 @@ impl E2eeTransport for FakeTransport {
 
     fn fetch_key_packages(
         &self,
-        _member: &PublicKey,
-        _device: &str,
+        member: &PublicKey,
+        device: &str,
     ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
-        async move { Ok(Vec::new()) }
+        let events = self
+            .key_packages
+            .lock()
+            .unwrap()
+            .get(&(member.clone(), device.to_string()))
+            .cloned()
+            .unwrap_or_default();
+        async move { Ok(events) }
     }
 
     fn fetch_history_v2(
