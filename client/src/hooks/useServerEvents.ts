@@ -244,6 +244,29 @@ export function useServerEvents(): void {
           payloadType: data.payload_type,
         },
       });
+      // A server-scoped MlsKeyPackagePublished (channel_id == null) is the
+      // signal that a member just became addable. This closes the C2 race: a
+      // late joiner is skipped by the membership_changed auto-add (they have no
+      // package until they open the channel), so the owner retries the add here,
+      // when the package actually exists. Owner-gated on the frontend (the add
+      // path has no server-side owner check); the add loop is idempotent so a
+      // redundant pass is a cheap no-op, never a spin.
+      if (data.channel_id == null && data.payload_type === "MlsKeyPackagePublished") {
+        const logServerId = stateRef.current.servers[data.server_id]?.logServerId ?? null;
+        const serverState = stateRef.current.servers[data.server_id];
+        const e2eeChannelIds = (serverState?.channels ?? [])
+          .filter(isE2eeChannel)
+          .map((c) => c.id);
+        if (logServerId && e2eeChannelIds.length > 0) {
+          getOwnPk().then((ownPk) => {
+            if (!ownPk || ownPk !== serverState?.ownerPublicKey) return;
+            for (const channelId of e2eeChannelIds) {
+              api.addMembersToE2eeChannel(data.server_id, logServerId, channelId).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      }
+
       // Trigger the steward (T9): fetch + apply the channel's MLS control plane
       // in order. Channel-scoped events only (a server-scoped KeyPackage
       // publication carries channel_id == null and has no group to advance).
@@ -407,13 +430,12 @@ export function useServerEvents(): void {
       // The approval queue component refetches getPendingMembers on this event (Task 8).
 
       // A member who joins AFTER an E2EE channel exists is never added by the
-      // creation-time add loop, so the owner auto-adds them here. The command is
-      // owner-gated server-side (a non-owner commit is rejected), but gate on the
-      // frontend too — only when our own public key is known AND matches the
-      // per-server `ownerPublicKey` — so a non-owner never surfaces those
-      // rejections. One pass per membership_changed event, no poll loop: the add
-      // loop is idempotent (already-present leaves are skipped), so a redundant
-      // pass is a cheap no-op, never a spin.
+      // creation-time add loop, so the owner auto-adds them here. NOTE: there is
+      // no server-side owner gate on the add path (the fold authorizes any full
+      // member holding a confirmed leaf to author an add-commit); the frontend
+      // gate below is the real protection, so keep it. Gate on our own public
+      // key matching the per-server `ownerPublicKey`. One pass per event, no
+      // poll loop: the add loop is idempotent, so a redundant pass is a no-op.
       const serverState = stateRef.current.servers[serverId];
       const logServerId = serverState?.logServerId ?? null;
       if (!logServerId) return;
