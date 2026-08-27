@@ -250,6 +250,27 @@ export async function processMlsControlEvents(serverId: string, logServerId: str
   return invoke("process_mls_control_events", { serverId, logServerId, channelId });
 }
 
+/** Seal + submit one E2EE channel message (T10). Returns the accepted event hash
+ *  and the epoch the ciphertext was sealed in. `replyTo` is an event-hash ref;
+ *  pass null for a top-level post (legacy numeric replies are not mapped yet). */
+export async function sendSealedMessage(serverId: string, logServerId: string, channelId: number, content: string, replyTo: string | null): Promise<{ event_hash: string; epoch: number }> {
+  return invoke("send_sealed_message", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null });
+}
+
+/** The wire shape of `decrypt_sealed_message`: a tag-discriminated result.
+ *  `decrypted` carries the opened `MessageEnvelope`; `undecryptable` is the
+ *  fail-closed marker (the ratchet is consumed on open — never retry). */
+export type SealedDecryptResult =
+  | { kind: "decrypted"; envelope: { content: string; attachment_keys: number[][]; filenames: string[]; mimes: string[] } }
+  | { kind: "undecryptable"; reason: string };
+
+/** Open ONE sealed ciphertext (T10). The frontend must call this exactly once
+ *  per sealed message and cache the result — a second open is impossible (the
+ *  ratchet is consumed) and destructive. See `useSealedDecrypt.ts`. */
+export async function decryptSealedMessage(serverId: string, logServerId: string, channelId: number, ciphertext: number[]): Promise<SealedDecryptResult> {
+  return invoke<SealedDecryptResult>("decrypt_sealed_message", { serverId, logServerId, channelId, ciphertext });
+}
+
 export async function createCategory(serverId: string, name: string): Promise<void> {
   return invoke<void>("create_category", { serverId, name });
 }

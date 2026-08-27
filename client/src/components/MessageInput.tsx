@@ -5,7 +5,7 @@ import * as bookApi from "../lib/book/client";
 import * as gifApi from "../lib/gifSearch";
 import type { MemberInfo, CommandInfo } from "../lib/types";
 import type { BookItem } from "../lib/book/types";
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, isE2eeChannel } from "../lib/types";
 import { useActiveServer } from "../context/ServerContext";
 import SendStickerPicker from "./SendStickerPicker";
 import EmojiAutocomplete from "./EmojiAutocomplete";
@@ -245,6 +245,36 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         return;
       }
       // unknown /word -> fall through and send as a normal message
+    }
+
+    // Sealed branch (T10): an E2EE channel routes to the seal-and-submit
+    // command instead of the legacy submitEvent/sendMessage paths. The legacy
+    // fetchUrl image-embed, DM encryption, inline :emoji: book-item resolution,
+    // and attachment paths are all EXCLUDED here — a sealed message is text-only
+    // this rung (sub-6 owns attachments) and replies stay top-level (a numeric
+    // replyTo is not mapped to an event-hash ref yet).
+    const currentChannel = activeServer?.channels.find((c) => c.id === channelId) ?? null;
+    if (isE2eeChannel(currentChannel)) {
+      const logServerId = activeServer?.logServerId ?? null;
+      if (!logServerId) {
+        setError("This channel is encrypted but the server has no log id");
+        return;
+      }
+      setSending(true);
+      setError(null);
+      try {
+        await api.sendSealedMessage(serverId, logServerId, channelId, text, null);
+        setContent("");
+        setAttachedFileId(null);
+        setAttachedFileName(null);
+        setAttachedCap(null);
+        if (onSent) onSent();
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setSending(false);
+      }
+      return;
     }
 
     setSending(true);

@@ -39,6 +39,20 @@ export function useMlsSteward(): void {
     // Drain on demand; failures (identity still locked, no key package
     // published yet, transport error) are non-fatal and surfaced by the
     // backend log / the T11 UI states, never retried in a loop.
-    api.processMlsControlEvents(activeServerId, logServerId, channelId).catch(() => {});
+    api.processMlsControlEvents(activeServerId, logServerId, channelId)
+      .then((result) => {
+        // Publish our KeyPackage only if we are NOT yet a confirmed member.
+        // CRITICAL non-destructive guard (T9's flag): `publish_own_key_package`
+        // overwrites `mls_state.json` back to `confirmed: false` / epoch 0, so
+        // it must never run on an already-confirmed member. `result.confirmed`
+        // is the persisted flag, false when `mls_state.json` is absent OR has
+        // `confirmed === false` — exactly the publish gate. Already confirmed →
+        // skip the publish entirely.
+        if (!result.confirmed) {
+          return api.publishOwnKeyPackage(activeServerId, logServerId, channelId);
+        }
+        return undefined;
+      })
+      .catch(() => {});
   }, [activeServerId, channelId, logServerId, channel]);
 }

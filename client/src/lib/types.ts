@@ -264,6 +264,17 @@ export function isE2eeChannel(channel: ChannelInfo | null | undefined): boolean 
   return (channel?.class ?? "Plaintext") === "E2ee";
 }
 
+/** The terminal result of decrypting one sealed message (D2/D4): either the
+ *  plaintext content or a fail-closed "couldn't decrypt" marker. Keyed by
+ *  message id in `PerServerState.sealedDecrypts`; each sealed row is decrypted
+ *  exactly once (the ratchet is consumed on open) and cached here. `eventHash`
+ *  is the log event hash of the ciphertext that was opened, so a sealed edit
+ *  (same id, new ciphertext) triggers a fresh decrypt rather than re-using a
+ *  stale plaintext. */
+export type SealedDecryptEntry =
+  | { kind: "decrypted"; content: string; eventHash: string | null }
+  | { kind: "undecryptable"; reason: string; eventHash: string | null };
+
 /** An MLS control event pointer as broadcast by the server
  *  (`MlsControlEvent`). Carries only a pointer - the client fetches and
  *  verifies the signed event itself (the steward, T9). `channelId` is null

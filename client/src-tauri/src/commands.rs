@@ -5533,6 +5533,362 @@ async fn run_process_mls_control_events(
 }
 
 // ---------------------------------------------------------------------------
+// send_sealed_message — seal + submit one E2EE channel message (T10)
+//
+// Wraps the crate's proven `send_sealed` path (build MessageEnvelope with empty
+// attachment vecs, enforce the client-side caps, seal, submit
+// `MessagePostedE2ee`); on a bare `stale-epoch` rejection it runs the crate's
+// bounded `send_sealed_resync` loop. Both call the crate, never a hand-rolled
+// MLS path. Runs under `run_e2ee` (spawn_blocking + nested runtime) because the
+// vertical holds `&FarderMlsStore` across awaits.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct SendSealedMessageResult {
+    /// Server-assigned hash of the accepted `MessagePostedE2ee` event.
+    pub event_hash: String,
+    /// The epoch the ciphertext was sealed in (the group's current epoch at
+    /// seal time; sealing never advances it).
+    pub epoch: u64,
+}
+
+#[tauri::command]
+pub async fn send_sealed_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — routes the request
+    log_server_id: String, // genesis hash — stamps the event + keys the device chain
+    channel_id: u64,
+    content: String,
+    reply_to: Option<String>, // event-hash ref; None for top-level (legacy numeric replies are not mapped yet)
+) -> Result<SendSealedMessageResult, String> {
+    let content = content.trim().to_string();
+    if content.is_empty() {
+        return Err("message content cannot be empty".to_string());
+    }
+
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, ds, chain| async move {
+            run_send_sealed_message(
+                state,
+                server_id,
+                log_server_id,
+                channel_id,
+                identity,
+                device,
+                ds,
+                chain,
+                content,
+                reply_to,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// The non-Send body of [`send_sealed_message`], driven on a current-thread
+/// runtime by [`run_e2ee`] (which already holds the device-chain lock and
+/// authorized the device). `send_sealed` advances `chain` only after the server
+/// accepts the event, so the chain is synced + persisted once on success.
+async fn run_send_sealed_message(
+    state: Arc<AppState>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+    identity: Keypair,
+    device: Keypair,
+    mut ds: crate::device::DeviceState,
+    mut chain: farder_e2ee_client::ChainState,
+    content: String,
+    reply_to: Option<String>,
+) -> Result<SendSealedMessageResult, String> {
+    use farder_e2ee_client::{
+        channel_group_id, resume_store, send_sealed, send_sealed_resync, Actor, ChannelKey,
+        ResyncRequest, SealContext, SendEligibility,
+    };
+    use farder_mls::credential::DeviceSigner;
+    use farder_mls::group::MlsChannelGroup;
+
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let data_dir = farder_data_dir();
+
+    let (store, store_instance_hash) = resume_store(&data_dir, &key).map_err(|e| e.to_string())?;
+    let mut mls = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+        .unwrap_or(crate::mls_state::MlsChannelState {
+            generation: 0,
+            epoch: 0,
+            store_instance_hash: hex::encode(store_instance_hash),
+            confirmed: false,
+            cursor: 0,
+            poisoned: None,
+        });
+
+    // F4 (terminal): the group is poisoned by an impostor leaf. Never send into
+    // it; surface the equivocation state rather than continuing.
+    if let Some(reason) = mls.poisoned.clone() {
+        return Err(format!(
+            "channel state could not be confirmed (poisoned): {reason}"
+        ));
+    }
+
+    let generation = mls.generation;
+    let mut group = MlsChannelGroup::load(
+        &store,
+        &DeviceSigner(&device),
+        channel_group_id(&log_server_id, channel_id, generation).as_bytes(),
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "no MLS group for this channel".to_string())?;
+
+    let actor = Actor {
+        device: &device,
+        identity: &identity,
+        log_server_id: &log_server_id,
+    };
+    let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+
+    let ctx = SealContext {
+        key: &key,
+        generation,
+        store: &store,
+        content: &content,
+        reply_to: reply_to.clone(),
+    };
+    let eligibility = if mls.confirmed {
+        SendEligibility::confirmed()
+    } else {
+        SendEligibility::not_confirmed()
+    };
+
+    let outcome = match send_sealed(&transport, &actor, &mut chain, &ctx, &mut group, &eligibility)
+        .await
+    {
+        Ok(send) => send,
+        // F6: the bare "stale-epoch" rejection also fires for
+        // MessagePostedE2ee. Resync is bounded (unproductive + total caps) and
+        // terminates under every transport behaviour; it never spins.
+        Err(farder_e2ee_client::E2eeError::Transport(e)) if e.is_stale_epoch() => {
+            let request = ResyncRequest {
+                eligibility: &eligibility,
+                since_accept_seq: mls.cursor,
+            };
+            let certs =
+                build_roster_cert_resolver(&transport, &state, &server_id, &identity).await?;
+            let resynced = match send_sealed_resync(
+                &transport,
+                &actor,
+                &mut chain,
+                &ctx,
+                &mut group,
+                &request,
+                &certs,
+            )
+            .await
+            {
+                Ok(resynced) => resynced,
+                // F4 (terminal): an impostor leaf is already merged and cannot
+                // be rolled back. Persist the poisoned flag so a later send or
+                // decrypt refuses this group, then surface the equivocation.
+                Err(farder_e2ee_client::E2eeError::ResyncPoisoned { member, reason }) => {
+                    let reason = format!(
+                        "impostor leaf for {} / {}: {reason}",
+                        member.identity, member.device
+                    );
+                    mls.poisoned = Some(reason.clone());
+                    mls.save(&log_server_id, channel_id)?;
+                    return Err(format!(
+                        "channel state could not be confirmed (poisoned): {reason}"
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+            // Persist the advanced control-plane cursor + the group's new epoch
+            // so the next resync/steward starts where this one left off.
+            mls.cursor = resynced.next_accept_seq;
+            mls.epoch = group.epoch();
+            mls.save(&log_server_id, channel_id)?;
+            resynced.send
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+
+    // Advance + persist the device chain on acceptance (mirrors submit_event).
+    ds.next_seq = chain.next_seq;
+    ds.last_event_hash = chain.last_event_hash.clone();
+    ds.lamport = chain.lamport;
+    ds.save(&log_server_id)?;
+
+    Ok(SendSealedMessageResult {
+        event_hash: outcome.event_hash,
+        epoch: outcome.epoch,
+    })
+}
+
+/// Build the Gate-2 trust anchor for the bounded resync loop: a
+/// [`farder_e2ee_client::VerifiedCertResolver`] over every current server
+/// member's authorized devices. A `stale-epoch` winning commit may add a
+/// member, and `send_sealed_resync` resolves each fetched commit's declared
+/// `adds` against this resolver — so it must cover the roster, fetched from the
+/// log via the crate's own `resolve_device_cert` (never synthesized from the
+/// commit). Reuses the same device-enumeration shape as
+/// `add_current_members_to_group`.
+async fn build_roster_cert_resolver(
+    transport: &crate::e2ee_transport::E2eeTransportImpl<'_>,
+    state: &AppState,
+    server_id: &str,
+    identity: &Keypair,
+) -> Result<farder_e2ee_client::VerifiedCertResolver, String> {
+    use farder_crypto::event_log::Event;
+    use farder_e2ee_client::{build_cert_resolver, E2eeTransport};
+    use farder_mls::group::DeclaredMember;
+
+    let members: Vec<MemberInfo> = {
+        let response = bridge::send_request(state, server_id, ServerRequest::GetMembers)
+            .await
+            .map_err(|e| e.to_string())?;
+        match response {
+            ServerResponse::Members { members } => members,
+            ServerResponse::Error { reason } => return Err(reason),
+            other => return Err(format!("unexpected response to GetMembers: {other:?}")),
+        }
+    };
+
+    let mut declared: Vec<DeclaredMember> = Vec::new();
+    for member in members {
+        // Our own leaf is already in the group; Gate 2 only resolves a commit's
+        // declared ADDS (other members), so self is irrelevant here.
+        if member.public_key == identity.public_key() {
+            continue;
+        }
+        let events = transport
+            .fetch_device_certs(&member.public_key)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut ids: Vec<String> = events
+            .iter()
+            .filter_map(|bytes| Event::from_bytes(bytes).ok().map(|ev| ev.core.device))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        for device_id in ids {
+            declared.push(DeclaredMember {
+                identity: member.public_key.clone(),
+                device: device_id,
+            });
+        }
+    }
+    build_cert_resolver(transport, &declared)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// decrypt_sealed_message — open ONE ciphertext (T10)
+//
+// The ratchet is consumed on open (4a): this command is the ONLY place that
+// opens a given ciphertext, and it calls `receive_sealed` exactly once. The
+// ciphertext is taken by value and moved into `receive_sealed`; the returned
+// `SealedOutcome` carries the bytes in neither variant, so a re-open is
+// structurally impossible. The frontend must call this once per sealed message
+// and cache the result (see useSealedDecrypt.ts).
+//
+// This is deliberately NOT `run_e2ee`: decryption is a local, read-only open
+// that needs only the device subkey + on-disk store (not the unlocked identity,
+// and not device authorization). It holds `device_chain_lock` so the
+// synchronous store open cannot race a concurrent send/steward write to the
+// same sqlite store.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DecryptSealedMessageResult {
+    /// The ciphertext opened and decoded to a valid [`MessageEnvelope`].
+    Decrypted {
+        envelope: farder_mls::envelope::MessageEnvelope,
+    },
+    /// The ciphertext could not be opened — tampered, wrong group/epoch, no
+    /// local group yet, or a poisoned group. The generation's decryption key is
+    /// already consumed; a retry on the same bytes is impossible and pointless.
+    Undecryptable { reason: String },
+}
+
+#[tauri::command]
+pub async fn decrypt_sealed_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,     // connection key (address) — only used for diagnostics (the store is keyed by log_server_id)
+    log_server_id: String, // genesis hash — keys the per-channel MLS store
+    channel_id: u64,
+    ciphertext: Vec<u8>,
+) -> Result<DecryptSealedMessageResult, String> {
+    let device = crate::device::load_or_create_device_keypair()?;
+    let data_dir = farder_data_dir();
+    let key = farder_e2ee_client::ChannelKey::new(log_server_id.clone(), channel_id)?;
+
+    // Serialize with the other E2EE commands that write the same sqlite store
+    // (send/steward) so a concurrent `open_message` never hits SQLITE_BUSY.
+    let _store_guard = state.device_chain_lock.lock().await;
+
+    // A missing store (never published a KeyPackage / not yet added) is the
+    // honest "cannot decrypt yet" case, not a command failure — surfaced as
+    // Undecryptable so the frontend renders a fail-closed state (T11 refines
+    // the channel-level "waiting for keys" interstitial).
+    let (store, store_instance_hash) = match farder_e2ee_client::resume_store(&data_dir, &key) {
+        Ok(store) => store,
+        Err(e) => {
+            return Ok(DecryptSealedMessageResult::Undecryptable {
+                reason: format!("no usable MLS store for channel {channel_id} on {server_id}: {e}"),
+            });
+        }
+    };
+
+    let mls = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+        .unwrap_or(crate::mls_state::MlsChannelState {
+            generation: 0,
+            epoch: 0,
+            store_instance_hash: hex::encode(store_instance_hash),
+            confirmed: false,
+            cursor: 0,
+            poisoned: None,
+        });
+
+    if let Some(reason) = mls.poisoned.clone() {
+        return Ok(DecryptSealedMessageResult::Undecryptable {
+            reason: format!("channel state could not be confirmed (poisoned): {reason}"),
+        });
+    }
+
+    let generation = mls.generation;
+    let mut group = match farder_mls::group::MlsChannelGroup::load(
+        &store,
+        &farder_mls::credential::DeviceSigner(&device),
+        farder_e2ee_client::channel_group_id(&log_server_id, channel_id, generation).as_bytes(),
+    ) {
+        Ok(Some(group)) => group,
+        Ok(None) => {
+            return Ok(DecryptSealedMessageResult::Undecryptable {
+                reason: format!("no MLS group for channel {channel_id} on {server_id}"),
+            });
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+
+    // The ratchet is consumed on open: `receive_sealed` takes the ciphertext BY
+    // VALUE and is invoked exactly once here — the bytes are moved in and never
+    // referenced again, so there is no path that re-opens them.
+    match farder_e2ee_client::receive_sealed(&store, &mut group, ciphertext) {
+        farder_e2ee_client::SealedOutcome::Decrypted(envelope) => {
+            Ok(DecryptSealedMessageResult::Decrypted { envelope })
+        }
+        farder_e2ee_client::SealedOutcome::Undecryptable { reason } => {
+            Ok(DecryptSealedMessageResult::Undecryptable { reason })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // redact_attachment — moderator redacts an attachment from the log
 // ---------------------------------------------------------------------------
 

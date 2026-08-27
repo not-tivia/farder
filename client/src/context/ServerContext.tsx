@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, SealedDecryptEntry } from "../lib/types";
 import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 
 export interface PerServerState {
@@ -42,6 +42,12 @@ export interface PerServerState {
    *  The steward (T9, 4b-2) drains these - T4 only records them, deduped by
    *  `eventHash`. */
   mlsControlEvents: MlsControlEventInfo[];
+  /** Per-message decrypt results for sealed rows (D2/D4): keyed by message id.
+   *  A sealed row is decrypted exactly once (the ratchet is consumed on open);
+   *  the result is cached here so a re-render never re-opens the ciphertext.
+   *  `decrypted` holds the plaintext; `undecryptable` is the distinct
+   *  "couldn't decrypt" marker. Absent = not yet decrypted (T5 placeholder). */
+  sealedDecrypts: Record<number, SealedDecryptEntry>;
 }
 
 export interface AppState {
@@ -83,6 +89,7 @@ const initialPerServerState: PerServerState = {
   events: {},
   activeWidgets: null,
   mlsControlEvents: [],
+  sealedDecrypts: {},
 };
 
 /** Combined chip cap for the active-widgets bar — mirrors the server's
@@ -167,7 +174,9 @@ export type AppAction =
   | { type: "EVENT_MY_RSVP"; serverId: string; payload: { eventId: number; myRsvp: string | null } }
   | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] } }
   | { type: "ADD_OR_UPDATE_MESSAGE"; serverId: string; payload: MessageInfo }
-  | { type: "MLS_CONTROL_EVENT"; serverId: string; payload: MlsControlEventInfo };
+  | { type: "MLS_CONTROL_EVENT"; serverId: string; payload: MlsControlEventInfo }
+  | { type: "SEALED_DECRYPTED"; serverId: string; payload: { messageId: number; eventHash: string | null; content: string } }
+  | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -358,6 +367,30 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       if (state.mlsControlEvents.some((e) => e.eventHash === action.payload.eventHash)) return state;
       return { ...state, mlsControlEvents: [...state.mlsControlEvents, action.payload] };
     }
+    case "SEALED_DECRYPTED":
+      return {
+        ...state,
+        sealedDecrypts: {
+          ...state.sealedDecrypts,
+          [action.payload.messageId]: {
+            kind: "decrypted",
+            content: action.payload.content,
+            eventHash: action.payload.eventHash,
+          },
+        },
+      };
+    case "SEALED_UNDECRYPTABLE":
+      return {
+        ...state,
+        sealedDecrypts: {
+          ...state.sealedDecrypts,
+          [action.payload.messageId]: {
+            kind: "undecryptable",
+            reason: action.payload.reason,
+            eventHash: action.payload.eventHash,
+          },
+        },
+      };
     case "CHANNEL_CREATED":
       if (state.channels.some(c => c.id === action.payload.id)) return state;
       return { ...state, channels: [...state.channels, { ...action.payload, class: action.payload.class ?? "Plaintext" }] };

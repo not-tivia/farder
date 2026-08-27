@@ -5,6 +5,7 @@ import { MediaPlayersProvider } from "./context/MediaPlayersContext";
 import { DataSaverProvider } from "./context/DataSaverContext";
 import { useServerEvents } from "./hooks/useServerEvents";
 import { useMlsSteward } from "./hooks/useMlsSteward";
+import { useSealedDecrypt } from "./hooks/useSealedDecrypt";
 import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
 import IdentityGate from "./components/IdentityGate";
@@ -27,6 +28,7 @@ function AppInner() {
   const [pendingInvite, setPendingInvite] = useState<string | null>(null);
   useServerEvents();
   useMlsSteward();
+  useSealedDecrypt();
 
   // Handle farder:// deep links passed via CLI argument at launch.
   // The link can arrive before the identity is unlocked, so just queue it;

@@ -163,7 +163,7 @@ export default function ChatPanel() {
           const withinWindow = prev &&
             (msg.timestamp - prev.timestamp) < 300;
           const grouped = !!(sameAuthor && withinWindow);
-          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} onReply={(msg) => setReplyTo(msg)} />;
+          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} sealedDecrypt={activeServer.sealedDecrypts?.[msg.id]} onReply={(msg) => setReplyTo(msg)} />;
         })}
         <div ref={bottomRef} />
       </div>

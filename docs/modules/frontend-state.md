@@ -49,6 +49,7 @@ These three files together are the entire client-side state layer. `ServerContex
 | `events` | `Record<number, { event: EventInfo; myRsvp: string \| null }>` | Live event-card state keyed by event id. Populated lazily by `EventWidget` (`EVENT_STATE` after `getEvent` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `EVENT_UPDATED` broadcasts and `EVENT_MY_RSVP`. `myRsvp` is `"going"`/`"maybe"`/`"no"`/`null` and is **self-only** — it never arrives in a broadcast |
 | `activeWidgets` | `{ channelId: number; polls: number[]; giveaways: number[]; events: number[] } \| null` | The viewed channel's open-widget **id lists** for the active-widgets bar (`ActiveWidgetsBar.tsx`); the infos are upserted into `polls`/`giveaways`/`events` so chips share one source of truth with the widgets. Replaced whole by `ACTIVE_WIDGETS` (fetched via `listActiveWidgets` on channel switch/reconnect), maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`/`EVENT_UPDATED` (append on open/upcoming-and-missing, remove on closed/ended/cancelled/started, 20 cap **combined across all three lists**). `null` until the first fetch |
 | `mlsControlEvents` | `MlsControlEventInfo[]` | Pending MLS control events (KeyPackage / Commit / Welcome / LeafConfirmed / GroupReset) received via `server:mls_control_event`. Record-only in T4 — the steward (T9, 4b-2) drains the queue; deduplicated by `eventHash` |
+| `sealedDecrypts` | `Record<number, SealedDecryptEntry>` | Per-message decrypt results for sealed rows, keyed by message id (T10, D2/D4). Each sealed row is decrypted **exactly once** (the ratchet is consumed on open) and the result cached here: `{ kind: "decrypted", content, eventHash }` or `{ kind: "undecryptable", reason, eventHash }`. `eventHash` is the opened ciphertext's log event hash so a sealed edit (same id, new ciphertext) triggers a fresh decrypt. Absent = not yet decrypted (the T5 placeholder renders) |
 
 ---
 
@@ -149,6 +150,8 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | Action type | What it mutates |
 |---|---|
 | `MLS_CONTROL_EVENT` | Appends an `MlsControlEventInfo` to `mlsControlEvents` (deduplicated by `eventHash`). Record-only — the steward (T9) drains the queue and processes each event via `fetch_mls_control` |
+| `SEALED_DECRYPTED` | Upserts `sealedDecrypts[messageId] = { kind: "decrypted", content, eventHash }` |
+| `SEALED_UNDECRYPTABLE` | Upserts `sealedDecrypts[messageId] = { kind: "undecryptable", reason, eventHash }` |
 
 ### DM actions (per-server)
 
@@ -242,6 +245,33 @@ Two module-level caches are populated at import time (not inside the effect): `n
 | `server:voice_left` | **none** — dispatched for ALL servers | `VOICE_LEFT` | Same rationale |
 
 Cross-reference: every event in this table must have a corresponding emit arm in `bridge.rs` (documented in `tauri-bridge.md`). If `bridge.rs` drops an event, its listener here is dead code.
+
+---
+
+## `useSealedDecrypt` — decrypt-once hook (T10)
+
+`useSealedDecrypt()` is mounted once at the app root (next to `useServerEvents` /
+`useMlsSteward`). It scans the active server's `messages` for sealed rows
+(`is_e2ee === true && sealed != null && content === ""`) and calls
+`api.decryptSealedMessage` for each one that has no cached result. It reacts to
+**state**, not to a single event, so it covers both arrival paths: a live
+`server:sealed_message` (folded into `messages` by `useServerEvents`) and a
+history load (`SET_MESSAGES` / `PREPEND_MESSAGES`).
+
+**Decrypt-once invariant** is enforced in two layers, plus the backend:
+
+1. **Terminal cache** — `sealedDecrypts[messageId]` holds the settled result;
+   a row whose `(messageId, eventHash)` pair is already cached is skipped.
+2. **In-flight dedupe** — a module-level `Map<"${serverId}:${messageId}", Promise>`
+   keys each outstanding `invoke`; a re-render (or StrictMode double-mount) joins
+   the existing promise rather than issuing a second `invoke`.
+3. **Backend structure** — `decrypt_sealed_message` takes the ciphertext by value
+   and calls `receive_sealed` exactly once; the returned `SealedOutcome` carries
+   the bytes in neither variant, so a second open is structurally impossible.
+
+On success it dispatches `SEALED_DECRYPTED`; on `undecryptable` (or a command
+failure) it dispatches `SEALED_UNDECRYPTABLE`. Decrypted content lives only in
+frontend memory (`sealedDecrypts`) — never persisted to disk in 4b (D4).
 
 ---
 
