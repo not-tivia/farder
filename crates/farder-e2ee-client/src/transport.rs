@@ -36,6 +36,17 @@ pub struct Welcomes {
     pub more: bool,
 }
 
+/// The payload of `ServerResponse::MlsControl` (`farder-protocol::server`),
+/// mirrored field-for-field. `events` are raw signed `Event` bytes
+/// (`rmp_serde`), oldest-first, for one channel's MLS control plane
+/// (`MlsCommit`, `MlsWelcome`, `MlsLeafConfirmed`, `MlsGroupReset`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MlsControl {
+    pub events: Vec<Vec<u8>>,
+    pub next_accept_seq: u64,
+    pub more: bool,
+}
+
 /// A failure of the transport layer, as opposed to a rejection inside the
 /// vertical's own logic.
 ///
@@ -154,6 +165,24 @@ pub trait E2eeTransport {
         channel_id: Option<u64>,
         since_accept_seq: u64,
     ) -> impl Future<Output = Result<Welcomes, TransportError>> + Send;
+
+    /// Fetch one channel's MLS control plane
+    /// (`ServerRequest::FetchMlsControl`): raw signed `Event` bytes for
+    /// `MlsCommit` / `MlsWelcome` / `MlsLeafConfirmed` / `MlsGroupReset`,
+    /// oldest-first. Returns the payload of `ServerResponse::MlsControl`. This
+    /// is how a member advances (or rebuilds) its group when ANOTHER member
+    /// commits — the winning commit's bytes are only reachable through here
+    /// (finding F3).
+    ///
+    /// Pagination mirrors `fetch_welcomes` (fact A2.8): feed the returned
+    /// `next_accept_seq` back as `since_accept_seq` and loop while
+    /// `more == true`. The cursor advances past non-matching rows too, so never
+    /// restart from 0.
+    fn fetch_mls_control(
+        &self,
+        channel_id: u64,
+        since_accept_seq: u64,
+    ) -> impl Future<Output = Result<MlsControl, TransportError>> + Send;
 
     /// Fetch the published KeyPackages for one member's device
     /// (`ServerRequest::FetchKeyPackages`). Returns the raw signed `Event`

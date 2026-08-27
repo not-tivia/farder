@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use farder_crypto::event_log::{ChannelClass, EventPayload, E2EE_CHANNEL_ID_FLOOR};
 use farder_mls::credential::{credential_with_key, generate_key_package, DeviceSigner};
-use farder_mls::group::MlsChannelGroup;
+use farder_mls::group::{DeclaredMember, MlsChannelGroup};
 use farder_mls::store::{FarderMlsStore, StoreResumeError};
 use tls_codec::Serialize as TlsSerialize;
 
@@ -136,6 +136,18 @@ pub enum E2eeError {
     /// silently destroy group state — the caller must self-`DeviceRevoked` and
     /// re-provision (sub-5's job). This is never papered over here.
     StoreResumeTerminal(StoreResumeError),
+    /// The resync loop gave up after exhausting its bounds: the send kept
+    /// losing the epoch race and the local group could not be made to converge
+    /// with the server's (see [`crate::resync`]). `attempts` is how many resync
+    /// attempts were made; `last_epoch` is the group's epoch when the loop
+    /// stopped. Equivocation-class — surfaced instead of looping silently.
+    ResyncEquivocation { attempts: usize, last_epoch: u64 },
+    /// F4 (terminal): while resyncing, an incoming commit passed Gate 1 (its
+    /// declared metadata matched) but failed Gate 2 (leaf binding) — an
+    /// impostor leaf. Because Gate 1 already merged the commit and farder-mls
+    /// offers no rollback, the local group is POISONED. The resync aborts and
+    /// surfaces this rather than continuing or retrying through it.
+    ResyncPoisoned { member: DeclaredMember, reason: String },
 }
 
 impl E2eeError {
@@ -171,6 +183,17 @@ impl fmt::Display for E2eeError {
             }
             Self::SealedOverCap { reason } => write!(f, "sealed message over cap: {reason}"),
             Self::StoreResumeTerminal(e) => write!(f, "MLS store resume is terminal: {e}"),
+            Self::ResyncEquivocation { attempts, last_epoch } => write!(
+                f,
+                "resync gave up after {attempts} attempts (group still at epoch {last_epoch}): \
+                 the send kept losing the epoch race"
+            ),
+            Self::ResyncPoisoned { member, reason } => write!(
+                f,
+                "resync hit an impostor leaf for {} / {} — the group is poisoned and cannot \
+                 be rolled back: {reason}",
+                member.identity, member.device
+            ),
         }
     }
 }

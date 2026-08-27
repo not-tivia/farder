@@ -29,10 +29,11 @@
 //! `post_tree_hash`. [`JoinInfo::tree_hash`] is documented to equal the adding
 //! commit's `post_tree_hash`, so this module submits it verbatim. There is **no
 //! local cross-check** against the steward's *declared* `post_tree_hash`: this
-//! crate's transport seam cannot fetch the adding `MlsCommit` (only messages
-//! via `fetch_history_v2`). A lying steward that declared a wrong
-//! `post_tree_hash` is therefore only caught by the fold, which rejects the
-//! confirmation — fail-closed, but not pre-empted client-side.
+//! module submits `JoinInfo::tree_hash` as-is rather than fetching the adding
+//! `MlsCommit` through `fetch_mls_control` (the join path does not need it, and
+//! the surface did not exist when it was written). A lying steward that declared
+//! a wrong `post_tree_hash` is therefore only caught by the fold, which rejects
+//! the confirmation — fail-closed, but not pre-empted client-side.
 
 use std::path::Path;
 
@@ -265,8 +266,9 @@ pub fn join_channel(
 ///
 /// `epoch` / `tree_hash` come from [`join_channel`]'s [`JoinInfo`]; `tree_hash`
 /// equals the adding commit's `post_tree_hash` by construction, and is not
-/// locally cross-checked against the steward's *declared* value (no fetch
-/// surface for the adding `MlsCommit` — see the module doc).
+/// locally cross-checked against the steward's *declared* value (it submits
+/// `JoinInfo::tree_hash` as-is rather than fetching the adding `MlsCommit` —
+/// see the module doc).
 pub async fn confirm_leaf<T: E2eeTransport + Sync>(
     transport: &T,
     actor: &Actor<'_>,
@@ -316,7 +318,7 @@ mod tests {
     use tls_codec::Serialize as TlsSerialize;
 
     use crate::testing::FakeTransport;
-    use crate::transport::{EventAccepted, Welcomes};
+    use crate::transport::{EventAccepted, MlsControl, Welcomes};
 
     const SERVER_ID: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 
@@ -489,6 +491,20 @@ mod tests {
                     more: false,
                 });
             async move { Ok(page) }
+        }
+
+        fn fetch_mls_control(
+            &self,
+            _channel_id: u64,
+            _since_accept_seq: u64,
+        ) -> impl std::future::Future<Output = Result<MlsControl, TransportError>> + Send {
+            async move {
+                Ok(MlsControl {
+                    events: Vec::new(),
+                    next_accept_seq: 0,
+                    more: false,
+                })
+            }
         }
 
         fn fetch_key_packages(

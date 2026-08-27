@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use farder_crypto::event_log::Event;
 use farder_crypto::identity::PublicKey;
 
-use crate::transport::{E2eeTransport, EventAccepted, TransportError, Welcomes};
+use crate::transport::{E2eeTransport, EventAccepted, MlsControl, TransportError, Welcomes};
 
 /// Records every submitted [`Event`] and returns either a default accept or a
 /// programmed per-submission result (FIFO). Programmed rejections inject
@@ -104,6 +104,20 @@ impl E2eeTransport for FakeTransport {
     ) -> impl Future<Output = Result<Welcomes, TransportError>> + Send {
         async move {
             Ok(Welcomes {
+                events: Vec::new(),
+                next_accept_seq: 0,
+                more: false,
+            })
+        }
+    }
+
+    fn fetch_mls_control(
+        &self,
+        _channel_id: u64,
+        _since_accept_seq: u64,
+    ) -> impl Future<Output = Result<MlsControl, TransportError>> + Send {
+        async move {
+            Ok(MlsControl {
                 events: Vec::new(),
                 next_accept_seq: 0,
                 more: false,

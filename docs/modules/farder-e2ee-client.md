@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,sealed}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,sealed,resync}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-26
 
@@ -20,9 +20,9 @@ and the MLS store is opened/closed by the caller via the lifecycle helpers
 below. The server emit sites, the Tauri command layer, and the harness are
 other tasks.
 
-**Status:** Tasks 1-5 COMPLETE (transport seam + channel create / KeyPackage
+**Status:** Tasks 1-6 COMPLETE (transport seam + channel create / KeyPackage
 publish / bootstrap / join + leaf confirmation / steward add + the two
-receive-side gates / sealed send + receive), per
+receive-side gates / sealed send + receive / bounded stale-epoch resync), per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 
 ---
@@ -31,25 +31,33 @@ receive-side gates / sealed send + receive), per
 
 ### `trait E2eeTransport`
 
-Exactly four calls, all `async` (each desugars to
+Exactly five calls, all `async` (each desugars to
 `fn … -> impl Future<Output = …> + Send`, because `async fn` in a public trait
 trips the `async_fn_in_trait` lint and is not object-safe):
 
 - `submit_event(&Event) -> Result<EventAccepted, TransportError>`
 - `fetch_welcomes(channel_id: Option<u64>, since_accept_seq: u64) -> Result<Welcomes, TransportError>`
+- `fetch_mls_control(channel_id: u64, since_accept_seq: u64) -> Result<MlsControl, TransportError>`
 - `fetch_key_packages(member: &PublicKey, device: &str) -> Result<Vec<Vec<u8>>, TransportError>`
 - `fetch_history_v2(channel_id, before_id, limit) -> Result<Vec<MessageInfoV2>, TransportError>`
 
 The method signatures mirror `farder-protocol::server` request/response shapes.
-`channel_id` on `fetch_welcomes` **narrows, never widens**. `#[cfg(test)]`
-`testing::FakeTransport` is an in-memory double for unit tests.
+`channel_id` on `fetch_welcomes` **narrows, never widens**. `fetch_mls_control`
+serves one channel's MLS control plane (`MlsCommit` / `MlsWelcome` /
+`MlsLeafConfirmed` / `MlsGroupReset`) with the same `next_accept_seq` + `more`
+cursor contract as `fetch_welcomes`. `#[cfg(test)]` `testing::FakeTransport` is
+an in-memory double for unit tests; `MlsControl` and `Welcomes` are the two
+page-shaped value structs the trait hands back.
 
 ### `TransportError`
 
 `ServerRejected { reason }` vs `Transport(String)`. The machine-readable case
 is `is_stale_epoch()`, which matches the **bare** `"stale-epoch"` reason string
 exactly — the server returns it unprefixed (fact A2.2), so a substring check
-for `"event rejected"` would miss it. The resync loop (Task 6) keys on this.
+for `"event rejected"` would miss it. Since finding F6 the server emits it for
+`MessagePostedE2ee` / `MessageEditedE2ee` too, not just `MlsCommit`, so it is
+the one signal the resync loop keys on for a sealed send that lost the epoch
+race.
 
 ---
 
@@ -192,8 +200,8 @@ for `"event rejected"` would miss it. The resync loop (Task 6) keys on this.
   `authz_head` is this device's own folded chain head (`chain.last_event_hash`),
   carried opaque. A `stale-epoch` rejection is NOT handled here (a sealed send
   is not a commit; it merges nothing locally), so any rejection surfaces as
-  `E2eeError::Transport` — Task 6's resync loop keys on
-  `TransportError::is_stale_epoch()`.
+  `E2eeError::Transport` — `resync::send_sealed_resync` (below) wraps this and
+  keys on `TransportError::is_stale_epoch()`.
 - `SealContext<'a> { key, generation, store, content, reply_to }` — the fixed
   inputs for one send (bundled like `StewardContext` to stay under the clippy
   arg bound).
@@ -208,6 +216,42 @@ for `"event rejected"` would miss it. The resync loop (Task 6) keys on this.
   panic is contained to a clean `Err` by farder-mls in both build profiles, so
   tampered ciphertext yields `Undecryptable`, never a panic.
 
+### Resync (`resync.rs`) — Task 6
+
+- `fetch_mls_control_exhaustive(transport, channel_id, since_accept_seq) -> (Vec<Event>, u64)`
+  (async) — fetch one channel's MLS control plane to exhaustion, decoding each
+  raw signed event and returning them oldest-first plus the final cursor.
+  Pagination mirrors `fetch_pending_welcomes` (fact A2.8): loop while `more`,
+  feeding `next_accept_seq` back as `since_accept_seq`; a `more == true` page
+  that does not advance the cursor is surfaced as a transport error rather than
+  spun on (commit `a2afff8` fixed the server-side version of that stall; this
+  is the client-side guard).
+- `send_sealed_resync(transport, actor, chain, ctx, group, request, certs) -> ResyncOutcome`
+  (async) — [`send_sealed`] with automatic resync on a `stale-epoch` rejection:
+  fetch the winning commits, apply them in order through
+  [`process_incoming_commit`]'s two gates, re-seal at the new epoch, resubmit.
+  The loop is bounded **twice** and must terminate under every transport
+  behaviour:
+  1. **Unproductive bound** — [`MAX_UNPRODUCTIVE_RESYNC_ATTEMPTS`] = 3
+     consecutive attempts whose resync did not advance the group's epoch surface
+     [`E2eeError::ResyncEquivocation`].
+  2. **Total bound** — [`MAX_TOTAL_RESYNC_ATTEMPTS`] = 10 caps the loop no matter
+     whether the epoch keeps advancing, so a client racing a fast committer
+     stops instead of spinning forever.
+  Both bounds are pinned by tests that assert termination, not just a happy
+  path. "Unproductive" means the group's epoch did not advance between attempts
+  (the fetch yielded no winning commit we could apply).
+  **F4 poisoned group:** if applying a fetched commit returns
+  `IncomingCommitOutcome::LeafBindingFailure`, the impostor leaf is already
+  merged (Gate 1 runs before Gate 2, and farder-mls offers no rollback), so the
+  loop aborts with [`E2eeError::ResyncPoisoned`] and never retries through it.
+- `ResyncRequest<'a> { eligibility, since_accept_seq }` — the fixed inputs
+  beyond the `SealContext`: the send-eligibility belief and the caller's
+  persisted control-plane cursor (this crate owns no storage).
+- `ResyncOutcome { send, next_accept_seq }` — the send result plus the advanced
+  cursor for the caller to persist.
+- `MAX_UNPRODUCTIVE_RESYNC_ATTEMPTS` (= 3) / `MAX_TOTAL_RESYNC_ATTEMPTS` (= 10).
+
 ### `E2eeError`
 
 The crate's one error type. Notable variants:
@@ -219,6 +263,12 @@ The crate's one error type. Notable variants:
   submission (content chars, pre-seal bytes, or ciphertext bytes).
 - `StoreResumeTerminal(StoreResumeError)` — the store could not be resumed;
   terminal for that store, never papered over.
+- `ResyncEquivocation { attempts, last_epoch }` — the resync loop gave up after
+  exhausting its bounds; the send kept losing the epoch race (see "Resync"
+  below).
+- `ResyncPoisoned { member, reason }` — F4, terminal: resync processed a commit
+  that failed leaf binding, so the impostor leaf is already merged and the
+  local group is poisoned.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.
 
 ---

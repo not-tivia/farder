@@ -56,8 +56,9 @@ use crate::transport::E2eeTransport;
 /// unrevoked, unexpired `DeviceCert` binding `device` to `identity`; the
 /// cryptographic binding (credential ↔ leaf signature key ↔ cert) is checked
 /// separately by `credential::verify_leaf_binding`. The caller owns the log
-/// state (Task 9's fetch surface will have the certs at hand); this trait just
-/// names the trust anchor `process_incoming_commit` needs.
+/// state (Task 9's `fetch_mls_control` surface has the events, and the caller
+/// resolves the certs from them); this trait just names the trust anchor
+/// `process_incoming_commit` needs.
 pub trait DeviceCertResolver {
     fn device_cert(&self, identity: &PublicKey, device: &str) -> Option<DeviceCert>;
 }
@@ -293,8 +294,9 @@ pub async fn add_member<T: E2eeTransport + Sync>(
 /// Process someone else's commit, delivery-agnostic: it takes the raw commit
 /// bytes plus the declared fields carried on the `MlsCommit` event, resolves
 /// `DeviceCert`s via [`DeviceCertResolver`], and returns a typed
-/// [`IncomingCommitOutcome`]. It does NOT touch the transport (finding F3:
-/// there is currently no surface that fetches an `MlsCommit`; Task 9 adds one).
+/// [`IncomingCommitOutcome`]. It does NOT touch the transport (finding F3: the
+/// commit bytes are only reachable through [`crate::transport::E2eeTransport::fetch_mls_control`],
+/// which Task 9 + Task 6's resync loop consume).
 ///
 /// Order: (0) the declared `epoch` must equal the group's current epoch, else
 /// [`IncomingCommitOutcome::OutOfOrder`]; (1) Gate 1 via

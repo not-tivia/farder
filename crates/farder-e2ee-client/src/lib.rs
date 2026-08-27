@@ -16,6 +16,7 @@ pub mod channel;
 pub mod channel_key;
 pub mod commit;
 pub mod join;
+pub mod resync;
 pub mod sealed;
 pub mod transport;
 
@@ -38,7 +39,11 @@ pub use join::{
     confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,
     LeafConfirmation, PendingWelcome, SendEligibility,
 };
+pub use resync::{
+    fetch_mls_control_exhaustive, send_sealed_resync, ResyncOutcome, ResyncRequest,
+    MAX_TOTAL_RESYNC_ATTEMPTS, MAX_UNPRODUCTIVE_RESYNC_ATTEMPTS,
+};
 pub use sealed::{
     receive_sealed, send_sealed, SealContext, SealedOutcome, SealedSendOutcome,
 };
-pub use transport::{E2eeTransport, EventAccepted, TransportError, Welcomes};
+pub use transport::{E2eeTransport, EventAccepted, MlsControl, TransportError, Welcomes};

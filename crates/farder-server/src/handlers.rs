@@ -55,6 +55,25 @@ fn current_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// The `(channel_id, generation, epoch)` an event cites, if it cites one.
+///
+/// The three payloads that cite a `(generation, epoch)` — and therefore the
+/// three that can lose an epoch race — are the `MlsCommit` a member authored and
+/// the two sealed sends (`MessagePostedE2ee` / `MessageEditedE2ee`). The
+/// stale-epoch pre-check bounces all three with the same bare `"stale-epoch"`
+/// reason so the client's resync loop has one machine-readable signal regardless
+/// of which payload lost the race.
+fn epoch_claim(payload: &EventPayload) -> Option<(u64, u64, u64)> {
+    match payload {
+        EventPayload::MlsCommit { channel_id, generation, epoch, .. }
+        | EventPayload::MessagePostedE2ee { channel_id, generation, epoch, .. }
+        | EventPayload::MessageEditedE2ee { channel_id, generation, epoch, .. } => {
+            Some((*channel_id, *generation, *epoch))
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared MemberInfo builder
 // ---------------------------------------------------------------------------
@@ -2314,14 +2333,26 @@ pub fn handle_request(
             //     process winner -> rebuild -> resubmit. Never stored, so the fold's
             //     no-op path is unreachable through ingest.
             //
+            //     The same remedy applies to the two sealed payloads that cite a
+            //     `(generation, epoch)` (`MessagePostedE2ee` / `MessageEditedE2ee`):
+            //     a message sealed at an epoch another member's commit has already
+            //     moved past must also resync and resubmit. Without this, a stale
+            //     sealed send fell through to the fold and came back as the prose
+            //     `"event rejected: sealed content does not cite the group's current
+            //     epoch"` — which the resync loop's exact `"stale-epoch"` predicate
+            //     would never match, silently disabling resync for the single most
+            //     common way to lose an epoch race. The fold's own `check_sealed_send`
+            //     epoch check stays as the authoritative backstop; this is an early,
+            //     machine-readable bounce, not a replacement for validation.
+            //
             //     This runs BEFORE signature/authz, so an unauthenticated submitter
             //     can distinguish "current epoch" from "not current". That leaks
             //     nothing: the whole commit/Welcome stream is already public
             //     server-wide by this rung's design (spec §"What is still visible"),
             //     so the group's epoch is public log state, not a secret.
-            if let EventPayload::MlsCommit { channel_id, generation, epoch, .. } = &event.core.payload {
-                if let Some((cur_gen, cur_epoch)) = ls.mls_current_epoch(*channel_id) {
-                    if *generation != cur_gen || *epoch != cur_epoch {
+            if let Some((channel_id, generation, epoch)) = epoch_claim(&event.core.payload) {
+                if let Some((cur_gen, cur_epoch)) = ls.mls_current_epoch(channel_id) {
+                    if generation != cur_gen || epoch != cur_epoch {
                         return err("stale-epoch");
                     }
                 }
@@ -9876,6 +9907,68 @@ mod tests {
             "stale-epoch",
             "the epoch that was current one event ago is now the stale one"
         );
+    }
+
+    #[test]
+    fn a_stale_sealed_send_is_bounced_with_the_stale_epoch_code() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 8;
+        let created = f.channel_created(ch, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+
+        let before = f.log_pos();
+        let authz_head = f.head.hash();
+
+        let posted = |generation: u64, epoch: u64| EP::MessagePostedE2ee {
+            channel_id: ch,
+            generation,
+            epoch,
+            ciphertext: vec![1, 2, 3],
+            reply_to: None,
+            attachments: vec![],
+            authz_head: authz_head.clone(),
+        };
+        let edited = |generation: u64, epoch: u64| EP::MessageEditedE2ee {
+            channel_id: ch,
+            target: "0f".repeat(32),
+            generation,
+            epoch,
+            ciphertext: vec![4, 5, 6],
+            authz_head: authz_head.clone(),
+        };
+
+        // A fresh E2ee channel's group sits at generation 0 / epoch 0. Both
+        // sealed payloads that cite a stale (generation, epoch) bounce with the
+        // SAME bare code as a stale commit — the resync loop has one signal for
+        // every payload that can lose an epoch race.
+        for (label, payload) in [
+            ("MessagePostedE2ee", posted(0, 7)),
+            ("MessagePostedE2ee", posted(3, 0)),
+            ("MessageEditedE2ee", edited(0, 7)),
+        ] {
+            let e = f.sign(now_ts(), payload);
+            let r = f.submit(&conn, &e);
+            assert_eq!(
+                err_reason(&r),
+                "stale-epoch",
+                "{label}: the bounce must be the exact machine-readable code the client's \
+                 resync loop keys on"
+            );
+            assert!(r.events.is_empty(), "a bounced sealed send broadcasts nothing");
+            assert_ingest_left_no_trace(&f, &conn, &e, before);
+        }
+
+        // Control: the CURRENT (generation, epoch) clears the pre-check and is
+        // judged by the FOLD instead, which refuses it for the real reason (no
+        // confirmed leaf on a fresh channel) — NOT as "stale-epoch". So this is
+        // a staleness gate, not a blanket "sealed sends are refused".
+        let current = f.sign(now_ts(), posted(0, 0));
+        let reason = err_reason(&f.submit(&conn, &current));
+        assert_ne!(reason, "stale-epoch");
+        assert!(reason.contains("event rejected:"), "the fold judged it: {reason}");
+        assert_ingest_left_no_trace(&f, &conn, &current, before);
     }
 
     #[test]

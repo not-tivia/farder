@@ -100,11 +100,10 @@ pub struct SealedSendOutcome {
 /// folded history). A rejection is NOT handled here: a sealed send is not a
 /// commit and does not merge anything locally, so there is no divergence to
 /// unwind, and resync is Task 6's job. Any rejection surfaces as
-/// [`E2eeError::Transport`], never swallowed. (Note for Task 6: the bare
+/// [`E2eeError::Transport`], never swallowed. Since finding F6, the bare
 /// `"stale-epoch"` reason — `TransportError::is_stale_epoch` — is emitted by
-/// the server only for `MlsCommit`, not for `MessagePostedE2ee`; a sealed send
-/// that loses an epoch race is rejected by the fold instead, as
-/// `"event rejected: sealed content does not cite the group's current epoch"`.)
+/// the server for `MessagePostedE2ee` / `MessageEditedE2ee` too (not just
+/// `MlsCommit`), so [`crate::resync::send_sealed_resync`] keys on it here.
 pub async fn send_sealed<T: E2eeTransport + Sync>(
     transport: &T,
     actor: &Actor<'_>,
