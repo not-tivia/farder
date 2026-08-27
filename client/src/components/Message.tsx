@@ -476,6 +476,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
       ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
       : message.content;
 
+  // Sealed E2EE row with no plaintext yet (Rung-2 4b-1 stopgap): render a
+  // placeholder instead of empty content. T10 wires decryption and replaces
+  // this with plaintext or a fail-closed "couldn't decrypt" marker -- this
+  // branch only matches while `content` is empty and no decrypt has run.
+  const isSealed = message.is_e2ee === true && message.sealed != null && message.content === "";
+
   async function handleReactionClick(emoji: string, alreadyMe: boolean, fileId?: number) {
     if (reacting) return;
     setReacting(true);
@@ -606,10 +612,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
       )}
       {/* Attachment-only messages (voice notes, captionless images) have empty
           content — the body must still render so the attachments do. */}
-      {(deleted || displayContent || message.attachments.length > 0) && !showWidget && (
-        <div className={`message-content${deleted ? " deleted-content" : ""}`}>
+      {(deleted || isSealed || displayContent || message.attachments.length > 0) && !showWidget && (
+        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed ? " sealed-content" : ""}`}>
           {deleted ? (
             <em>This message has been deleted.</em>
+          ) : isSealed ? (
+            <em title="Encrypted message — awaiting decryption">🔒 Encrypted message</em>
           ) : editing ? (
             <div className="message-edit-area">
               <textarea

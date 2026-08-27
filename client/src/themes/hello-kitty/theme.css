@@ -19,6 +19,7 @@
   --xp-font-size-small: 11px;
   --xp-text-normal:    #4A2937;
   --xp-bow-red:        #E63946;
+  --xp-e2ee:           #2E8B57;
 }
 
 * {
@@ -242,6 +243,11 @@ body {
   color: rgba(255,255,255,0.9);
 }
 
+.channel-e2ee-lock {
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
 .channel-item.unread {
   font-weight: bold;
   color: var(--xp-blue-dark);
@@ -328,6 +334,14 @@ body {
   font-weight: bold;
   font-size: 13px;
   color: var(--xp-blue-dark);
+}
+
+.channel-header-e2ee {
+  color: var(--xp-e2ee);
+  font-size: 10px;
+  font-weight: bold;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 
 .channel-header-topic {
@@ -441,6 +455,11 @@ body {
 }
 
 .message-content.deleted-content {
+  color: var(--xp-text-muted);
+  font-style: italic;
+}
+
+.message-content.sealed-content {
   color: var(--xp-text-muted);
   font-style: italic;
 }

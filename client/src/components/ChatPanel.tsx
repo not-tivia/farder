@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
-import { publicKeyToString, flattenMessageInfoV2 } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
 import type { MessageInfo } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
@@ -127,6 +127,9 @@ export default function ChatPanel() {
             ? dms.find(d => d.channel.id === currentChannelId)?.participant.display_name ?? "DM"
             : `# ${currentChannel?.name ?? "unknown"}`}
         </span>
+        {isE2eeChannel(currentChannel) && (
+          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
+        )}
         {currentChannel?.topic && (
           <span className="channel-header-topic">{currentChannel.topic}</span>
         )}

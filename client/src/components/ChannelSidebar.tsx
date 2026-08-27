@@ -495,6 +495,9 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
       >
         <span className="channel-prefix">{prefix}</span>
         <span>{ch.name}</span>
+        {isE2eeChannel(ch) && (
+          <span className="channel-e2ee-lock" title="Encrypted channel">🔒</span>
+        )}
       </div>
     );
   }
