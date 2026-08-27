@@ -291,6 +291,52 @@ pub fn get_message(conn: &Connection, id: u64, requester: &PublicKey) -> Result<
     Ok(Some(msg))
 }
 
+/// `get_message` for the v2 surface: the same row plus the three v2-only
+/// columns (`is_e2ee`, `sealed`, `event_hash`), enriched exactly like
+/// `get_message`. Used to build the `SealedMessage` / `SealedMessageEdited`
+/// broadcasts for a freshly derived or edited row — the server never has the
+/// plaintext, so the only live shape it can announce is `MessageInfoV2`.
+pub fn get_message_v2(
+    conn: &Connection,
+    id: u64,
+    requester: &PublicKey,
+) -> Result<Option<MessageInfoV2>> {
+    let select = format!("{}, is_e2ee, sealed, event_hash", MSG_SELECT);
+    let mut msg = match conn
+        .query_row(
+            &format!("SELECT {} FROM messages WHERE id = ?1", select),
+            params![id as i64],
+            |row| {
+                let base = row_to_message_info(row)?;
+                let n = 11; // MSG_SELECT's column count; the three v2 columns follow it.
+                let is_e2ee: i64 = row.get(n)?;
+                Ok(MessageInfoV2 {
+                    base,
+                    is_e2ee: is_e2ee != 0,
+                    sealed: row.get(n + 1)?,
+                    event_hash: row.get(n + 2)?,
+                })
+            },
+        )
+        .optional()?
+    {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    msg.base.attachments = crate::attachments::get_attachments_for_message(conn, msg.base.id)?;
+    msg.base.reactions = crate::reactions::get_reactions_for_message(conn, msg.base.id, requester)?;
+    if let Some(thread) = crate::channels::get_thread_for_message(conn, msg.base.id)? {
+        msg.base.thread_id = Some(thread.id);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE channel_id = ?1",
+            rusqlite::params![thread.id as i64],
+            |row| row.get(0),
+        )?;
+        msg.base.thread_message_count = Some(count as u32);
+    }
+    Ok(Some(msg))
+}
+
 pub fn fetch_history(
     conn: &Connection,
     channel_id: u64,

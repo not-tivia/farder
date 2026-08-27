@@ -751,6 +751,8 @@ name = "farder"
 version = "0.1.0"
 dependencies = [
  "farder-crypto",
+ "farder-e2ee-client",
+ "farder-mls",
  "farder-node",
  "farder-protocol",
  "farder-server",
@@ -758,6 +760,7 @@ dependencies = [
  "quinn",
  "rand 0.8.5",
  "rcgen",
+ "rusqlite",
  "rustls",
  "serde",
  "sha2",
@@ -800,6 +803,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x25519-dalek",
+]
+
+[[package]]
+name = "farder-e2ee-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "farder-crypto",
+ "farder-mls",
+ "farder-protocol",
+ "openmls",
+ "rmp-serde",
+ "serde",
+ "tls_codec",
+ "tokio",
 ]
 
 [[package]]

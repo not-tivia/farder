@@ -716,7 +716,11 @@ the `SubmitEvent` arm pre-checks `mls_current_epoch(channel_id)` *before*
 `apply`, and returns the exact string `"stale-epoch"` when either the declared
 generation or the declared epoch is not the current one — so the fold's
 accept-as-no-op path is unreachable through ingest and the author's client
-resyncs instead of believing its commit landed.
+resyncs instead of believing its commit landed. The same pre-check fires for a
+stale `MessagePostedE2ee` / `MessageEditedE2ee` (finding F6), so a sealed send
+that loses the epoch race bounces with the same machine-readable code instead of
+the fold's prose epoch-mismatch message — the client's resync loop has one
+signal for every payload that cites an epoch.
 
 ### Rung-2 purity + checkpoint composability (sub-2 Task 5)
 

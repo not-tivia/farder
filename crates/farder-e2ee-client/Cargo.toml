@@ -1,0 +1,26 @@
+[package]
+name = "farder-e2ee-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+farder-mls = { workspace = true }
+farder-crypto = { workspace = true }
+farder-protocol = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+rmp-serde = "1"
+# Serializing a KeyPackage to its RFC 9420 TLS bytes before publishing it.
+# `tls_codec 0.4` is the exact crate openmls 0.8.1 already pulls in (see
+# `farder-mls`), so this promotes an existing transitive dep to a direct one
+# rather than adding a new third-party crate.
+tls_codec = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true }
+# Dev-only: mint the impostor KeyPackage (cloned credential bytes over
+# attacker-owned keys) for the security-critical Gate-2 test. `openmls 0.8.1`
+# is the exact crate `farder-mls` already pins, so this promotes an existing
+# transitive dep to a test-only direct one rather than adding a new crate.
+openmls = "=0.8.1"

@@ -33,7 +33,7 @@ pub fn load_genesis(conn: &Connection) -> Result<Option<Genesis>> {
     }
 }
 
-fn payload_type(p: &EventPayload) -> &'static str {
+pub(crate) fn payload_type(p: &EventPayload) -> &'static str {
     match p {
         EventPayload::MessagePosted { .. } => "MessagePosted",
         EventPayload::DeviceAuthorized { .. } => "DeviceAuthorized",
@@ -45,8 +45,11 @@ fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::PermissionGranted { .. } => "PermissionGranted",
         EventPayload::MemberApproved { .. } => "MemberApproved",
         EventPayload::AttachmentRedacted { .. } => "AttachmentRedacted",
-        // Rung-2 MLS/E2EE variants — DORMANT: LogState rejects them until the
-        // fold rules land; ingest behavior for them is sub-3. Names only here.
+        // Rung-2 MLS/E2EE variants — LIVE since 4a: `LogState` folds them, and
+        // these `payload_type` names now feed the `MlsControlEvent` broadcast
+        // (Task 7) and the fetch surfaces (`fetch_welcomes_for`,
+        // `fetch_mls_control`, `fetch_key_packages`, `fetch_device_certs`).
+        // Names only here.
         EventPayload::ChannelCreated { .. } => "ChannelCreated",
         EventPayload::MlsKeyPackagePublished { .. } => "MlsKeyPackagePublished",
         EventPayload::MlsCommit { .. } => "MlsCommit",
@@ -824,14 +827,26 @@ pub fn fetch_welcomes_for(
     let mut out = Vec::new();
     let mut cursor = since_accept_seq;
     let mut more = false;
+    let mut scanned = 0usize;
     for row in rows {
         let (seq, body) = row?;
         // Cap on ROWS SCANNED, not rows matched: bounding only the matches would
         // let one request walk the entire table when nothing matches.
-        if out.len() >= MAX_FETCH_EVENTS || (seq as u64) > cursor + MAX_FETCH_EVENTS as u64 {
+        //
+        // The bound is a COUNT of examined rows, never a distance in accept_seq.
+        // A range cap (`seq > cursor + MAX`) breaks BEFORE `cursor = seq`
+        // whenever the next matching row sits more than MAX positions past the
+        // cursor -- i.e. behind a gap of rows this query's WHERE clause excludes,
+        // which is the normal case on any busy server. It then returns
+        // `more = true` with an UNMOVED cursor, and a client feeding
+        // next_accept_seq back asks the identical question forever and never
+        // reaches its event. Counting examined rows always advances the cursor
+        // past what was examined, which is the invariant promised above.
+        if out.len() >= MAX_FETCH_EVENTS || scanned >= MAX_FETCH_EVENTS {
             more = true;
             break;
         }
+        scanned += 1;
         cursor = seq as u64;
         let event = Event::from_bytes(&body).context("decode welcome event")?;
         let EventPayload::MlsWelcome { channel_id, for_member, .. } = &event.core.payload else {
@@ -844,6 +859,81 @@ pub fn fetch_welcomes_for(
             if *channel_id != want {
                 continue;
             }
+        }
+        out.push(body);
+    }
+    Ok((out, cursor, more))
+}
+
+/// Raw signed-`Event` bytes for one channel's MLS control plane, oldest-first,
+/// starting after `since_accept_seq`.
+///
+/// The control plane is the four channel-scoped MLS payloads a member needs to
+/// advance (or rebuild) its group state when *another* member commits:
+/// `MlsCommit`, `MlsWelcome`, `MlsLeafConfirmed` and `MlsGroupReset`.
+/// `MlsKeyPackagePublished` is deliberately NOT here — it carries no
+/// `channel_id` (it is server-scoped, published before any group exists) and is
+/// already served by [`fetch_key_packages`].
+///
+/// `channel_id` is matched against the SIGNED payload, never against the
+/// `events.channel_id` column: ingest only denormalizes that column for
+/// `MessagePosted`, so for the MLS variants the body is the only source of
+/// truth. The bytes are handed back opaque — the server stores and orders MLS
+/// traffic, it does not interpret it.
+///
+/// Returns `(events, next_accept_seq, more)` with the SAME cursor semantics as
+/// [`fetch_welcomes_for`]: the cursor advances past every row EXAMINED, not just
+/// the ones returned, so a channel whose control events sit behind thousands of
+/// other channels' is not stuck re-scanning the same prefix forever.
+pub fn fetch_mls_control(
+    conn: &Connection,
+    channel_id: u64,
+    since_accept_seq: u64,
+) -> Result<(Vec<Vec<u8>>, u64, bool)> {
+    let mut stmt = conn.prepare(
+        "SELECT accept_seq, event_body FROM events \
+         WHERE payload_type IN ('MlsCommit', 'MlsWelcome', 'MlsLeafConfirmed', 'MlsGroupReset') \
+           AND accept_seq > ?1 \
+         ORDER BY accept_seq ASC",
+    )?;
+    let rows = stmt.query_map(params![since_accept_seq as i64], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut out = Vec::new();
+    let mut cursor = since_accept_seq;
+    let mut more = false;
+    let mut scanned = 0usize;
+    for row in rows {
+        let (seq, body) = row?;
+        // Cap on ROWS SCANNED, not rows matched: bounding only the matches would
+        // let one request walk the entire table when nothing matches. Identical
+        // to `fetch_welcomes_for`.
+        //
+        // The bound is a COUNT of examined rows, never a distance in accept_seq.
+        // A range cap (`seq > cursor + MAX`) breaks BEFORE `cursor = seq`
+        // whenever the next matching row sits more than MAX positions past the
+        // cursor -- i.e. behind a gap of rows this query's WHERE clause excludes,
+        // which is the normal case on any busy server. It then returns
+        // `more = true` with an UNMOVED cursor, and a client feeding
+        // next_accept_seq back asks the identical question forever and never
+        // reaches its event. Counting examined rows always advances the cursor
+        // past what was examined, which is the invariant promised above.
+        if out.len() >= MAX_FETCH_EVENTS || scanned >= MAX_FETCH_EVENTS {
+            more = true;
+            break;
+        }
+        scanned += 1;
+        cursor = seq as u64;
+        let event = Event::from_bytes(&body).context("decode mls control event")?;
+        let want = match &event.core.payload {
+            EventPayload::MlsCommit { channel_id, .. }
+            | EventPayload::MlsWelcome { channel_id, .. }
+            | EventPayload::MlsLeafConfirmed { channel_id, .. }
+            | EventPayload::MlsGroupReset { channel_id, .. } => *channel_id,
+            _ => continue,
+        };
+        if want != channel_id {
+            continue;
         }
         out.push(body);
     }
@@ -873,6 +963,43 @@ pub fn fetch_key_packages(
     )?;
     let rows = stmt.query_map(
         params![member.as_bytes().as_slice(), device, MAX_FETCH_EVENTS as i64],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Raw signed-`Event` bytes for the `DeviceAuthorized` events of one identity,
+/// oldest-first.
+///
+/// `DeviceAuthorized` carries a `DeviceCert` — the identity-signed
+/// authorization of one device subkey. This is the ONLY production source of
+/// the certs the receive-side leaf-binding gate (`verify_leaf_binding`)
+/// verifies against, so the certs must be fetched from HERE (the log) and
+/// **never** taken from the commit under validation.
+///
+/// Keyed by the SIGNED `author` column (== the identity), never by anything the
+/// fetcher asserted. Membership gating still applies at the request layer:
+/// public *within* the server is not public to the world.
+///
+/// Un-paginated, like [`fetch_key_packages`], and for the same reason: a
+/// cert-per-device set is tiny (a device re-authorization is a rare, deliberate
+/// act), so there is no long backlog to page through; `MAX_FETCH_EVENTS` is the
+/// bound.
+pub fn fetch_device_certs(
+    conn: &Connection,
+    identity: &PublicKey,
+) -> Result<Vec<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_body FROM events \
+         WHERE payload_type = 'DeviceAuthorized' AND author = ?1 \
+         ORDER BY accept_seq ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![identity.as_bytes().as_slice(), MAX_FETCH_EVENTS as i64],
         |r| r.get::<_, Vec<u8>>(0),
     )?;
     let mut out = Vec::new();
@@ -1130,6 +1257,55 @@ mod tests {
         // The right code resolves to the invite's event hash; a wrong code resolves to None.
         assert_eq!(find_invite_event_by_code(&conn, code).unwrap().as_deref(), Some(inv.hash().as_str()));
         assert_eq!(find_invite_event_by_code(&conn, "WRONGcode").unwrap(), None);
+    }
+
+    #[test]
+    fn fetch_device_certs_returns_only_the_requested_identitys_certs() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let bob = Keypair::generate();
+        let bob_dev = Keypair::generate();
+        let g = genesis(&alice);
+        save_genesis(&conn, &g).unwrap();
+
+        // Alice and bob each authorize one device.
+        let alice_da = Event::next(
+            &alice_dev,
+            alice.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&alice, &alice_dev.public_key(), 1) },
+        );
+        store_event(&conn, &alice_da).unwrap();
+        let bob_da = Event::next(
+            &bob_dev,
+            bob.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&bob, &bob_dev.public_key(), 1) },
+        );
+        store_event(&conn, &bob_da).unwrap();
+
+        // Alice's identity returns HER cert (and only hers).
+        let alice_events = fetch_device_certs(&conn, &alice.public_key()).unwrap();
+        assert_eq!(alice_events.len(), 1);
+        let event = Event::from_bytes(&alice_events[0]).unwrap();
+        let EP::DeviceAuthorized { cert } = &event.core.payload else {
+            panic!("expected DeviceAuthorized");
+        };
+        assert_eq!(cert.core.identity, alice.public_key());
+        assert_eq!(cert.core.device_pubkey, alice_dev.public_key());
+
+        // Bob's identity returns his own; a stranger's returns nothing.
+        let bob_events = fetch_device_certs(&conn, &bob.public_key()).unwrap();
+        assert_eq!(bob_events.len(), 1);
+        let stranger = Keypair::generate();
+        assert!(fetch_device_certs(&conn, &stranger.public_key()).unwrap().is_empty());
     }
 
     #[test]
@@ -2068,5 +2244,211 @@ mod tests {
             Some(&b"FRESH ciphertext"[..]),
             "redaction touched no message row at all"
         );
+    }
+
+    /// Store one `MlsLeafConfirmed` control event for `channel_id`. `marker`
+    /// lands in `epoch`/`generation`/`tree_hash`, which also makes every event's
+    /// content hash unique across the test.
+    fn store_control(
+        conn: &Connection,
+        dev: &Keypair,
+        author: &farder_crypto::identity::PublicKey,
+        g: &Genesis,
+        channel_id: u64,
+        marker: u64,
+    ) -> Event {
+        let ev = Event::next(
+            dev,
+            author.clone(),
+            g.server_id(),
+            None,
+            0,
+            marker,
+            EP::MlsLeafConfirmed {
+                channel_id,
+                generation: marker,
+                epoch: marker,
+                tree_hash: [marker as u8; 32],
+                store_instance_hash: [0u8; 32],
+            },
+        );
+        store_event(conn, &ev).unwrap();
+        ev
+    }
+
+    fn control_markers(events: &[Vec<u8>]) -> Vec<(u64, u64)> {
+        events
+            .iter()
+            .map(|b| {
+                let e = Event::from_bytes(b).unwrap();
+                match e.core.payload {
+                    EP::MlsLeafConfirmed { channel_id, epoch, .. } => (channel_id, epoch),
+                    other => panic!("expected MlsLeafConfirmed, got {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fetch_mls_control_returns_the_channels_events_oldest_first() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        let b = 200u64;
+        // Interleave A and B control events; A's are 1, 3, 5 by accept order.
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 1);
+        store_control(&conn, &dev, &owner.public_key(), &g, b, 2);
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 3);
+        store_control(&conn, &dev, &owner.public_key(), &g, b, 4);
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 5);
+
+        let (events, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
+        assert_eq!(control_markers(&events), vec![(a, 1), (a, 3), (a, 5)]);
+        assert_eq!(cursor, 5, "the cursor is the last accept_seq examined");
+        assert!(!more);
+    }
+
+    #[test]
+    fn fetch_mls_control_pages_matching_rows_and_returns_more() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        for marker in 1..=(MAX_FETCH_EVENTS as u64 + 1) {
+            store_control(&conn, &dev, &owner.public_key(), &g, a, marker);
+        }
+
+        let (first, cursor, more) = fetch_mls_control(&conn, a, 0).unwrap();
+        assert_eq!(first.len(), MAX_FETCH_EVENTS);
+        assert!(more);
+        assert_eq!(cursor, MAX_FETCH_EVENTS as u64);
+
+        let (second, cursor2, more2) = fetch_mls_control(&conn, a, cursor).unwrap();
+        assert_eq!(second.len(), 1, "feeding next_accept_seq back reaches the tail");
+        assert_eq!(control_markers(&second), vec![(a, MAX_FETCH_EVENTS as u64 + 1)]);
+        assert_eq!(cursor2, MAX_FETCH_EVENTS as u64 + 1);
+        assert!(!more2);
+    }
+
+    #[test]
+    fn fetch_mls_control_reaches_a_target_behind_many_non_matching_rows() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        let b = 200u64;
+        // 600 control events for channel B, then the ONE for channel A.
+        for marker in 1..=600u64 {
+            store_control(&conn, &dev, &owner.public_key(), &g, b, marker);
+        }
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 7);
+
+        // Drive the documented client loop. 601 rows exceed one page, so this
+        // takes two -- the property under test is that the target IS reached and
+        // that every `more` page strictly advances the cursor, never that a
+        // single call swallows an unbounded number of rows.
+        let mut cursor = 0u64;
+        let mut seen = Vec::new();
+        let mut pages = 0;
+        loop {
+            let (events, next, more) = fetch_mls_control(&conn, a, cursor).unwrap();
+            seen.extend(control_markers(&events));
+            pages += 1;
+            assert!(pages <= 8, "pagination should converge, not grind");
+            if !more {
+                cursor = next;
+                break;
+            }
+            assert!(next > cursor, "a `more` page must advance the cursor past what it examined");
+            cursor = next;
+        }
+        assert_eq!(seen, vec![(a, 7)], "the target behind 600 non-matching rows is reachable");
+        assert_eq!(cursor, 601, "the cursor ends past every row examined");
+    }
+
+    #[test]
+    fn fetch_mls_control_advances_the_cursor_past_non_matching_rows_with_no_matches() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+        let b = 200u64;
+        for marker in 1..=600u64 {
+            store_control(&conn, &dev, &owner.public_key(), &g, b, marker);
+        }
+
+        // Nothing for A at all: every page is empty but the cursor still moves,
+        // so the caller is not stuck re-scanning B's 600 rows from 0 forever.
+        let mut cursor = 0u64;
+        let mut pages = 0;
+        loop {
+            let (events, next, more) = fetch_mls_control(&conn, a, cursor).unwrap();
+            assert!(events.is_empty());
+            pages += 1;
+            assert!(pages <= 8, "pagination should converge, not grind");
+            if !more {
+                cursor = next;
+                break;
+            }
+            assert!(next > cursor, "an empty `more` page must still advance the cursor");
+            cursor = next;
+        }
+        assert_eq!(cursor, 600, "the cursor ends past every row examined");
+    }
+    /// A control event sitting behind a GAP of rows the SQL filter excludes.
+    ///
+    /// The dense case (600 rows of the same payload family) advances the cursor
+    /// one row at a time and never trips the range cap. The real world is the
+    /// gap case: 600 ordinary events, then the control event at accept_seq 601.
+    /// The range cap `seq > cursor + MAX_FETCH_EVENTS` then fires on the FIRST
+    /// row and breaks BEFORE `cursor = seq`, so the page is empty, `more` is
+    /// true, and the cursor has not moved. A client feeding `next_accept_seq`
+    /// back asks the identical question forever and never reaches its event.
+    #[test]
+    fn a_more_page_always_advances_the_cursor_across_a_filtered_out_gap() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+        let g = genesis(&owner);
+        let a = 100u64;
+
+        // Noise of a payload type the SQL filter excludes, so these rows are
+        // never examined and cannot advance the cursor one-by-one.
+        for marker in 1..=600u64 {
+            let ev = Event::next(
+                &dev,
+                owner.public_key(),
+                g.server_id(),
+                None,
+                0,
+                marker,
+                EP::DeviceRevoked { device: format!("{marker:064x}") },
+            );
+            store_event(&conn, &ev).unwrap();
+        }
+        store_control(&conn, &dev, &owner.public_key(), &g, a, 7);
+
+        // Drive the documented client loop: feed next_accept_seq back while `more`.
+        let mut cursor = 0u64;
+        let mut seen = Vec::new();
+        for _ in 0..16 {
+            let (events, next, more) = fetch_mls_control(&conn, a, cursor).unwrap();
+            seen.extend(control_markers(&events));
+            assert!(
+                next > cursor || !more,
+                "a `more` page MUST advance the cursor or the client loops \
+                 forever; it stayed at {cursor}"
+            );
+            cursor = next;
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(seen, vec![(a, 7)], "the event behind the gap must be reachable");
     }
 }
