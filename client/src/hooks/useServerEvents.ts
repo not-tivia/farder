@@ -338,7 +338,7 @@ export function useServerEvents(): void {
       // the change is reflected immediately.
       api.getMembers(serverId).then(members =>
         dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
-      api.getServerInfo(serverId).then(info =>
+      api.getServerInfoV2(serverId).then(info =>
         dispatch({ type: "SERVER_REFRESHED", serverId, payload: info })).catch(() => {});
     }).then(safePush);
 

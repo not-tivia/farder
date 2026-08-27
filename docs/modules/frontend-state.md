@@ -29,12 +29,12 @@ These three files together are the entire client-side state layer. `ServerContex
 | `serverName` | `string` | Display name; set on connect/refresh |
 | `connected` | `boolean` | Whether the QUIC connection is up |
 | `connectionLost` | `boolean` | True if the connection dropped unexpectedly (triggers reconnect UI) |
-| `channels` | `ChannelInfo[]` | All text/voice channels; replaced on connect, patched by channel events |
+| `channels` | `ChannelInfo[]` | All text/voice channels; replaced on connect, patched by channel events. Each entry carries an optional Rung-2 `class` (`"Plaintext"` \| `"E2ee"`) flattened from `getServerInfoV2`; absent = plaintext |
 | `categories` | `CategoryInfo[]` | Channel categories; same lifecycle as `channels` |
 | `roles` | `RoleInfo[]` | Server roles; same lifecycle |
 | `members` | `MemberInfo[]` | Full member list; re-fetched on `member_joined`, patched by `MEMBER_LEFT` / `MEMBER_TIMEOUT_CHANGED` |
 | `currentChannelId` | `number \| null` | The text channel the user is viewing; set by `SELECT_CHANNEL` |
-| `messages` | `Record<number, MessageInfo[]>` | Messages keyed by channel id; populated lazily as channels are opened |
+| `messages` | `Record<number, MessageInfo[]>` | Messages keyed by channel id; populated lazily as channels are opened. Rung-2 rows may carry optional `is_e2ee` / `sealed` / `event_hash` (a sealed row has empty `content` and ciphertext in `sealed`) |
 | `threadChannelId` | `number \| null` | Threadpane channel; set by `VIEW_THREAD` |
 | `readState` | `Record<number, number>` | Last-read message id per channel; updated on channel select and explicit `MARK_READ` |
 | `dms` | `DmEntry[]` | Direct-message entries (channel + participant); set by `SET_DMS` / `DM_CREATED` |
@@ -97,7 +97,7 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 
 | Action type | What it mutates |
 |---|---|
-| `CONNECTED` / `SERVER_REFRESHED` | Replaces channels, categories, roles, ownerPublicKey; sets `connected = true`, `connectionLost = false`. Also syncs the `ServerListEntry` name/connected flag. |
+| `CONNECTED` / `SERVER_REFRESHED` | Replaces channels, categories, roles, ownerPublicKey; sets `connected = true`, `connectionLost = false`. Also syncs the `ServerListEntry` name/connected flag. Payload is a `ServerInfoV2` (v2 channel list carries `class`); `SERVER_ADDED` stays on `ConnectResult` and defaults class to plaintext. |
 | `DISCONNECTED` | Resets the server slice to `initialPerServerState` with `connected = false` |
 | `CONNECTION_LOST` | Sets `connected = false, connectionLost = true`; marks the `ServerListEntry` disconnected |
 | `RECONNECTED` | Sets `connected = true, connectionLost = false`; marks the `ServerListEntry` connected |

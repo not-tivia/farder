@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2 } from "../lib/types";
 import type { MessageInfo } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
@@ -84,7 +84,9 @@ export default function ChatPanel() {
       if (!oldest) return;
       setLoadingMore(true);
       try {
-        const older = await api.fetchHistory(serverId, currentChannelId, oldest.id, 50);
+        const older = currentChannel?.class === "E2ee"
+          ? flattenMessageInfoV2(await api.fetchHistoryV2(serverId, currentChannelId, oldest.id, 50))
+          : await api.fetchHistory(serverId, currentChannelId, oldest.id, 50);
         if (older.length === 0) {
           setHasMore(false);
         } else {

@@ -9,6 +9,10 @@ export interface ChannelInfo {
   slow_mode_secs: number | null;
   retention_secs: number | null;
   thread_parent_message_id: number | null;
+  /** Rung-2 client-side channel class. Absent on raw v1 frames — Rust
+   *  `ChannelInfo` has no `class`; it rides in `ChannelInfoV2` and the client
+   *  flattens it onto each entry on connect. `undefined` means plaintext. */
+  class?: ChannelClass;
 }
 
 /** A channel's content class — immutable, set at creation (Rung-2).
@@ -94,6 +98,12 @@ export interface MessageInfo {
   /** Server-written widget marker JSON (e.g. `{"type":"poll","id":7}`); null/absent
    *  for normal messages. Treat as untrusted: try/catch parse, numeric id check. */
   widget?: string | null;
+  /** Rung-2 sealed-row fields, absent on v1/plaintext rows. A sealed row has
+   *  empty `content` and ciphertext in `sealed`; `event_hash` cites the log
+   *  event for reply/edit/delete. `is_e2ee` undefined = plaintext. */
+  is_e2ee?: boolean;
+  sealed?: number[] | null;
+  event_hash?: string | null;
 }
 
 /** A message plus the sealed-row fields a v1 client cannot render (Rung-2 v2
@@ -234,6 +244,24 @@ export interface ServerInfoV2 {
   roles: RoleInfo[];
   owner_public_key?: { bytes: number[] } | null;
   server_id?: string | null;
+}
+
+/** Flatten a v2 channel into the client-side `ChannelInfo` entry, merging its
+ *  `class` onto `base`. The `channels` state entries are the flattened form. */
+export function flattenChannelInfoV2(channels: ChannelInfoV2[]): ChannelInfo[] {
+  return channels.map((c) => ({ ...c.base, class: c.class }));
+}
+
+/** Flatten a v2 message row into the client-side `MessageInfo` entry, merging
+ *  the sealed-row fields onto `base`. Plaintext rows pass through with the
+ *  fields undefined. */
+export function flattenMessageInfoV2(messages: MessageInfoV2[]): MessageInfo[] {
+  return messages.map((m) => ({ ...m.base, is_e2ee: m.is_e2ee, sealed: m.sealed, event_hash: m.event_hash }));
+}
+
+/** Ask "is this channel E2EE?" — unknown/absent class defaults to plaintext. */
+export function isE2eeChannel(channel: ChannelInfo | null | undefined): boolean {
+  return (channel?.class ?? "Plaintext") === "E2ee";
 }
 
 export interface SendMessageResult {

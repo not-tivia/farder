@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo } from "../lib/types";
-import { publicKeyToString } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2 } from "../lib/types";
+import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 
 export interface PerServerState {
   serverName: string;
@@ -102,8 +102,8 @@ export type AppAction =
   | { type: "INCREMENT_UNREAD"; serverId: string }
   | { type: "CLEAR_UNREAD"; serverId: string }
   // Per-server actions (all require serverId)
-  | { type: "CONNECTED"; serverId: string; payload: ConnectResult }
-  | { type: "SERVER_REFRESHED"; serverId: string; payload: ConnectResult }
+  | { type: "CONNECTED"; serverId: string; payload: ServerInfoV2 }
+  | { type: "SERVER_REFRESHED"; serverId: string; payload: ServerInfoV2 }
   | { type: "DISCONNECTED"; serverId: string }
   | { type: "CONNECTION_LOST"; serverId: string }
   | { type: "RECONNECTED"; serverId: string }
@@ -173,7 +173,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         connected: true,
         connectionLost: false,
         serverName: action.payload.server_name,
-        channels: action.payload.channels,
+        channels: flattenChannelInfoV2(action.payload.channels),
         categories: action.payload.categories,
         roles: action.payload.roles,
         ownerPublicKey: action.payload.owner_public_key
@@ -331,7 +331,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     }
     case "CHANNEL_CREATED":
       if (state.channels.some(c => c.id === action.payload.id)) return state;
-      return { ...state, channels: [...state.channels, action.payload] };
+      return { ...state, channels: [...state.channels, { ...action.payload, class: action.payload.class ?? "Plaintext" }] };
     case "CHANNEL_DELETED": {
       const { channelId } = action.payload;
       // Prune the stale voice roster for the deleted channel, and exit voice if
@@ -352,7 +352,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     case "CATEGORY_UPDATED":
       return { ...state, categories: state.categories.map((c) => c.id === action.payload.id ? action.payload : c) };
     case "CHANNEL_UPDATED":
-      return { ...state, channels: state.channels.map((c) => c.id === action.payload.id ? action.payload : c) };
+      return { ...state, channels: state.channels.map((c) => c.id === action.payload.id ? { ...action.payload, class: c.class ?? "Plaintext" } : c) };
     case "VIEW_THREAD":
       return { ...state, threadChannelId: action.payload };
     case "MARK_READ": {
@@ -571,7 +571,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         connected: true,
         connectionLost: false,
         serverName: payload.server_name,
-        channels: payload.channels,
+        channels: payload.channels.map((c) => ({ ...c, class: c.class ?? "Plaintext" })),
         categories: payload.categories,
         roles: payload.roles,
         ownerPublicKey: payload.owner_public_key

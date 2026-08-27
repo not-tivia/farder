@@ -3,7 +3,7 @@ import { useApp, useActiveServer, useActiveServerId } from "../context/ServerCon
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
 import type { ChannelInfo, CategoryInfo, MemberInfo } from "../lib/types";
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
 
 import InviteDialog from "./InviteDialog";
 import ServerSettingsDialog from "./ServerSettingsDialog";
@@ -349,7 +349,9 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
     dispatch({ type: "SELECT_CHANNEL", serverId, payload: channel.id });
     setLastChannel(serverId, channel.id);
     try {
-      const msgs = await api.fetchHistory(serverId, channel.id);
+      const msgs = isE2eeChannel(channel)
+        ? flattenMessageInfoV2(await api.fetchHistoryV2(serverId, channel.id))
+        : await api.fetchHistory(serverId, channel.id);
       const reversed = msgs.reverse();
       dispatch({ type: "SET_MESSAGES", serverId, payload: { channelId: channel.id, messages: reversed } });
       if (reversed.length > 0) {

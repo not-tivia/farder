@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 import AddServerModal from "./AddServerModal";
 
 export default function ServerStrip() {
@@ -29,14 +29,15 @@ export default function ServerStrip() {
     dispatch({ type: "CLEAR_UNREAD", serverId });
     void api.setLastServer(serverId);
     try {
-      const info = await api.getServerInfo(serverId);
+      const info = await api.getServerInfoV2(serverId);
       dispatch({ type: "SERVER_REFRESHED", serverId, payload: info });
       const members = await api.getMembers(serverId);
       dispatch({ type: "SET_MEMBERS", serverId, payload: members });
       const dms = await api.listDms(serverId);
       dispatch({ type: "SET_DMS", serverId, payload: dms });
       // Load voice states for all voice channels
-      const voiceChannels = info.channels.filter(c => c.channel_type === "Voice");
+      const flatChannels = flattenChannelInfoV2(info.channels);
+      const voiceChannels = flatChannels.filter(c => c.channel_type === "Voice");
       for (const vc of voiceChannels) {
         try {
           const vs = await api.getVoiceState(serverId, vc.id);
