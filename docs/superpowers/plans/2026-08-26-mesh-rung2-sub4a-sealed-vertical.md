@@ -287,3 +287,37 @@ struct** (rmp_serde encodes a struct as a positional array; adding a variant is 
 mutating a shipped struct is not). Without Task 9 the vertical is single-add-only, so it is
 required for 4a to be honestly complete — it is sequenced after Task 4 purely because
 Task 4 does not depend on it.
+
+### F4 — Gate 2 necessarily runs POST-merge (real limitation, Task 6 must honour it)
+
+`process_commit_checked` merges as soon as the declared-vs-actual check passes, and
+farder-mls exposes `ProcessedCommit::actual_adds` (with the real per-leaf signature keys)
+**only after** that merge. So `verify_leaf_binding` — Gate 2 — necessarily runs against an
+already-merged group. When it fails, `IncomingCommitOutcome::LeafBindingFailure` is a hard
+rejection, but the local group **already contains the impostor leaf**, and the public
+farder-mls API offers no rollback.
+
+**Contract:** a `LeafBindingFailure` means the local group is POISONED. The caller must
+treat it as terminal for that group instance — abort and resync from the log, never
+continue. Task 6 owns that path. Do NOT downgrade this to a warning.
+
+**Carry-forward for a farder-mls revision:** a pre-merge leaf-inspection hook (expose the
+staged commit's actual leaves before merging) would let Gate 2 run before any state change
+and turn this from "poisoned, must resync" into a clean refusal. Out of scope for 4a.
+
+### F5 — the "intermittent `fetch_mls_control*` failures" were MY concurrent edits, not a flake
+
+Task 4's report recorded an intermittent failure cluster in `fetch_mls_control*` seen in
+~2 of 5 workspace runs. Cause identified: I was fixing the pagination bug (commit `a2afff8`)
+in the SAME checkout while that agent ran `cargo test --workspace`, so its runs sampled my
+half-applied state — including the window where the fix was in but the two tests still
+asserted the old behaviour. On a clean tree the workspace suite ran **three consecutive
+times, exit 0, 813 passing, zero failures**.
+
+Do not record this as a known flake; there is nothing to chase. The genuine known flake in
+this repo remains `handlers::tests::test_timeout_member_rejects_invalid_duration` (time-based).
+
+**Process lesson:** do not edit the working tree while subagents are running workspace-wide
+test commands in it. Either make controller-side fixes in a scratch worktree and cherry-pick,
+or wait for a quiet window. The concurrency saved wall-clock but cost an agent real time
+chasing a phantom.
