@@ -320,6 +320,25 @@ impl E2eeTransport for QuicE2eeTransport {
         }
     }
 
+    fn fetch_device_certs(
+        &self,
+        identity: &PublicKey,
+    ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+        let identity = identity.clone();
+        async move {
+            match self
+                .round_trip(ServerRequest::FetchDeviceCerts { identity })
+                .await?
+            {
+                ServerResponse::DeviceCerts { events } => Ok(events),
+                ServerResponse::Error { reason } => Err(TransportError::rejected(reason)),
+                other => Err(TransportError::transport(format!(
+                    "unexpected FetchDeviceCerts response: {other:?}"
+                ))),
+            }
+        }
+    }
+
     fn fetch_history_v2(
         &self,
         channel_id: u64,

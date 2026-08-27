@@ -1520,6 +1520,21 @@ pub fn handle_request(
             ok(ServerResponse::KeyPackages { events })
         }
 
+        ServerRequest::FetchDeviceCerts { identity } => {
+            if !connection_speaks_v2(state, member) {
+                return err(UPGRADE_REQUIRED);
+            }
+            // Membership-gated by the request gate at the top of `handle_request`
+            // (this variant is NOT in the bootstrap allow-list). DeviceCerts are
+            // identity-signed and public WITHIN the server by design — the
+            // receive-side leaf-binding gate must be able to fetch the cert of a
+            // member it validates. This is the production source of that gate's
+            // trust anchor; a caller must NEVER substitute a cert taken from the
+            // commit being validated.
+            let events = crate::event_ingest::fetch_device_certs(conn, &identity)?;
+            ok(ServerResponse::DeviceCerts { events })
+        }
+
         ServerRequest::FetchMlsControl { channel_id, since_accept_seq } => {
             if !connection_speaks_v2(state, member) {
                 return err(UPGRADE_REQUIRED);
@@ -9135,6 +9150,7 @@ mod tests {
                 ServerRequest::GetServerInfoV2,
                 ServerRequest::FetchHistoryV2 { channel_id: 1, before_id: None, limit: 10 },
                 ServerRequest::FetchMlsControl { channel_id: 1, since_accept_seq: 0 },
+                ServerRequest::FetchDeviceCerts { identity: owner.clone() },
             ]
         };
 
@@ -9277,6 +9293,83 @@ mod tests {
         assert_eq!(err_reason(&r), "missing READ_MESSAGES permission");
     }
 
+    /// `FetchDeviceCerts` is the production source of the receive-side leaf-
+    /// binding gate's trust anchor: it serves one identity's OWN
+    /// `DeviceAuthorized` events (and nobody else's), needs v2, and is
+    /// membership-gated (asserted in `new_fetch_surfaces_are_membership_gated_...`
+    /// and `no_new_request_variant_escapes_default_deny...`).
+    #[test]
+    fn fetch_device_certs_serves_only_the_requested_identity_and_is_v2_gated() {
+        use farder_crypto::event_log::{DeviceCert, Event};
+
+        let (conn, owner) = setup();
+        let state = fake_state_v2(&owner);
+
+        // Publish a DeviceAuthorized for a fresh identity (the author is the
+        // identity; the device subkey signs the event).
+        let target = Keypair::generate();
+        let target_dev = Keypair::generate();
+        let da = Event::next(
+            &target_dev,
+            target.public_key(),
+            "test-server".to_string(),
+            None,
+            0,
+            1,
+            EventPayload::DeviceAuthorized {
+                cert: DeviceCert::create(&target, &target_dev.public_key(), 1),
+            },
+        );
+        crate::event_ingest::store_event(&conn, &da).unwrap();
+
+        // A v1 connection cannot reach the surface at all.
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::FetchDeviceCerts { identity: target.public_key() },
+            "",
+            &fake_state(),
+        )
+        .unwrap();
+        assert_eq!(err_reason(&r), UPGRADE_REQUIRED);
+
+        // The requested identity's cert is returned, as raw signed event bytes.
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::FetchDeviceCerts { identity: target.public_key() },
+            "",
+            &state,
+        )
+        .unwrap();
+        let ServerResponse::DeviceCerts { events } = r.response else {
+            panic!("expected DeviceCerts");
+        };
+        assert_eq!(events.len(), 1);
+        let event = Event::from_bytes(&events[0]).unwrap();
+        let EventPayload::DeviceAuthorized { cert } = &event.core.payload else {
+            panic!("expected DeviceAuthorized");
+        };
+        assert_eq!(cert.core.identity, target.public_key());
+
+        // A different identity has no certs in the log, so it returns nothing.
+        let r = handle_request(
+            &conn,
+            &owner,
+            true,
+            ServerRequest::FetchDeviceCerts { identity: owner.clone() },
+            "",
+            &state,
+        )
+        .unwrap();
+        let ServerResponse::DeviceCerts { events } = r.response else {
+            panic!("expected DeviceCerts");
+        };
+        assert!(events.is_empty());
+    }
+
     /// `NegotiateProtocol` records ONLY the caller's own slot, keyed by the
     /// authenticated connection key.
     #[test]
@@ -9347,7 +9440,8 @@ mod tests {
                 | ServerRequest::FetchKeyPackages { .. }
                 | ServerRequest::GetServerInfoV2
                 | ServerRequest::FetchHistoryV2 { .. }
-                | ServerRequest::FetchMlsControl { .. } => true,
+                | ServerRequest::FetchMlsControl { .. }
+                | ServerRequest::FetchDeviceCerts { .. } => true,
                 // Everything else is gated. Enumerated, not `_`-defaulted.
                 ServerRequest::AddBot { .. }
                 | ServerRequest::AddBotAlert { .. }

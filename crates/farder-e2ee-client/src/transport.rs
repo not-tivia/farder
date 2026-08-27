@@ -193,6 +193,20 @@ pub trait E2eeTransport {
         device: &str,
     ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send;
 
+    /// Fetch the `DeviceAuthorized` events for one identity
+    /// (`ServerRequest::FetchDeviceCerts`). Returns the raw signed `Event`
+    /// bytes from `ServerResponse::DeviceCerts`, oldest-first.
+    ///
+    /// This is the ONLY production source of the `DeviceCert`s the receive-side
+    /// leaf-binding gate (Gate 2) verifies against — a cert must come from HERE
+    /// (the log), **never** from the commit under validation. See
+    /// [`crate::cert`] for the production [`crate::commit::DeviceCertResolver`]
+    /// built on top of this.
+    fn fetch_device_certs(
+        &self,
+        identity: &PublicKey,
+    ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send;
+
     /// Fetch channel history that can carry sealed rows
     /// (`ServerRequest::FetchHistoryV2`). Returns the `messages` from
     /// `ServerResponse::HistoryV2`.

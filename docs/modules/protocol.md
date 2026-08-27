@@ -80,6 +80,7 @@ v1 and v2 surfaces are separate variants, never modes of one variant:
 | — | `FetchWelcomes` / `Welcomes` | MLS Welcomes addressed to the **authenticated connection key**. There is deliberately no recipient field: `channel_id` can narrow the result, nothing can widen it. The response carries `next_accept_seq` + `more`, because `accept_seq` is a server-local column that appears nowhere in the returned event bytes — without the cursor a client could only ever ask from 0 and, once its backlog exceeded the per-fetch cap, could never reach its newest Welcome |
 | — | `FetchKeyPackages` / `KeyPackages` | published KeyPackages for one `(member, device)`. Public *within* the server by design — membership gating still applies |
 | — | `FetchMlsControl` / `MlsControl` | one channel's MLS control plane — the raw signed `Event` bytes for `MlsCommit`, `MlsWelcome`, `MlsLeafConfirmed` and `MlsGroupReset`, oldest-first. This is what a member uses to advance its group when *another* member commits: `FetchWelcomes` only serves Welcomes addressed to the caller, so without this surface a client can never obtain the incoming `MlsCommit` it must feed to `process_commit_checked`. Channel-scoped and gated on `READ_MESSAGES` (the same read gate as `FetchHistoryV2`). Same cursor contract as `Welcomes`: `next_accept_seq` + `more`. `MlsKeyPackagePublished` is deliberately absent — it has no channel and is already served by `FetchKeyPackages` |
+| — | `FetchDeviceCerts` / `DeviceCerts` | the `DeviceAuthorized` events for one identity — the raw signed `Event` bytes carrying that identity's `DeviceCert`s, oldest-first. This is the production source of the receive-side leaf-binding gate's trust anchor (`verify_leaf_binding`), so a client must fetch the cert from HERE (the log) and **never** take one from the commit under validation. Public *within* the server by design (like `FetchKeyPackages`); membership gating still applies. Un-paginated like `FetchKeyPackages` — a cert-per-device set is tiny |
 
 All three fetch responses hand back **raw signed `Event` bytes**: the server
 stores and orders MLS traffic, it never interprets it.
@@ -344,6 +345,7 @@ Every request receives exactly one response.
 | `Event` | `event: EventInfo`, `my_rsvp: Option<String>` | Full event state in response to `GetEvent`. `my_rsvp` is requester-specific and never rides in the `EventUpdated` broadcast. |
 | `MyReminders` | `reminders: Vec<ReminderInfo>` | The caller's own pending reminders in response to `ListMyReminders`, soonest first. Owner-scoped in SQL — another member's reminder can never appear here. |
 | `MlsControl` | `events: Vec<Vec<u8>>`, `next_accept_seq: u64`, `more: bool` | One channel's MLS control-plane events (raw signed `Event` bytes), oldest-first, in response to `FetchMlsControl`. `next_accept_seq` is the cursor for the next request's `since_accept_seq`; `more` says whether the server truncated the page. |
+| `DeviceCerts` | `events: Vec<Vec<u8>>` | One identity's `DeviceAuthorized` events (raw signed `Event` bytes), oldest-first, in response to `FetchDeviceCerts`. |
 
 ---
 

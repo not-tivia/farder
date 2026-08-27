@@ -11,6 +11,7 @@
 //! This crate deliberately has **no networking dependency** (no `quinn`, no
 //! `tauri`): the transport is supplied by the caller behind the trait.
 
+pub mod cert;
 pub mod chain;
 pub mod channel;
 pub mod channel_key;
@@ -23,6 +24,7 @@ pub mod transport;
 #[cfg(test)]
 pub mod testing;
 
+pub use cert::{build_cert_resolver, resolve_device_cert, VerifiedCertResolver};
 pub use chain::{build_next_event, event_now_secs, Actor, ChainState};
 pub use channel::{
     bootstrap_group, channel_group_id, create_e2ee_channel, publish_key_package,

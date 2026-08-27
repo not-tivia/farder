@@ -45,8 +45,11 @@ pub(crate) fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::PermissionGranted { .. } => "PermissionGranted",
         EventPayload::MemberApproved { .. } => "MemberApproved",
         EventPayload::AttachmentRedacted { .. } => "AttachmentRedacted",
-        // Rung-2 MLS/E2EE variants — DORMANT: LogState rejects them until the
-        // fold rules land; ingest behavior for them is sub-3. Names only here.
+        // Rung-2 MLS/E2EE variants — LIVE since 4a: `LogState` folds them, and
+        // these `payload_type` names now feed the `MlsControlEvent` broadcast
+        // (Task 7) and the fetch surfaces (`fetch_welcomes_for`,
+        // `fetch_mls_control`, `fetch_key_packages`, `fetch_device_certs`).
+        // Names only here.
         EventPayload::ChannelCreated { .. } => "ChannelCreated",
         EventPayload::MlsKeyPackagePublished { .. } => "MlsKeyPackagePublished",
         EventPayload::MlsCommit { .. } => "MlsCommit",
@@ -969,6 +972,43 @@ pub fn fetch_key_packages(
     Ok(out)
 }
 
+/// Raw signed-`Event` bytes for the `DeviceAuthorized` events of one identity,
+/// oldest-first.
+///
+/// `DeviceAuthorized` carries a `DeviceCert` — the identity-signed
+/// authorization of one device subkey. This is the ONLY production source of
+/// the certs the receive-side leaf-binding gate (`verify_leaf_binding`)
+/// verifies against, so the certs must be fetched from HERE (the log) and
+/// **never** taken from the commit under validation.
+///
+/// Keyed by the SIGNED `author` column (== the identity), never by anything the
+/// fetcher asserted. Membership gating still applies at the request layer:
+/// public *within* the server is not public to the world.
+///
+/// Un-paginated, like [`fetch_key_packages`], and for the same reason: a
+/// cert-per-device set is tiny (a device re-authorization is a rare, deliberate
+/// act), so there is no long backlog to page through; `MAX_FETCH_EVENTS` is the
+/// bound.
+pub fn fetch_device_certs(
+    conn: &Connection,
+    identity: &PublicKey,
+) -> Result<Vec<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_body FROM events \
+         WHERE payload_type = 'DeviceAuthorized' AND author = ?1 \
+         ORDER BY accept_seq ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![identity.as_bytes().as_slice(), MAX_FETCH_EVENTS as i64],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Repair drift: for every stored `MessagePosted` event that already has a derived
 /// `messages` row, (re)materialize any missing VALID attachment rows. Idempotent
 /// (each cap is guarded inside `derive_attachments`). Returns the number of attachment
@@ -1217,6 +1257,55 @@ mod tests {
         // The right code resolves to the invite's event hash; a wrong code resolves to None.
         assert_eq!(find_invite_event_by_code(&conn, code).unwrap().as_deref(), Some(inv.hash().as_str()));
         assert_eq!(find_invite_event_by_code(&conn, "WRONGcode").unwrap(), None);
+    }
+
+    #[test]
+    fn fetch_device_certs_returns_only_the_requested_identitys_certs() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let bob = Keypair::generate();
+        let bob_dev = Keypair::generate();
+        let g = genesis(&alice);
+        save_genesis(&conn, &g).unwrap();
+
+        // Alice and bob each authorize one device.
+        let alice_da = Event::next(
+            &alice_dev,
+            alice.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&alice, &alice_dev.public_key(), 1) },
+        );
+        store_event(&conn, &alice_da).unwrap();
+        let bob_da = Event::next(
+            &bob_dev,
+            bob.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&bob, &bob_dev.public_key(), 1) },
+        );
+        store_event(&conn, &bob_da).unwrap();
+
+        // Alice's identity returns HER cert (and only hers).
+        let alice_events = fetch_device_certs(&conn, &alice.public_key()).unwrap();
+        assert_eq!(alice_events.len(), 1);
+        let event = Event::from_bytes(&alice_events[0]).unwrap();
+        let EP::DeviceAuthorized { cert } = &event.core.payload else {
+            panic!("expected DeviceAuthorized");
+        };
+        assert_eq!(cert.core.identity, alice.public_key());
+        assert_eq!(cert.core.device_pubkey, alice_dev.public_key());
+
+        // Bob's identity returns his own; a stranger's returns nothing.
+        let bob_events = fetch_device_certs(&conn, &bob.public_key()).unwrap();
+        assert_eq!(bob_events.len(), 1);
+        let stranger = Keypair::generate();
+        assert!(fetch_device_certs(&conn, &stranger.public_key()).unwrap().is_empty());
     }
 
     #[test]

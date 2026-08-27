@@ -24,6 +24,7 @@ pub struct FakeTransport {
     submitted: Mutex<Vec<Event>>,
     responses: Mutex<VecDeque<Result<EventAccepted, TransportError>>>,
     key_packages: Mutex<HashMap<(PublicKey, String), Vec<Vec<u8>>>>,
+    device_certs: Mutex<HashMap<PublicKey, Vec<Vec<u8>>>>,
 }
 
 impl FakeTransport {
@@ -62,6 +63,13 @@ impl FakeTransport {
             .lock()
             .unwrap()
             .insert((member.clone(), device.to_string()), events);
+    }
+
+    /// Serve the raw signed `DeviceAuthorized` event bytes that
+    /// `fetch_device_certs(identity)` should return, keyed by the identity
+    /// public key (the event's `author`).
+    pub fn serve_device_certs(&self, identity: &PublicKey, events: Vec<Vec<u8>>) {
+        self.device_certs.lock().unwrap().insert(identity.clone(), events);
     }
 
     /// Program the next `submit_event` call to be accepted with `event_hash`.
@@ -135,6 +143,20 @@ impl E2eeTransport for FakeTransport {
             .lock()
             .unwrap()
             .get(&(member.clone(), device.to_string()))
+            .cloned()
+            .unwrap_or_default();
+        async move { Ok(events) }
+    }
+
+    fn fetch_device_certs(
+        &self,
+        identity: &PublicKey,
+    ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+        let events = self
+            .device_certs
+            .lock()
+            .unwrap()
+            .get(identity)
             .cloned()
             .unwrap_or_default();
         async move { Ok(events) }

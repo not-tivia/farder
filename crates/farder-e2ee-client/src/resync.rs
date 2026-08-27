@@ -490,6 +490,13 @@ mod tests {
             async move { Ok(Vec::new()) }
         }
 
+        fn fetch_device_certs(
+            &self,
+            _identity: &farder_crypto::identity::PublicKey,
+        ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
         fn fetch_history_v2(
             &self,
             _channel_id: u64,
@@ -561,6 +568,13 @@ mod tests {
             &self,
             _member: &farder_crypto::identity::PublicKey,
             _device: &str,
+        ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
+        fn fetch_device_certs(
+            &self,
+            _identity: &farder_crypto::identity::PublicKey,
         ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
             async move { Ok(Vec::new()) }
         }

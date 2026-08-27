@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,sealed,resync}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-26
 
@@ -22,7 +22,9 @@ other tasks.
 
 **Status:** Tasks 1-6 COMPLETE (transport seam + channel create / KeyPackage
 publish / bootstrap / join + leaf confirmation / steward add + the two
-receive-side gates / sealed send + receive / bounded stale-epoch resync), per
+receive-side gates / sealed send + receive / bounded stale-epoch resync), plus
+Task 10 (production `DeviceCertResolver` + `FetchDeviceCerts` protocol surface),
+per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 
 ---
@@ -31,7 +33,7 @@ receive-side gates / sealed send + receive / bounded stale-epoch resync), per
 
 ### `trait E2eeTransport`
 
-Exactly five calls, all `async` (each desugars to
+Exactly six calls, all `async` (each desugars to
 `fn … -> impl Future<Output = …> + Send`, because `async fn` in a public trait
 trips the `async_fn_in_trait` lint and is not object-safe):
 
@@ -39,15 +41,18 @@ trips the `async_fn_in_trait` lint and is not object-safe):
 - `fetch_welcomes(channel_id: Option<u64>, since_accept_seq: u64) -> Result<Welcomes, TransportError>`
 - `fetch_mls_control(channel_id: u64, since_accept_seq: u64) -> Result<MlsControl, TransportError>`
 - `fetch_key_packages(member: &PublicKey, device: &str) -> Result<Vec<Vec<u8>>, TransportError>`
+- `fetch_device_certs(identity: &PublicKey) -> Result<Vec<Vec<u8>>, TransportError>`
 - `fetch_history_v2(channel_id, before_id, limit) -> Result<Vec<MessageInfoV2>, TransportError>`
 
 The method signatures mirror `farder-protocol::server` request/response shapes.
 `channel_id` on `fetch_welcomes` **narrows, never widens**. `fetch_mls_control`
 serves one channel's MLS control plane (`MlsCommit` / `MlsWelcome` /
 `MlsLeafConfirmed` / `MlsGroupReset`) with the same `next_accept_seq` + `more`
-cursor contract as `fetch_welcomes`. `#[cfg(test)]` `testing::FakeTransport` is
-an in-memory double for unit tests; `MlsControl` and `Welcomes` are the two
-page-shaped value structs the trait hands back.
+cursor contract as `fetch_welcomes`. `fetch_device_certs` serves one identity's
+`DeviceAuthorized` events — the production source of the Gate 2 trust anchor (see
+`cert.rs` below). `#[cfg(test)]` `testing::FakeTransport` is an in-memory double
+for unit tests; `MlsControl` and `Welcomes` are the two page-shaped value structs
+the trait hands back.
 
 ### `TransportError`
 
@@ -168,8 +173,10 @@ race.
 - `DeclaredCommit { epoch, adds, removes, post_tree_hash }` — the declared
   fields of the `MlsCommit` event, grouped for `process_incoming_commit`.
 - `DeviceCertResolver` — trait; `device_cert(identity, device) -> Option<DeviceCert>`
-  supplies the log-valid trust anchor for Gate 2. The cryptographic binding is
-  checked separately by `verify_leaf_binding`.
+  supplies the log-valid trust anchor for Gate 2. The production implementation
+  is [`cert::VerifiedCertResolver`] (built by [`cert::build_cert_resolver`]); the
+  cert must come from the log, never from the commit under validation. The
+  cryptographic binding is checked separately by `verify_leaf_binding`.
 - `IncomingCommitOutcome::{ Applied, OutOfOrder, LeafBindingFailure }` — the
   typed result: success, an ordering gap/replay (blocked, not skipped), or an
   impostor-leaf rejection.
@@ -177,6 +184,37 @@ race.
   post_epoch_authenticator, post_tree_hash }` — `post_epoch_authenticator` is
   read from `group.epoch_authenticator()` immediately after the merge (it is
   NOT a field on `CommitOutcome`, finding F1).
+
+### Device cert resolver (`cert.rs`) — Task 10
+
+The production [`DeviceCertResolver`] trust anchor, closing finding F7 (Gate 2
+had no production cert source). `resolve_device_cert(transport, identity, device)`
+is the primitive: it fetches the identity's `DeviceAuthorized` events over
+`fetch_device_certs`, decodes each one, and returns a [`DeviceCert`] only after
+**all three** checks pass. `build_cert_resolver(transport, members)` batches it
+into a sync [`VerifiedCertResolver`] for [`process_incoming_commit`] (which is
+sync and runs Gate 2 over the already-merged commit).
+
+- `resolve_device_cert` → `Result<Option<DeviceCert>>` (async) — fetch + decode
+  + verify one `(identity, device)`.
+- `build_cert_resolver(transport, &[DeclaredMember]) -> Result<VerifiedCertResolver>`
+  (async) — resolves the certs for a commit's declared adds; an unresolvable
+  member is simply absent from the map, so Gate 2 fails closed for it.
+- `VerifiedCertResolver` — `impl DeviceCertResolver` over an in-memory map.
+
+**What it verifies, and what it does NOT (honest limitation):**
+
+- It verifies **source** (fetched from the log, never from the commit under
+  validation), **binding** (`cert.core.identity == identity` AND
+  `cert.core.device_id == device`), and **signature** (`DeviceCert::verify()`:
+  `device_id` matches `device_pubkey` and the identity key signed the core).
+- It does **NOT** verify revocation or expiry. `DeviceRevoked` and
+  `DeviceCertCore.expires_at` are *fold state* — a `LogState` decides whether the
+  device is currently un-revoked and un-expired — and this crate holds no local
+  `LogState`. A cert that verifies here can still be dead on the server.
+  Revocation/expiry awareness belongs to sub-5 (which owns `DeviceRevoked`, rekey
+  cadence and re-provisioning). This resolver verifies the **cryptographic
+  binding**, not the **fold liveness**; do not read "log-valid" as "un-revoked".
 
 ### Sealed send + receive (`sealed.rs`)
 

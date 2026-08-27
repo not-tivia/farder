@@ -515,6 +515,13 @@ mod tests {
             async move { Ok(Vec::new()) }
         }
 
+        fn fetch_device_certs(
+            &self,
+            _identity: &PublicKey,
+        ) -> impl std::future::Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+            async move { Ok(Vec::new()) }
+        }
+
         fn fetch_history_v2(
             &self,
             _channel_id: u64,

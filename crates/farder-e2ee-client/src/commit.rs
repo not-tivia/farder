@@ -51,14 +51,20 @@ use crate::transport::E2eeTransport;
 
 /// Resolves the log-valid [`DeviceCert`] for one `(identity, device)`.
 ///
-/// This is the *fold-status* half of the second receive-side gate. The
-/// resolver must return `Some(cert)` ONLY when the log currently holds a live,
-/// unrevoked, unexpired `DeviceCert` binding `device` to `identity`; the
-/// cryptographic binding (credential ↔ leaf signature key ↔ cert) is checked
-/// separately by `credential::verify_leaf_binding`. The caller owns the log
-/// state (Task 9's `fetch_mls_control` surface has the events, and the caller
-/// resolves the certs from them); this trait just names the trust anchor
-/// `process_incoming_commit` needs.
+/// This is the *trust-anchor* half of the second receive-side gate. The
+/// resolver must return `Some(cert)` ONLY for a cert it obtained from the log
+/// — never from the commit under validation. The production source is
+/// [`crate::cert`]: [`crate::cert::resolve_device_cert`] fetches the identity's
+/// `DeviceAuthorized` events over the transport and serves a cert only after
+/// `DeviceCert::verify` passes. (The `fetch_mls_control` surface carries
+/// `MlsCommit` / `MlsWelcome` / `MlsLeafConfirmed` / `MlsGroupReset` — it has
+/// no `DeviceCert`s, so it is NOT a cert source.)
+///
+/// The cryptographic binding (credential ↔ leaf signature key ↔ cert) is
+/// checked separately by `credential::verify_leaf_binding`; this trait names
+/// which cert that check trusts. The resolver verifies the *cryptographic*
+/// binding, not the *fold liveness* — revocation and cert expiry are `LogState`
+/// facts this crate does not hold (see the module doc on [`crate::cert`]).
 pub trait DeviceCertResolver {
     fn device_cert(&self, identity: &PublicKey, device: &str) -> Option<DeviceCert>;
 }
@@ -393,6 +399,7 @@ mod tests {
     use tls_codec::Serialize as TlsSerialize;
 
     use crate::channel::{bootstrap_group, channel_group_id, create_e2ee_channel, ChannelSpec};
+    use crate::cert::build_cert_resolver;
     use crate::testing::FakeTransport;
 
     const SERVER_ID: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -980,6 +987,138 @@ mod tests {
         );
         let certs = MapCertResolver(certs);
         let bob_member = declared(&f.bob_id, &f.bob_dev);
+
+        let result = process_incoming_commit(
+            &f.bob_store,
+            &mut f.bob_group,
+            &outcome.commit_bytes,
+            &DeclaredCommit {
+                epoch: outcome.epoch,
+                adds: vec![DeclaredAdd {
+                    identity: bob_member.identity.clone(),
+                    device: bob_member.device.clone(),
+                    key_package: "0f".repeat(32),
+                }],
+                removes: vec![],
+                post_tree_hash: outcome.post_tree_hash,
+            },
+            &certs,
+        )
+        .unwrap();
+
+        match result {
+            IncomingCommitOutcome::LeafBindingFailure { member, reason } => {
+                assert_eq!(member, bob_member);
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected LeafBindingFailure, got {other:?}"),
+        }
+    }
+
+    /// The production resolver, built over [`FakeTransport`], accepts a genuine
+    /// add — proving the cert path (fetch → decode → verify) actually feeds
+    /// Gate 2 and not just the test double.
+    #[tokio::test]
+    async fn process_incoming_commit_with_the_production_resolver_accepts_a_genuine_add() {
+        let mut f = two_member(1 << 60);
+
+        let charlie_id = Keypair::generate();
+        let charlie_dev = Keypair::generate();
+        let cert_event = build_next_event(
+            &charlie_dev,
+            &charlie_id,
+            SERVER_ID,
+            &ChainState::default(),
+            event_now_secs(),
+            EP::DeviceAuthorized {
+                cert: DeviceCert::create(&charlie_id, &charlie_dev.public_key(), 1_700_000_000),
+            },
+        );
+        let transport = FakeTransport::new();
+        transport.serve_device_certs(&charlie_id.public_key(), vec![cert_event.to_bytes()]);
+
+        // Alice honestly adds Charlie.
+        let charlie_bundle =
+            generate_key_package(&f.alice_store, &charlie_dev, &charlie_id.public_key()).unwrap();
+        let charlie_kp_bytes = charlie_bundle.key_package().tls_serialize_detached().unwrap();
+        let charlie_kp = decode_key_package(&f.alice_store, &charlie_kp_bytes).unwrap();
+        let outcome = f
+            .alice_group
+            .add_members(&f.alice_store, &DeviceSigner(&f.alice_dev), &[charlie_kp])
+            .unwrap();
+
+        let member = declared(&charlie_id, &charlie_dev);
+        let certs = build_cert_resolver(&transport, std::slice::from_ref(&member))
+            .await
+            .unwrap();
+
+        let result = process_incoming_commit(
+            &f.bob_store,
+            &mut f.bob_group,
+            &outcome.commit_bytes,
+            &DeclaredCommit {
+                epoch: outcome.epoch,
+                adds: vec![DeclaredAdd {
+                    identity: member.identity.clone(),
+                    device: member.device.clone(),
+                    key_package: "0f".repeat(32),
+                }],
+                removes: vec![],
+                post_tree_hash: outcome.post_tree_hash,
+            },
+            &certs,
+        )
+        .unwrap();
+
+        match result {
+            IncomingCommitOutcome::Applied { epoch, post_tree_hash } => {
+                assert_eq!(epoch, 2);
+                assert_eq!(post_tree_hash, outcome.post_tree_hash);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        assert_eq!(f.bob_group.epoch(), 2);
+    }
+
+    /// THE integration test: the PRODUCTION resolver (not `MapCertResolver`)
+    /// still rejects the impostor. The cert served by the transport is bob's
+    /// real one; the impostor leaf carries bob's credential over attacker keys,
+    /// so `verify_leaf_binding` must fail.
+    #[tokio::test]
+    async fn process_incoming_commit_with_the_production_resolver_still_rejects_the_impostor() {
+        let mut f = two_member(1 << 61);
+
+        let cert_event = build_next_event(
+            &f.bob_dev,
+            &f.bob_id,
+            SERVER_ID,
+            &ChainState::default(),
+            event_now_secs(),
+            EP::DeviceAuthorized {
+                cert: DeviceCert::create(&f.bob_id, &f.bob_dev.public_key(), 1_700_000_000),
+            },
+        );
+        let transport = FakeTransport::new();
+        transport.serve_device_certs(&f.bob_id.public_key(), vec![cert_event.to_bytes()]);
+
+        let attacker_dev = Keypair::generate();
+        let impostor = impostor_key_package(
+            &f.alice_store,
+            &attacker_dev,
+            &f.bob_id,
+            &f.bob_dev,
+        );
+        let impostor_bytes = impostor.tls_serialize_detached().unwrap();
+        let impostor = decode_key_package(&f.alice_store, &impostor_bytes).unwrap();
+        let outcome = f
+            .alice_group
+            .add_members(&f.alice_store, &DeviceSigner(&f.alice_dev), &[impostor])
+            .unwrap();
+
+        let bob_member = declared(&f.bob_id, &f.bob_dev);
+        let certs = build_cert_resolver(&transport, std::slice::from_ref(&bob_member))
+            .await
+            .unwrap();
 
         let result = process_incoming_commit(
             &f.bob_store,
