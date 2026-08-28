@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-27
 
@@ -27,7 +27,8 @@ Task 10 (production `DeviceCertResolver` + `FetchDeviceCerts` protocol surface),
 per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 Sub-5a lifecycle: C1 (revocation/expiry-aware cert resolver), C2 (rekey +
-cadence, `rekey.rs`) and C3 (drift discharge, `drift.rs`) are COMPLETE.
+cadence, `rekey.rs`), C3 (drift discharge, `drift.rs`) and C4 (`DeviceRevoked`
+emission, `revoke.rs`) are COMPLETE.
 
 ---
 
@@ -304,6 +305,33 @@ dead `(identity, device)` leaves.
 The reactive wiring (detect the sealed-send rejection / `DeviceRevoked` /
 `MembershipChanged` broadcast and call `discharge_drift`) is H1/5b, not here —
 C3 provides the primitive + the predicate + the helper.
+
+### Device revocation (`revoke.rs`) — sub-5a C4
+
+The **emission** half of revocation (the fold's `DeviceRevoked` authz is
+`event_log_state.rs:996-1010`, authority-note fact 2). On accept the device's
+cert is dead, its chain frozen, and its MLS leaf becomes drift lazily via
+`pending_removals` (discharged by `drift.rs`).
+
+- `revoke_device(transport, actor, chain, device_id: String) -> RevokeOutcome`
+  (async) — build `DeviceRevoked { device }` via `build_next_event`, submit, and
+  advance the chain only on accept (the same pattern as `publish_key_package`).
+  `device_id` is the **victim**'s hex SHA-256 id
+  (`farder_crypto::event_log::device_id(&device_pubkey)`); `core.device` is the
+  authoring device, `core.author` is `actor.identity`. Two call shapes, chosen
+  by the caller via `Actor` + target (the fn emits the identical payload either
+  way — the fold decides):
+  - **Self-revoke** — the identity revokes one of its own devices, from any of
+    its devices (including the revoked device itself); the `author == rec.identity`
+    arm authorizes. This is the form C7 (store re-provisioning) calls.
+  - **Owner-revoke** — the server owner revokes a member's device; the
+    `is_owner(author)` arm authorizes.
+  `DeviceRevoked` merges no MLS state, so there is no divergence contract: any
+  rejection surfaces as `E2eeError::Transport` with the reason preserved
+  verbatim (`rejection_reason()`), notably `"device already revoked"`,
+  `"revocation cites an unknown device"`, and `"only the owning identity or the
+  server owner may revoke a device"`.
+- `RevokeOutcome { event_hash }` — the accepted event's hash.
 
 ### Sealed send + receive (`sealed.rs`)
 
