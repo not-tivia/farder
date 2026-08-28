@@ -80,16 +80,31 @@ impl std::fmt::Debug for HistoryKeys {
     }
 }
 
-/// Derive the row-AEAD and author-tag subkeys from the unlocked identity signing
-/// key. The input is already a uniformly random 32-byte seed, so HKDF-Expand
-/// with distinct info strings is the whole derivation.
-pub fn derive_keys(identity_signing_key: &[u8; 32]) -> HistoryKeys {
+/// Derive one 32-byte at-rest subkey from the unlocked identity signing key.
+///
+/// This crate is the single owner of "keys for local files protected by the
+/// identity", so every at-rest key in the client comes from here with its own
+/// `info` string: the history rows and author tags below, the device signing
+/// key's wrapper, and the MLS store's value encryption. Distinct `info` strings
+/// are what keep those keys independent — reusing one would let a leak in any of
+/// them compromise the others.
+///
+/// The input is already a uniformly random 32-byte seed, so HKDF-Expand is the
+/// whole derivation (no extract step is needed).
+pub fn derive_local_key(identity_signing_key: &[u8; 32], info: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, identity_signing_key);
-    let mut row = [0u8; 32];
-    let mut tag = [0u8; 32];
-    hk.expand(INFO_ROW_KEY, &mut row).expect("32 is a valid HKDF length");
-    hk.expand(INFO_TAG_KEY, &mut tag).expect("32 is a valid HKDF length");
-    HistoryKeys { row, tag }
+    let mut out = [0u8; 32];
+    hk.expand(info, &mut out).expect("32 is a valid HKDF length");
+    out
+}
+
+/// Derive the row-AEAD and author-tag subkeys from the unlocked identity signing
+/// key. They must differ: sharing them would let a leaked row key forge tags.
+pub fn derive_keys(identity_signing_key: &[u8; 32]) -> HistoryKeys {
+    HistoryKeys {
+        row: derive_local_key(identity_signing_key, INFO_ROW_KEY),
+        tag: derive_local_key(identity_signing_key, INFO_TAG_KEY),
+    }
 }
 
 /// The blind index for one author: `HMAC-SHA256(tag_key, author_pk)`.

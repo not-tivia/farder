@@ -509,7 +509,13 @@ open — 4a). Returns a tag-discriminated `DecryptSealedMessageResult`: either
 poisoned group surface as `undecryptable`, never a command error, so the
 frontend renders a fail-closed state rather than garbage. Deliberately NOT
 `run_e2ee`: decryption is a local, read-only open that needs only the device
-subkey + on-disk store (not the unlocked identity, not device authorization); it
+subkey + on-disk store (not device authorization). **Since sub-7a H1 it DOES
+require the identity to be unlocked**, because the device subkey is now wrapped
+at rest under an identity-derived key; a locked identity returns
+`{ kind: "undecryptable", reason: "identity is locked" }` rather than an error,
+matching how this command reports every other local failure. Reading sealed
+history while the app was locked was a hole in the property the PIN exists to
+provide. It
 still holds `device_chain_lock` so the synchronous open cannot race a concurrent
 send/steward write to the same sqlite store.
 **Parameters:** `server_id` — the connection key (diagnostics only; the store is
