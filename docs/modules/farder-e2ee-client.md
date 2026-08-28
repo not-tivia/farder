@@ -374,7 +374,12 @@ the new generation has no group in the fold until the reset lands).
   un-revoked, un-expired) from the log, revocation- and expiry-aware like
   `cert.rs`'s resolver. The reset caller passes the complete current
   member × live-device set minus the owner's own device as `members` (the fold's
-  non-selective-reset rule); this is the CALLER's responsibility.
+  non-selective-reset rule); this is the CALLER's responsibility. It is NOT
+  reset-only: the Tauri client's auto-add path uses it to build a member's device
+  roster, because authoring an add for a non-live device diverges the local group
+  (finding F3). Anything that needs "which devices of this identity may hold a
+  leaf" must go through here rather than reading `DeviceAuthorized` payloads
+  directly.
 
 The exact-cover and confirmation-wall rules are validated against a real
 `LogState` replay in `reset.rs`'s tests (mirroring `farder-mls/tests/fold_chain.rs`).
@@ -557,6 +562,12 @@ The crate's one error type. Notable variants:
 - `RekeyRateLimited { reason }` — the fold refused a commit under the
   commit-rate rule (a rekey, or a drift discharge whose removes did not
   discharge anything). Same divergence caveat as `StaleEpochDiverged`.
+- `CommitRejectedDiverged { reason, local_epoch }` — the fold refused an
+  own-commit for any OTHER reason (e.g. `"declared add of a device that is not
+  live"`). Every own-commit primitive merges locally before it submits, so this
+  carries the same divergence contract as `StaleEpochDiverged`; the fold's reason
+  is preserved verbatim. Returned by `bootstrap_group`, `add_member`,
+  `rekey_channel` and `discharge_drift` (finding F3).
 - `DeviceCapReached { reason }` — the fold refused a `DeviceAuthorized` under
   the live-device cap (8); surfaced by `device.rs`'s `authorize_device`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.
@@ -565,9 +576,9 @@ Predicate methods (machine-readable signals over the fold's rejection strings):
 `is_stale_epoch_diverged()`, `is_rekey_rate_limited()`,
 `is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`,
 `is_device_cap_reached()`, `is_diverged()` (the finding-F1 divergence class:
-`StaleEpochDiverged` / `RekeyRateLimited` / `ResyncEquivocation` /
-`ResyncPoisoned` — the local group is one epoch ahead with no rollback, mapped
-to `reprovision.rs`'s `recover_diverged_group`).
+`StaleEpochDiverged` / `RekeyRateLimited` / `CommitRejectedDiverged` /
+`ResyncEquivocation` / `ResyncPoisoned` — the local group is one epoch ahead with
+no rollback, mapped to `reprovision.rs`'s `recover_diverged_group`).
 
 ---
 
