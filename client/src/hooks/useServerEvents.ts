@@ -4,6 +4,7 @@ import { useApp } from "../context/ServerContext";
 import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo, MessageInfoV2, ChannelInfoV2 } from "../lib/types";
 import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
+import { refreshServerClasses } from "../lib/refreshServerClasses";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 
 // Module-level cache for notification prefs and own public key
@@ -435,8 +436,18 @@ export function useServerEvents(): void {
       const serverId = data.server_id;
       // Re-fetch my own status (I may have just been approved/denied), the member
       // list, and the pending queue — all derive from the changed log membership.
-      api.getMembershipStatus(serverId).then(status =>
-        dispatch({ type: "SET_MEMBERSHIP_STATUS", serverId, status: status as "member" | "pending" | "none" })).catch(() => {});
+      api.getMembershipStatus(serverId).then(status => {
+        dispatch({ type: "SET_MEMBERSHIP_STATUS", serverId, status: status as "member" | "pending" | "none" });
+        // Becoming a member is the moment content stops being blocked. Until
+        // this refresh existed, an APPROVED joiner sat with an empty channel
+        // list and no categories until they restarted the app: the server had
+        // denied the channel fetch while they were pending, and nothing ever
+        // asked again. Status and the member list were refreshed here; the
+        // channels were not.
+        if (status === "member") {
+          refreshServerClasses(serverId, dispatch, api);
+        }
+      }).catch(() => {});
       api.getMembers(serverId).then(members =>
         dispatch({ type: "SET_MEMBERS", serverId, payload: members })).catch(() => {});
       // The approval queue component refetches getPendingMembers on this event (Task 8).
