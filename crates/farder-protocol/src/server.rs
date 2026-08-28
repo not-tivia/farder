@@ -646,12 +646,15 @@ pub enum ServerRequest {
     /// `FetchHistoryV2`; `MlsKeyPackagePublished` is deliberately NOT here (it
     /// has no channel and is already served by `FetchKeyPackages`).
     FetchMlsControl { channel_id: u64, since_accept_seq: u64 },
-    /// Fetch the `DeviceAuthorized` events for one identity — the raw signed
-    /// `Event` bytes carrying that identity's `DeviceCert`s. A device cert is
-    /// the log-valid trust anchor for the receive-side leaf-binding gate
-    /// (`verify_leaf_binding`), so it must come from HERE (the log) — NEVER
-    /// from the commit being validated. Public *within* the server by design
-    /// (like `FetchKeyPackages`); membership gating still applies.
+    /// Fetch the device-lifecycle events for one identity — the raw signed
+    /// `Event` bytes carrying `DeviceAuthorized` (one `DeviceCert` each) and
+    /// `DeviceRevoked` (one revoked `DeviceId` each), oldest-first. A device
+    /// cert is the log-valid trust anchor for the receive-side leaf-binding
+    /// gate (`verify_leaf_binding`), so it must come from HERE (the log) —
+    /// NEVER from the commit being validated. A client tells the two payloads
+    /// apart by decoding each event's payload enum — no new wire shape. Public
+    /// *within* the server by design (like `FetchKeyPackages`); membership
+    /// gating still applies.
     FetchDeviceCerts { identity: PublicKey },
 }
 
@@ -773,8 +776,10 @@ pub enum ServerResponse {
     /// next request's `since_accept_seq`, and `more` says whether the server
     /// truncated the page.
     MlsControl { events: Vec<Vec<u8>>, next_accept_seq: u64, more: bool },
-    /// Answer to `FetchDeviceCerts`: raw signed `Event` bytes carrying
-    /// `DeviceAuthorized` (one `DeviceCert` each), oldest-first.
+    /// Answer to `FetchDeviceCerts`: raw signed `Event` bytes, oldest-first,
+    /// mixing `DeviceAuthorized` (one `DeviceCert` each) and `DeviceRevoked`
+    /// (one revoked `DeviceId` each). A client tells the two payloads apart by
+    /// decoding each event's payload enum.
     DeviceCerts { events: Vec<Vec<u8>> },
 }
 

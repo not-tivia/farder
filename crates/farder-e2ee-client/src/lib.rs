@@ -16,8 +16,14 @@ pub mod chain;
 pub mod channel;
 pub mod channel_key;
 pub mod commit;
+pub mod device;
+pub mod drift;
 pub mod join;
+pub mod rekey;
+pub mod reprovision;
+pub mod reset;
 pub mod resync;
+pub mod revoke;
 pub mod sealed;
 pub mod transport;
 
@@ -36,11 +42,26 @@ pub use commit::{
     add_member, process_incoming_commit, AddMemberOutcome, DeclaredCommit, DeviceCertResolver,
     IncomingCommitOutcome, StewardContext,
 };
+pub use device::{add_own_device, authorize_device, AddOwnDeviceOutcome, DeviceAuthorizedOutcome, OwnDeviceContext};
+pub use drift::{
+    dead_leaves_from_revocation, discharge_drift, DriftDischargeContext, DriftDischargeOutcome,
+};
 pub use farder_mls::group::JoinInfo;
 pub use join::{
     confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,
     LeafConfirmation, PendingWelcome, SendEligibility,
 };
+pub use rekey::{
+    rekey_channel, rekey_permitted_by_rate_rule, should_rekey, HoldReason, RekeyCadence,
+    RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger, REKEY_SEALED_SEND_INTERVAL,
+    REKEY_WALL_CLOCK_SECS,
+};
+pub use reprovision::{
+    recover_diverged_group, reprovision_device, ReprovisionContext, ReprovisionLive,
+    ReprovisionOutcome,
+};
+pub use reset::{join_reset, member_live_leaves, reset_group, ResetContext, ResetOutcome};
+pub use revoke::{revoke_device, RevokeOutcome};
 pub use resync::{
     fetch_mls_control_exhaustive, send_sealed_resync, ResyncOutcome, ResyncRequest,
     MAX_TOTAL_RESYNC_ATTEMPTS, MAX_UNPRODUCTIVE_RESYNC_ATTEMPTS,

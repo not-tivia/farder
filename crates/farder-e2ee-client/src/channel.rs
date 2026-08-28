@@ -111,6 +111,33 @@ pub enum E2eeError {
     /// log (Task 6) before doing anything else. This is never silently
     /// swallowed and never reported as success.
     StaleEpochDiverged { local_epoch: u64 },
+    /// The server refused a rekey commit under the commit-rate rule
+    /// (`event_log_state.rs:1187-1203`): the author has already committed in
+    /// this channel and the epoch gap has not yet elapsed, so the rekey is not
+    /// permitted YET. This is a *policy* refusal at the cited epoch, not the
+    /// bare `"stale-epoch"` epoch-CAS bounce — but note `self_update` still
+    /// merged locally, so the local group is one epoch ahead of the server and
+    /// must not be reused until resynced (same divergence caveat as
+    /// [`E2eeError::StaleEpochDiverged`]). A caller must NOT retry the rekey in
+    /// a loop: when to rekey later is the cadence policy's job
+    /// ([`crate::rekey`]), keyed off the `"freshness ceiling reached"` send
+    /// rejection or a sufficient epoch gap.
+    RekeyRateLimited { reason: String },
+    /// The server refused an own-commit for a reason that is neither the bare
+    /// `"stale-epoch"` epoch CAS nor the commit-rate rule — for example
+    /// `"declared add of a device that is not live (unknown, revoked, or
+    /// cert-expired)"` (`event_log_state.rs:1114-1119`).
+    ///
+    /// Every own-commit primitive (`bootstrap_group` / `add_members` /
+    /// `self_update` / `remove_members`) merges **locally before the submit**,
+    /// and farder-mls offers no rollback, so ANY rejection at that point leaves
+    /// the local group one epoch ahead of the server — the same divergence
+    /// contract as [`E2eeError::StaleEpochDiverged`], and the reason finding F1
+    /// gives for [`crate::reprovision::recover_diverged_group`]. Classifying
+    /// only the two *known* rejections as divergence let every other fold
+    /// refusal poison the group silently, reported as a plain transport error.
+    /// The caller must NOT keep using the group; recover, do not retry.
+    CommitRejectedDiverged { reason: String, local_epoch: u64 },
     /// A `channel_id` below `E2EE_CHANNEL_ID_FLOOR` — the id must stay clear
     /// of the legacy DB `channels` AUTOINCREMENT space.
     ChannelIdBelowFloor { channel_id: u64 },
@@ -148,6 +175,12 @@ pub enum E2eeError {
     /// offers no rollback, the local group is POISONED. The resync aborts and
     /// surfaces this rather than continuing or retrying through it.
     ResyncPoisoned { member: DeclaredMember, reason: String },
+    /// The server rejected a `DeviceAuthorized` because the identity already
+    /// holds [`MAX_LIVE_DEVICES_PER_IDENTITY`](farder_crypto::event_log_state::MAX_LIVE_DEVICES_PER_IDENTITY)
+    /// live devices (`event_log_state.rs:840-849`). This is a *policy* refusal
+    /// at the event itself (surfaced by C6's [`crate::device::authorize_device`]),
+    /// distinct from a transport failure — the caller must not blindly retry.
+    DeviceCapReached { reason: String },
 }
 
 impl E2eeError {
@@ -161,6 +194,57 @@ impl E2eeError {
     pub fn is_stale_epoch_diverged(&self) -> bool {
         matches!(self, Self::StaleEpochDiverged { .. })
     }
+
+    /// True iff the server refused a rekey under the commit-rate rule — "you
+    /// may not rekey yet". See [`E2eeError::RekeyRateLimited`].
+    pub fn is_rekey_rate_limited(&self) -> bool {
+        matches!(self, Self::RekeyRateLimited { .. })
+    }
+
+    /// True iff a sealed send was rejected because the freshness ceiling was
+    /// reached — the fold's guarantee that a rekey is now permitted, so the
+    /// caller should rekey and retry. Keys on the `"freshness ceiling reached"`
+    /// reason inside [`E2eeError::Transport`].
+    pub fn is_freshness_ceiling_reached(&self) -> bool {
+        matches!(self, Self::Transport(e) if e.is_freshness_ceiling_reached())
+    }
+
+    /// True iff a sealed send was rejected because the channel has pending
+    /// removals (drift): the fold's guarantee that the channel is sealed until
+    /// a remaining confirmed member authors a drift-discharging remove-commit.
+    /// Keys on the `"channel is sealed until a rekey discharges its pending
+    /// removals"` reason inside [`E2eeError::Transport`]. This is the reactive
+    /// drift signal the caller maps to [`crate::drift::discharge_drift`].
+    pub fn is_sealed_pending_removals(&self) -> bool {
+        matches!(self, Self::Transport(e) if e.is_sealed_pending_removals())
+    }
+
+    /// True iff a `DeviceAuthorized` was refused by the live-device cap — the
+    /// typed form that [`crate::device::authorize_device`] maps the fold's
+    /// `"identity already has the maximum number of live devices"` rejection
+    /// into (via [`crate::transport::TransportError::is_device_cap_reached`]).
+    pub fn is_device_cap_reached(&self) -> bool {
+        matches!(self, Self::DeviceCapReached { .. })
+    }
+
+    /// True iff this error leaves the local group one epoch ahead of the server
+    /// with no rollback — the divergence class finding F1 describes. Covers the
+    /// own-commit rejections ([`E2eeError::StaleEpochDiverged`] /
+    /// [`E2eeError::RekeyRateLimited`]) and the resync terminal/equivocation
+    /// errors ([`E2eeError::ResyncEquivocation`] /
+    /// [`E2eeError::ResyncPoisoned`]). A caller maps these to
+    /// [`crate::reprovision::recover_diverged_group`] rather than keeping the
+    /// group.
+    pub fn is_diverged(&self) -> bool {
+        matches!(
+            self,
+            Self::StaleEpochDiverged { .. }
+                | Self::RekeyRateLimited { .. }
+                | Self::CommitRejectedDiverged { .. }
+                | Self::ResyncEquivocation { .. }
+                | Self::ResyncPoisoned { .. }
+        )
+    }
 }
 
 impl fmt::Display for E2eeError {
@@ -171,6 +255,14 @@ impl fmt::Display for E2eeError {
                 f,
                 "server rejected our commit as stale-epoch; the local group is now at epoch \
                  {local_epoch}, one ahead of the server — resync from the log before continuing"
+            ),
+            Self::RekeyRateLimited { reason } => {
+                write!(f, "rekey refused by the commit-rate rule (not permitted yet): {reason}")
+            }
+            Self::CommitRejectedDiverged { reason, local_epoch } => write!(
+                f,
+                "server rejected our commit ({reason}); the local group is now at epoch \
+                 {local_epoch}, one ahead of the server — recover before continuing"
             ),
             Self::ChannelIdBelowFloor { channel_id } => write!(
                 f,
@@ -193,6 +285,10 @@ impl fmt::Display for E2eeError {
                 "resync hit an impostor leaf for {} / {} — the group is poisoned and cannot \
                  be rolled back: {reason}",
                 member.identity, member.device
+            ),
+            Self::DeviceCapReached { reason } => write!(
+                f,
+                "device authorization refused by the live-device cap: {reason}"
             ),
         }
     }
@@ -462,12 +558,19 @@ pub async fn bootstrap_group<T: E2eeTransport + Sync>(
         },
     );
 
-    // 3. Submit; surface a stale-epoch rejection as the explicit divergence
-    //    error rather than a generic transport error.
+    // 3. Submit; the bootstrap commit merged locally already, so surface a
+    //    stale-epoch bounce AND any other fold refusal as divergence (finding
+    //    F3) rather than a generic transport error.
     let accepted = match transport.submit_event(&event).await {
         Ok(a) => a,
         Err(e) if e.is_stale_epoch() => {
             return Err(E2eeError::StaleEpochDiverged {
+                local_epoch: group.epoch(),
+            });
+        }
+        Err(crate::transport::TransportError::ServerRejected { reason }) => {
+            return Err(E2eeError::CommitRejectedDiverged {
+                reason,
                 local_epoch: group.epoch(),
             });
         }

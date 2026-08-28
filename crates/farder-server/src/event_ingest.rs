@@ -972,8 +972,9 @@ pub fn fetch_key_packages(
     Ok(out)
 }
 
-/// Raw signed-`Event` bytes for the `DeviceAuthorized` events of one identity,
-/// oldest-first.
+/// Raw signed-`Event` bytes for the device-lifecycle events of one identity,
+/// oldest-first: its `DeviceAuthorized` events (one `DeviceCert` each) AND its
+/// `DeviceRevoked` events (one revoked `DeviceId` each).
 ///
 /// `DeviceAuthorized` carries a `DeviceCert` — the identity-signed
 /// authorization of one device subkey. This is the ONLY production source of
@@ -981,30 +982,94 @@ pub fn fetch_key_packages(
 /// verifies against, so the certs must be fetched from HERE (the log) and
 /// **never** taken from the commit under validation.
 ///
-/// Keyed by the SIGNED `author` column (== the identity), never by anything the
-/// fetcher asserted. Membership gating still applies at the request layer:
-/// public *within* the server is not public to the world.
+/// Sub-5 (S1) adds `DeviceRevoked` to the same stream so a revocation-aware
+/// client can fold liveness itself. The response therefore MIXES the two
+/// payloads; a client tells them apart by decoding each event's payload enum
+/// (`EventPayload::DeviceAuthorized` vs `EventPayload::DeviceRevoked`) — no new
+/// wire shape was needed, and the server stays blind: it serves the log, it
+/// does not compute a "revoked?" verdict (S2).
+///
+/// Correlation matters because a `DeviceRevoked { device }` names the REVOKED
+/// device in its PAYLOAD, not in a column, and can be authored by the owning
+/// identity (self-revoke) OR by the server owner (owner-revoke). Keying by
+/// `author` alone would miss owner-revokes. The revoked device is therefore
+/// matched through the identity's device set: the `device` column of the
+/// identity's own `DeviceAuthorized` rows (a device authorizes itself, so the
+/// authoring device IS the authorized device).
+///
+/// The cert half stays keyed by the SIGNED `author` column (== the identity),
+/// never by anything the fetcher asserted. Membership gating still applies at
+/// the request layer: public *within* the server is not public to the world.
 ///
 /// Un-paginated, like [`fetch_key_packages`], and for the same reason: a
 /// cert-per-device set is tiny (a device re-authorization is a rare, deliberate
-/// act), so there is no long backlog to page through; `MAX_FETCH_EVENTS` is the
-/// bound.
+/// act, and revocations are rarer still), so there is no long backlog to page
+/// through; `MAX_FETCH_EVENTS` is the bound.
 pub fn fetch_device_certs(
     conn: &Connection,
     identity: &PublicKey,
 ) -> Result<Vec<Vec<u8>>> {
-    let mut stmt = conn.prepare(
-        "SELECT event_body FROM events \
-         WHERE payload_type = 'DeviceAuthorized' AND author = ?1 \
-         ORDER BY accept_seq ASC LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(
-        params![identity.as_bytes().as_slice(), MAX_FETCH_EVENTS as i64],
-        |r| r.get::<_, Vec<u8>>(0),
-    )?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
+    // The identity's device set: every device its `DeviceAuthorized` rows
+    // registered. `device` is the AUTHORING device, which for a DeviceAuthorized
+    // equals the authorized device (self-bootstrap).
+    let mut device_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT device FROM events \
+             WHERE payload_type = 'DeviceAuthorized' AND author = ?1",
+        )?;
+        let rows = stmt.query_map(
+            params![identity.as_bytes().as_slice()],
+            |r| r.get::<_, String>(0),
+        )?;
+        for row in rows {
+            device_ids.insert(row?);
+        }
+    }
+
+    // Load the identity's `DeviceAuthorized` events (author-filtered) and the
+    // `DeviceRevoked` events targeting one of its devices, then merge in accept
+    // order. `DeviceRevoked` is scanned server-wide because its `author` column
+    // names the REVOKER (owner or self), not the victim — the only thing that
+    // narrows it is the revoked device id inside the payload, so each is decoded.
+    let mut rows: Vec<(i64, Vec<u8>)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT accept_seq, event_body FROM events \
+             WHERE payload_type = 'DeviceAuthorized' AND author = ?1 \
+             ORDER BY accept_seq ASC",
+        )?;
+        let mapped = stmt.query_map(params![identity.as_bytes().as_slice()], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in mapped {
+            rows.push(row?);
+        }
+    }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT accept_seq, event_body FROM events \
+             WHERE payload_type = 'DeviceRevoked' \
+             ORDER BY accept_seq ASC",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in mapped {
+            let (seq, body) = row?;
+            let event = Event::from_bytes(&body).context("decode DeviceRevoked event")?;
+            if let EventPayload::DeviceRevoked { device } = &event.core.payload {
+                if device_ids.contains(device) {
+                    rows.push((seq, body));
+                }
+            }
+        }
+    }
+
+    rows.sort_by_key(|(seq, _)| *seq);
+    let mut out = Vec::with_capacity(rows.len().min(MAX_FETCH_EVENTS));
+    for (_, body) in rows.into_iter().take(MAX_FETCH_EVENTS) {
+        out.push(body);
     }
     Ok(out)
 }
@@ -1306,6 +1371,77 @@ mod tests {
         assert_eq!(bob_events.len(), 1);
         let stranger = Keypair::generate();
         assert!(fetch_device_certs(&conn, &stranger.public_key()).unwrap().is_empty());
+    }
+
+    /// Sub-5 (S1): a `DeviceRevoked` for identity X is returned by
+    /// `fetch_device_certs(X)`, mixed with X's `DeviceAuthorized` events, and the
+    /// two payloads are told apart by decoding each event's payload enum. The
+    /// revoked device is matched through X's own device set, so an OWNER-authored
+    /// revocation (author != X) is still folded in — keying by `author` alone
+    /// would miss it.
+    #[test]
+    fn fetch_device_certs_returns_device_revoked_mixed_with_device_authorized() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let alice = Keypair::generate();
+        let alice_dev = Keypair::generate();
+        let g = genesis(&alice);
+        save_genesis(&conn, &g).unwrap();
+
+        let alice_dev_id = farder_crypto::event_log::device_id(&alice_dev.public_key());
+
+        // Alice authorizes one device.
+        let alice_da = Event::next(
+            &alice_dev,
+            alice.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&alice, &alice_dev.public_key(), 1) },
+        );
+        store_event(&conn, &alice_da).unwrap();
+
+        // The OWNER revokes alice's device — a revocation authored by someone
+        // other than the owning identity, which is exactly the case an
+        // `author = identity` filter would miss.
+        let revoke = Event::next(
+            &owner_dev,
+            owner.public_key(),
+            g.server_id(),
+            None,
+            0,
+            1,
+            EP::DeviceRevoked { device: alice_dev_id.clone() },
+        );
+        store_event(&conn, &revoke).unwrap();
+
+        // Alice's fetch returns BOTH payloads, distinguished by decoding.
+        let events = fetch_device_certs(&conn, &alice.public_key()).unwrap();
+        assert_eq!(events.len(), 2, "expected one DeviceAuthorized + one DeviceRevoked");
+        let mut saw_authorized = false;
+        let mut saw_revoked = false;
+        for bytes in &events {
+            let event = Event::from_bytes(bytes).unwrap();
+            match &event.core.payload {
+                EP::DeviceAuthorized { cert } => {
+                    assert_eq!(cert.core.identity, alice.public_key());
+                    saw_authorized = true;
+                }
+                EP::DeviceRevoked { device } => {
+                    assert_eq!(device, &alice_dev_id);
+                    saw_revoked = true;
+                }
+                other => panic!("unexpected payload in device-certs stream: {other:?}"),
+            }
+        }
+        assert!(saw_authorized, "the stream must contain the DeviceAuthorized");
+        assert!(saw_revoked, "the stream must contain the DeviceRevoked");
+
+        // The owner's own fetch does NOT include alice's revocation: the revoked
+        // device belongs to alice, and the owner has no DeviceAuthorized here.
+        assert!(fetch_device_certs(&conn, &owner.public_key()).unwrap().is_empty());
     }
 
     #[test]

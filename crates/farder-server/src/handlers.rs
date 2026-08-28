@@ -2510,13 +2510,18 @@ pub fn handle_request(
             // consistent with `FetchKeyPackages`: KeyPackages are public WITHIN the
             // server by design (a committer must be able to fetch the packages of
             // the member it is adding), so a server-wide pointer leaks nothing the
-            // fetch surface does not already expose.
+            // fetch surface does not already expose. `DeviceRevoked` is likewise
+            // server-scoped (revocation is not a channel fact — the fold freezes a
+            // device's chain server-wide), so it rides `All` with `channel_id:
+            // None` for the same reason, and the pointer leaks nothing beyond what
+            // `FetchDeviceCerts` already exposes to members.
             let mls_control: Option<Option<u64>> = match &event.core.payload {
                 EventPayload::MlsCommit { channel_id, .. }
                 | EventPayload::MlsWelcome { channel_id, .. }
                 | EventPayload::MlsLeafConfirmed { channel_id, .. }
                 | EventPayload::MlsGroupReset { channel_id, .. } => Some(Some(*channel_id)),
-                EventPayload::MlsKeyPackagePublished { .. } => Some(None),
+                EventPayload::MlsKeyPackagePublished { .. }
+                | EventPayload::DeviceRevoked { .. } => Some(None),
                 _ => None,
             };
             if let Some(channel_id) = mls_control {
@@ -10601,6 +10606,32 @@ mod tests {
                 assert_eq!(*channel_id, None, "a KeyPackage publication has no channel to scope to");
                 assert_eq!(event_hash, &kp.hash());
                 assert_eq!(payload_type, "MlsKeyPackagePublished");
+            }
+            other => panic!("expected MlsControlEvent to All, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_device_revoked_broadcasts_an_mls_control_event_to_all() {
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+
+        // Self-revoke: the owner kills its own (already-authorized) device.
+        let revoked_device = farder_crypto::event_log::device_id(&f.dev.public_key());
+        let revoke = f.sign(now_ts(), EP::DeviceRevoked { device: revoked_device });
+        let r = f.accept(&conn, &revoke);
+
+        let ctl = r
+            .events
+            .iter()
+            .find(|b| matches!(&b.event, ServerEvent::MlsControlEvent { .. }))
+            .expect("a device revocation broadcasts MlsControlEvent");
+        match (&ctl.target, &ctl.event) {
+            (EventTarget::All, ServerEvent::MlsControlEvent { channel_id, event_hash, payload_type }) => {
+                assert_eq!(*channel_id, None, "revocation is server-scoped, not channel-scoped");
+                assert_eq!(event_hash, &revoke.hash(), "the event is a pointer, not a summary");
+                assert_eq!(payload_type, "DeviceRevoked");
             }
             other => panic!("expected MlsControlEvent to All, got {other:?}"),
         }

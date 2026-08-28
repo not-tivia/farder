@@ -1,8 +1,8 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke,reprovision,reset,device}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
-> **Last reviewed:** 2026-08-26
+> **Last reviewed:** 2026-08-27
 
 ## Purpose
 
@@ -26,6 +26,11 @@ receive-side gates / sealed send + receive / bounded stale-epoch resync), plus
 Task 10 (production `DeviceCertResolver` + `FetchDeviceCerts` protocol surface),
 per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
+Sub-5a lifecycle: C1 (revocation/expiry-aware cert resolver), C2 (rekey +
+cadence, `rekey.rs`), C3 (drift discharge, `drift.rs`), C4 (`DeviceRevoked`
+emission, `revoke.rs`), C5 (group reset, `reset.rs`), C6 (multi-device
+self-add, `device.rs`) and C7 (store re-provisioning + diverged-group recovery,
+`reprovision.rs`) are COMPLETE.
 
 ---
 
@@ -49,7 +54,8 @@ The method signatures mirror `farder-protocol::server` request/response shapes.
 serves one channel's MLS control plane (`MlsCommit` / `MlsWelcome` /
 `MlsLeafConfirmed` / `MlsGroupReset`) with the same `next_accept_seq` + `more`
 cursor contract as `fetch_welcomes`. `fetch_device_certs` serves one identity's
-`DeviceAuthorized` events — the production source of the Gate 2 trust anchor (see
+device-lifecycle events — `DeviceAuthorized` plus, since sub-5 S1, `DeviceRevoked`
+— the production source of the Gate 2 trust anchor (see
 `cert.rs` below). `#[cfg(test)]` `testing::FakeTransport` is an in-memory double
 for unit tests; `MlsControl` and `Welcomes` are the two page-shaped value structs
 the trait hands back.
@@ -63,6 +69,24 @@ for `"event rejected"` would miss it. Since finding F6 the server emits it for
 `MessagePostedE2ee` / `MessageEditedE2ee` too, not just `MlsCommit`, so it is
 the one signal the resync loop keys on for a sealed send that lost the epoch
 race.
+
+The sub-5a lifecycle added three more fold-rejection predicates, each keyed on
+the fold's **verbatim** rejection string (wrapped by the server as
+`"event rejected: …"`):
+
+- `is_commit_rate_limited()` — `"commit-rate rule: …"` (a non-drift-discharging
+  commit is not permitted yet).
+- `is_freshness_ceiling_reached()` — `"freshness ceiling reached: …"` (the
+  fold's guarantee a rekey is now permitted).
+- `is_sealed_pending_removals()` — `"channel is sealed until a rekey discharges
+  its pending removals"` (the reactive drift signal: a dead leaf seals the
+  channel until a remove-commit discharges `pending_removals`; see `drift.rs`).
+- `is_device_cap_reached()` — `"identity already has the maximum number of live
+  devices"` (the live-device cap at `DeviceAuthorized`; C6's `authorize_device`
+  maps it to `E2eeError::DeviceCapReached`).
+
+`rejection_reason()` returns the server reason verbatim (with the
+`"event rejected: "` prefix when present).
 
 ---
 
@@ -189,9 +213,10 @@ race.
 
 The production [`DeviceCertResolver`] trust anchor, closing finding F7 (Gate 2
 had no production cert source). `resolve_device_cert(transport, identity, device)`
-is the primitive: it fetches the identity's `DeviceAuthorized` events over
+is the primitive: it fetches the identity's device-lifecycle events
+(`DeviceAuthorized` + `DeviceRevoked`, since sub-5 S1) over
 `fetch_device_certs`, decodes each one, and returns a [`DeviceCert`] only after
-**all three** checks pass. `build_cert_resolver(transport, members)` batches it
+**all five** checks pass. `build_cert_resolver(transport, members)` batches it
 into a sync [`VerifiedCertResolver`] for [`process_incoming_commit`] (which is
 sync and runs Gate 2 over the already-merged commit).
 
@@ -202,19 +227,246 @@ sync and runs Gate 2 over the already-merged commit).
   member is simply absent from the map, so Gate 2 fails closed for it.
 - `VerifiedCertResolver` — `impl DeviceCertResolver` over an in-memory map.
 
-**What it verifies, and what it does NOT (honest limitation):**
+**What it verifies:**
 
-- It verifies **source** (fetched from the log, never from the commit under
-  validation), **binding** (`cert.core.identity == identity` AND
+- **Source** (fetched from the log, never from the commit under validation),
+  **binding** (`cert.core.identity == identity` AND
   `cert.core.device_id == device`), and **signature** (`DeviceCert::verify()`:
   `device_id` matches `device_pubkey` and the identity key signed the core).
-- It does **NOT** verify revocation or expiry. `DeviceRevoked` and
-  `DeviceCertCore.expires_at` are *fold state* — a `LogState` decides whether the
-  device is currently un-revoked and un-expired — and this crate holds no local
-  `LogState`. A cert that verifies here can still be dead on the server.
-  Revocation/expiry awareness belongs to sub-5 (which owns `DeviceRevoked`, rekey
-  cadence and re-provisioning). This resolver verifies the **cryptographic
-  binding**, not the **fold liveness**; do not read "log-valid" as "un-revoked".
+- **Revocation** (sub-5 C1) — it collects every `DeviceRevoked { device }` in
+  the fetched stream (the payload names the VICTIM; `core.device` is the
+  revoker) and never returns a cert for a device in that set, even if it is the
+  newest verifying cert in the stream.
+- **Expiry** (sub-5 C1) — if the winning (newest verifying) cert's
+  `DeviceCertCore.expires_at` has passed the client's **local clock**
+  (`event_now_secs`), it is rejected. The local clock is used deliberately: a
+  revoked/expired device's own `core.timestamp` cannot be trusted, and cert
+  expiry is a wall-clock property — local time is the conservative bound (may
+  fail closed marginally early on a skewed clock, never serves an expired cert).
+- Since sub-5 S1 the fetch stream mixes `DeviceRevoked` in; a
+  non-`DeviceAuthorized` payload is never a cert source.
+
+### Rekey (`rekey.rs`) — sub-5a C2
+
+A *rekey* is [`MlsChannelGroup::self_update`] — an own-commit with empty
+adds/removes. Because the crate holds no fold `LogState`, the commit-rate rule
+and the freshness ceiling are only observable reactively (the fold's rejection
+strings) or via a **local cadence**:
+
+- `rekey_channel(transport, actor, chain, ctx, group) -> RekeyOutcome` (async) —
+  run `self_update`, submit the empty-adds/removes `MlsCommit` with the real
+  chaining values, advance the chain on accept. A `stale-epoch` rejection is
+  `E2eeError::StaleEpochDiverged`; a `"commit-rate rule:"` rejection is
+  `E2eeError::RekeyRateLimited`. It never loops.
+- `RekeyContext<'a> { key, generation, store, store_instance_hash }` /
+  `RekeyOutcome { event_hash, local_epoch, post_epoch_authenticator,
+  post_tree_hash }`.
+- `should_rekey(ceiling_signalled, cadence, now_secs) -> RekeyDecision` — a pure,
+  total decision function: a `"freshness ceiling reached"` signal forces a rekey;
+  otherwise the proactive cadence (`REKEY_SEALED_SEND_INTERVAL` /
+  `REKEY_WALL_CLOCK_SECS`) rekeys only when
+  `rekey_permitted_by_rate_rule(...)` (a local re-derivation of
+  `event_log_state.rs:1187-1203`) says the commit-rate rule would accept it.
+- `RekeyCadence`, `RekeyDecision::{ Rekey(RekeyTrigger), Hold(HoldReason) }`,
+  `RekeyTrigger::{ CeilingSignalled, Proactive }`, `HoldReason::{ Cadence,
+  RateRule }`, `REKEY_SEALED_SEND_INTERVAL` (= 100), `REKEY_WALL_CLOCK_SECS`
+  (= 7 days).
+
+### Drift discharge (`drift.rs`) — sub-5a C3
+
+When a member's device is revoked/expired or a member is banned/kicked, the
+fold puts the dead leaf in `pending_removals`, which SEALS the channel
+(`event_log_state.rs:576-587, 1445-1448`). A rekey does NOT discharge drift —
+`commit_discharges_drift` requires a commit whose declared `removes` intersect
+`pending_removals` (`event_log_state.rs:636-646`). Drift discharge is therefore
+a distinct operation: a [`MlsChannelGroup::remove_members`] commit listing the
+dead `(identity, device)` leaves.
+
+- `discharge_drift(transport, actor, chain, ctx, group, dead_leaves) -> DriftDischargeOutcome`
+  (async) — run `remove_members` over `dead_leaves` and submit the `MlsCommit`
+  with `removes` = the actually-removed leaves. Mirrors
+  `bootstrap_group`/`add_member`/`rekey_channel`'s submit + chain-advance.
+  - A `stale-epoch` rejection → `E2eeError::StaleEpochDiverged` (the discharge
+    race: another member won the epoch CAS; `remove_members` already merged
+    locally, so the caller must resync and retry once — no loop).
+  - A `"commit-rate rule:"` rejection → `E2eeError::RekeyRateLimited` (a
+    genuine discharge is commit-rate-exempt, so this means the removes did NOT
+    intersect `pending_removals` — the dead-leaf set was wrong).
+  - An absent target leaf errors at `remove_members` **before** any submit
+    (`E2eeError::Mls`), and an empty `dead_leaves` is refused up front — no
+    silent no-op, no spin.
+- `DriftDischargeContext<'a> { key, generation, store, store_instance_hash }` /
+  `DriftDischargeOutcome { event_hash, local_epoch, post_epoch_authenticator,
+  post_tree_hash }`.
+- `dead_leaves_from_revocation(revoked_device, members) -> Vec<DeclaredMember>` —
+  the minimal helper for the reactive signal: the `DeviceRevoked { device }`
+  payload names only the REVOKED device (not its identity), so the identity half
+  is resolved against the group's member list. Returns every leaf whose `device`
+  matches, empty when the device is not in the group.
+- `E2eeError::is_sealed_pending_removals()` /
+  `TransportError::is_sealed_pending_removals()` — the reactive drift predicate
+  keyed on `"channel is sealed until a rekey discharges its pending removals"`.
+
+The reactive wiring (detect the sealed-send rejection / `DeviceRevoked` /
+`MembershipChanged` broadcast and call `discharge_drift`) is H1/5b, not here —
+C3 provides the primitive + the predicate + the helper.
+
+### Device revocation (`revoke.rs`) — sub-5a C4
+
+The **emission** half of revocation (the fold's `DeviceRevoked` authz is
+`event_log_state.rs:996-1010`, authority-note fact 2). On accept the device's
+cert is dead, its chain frozen, and its MLS leaf becomes drift lazily via
+`pending_removals` (discharged by `drift.rs`).
+
+- `revoke_device(transport, actor, chain, device_id: String) -> RevokeOutcome`
+  (async) — build `DeviceRevoked { device }` via `build_next_event`, submit, and
+  advance the chain only on accept (the same pattern as `publish_key_package`).
+  `device_id` is the **victim**'s hex SHA-256 id
+  (`farder_crypto::event_log::device_id(&device_pubkey)`); `core.device` is the
+  authoring device, `core.author` is `actor.identity`. Two call shapes, chosen
+  by the caller via `Actor` + target (the fn emits the identical payload either
+  way — the fold decides):
+  - **Self-revoke** — the identity revokes one of its own devices, from any of
+    its devices (including the revoked device itself); the `author == rec.identity`
+    arm authorizes. This is the form C7 (store re-provisioning) calls.
+  - **Owner-revoke** — the server owner revokes a member's device; the
+    `is_owner(author)` arm authorizes.
+  `DeviceRevoked` merges no MLS state, so there is no divergence contract: any
+  rejection surfaces as `E2eeError::Transport` with the reason preserved
+  verbatim (`rejection_reason()`), notably `"device already revoked"`,
+  `"revocation cites an unknown device"`, and `"only the owning identity or the
+  server owner may revoke a device"`.
+- `RevokeOutcome { event_hash }` — the accepted event's hash.
+
+### Group reset (`reset.rs`) — sub-5a C5
+
+The owner's "big hammer" to recover a broken/diverged channel: tear the MLS
+group down and rebuild it at `generation + 1`. The fold forces this exact
+sequence (`event_log_state.rs:1342-1394`, `:1239-1246`, `:1284-1316`), and
+`reset_group` builds it from the lower-level `MlsChannelGroup` methods — it is
+NOT `add_member` (which submits an `MlsCommit` at the CURRENT generation; a
+reset stages Welcomes for the NEXT generation with no accepted commit, because
+the new generation has no group in the fold until the reset lands).
+
+- `reset_group(transport, actor, chain, ctx, generation, members) -> ResetOutcome`
+  (async, owner) — mint a FRESH one-member group at `generation + 1`, add every
+  member in ONE commit (so every welcomed leaf lands at the SAME post-tree-hash;
+  one add per member would give each a different tree hash and only the last
+  could confirm), stage one next-generation `MlsWelcome` per member
+  (owner-only), then submit `MlsGroupReset { new_generation, welcomes,
+  post_tree_hash }`. The `commit` ref on each staged Welcome is a documented
+  sentinel — the reset generation's add-commit is never a log event, and the
+  fold's next-generation Welcome arm never reads it. There is no divergence
+  caveat (the fresh group is never submitted as a commit, so no epoch CAS to
+  lose); a rejection surfaces as `E2eeError::Transport` with the fold's reason.
+- `ResetContext<'a> { key, store, store_instance_hash }` — shared by the
+  resetter and a welcomed member. `ResetOutcome { event_hash, new_generation,
+  post_tree_hash }`.
+- `join_reset(transport, actor, chain, ctx, welcome, reset_post_tree_hash) -> LeafConfirmation`
+  (async, member) — `join_channel` from the staged Welcome, then confirm the
+  leaf with `tree_hash == reset_post_tree_hash` (the confirmation wall's anchor
+  for a reset generation, whose add-commit is never a log event —
+  `event_log_state.rs:1284-1316`). It also fails closed locally if the joined
+  group's real `JoinInfo.tree_hash` does not match the declared hash, before
+  emitting a doomed confirmation.
+- `member_live_leaves(transport, identity) -> Vec<DeclaredMember>` (async) — the
+  exact-cover helper: enumerate one identity's LIVE devices (authorized,
+  un-revoked, un-expired) from the log, revocation- and expiry-aware like
+  `cert.rs`'s resolver. The reset caller passes the complete current
+  member × live-device set minus the owner's own device as `members` (the fold's
+  non-selective-reset rule); this is the CALLER's responsibility. It is NOT
+  reset-only: the Tauri client's auto-add path uses it to build a member's device
+  roster, because authoring an add for a non-live device diverges the local group
+  (finding F3). Anything that needs "which devices of this identity may hold a
+  leaf" must go through here rather than reading `DeviceAuthorized` payloads
+  directly.
+
+The exact-cover and confirmation-wall rules are validated against a real
+`LogState` replay in `reset.rs`'s tests (mirroring `farder-mls/tests/fold_chain.rs`).
+
+### Multi-device self-add (`device.rs`) — sub-5a C6
+
+The "I am adding a SECOND device to my own identity" path. The fold's self-add
+rule (`event_log_state.rs:1136-1145`) means: once an identity holds a confirmed
+leaf, only that identity may add its further devices (`author == add.identity`),
+so the add-commit is authored by an **existing confirmed device of the same
+identity** while the *new* device is the one being added.
+
+- `add_own_device(transport, ctx, new_chain, steward, steward_chain, group) -> AddOwnDeviceOutcome`
+  (async) — the one-shot orchestration, in order:
+  1. **The new device authorizes itself** — [`authorize_device`] submits
+     `DeviceAuthorized { cert }` (`cert = DeviceCert::create(identity,
+     &new_device_pubkey, now)`): the **identity** key signs the cert (binding the
+     new device to the identity), the **new device** key signs the event
+     (`event_log_state.rs:781-802`).
+  2. **The new device publishes a KeyPackage** — reused [`publish_key_package`],
+     from the new device's own store (its KeyPackage private material lives there).
+  3. **The existing confirmed device self-adds the new device** — reused
+     [`add_member`], targeting the new device's `(identity, device_id)`; the
+     steward's identity equals the added identity, so the self-add rule holds.
+  `steward` is the existing device (its `identity` must equal `ctx.identity`,
+  guarded up front), `new_chain`/`steward_chain` are the two per-(server, device)
+  chains, and `group` is the existing device's loaded group. A `stale-epoch`
+  rejection of the add surfaces `E2eeError::StaleEpochDiverged` (same divergence
+  contract as `add_member`).
+- `authorize_device(transport, actor, chain) -> DeviceAuthorizedOutcome` (async) —
+  the primitive behind step 1: submit `DeviceAuthorized { cert }` and advance the
+  chain on accept. `actor.identity` signs the cert; `actor.device` signs the
+  event. A live-device-cap rejection surfaces as `E2eeError::DeviceCapReached`
+  with the fold's reason preserved verbatim.
+- `OwnDeviceContext<'a> { identity, new_device, new_store,
+  new_store_instance_hash, steward }` — the fixed inputs for the orchestration
+  (two actors, two chains, so bundled to stay under the clippy arg bound).
+- `DeviceAuthorizedOutcome { event_hash, cert }` / `AddOwnDeviceOutcome {
+  device_authorized_hash, key_package_hash, commit_event_hash, welcome_event_hash,
+  local_epoch, post_epoch_authenticator, post_tree_hash }`.
+
+**Device cap (8):** the fold enforces the live-device cap at `DeviceAuthorized`
+(`event_log_state.rs:840-849`; live = non-revoked + cert-unexpired, at most
+`MAX_LIVE_DEVICES_PER_IDENTITY` = 8). The crate holds no fold `LogState`, so it
+cannot count live devices client-side — instead `authorize_device` surfaces the
+fold's verbatim `"identity already has the maximum number of live devices"`
+rejection as `E2eeError::DeviceCapReached` (via
+`TransportError::is_device_cap_reached()`), never silently swallowed.
+
+### Store re-provisioning + diverged-group recovery (`reprovision.rs`) — sub-5a C7
+
+The recovery primitive that makes finding F1's terminal state non-fatal.
+Because MLS ratchet state lives in the store, recovery is a **NEW leaf for the
+same identity** (authorized + published + self-added via C6), never a
+resurrection of the old leaf. The old store path is poison and is never reused
+or deleted in place — the fresh store is caller-minted at a NEW path (a fresh
+per-device `data_dir`), because only the caller knows where to persist the new
+device key and store path.
+
+- `reprovision_device(transport, ctx, live) -> ReprovisionOutcome` (async) — the
+  full recovery, in order:
+  1. [`revoke_device`] — the OLD device signs its own `DeviceRevoked` (victim id
+     = `device_id(&old_device.public_key())`), authorized by the fold's
+     "owning identity OR owner" arm (`event_log_state.rs:996-1010`).
+  2. [`add_own_device`] — the FRESH device authorizes itself (`DeviceAuthorized`
+     with an identity-signed cert), publishes its KeyPackage from its fresh
+     store, and the healthy steward self-adds its leaf.
+- `recover_diverged_group(transport, ctx, trigger, live) -> ReprovisionOutcome`
+  (async) — a thin wrapper: if `trigger.is_diverged()` it runs
+  `reprovision_device`; otherwise it returns `trigger` unchanged (taken by
+  value, so a non-diverged error is returned exactly as-is).
+- `ReprovisionContext<'a> { old_device, fresh }` — the fixed inputs: the OLD
+  device key (signs the self-revoke) and the fresh device's [`OwnDeviceContext`]
+  (identity + fresh device key + fresh store + instance hash + steward).
+- `ReprovisionLive<'a> { old_chain, new_chain, steward, steward_chain, group }`
+  — the transient mutated inputs (three chains + the healthy steward's commit
+  surface), bundled to stay under the clippy arg bound.
+- `ReprovisionOutcome { device_revoked_hash, add }` — the revoked event's hash
+  plus the full [`AddOwnDeviceOutcome`].
+
+**Seam:** the caller supplies the fresh device key + store (no generator) — it
+owns persistence, it chooses the fresh path, and it keeps `reprovision_device` a
+pure orchestration with no filesystem coupling. **Honest limitation:** the
+self-add must be authored by an existing confirmed device of the same identity,
+so a single-device identity whose only store is lost has no healthy author and
+needs an owner `MlsGroupReset` (C5) or another device — out of C7's scope, wired
+by H1.
 
 ### Sealed send + receive (`sealed.rs`)
 
@@ -307,7 +559,26 @@ The crate's one error type. Notable variants:
 - `ResyncPoisoned { member, reason }` — F4, terminal: resync processed a commit
   that failed leaf binding, so the impostor leaf is already merged and the
   local group is poisoned.
+- `RekeyRateLimited { reason }` — the fold refused a commit under the
+  commit-rate rule (a rekey, or a drift discharge whose removes did not
+  discharge anything). Same divergence caveat as `StaleEpochDiverged`.
+- `CommitRejectedDiverged { reason, local_epoch }` — the fold refused an
+  own-commit for any OTHER reason (e.g. `"declared add of a device that is not
+  live"`). Every own-commit primitive merges locally before it submits, so this
+  carries the same divergence contract as `StaleEpochDiverged`; the fold's reason
+  is preserved verbatim. Returned by `bootstrap_group`, `add_member`,
+  `rekey_channel` and `discharge_drift` (finding F3).
+- `DeviceCapReached { reason }` — the fold refused a `DeviceAuthorized` under
+  the live-device cap (8); surfaced by `device.rs`'s `authorize_device`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.
+
+Predicate methods (machine-readable signals over the fold's rejection strings):
+`is_stale_epoch_diverged()`, `is_rekey_rate_limited()`,
+`is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`,
+`is_device_cap_reached()`, `is_diverged()` (the finding-F1 divergence class:
+`StaleEpochDiverged` / `RekeyRateLimited` / `CommitRejectedDiverged` /
+`ResyncEquivocation` / `ResyncPoisoned` — the local group is one epoch ahead with
+no rollback, mapped to `reprovision.rs`'s `recover_diverged_group`).
 
 ---
 
