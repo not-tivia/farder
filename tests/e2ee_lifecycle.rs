@@ -28,13 +28,14 @@ use farder_crypto::event_log::{
 };
 use farder_crypto::identity::{Keypair, PublicKey};
 use farder_e2ee_client::{
-    add_member, add_own_device, bootstrap_group, build_next_event, confirm_leaf,
-    create_e2ee_channel, create_joiner_store, discharge_drift, event_now_secs,
+    add_member, add_own_device, bootstrap_group, build_cert_resolver, build_next_event,
+    confirm_leaf, create_e2ee_channel, create_joiner_store, discharge_drift, event_now_secs,
     fetch_pending_welcomes, join_channel, publish_key_package, receive_sealed, rekey_channel,
-    reprovision_device, reset_group, resume_store, send_sealed, Actor, ChainState,
-    ChannelKey, ChannelSpec, DriftDischargeContext, E2eeTransport, EventAccepted, MlsControl,
-    OwnDeviceContext, RekeyContext, ReprovisionContext, ReprovisionLive, ResetContext,
-    SealContext, SealedOutcome, SendEligibility, StewardContext, TransportError, Welcomes,
+    reprovision_device, reset_group, resume_store, revoke_device, send_sealed, Actor, ChainState,
+    ChannelKey, ChannelSpec, DeviceCertResolver, DriftDischargeContext, E2eeTransport,
+    EventAccepted, MlsControl, OwnDeviceContext, RekeyContext, ReprovisionContext,
+    ReprovisionLive, ResetContext, SealContext, SealedOutcome, SendEligibility, StewardContext,
+    TransportError, Welcomes,
 };
 use farder_mls::group::{DeclaredMember, MlsChannelGroup};
 use farder_mls::store::FarderMlsStore;
@@ -1188,9 +1189,9 @@ async fn stale_channel_blocks_then_unblocks_after_rekey() {
 /// SPEC TEST 4 (exact — the multi-device case C7 names for H1): the owner's
 /// SECOND device O2 confirms a leaf, then loses its on-disk store (resume is
 /// terminal). The recovery path `reprovision_device` self-revokes the old O2
-/// device, mints a FRESH device O2', and the still-healthy O1 steward self-adds
-/// it; O2' then joins and confirms — the identity has rejoined. The old leaf's
-/// drift is left to a later discharge (reported, not papered over).
+/// device, discharges the dead leaf's drift, mints a FRESH device O2', and the
+/// still-healthy O1 steward self-adds it; O2' then joins and confirms — the
+/// identity has rejoined (and the discharge un-seals the channel).
 #[tokio::test]
 async fn device_loss_rejoin_via_reprovision() {
     let channel_id = E2EE_CHANNEL_ID_FLOOR + 50_104;
@@ -1380,4 +1381,75 @@ async fn partial_reset_is_refused_with_the_exact_cover_error() {
         }
         other => panic!("expected a Transport rejection, got {other}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 — a revoked member device's cert no longer resolves (S1/C1)
+// ---------------------------------------------------------------------------
+
+/// F2's second clause, end-to-end over the real server: the owner revokes a
+/// member's device with `revoke_device` (owner-revoke form — the fold's
+/// `is_owner` arm authorizes it), which the server accepts and both serves back
+/// through the widened `FetchDeviceCerts` stream (S1) and broadcasts as a
+/// server-scoped `MlsControlEvent`. A subsequent `build_cert_resolver` for that
+/// member must then NOT return the revoked device's cert (C1's
+/// revocation-aware resolver folds the `DeviceRevoked` events it fetched).
+#[tokio::test]
+async fn a_revoked_members_device_cert_no_longer_resolves() {
+    let channel_id = E2EE_CHANNEL_ID_FLOOR + 50_106;
+    let s = setup_owner_joiner(channel_id, true).await;
+    let TwoClientSetup {
+        core:
+            OwnerCore {
+                owner_kp,
+                owner_dev,
+                server_id,
+                owner_transport,
+                mut owner_chain,
+                ..
+            },
+        joiner_kp,
+        joiner_dev,
+        joiner_transport,
+        ..
+    } = s;
+
+    let owner_actor = actor(&owner_kp, &owner_dev, &server_id);
+    let joiner_member = DeclaredMember {
+        identity: joiner_kp.public_key(),
+        device: device_id(&joiner_dev.public_key()),
+    };
+
+    // Positive control: before the revocation the resolver returns the joiner's
+    // genuine cert — so the later negative is revocation, not a broken resolver.
+    let before = build_cert_resolver(&joiner_transport, std::slice::from_ref(&joiner_member))
+        .await
+        .unwrap();
+    assert!(
+        before
+            .device_cert(&joiner_kp.public_key(), &device_id(&joiner_dev.public_key()))
+            .is_some(),
+        "the joiner's cert must resolve before the revocation"
+    );
+
+    // Owner revokes the joiner's device.
+    revoke_device(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        device_id(&joiner_dev.public_key()),
+    )
+    .await
+    .unwrap();
+
+    // The revoked device's cert must no longer resolve.
+    let after = build_cert_resolver(&joiner_transport, std::slice::from_ref(&joiner_member))
+        .await
+        .unwrap();
+    assert!(
+        after
+            .device_cert(&joiner_kp.public_key(), &device_id(&joiner_dev.public_key()))
+            .is_none(),
+        "a revoked device's cert must not resolve"
+    );
 }
