@@ -5715,17 +5715,58 @@ async fn run_send_sealed_message(
         store: &store,
         store_instance_hash: &store_instance_hash,
     };
-    let outcome = match farder_e2ee_client::send_sealed_keepalive(
+    let drift_ctx = farder_e2ee_client::DriftDischargeContext {
+        key: &key,
+        generation,
+        store: &store,
+        store_instance_hash: &store_instance_hash,
+    };
+
+    // First attempt with an EMPTY dead-leaf set: deriving it costs a roster
+    // fetch plus a cert fetch per member, far too much to spend on every
+    // message. A drift seal is rare, so we pay for the answer only when the
+    // channel actually reports one.
+    let first = farder_e2ee_client::send_sealed_keepalive(
         &transport,
         &actor,
         &mut chain,
         &ctx,
-        &rekey_ctx,
+        &farder_e2ee_client::KeepaliveRepairs {
+            rekey: &rekey_ctx,
+            drift: &drift_ctx,
+            dead: &[],
+        },
         &mut group,
         &eligibility,
     )
-    .await
-    {
+    .await;
+
+    let first = match first {
+        Err(ref e) if e.is_sealed_pending_removals() => {
+            // Now it is worth the round trips: derive whom the fold no longer
+            // owes a leaf, discharge, and retry (sub-5b K3).
+            let live =
+                live_channel_leaves(&transport, &state, &server_id, &identity, &device).await?;
+            let dead = farder_e2ee_client::dead_leaves(&group, &live).map_err(|e| e.to_string())?;
+            farder_e2ee_client::send_sealed_keepalive(
+                &transport,
+                &actor,
+                &mut chain,
+                &ctx,
+                &farder_e2ee_client::KeepaliveRepairs {
+                    rekey: &rekey_ctx,
+                    drift: &drift_ctx,
+                    dead: &dead,
+                },
+                &mut group,
+                &eligibility,
+            )
+            .await
+        }
+        other => other,
+    };
+
+    let outcome = match first {
         Ok(k) => k.send,
         // F6: the bare "stale-epoch" rejection also fires for
         // MessagePostedE2ee. Resync is bounded (unproductive + total caps) and
@@ -5795,6 +5836,53 @@ async fn run_send_sealed_message(
 /// log via the crate's own `resolve_device_cert` (never synthesized from the
 /// commit). Reuses the same device-enumeration shape as
 /// `add_current_members_to_group`.
+/// The client's view of which `(identity, device)` leaves are still ENTITLED to
+/// be in an E2EE channel's group: every current roster member crossed with their
+/// live (authorized, un-revoked, un-expired) devices, plus our own leaf.
+///
+/// Subtracting this from the group's ACTUAL leaf view yields the fold's
+/// `pending_removals` — the drift that seals the channel (sub-5b K3). A banned
+/// member vanishes from the roster; a revoked or expired device vanishes from
+/// `member_live_leaves`. Deliberately computed ONLY when a send comes back
+/// sealed: it costs a roster fetch plus one cert fetch per member, which is far
+/// too much to spend on every message.
+async fn live_channel_leaves(
+    transport: &crate::e2ee_transport::E2eeTransportImpl<'_>,
+    state: &AppState,
+    server_id: &str,
+    identity: &Keypair,
+    own_device: &Keypair,
+) -> Result<Vec<farder_mls::group::DeclaredMember>, String> {
+    use farder_crypto::event_log::device_id;
+    use farder_mls::group::DeclaredMember;
+
+    let members: Vec<MemberInfo> = {
+        let response = bridge::send_request(state, server_id, ServerRequest::GetMembers)
+            .await
+            .map_err(|e| e.to_string())?;
+        match response {
+            ServerResponse::Members { members } => members,
+            ServerResponse::Error { reason } => return Err(reason),
+            other => return Err(format!("unexpected response to GetMembers: {other:?}")),
+        }
+    };
+
+    let mut live: Vec<DeclaredMember> = vec![DeclaredMember {
+        identity: identity.public_key(),
+        device: device_id(&own_device.public_key()),
+    }];
+    for member in members {
+        if member.public_key == identity.public_key() {
+            continue;
+        }
+        let leaves = farder_e2ee_client::member_live_leaves(transport, &member.public_key)
+            .await
+            .map_err(|e| e.to_string())?;
+        live.extend(leaves);
+    }
+    Ok(live)
+}
+
 async fn build_roster_cert_resolver(
     transport: &crate::e2ee_transport::E2eeTransportImpl<'_>,
     state: &AppState,

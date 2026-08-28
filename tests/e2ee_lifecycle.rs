@@ -32,7 +32,7 @@ use farder_e2ee_client::{
     confirm_leaf, create_e2ee_channel, create_joiner_store, discharge_drift, event_now_secs,
     fetch_pending_welcomes, join_channel, publish_key_package, receive_sealed, rekey_channel,
     reprovision_device, reset_group, resume_store, revoke_device, send_sealed,
-    send_sealed_keepalive, Actor, ChainState, KeepaliveAction,
+    dead_leaves, send_sealed_keepalive, Actor, ChainState, KeepaliveAction, KeepaliveRepairs,
     ChannelKey, ChannelSpec, DeviceCertResolver, DriftDischargeContext, E2eeTransport,
     EventAccepted, MlsControl, OwnDeviceContext, RekeyContext, ReprovisionContext,
     ReprovisionLive, ResetContext, SealContext, SealedOutcome, SendEligibility, StewardContext,
@@ -1553,12 +1553,22 @@ async fn the_freshness_ceiling_does_not_brick_a_channel() {
         store: &owner_store,
         store_instance_hash: &owner_hash,
     };
+    let drift_ctx = DriftDischargeContext {
+        key: &key,
+        generation: 0,
+        store: &owner_store,
+        store_instance_hash: &owner_hash,
+    };
     let outcome = send_sealed_keepalive(
         &owner_transport,
         &owner_actor,
         &mut owner_chain,
         &seal(OWNER_PLAINTEXT),
-        &rekey_ctx,
+        &KeepaliveRepairs {
+            rekey: &rekey_ctx,
+            drift: &drift_ctx,
+            dead: &[],
+        },
         &mut owner_group,
         &SendEligibility::confirmed(),
     )
@@ -1581,4 +1591,148 @@ async fn the_freshness_ceiling_does_not_brick_a_channel() {
     )
     .await
     .expect("an accepted commit zeroes the freshness budget");
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 — a ban does not brick a channel either (sub-5b K3/K6)
+// ---------------------------------------------------------------------------
+
+/// The second bricking path. A ban turns the banned member's leaf into drift,
+/// and drift SEALS the channel until a remaining member authors a remove-commit.
+/// 5a built `discharge_drift` and shipped it dormant; nothing called it. So
+/// banning someone stopped the channel accepting messages, immediately and
+/// permanently.
+///
+/// A rekey is NOT the answer here and this test pins that too: the fold requires
+/// a discharging commit's removes to intersect `pending_removals`, so the
+/// keep-alive path must pick the right operation, not just "commit something".
+#[tokio::test]
+async fn a_ban_does_not_brick_a_channel() {
+    let channel_id = E2EE_CHANNEL_ID_FLOOR + 50_108;
+    let s = setup_owner_joiner(channel_id, true).await;
+    let TwoClientSetup {
+        core:
+            OwnerCore {
+                owner_kp,
+                owner_dev,
+                server_id,
+                owner_transport,
+                mut owner_chain,
+                key,
+                owner_store,
+                owner_hash,
+                mut owner_group,
+                ..
+            },
+        joiner_kp,
+        joiner_dev,
+        ..
+    } = s;
+
+    let owner_actor = actor(&owner_kp, &owner_dev, &server_id);
+    let seal = |content: &'static str| SealContext {
+        key: &key,
+        generation: 0,
+        store: &owner_store,
+        content,
+        reply_to: None,
+    };
+    let rekey_ctx = RekeyContext {
+        key: &key,
+        generation: 0,
+        store: &owner_store,
+        store_instance_hash: &owner_hash,
+    };
+    let drift_ctx = DriftDischargeContext {
+        key: &key,
+        generation: 0,
+        store: &owner_store,
+        store_instance_hash: &owner_hash,
+    };
+
+    // Healthy to start with.
+    send_sealed(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &seal("before the ban"),
+        &mut owner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("a healthy channel accepts sealed content");
+
+    // Ban the joiner: their confirmed leaf becomes drift and seals the channel.
+    let ban = build_next_event(
+        &owner_dev,
+        &owner_kp,
+        &server_id,
+        &owner_chain,
+        event_now_secs(),
+        EventPayload::MemberBanned {
+            member: joiner_kp.public_key(),
+        },
+    );
+    owner_transport.submit_event(&ban).await.expect("ban accepted");
+    owner_chain.advance(&ban);
+
+    let sealed = send_sealed(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &seal("blocked by drift"),
+        &mut owner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        sealed.is_sealed_pending_removals(),
+        "a ban must seal the channel on drift, got {sealed}"
+    );
+
+    // The client's view of `pending_removals`: the owner is still live, the
+    // banned joiner is not. `dead_leaves` derives it by subtraction.
+    let live = vec![DeclaredMember {
+        identity: owner_kp.public_key(),
+        device: device_id(&owner_dev.public_key()),
+    }];
+    let dead = dead_leaves(&owner_group, &live).expect("derive dead leaves");
+    assert_eq!(dead.len(), 1, "exactly the banned member's leaf is drift");
+    assert_eq!(dead[0].identity, joiner_kp.public_key());
+    assert_eq!(dead[0].device, device_id(&joiner_dev.public_key()));
+
+    // The keep-alive path discharges it and the message goes out.
+    let outcome = send_sealed_keepalive(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &seal(OWNER_PLAINTEXT),
+        &KeepaliveRepairs {
+            rekey: &rekey_ctx,
+            drift: &drift_ctx,
+            dead: &dead,
+        },
+        &mut owner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("the keep-alive path must clear a drift seal");
+    assert_eq!(
+        outcome.action,
+        KeepaliveAction::DischargedThenSent,
+        "drift must be cleared by a REMOVE commit, not by a rekey"
+    );
+
+    // The channel stays usable afterwards.
+    send_sealed(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &seal("after the discharge"),
+        &mut owner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("discharging the drift un-seals the channel");
 }

@@ -52,7 +52,9 @@ pub use join::{
     confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,
     LeafConfirmation, PendingWelcome, SendEligibility,
 };
-pub use keepalive::{send_sealed_keepalive, KeepaliveAction, KeepaliveOutcome};
+pub use keepalive::{
+    dead_leaves, send_sealed_keepalive, KeepaliveAction, KeepaliveOutcome, KeepaliveRepairs,
+};
 pub use rekey::{
     rekey_channel, rekey_permitted_by_rate_rule, should_rekey, HoldReason, RekeyCadence,
     RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger, REKEY_SEALED_SEND_INTERVAL,

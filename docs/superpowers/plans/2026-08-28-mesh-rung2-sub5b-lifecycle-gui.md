@@ -72,7 +72,7 @@ ceiling signal.** Cadence state (`RekeyCadence`) persists in the existing
 - [ ] **K2 — the rekey trigger.** Persist `RekeyCadence` in `mls_state.json`;
       consult `should_rekey` on channel open and after each own send; call
       `rekey_channel` when it says so. Proactive cadence AND the ceiling override.
-- [ ] **K3 — the drift-discharge trigger.** On the sealed-pending-removals signal,
+- [x] **K3 — the drift-discharge trigger.** On the sealed-pending-removals signal,
       derive the dead leaves (5a's `dead_leaves_from_revocation` / the ban's
       membership change) and call `discharge_drift`. Handle the race exactly as
       5a specified: one attempt, `stale-epoch` → back off, never spin.
@@ -83,7 +83,7 @@ ceiling signal.** Cadence state (`RekeyCadence`) persists in the existing
 - [ ] **K5 — the leaf-diff surface.** Extend the steward's result with the
       `group.leaves()` diff per applied commit (D2), so 5b-2 renders notices from
       a fact the crate computed rather than the frontend guessing.
-- [ ] **K6 — harness proof (named deliverable).** Extend `tests/e2ee_lifecycle.rs`:
+- [x] **K6 — harness proof (named deliverable).** (both bricking paths proven; rekey cadence K2 still to come) Extend `tests/e2ee_lifecycle.rs`:
       drive a channel PAST the freshness ceiling and prove it keeps accepting
       messages with the trigger in place — and, with the trigger disabled, that it
       seals. Same for a ban → drift → discharge → un-seal. **This is the test that
