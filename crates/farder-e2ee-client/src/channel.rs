@@ -160,6 +160,12 @@ pub enum E2eeError {
     /// offers no rollback, the local group is POISONED. The resync aborts and
     /// surfaces this rather than continuing or retrying through it.
     ResyncPoisoned { member: DeclaredMember, reason: String },
+    /// The server rejected a `DeviceAuthorized` because the identity already
+    /// holds [`MAX_LIVE_DEVICES_PER_IDENTITY`](farder_crypto::event_log_state::MAX_LIVE_DEVICES_PER_IDENTITY)
+    /// live devices (`event_log_state.rs:840-849`). This is a *policy* refusal
+    /// at the event itself (surfaced by C6's [`crate::device::authorize_device`]),
+    /// distinct from a transport failure — the caller must not blindly retry.
+    DeviceCapReached { reason: String },
 }
 
 impl E2eeError {
@@ -197,6 +203,14 @@ impl E2eeError {
     pub fn is_sealed_pending_removals(&self) -> bool {
         matches!(self, Self::Transport(e) if e.is_sealed_pending_removals())
     }
+
+    /// True iff a `DeviceAuthorized` was refused by the live-device cap — the
+    /// typed form that [`crate::device::authorize_device`] maps the fold's
+    /// `"identity already has the maximum number of live devices"` rejection
+    /// into (via [`crate::transport::TransportError::is_device_cap_reached`]).
+    pub fn is_device_cap_reached(&self) -> bool {
+        matches!(self, Self::DeviceCapReached { .. })
+    }
 }
 
 impl fmt::Display for E2eeError {
@@ -232,6 +246,10 @@ impl fmt::Display for E2eeError {
                 "resync hit an impostor leaf for {} / {} — the group is poisoned and cannot \
                  be rolled back: {reason}",
                 member.identity, member.device
+            ),
+            Self::DeviceCapReached { reason } => write!(
+                f,
+                "device authorization refused by the live-device cap: {reason}"
             ),
         }
     }

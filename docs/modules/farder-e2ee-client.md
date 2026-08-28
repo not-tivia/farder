@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke,reset}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke,reset,device}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-27
 
@@ -28,7 +28,8 @@ per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 Sub-5a lifecycle: C1 (revocation/expiry-aware cert resolver), C2 (rekey +
 cadence, `rekey.rs`), C3 (drift discharge, `drift.rs`), C4 (`DeviceRevoked`
-emission, `revoke.rs`) and C5 (group reset, `reset.rs`) are COMPLETE.
+emission, `revoke.rs`), C5 (group reset, `reset.rs`) and C6 (multi-device
+self-add, `device.rs`) are COMPLETE.
 
 ---
 
@@ -79,6 +80,9 @@ the fold's **verbatim** rejection string (wrapped by the server as
 - `is_sealed_pending_removals()` — `"channel is sealed until a rekey discharges
   its pending removals"` (the reactive drift signal: a dead leaf seals the
   channel until a remove-commit discharges `pending_removals`; see `drift.rs`).
+- `is_device_cap_reached()` — `"identity already has the maximum number of live
+  devices"` (the live-device cap at `DeviceAuthorized`; C6's `authorize_device`
+  maps it to `E2eeError::DeviceCapReached`).
 
 `rejection_reason()` returns the server reason verbatim (with the
 `"event rejected: "` prefix when present).
@@ -374,6 +378,51 @@ the new generation has no group in the fold until the reset lands).
 The exact-cover and confirmation-wall rules are validated against a real
 `LogState` replay in `reset.rs`'s tests (mirroring `farder-mls/tests/fold_chain.rs`).
 
+### Multi-device self-add (`device.rs`) — sub-5a C6
+
+The "I am adding a SECOND device to my own identity" path. The fold's self-add
+rule (`event_log_state.rs:1136-1145`) means: once an identity holds a confirmed
+leaf, only that identity may add its further devices (`author == add.identity`),
+so the add-commit is authored by an **existing confirmed device of the same
+identity** while the *new* device is the one being added.
+
+- `add_own_device(transport, ctx, new_chain, steward, steward_chain, group) -> AddOwnDeviceOutcome`
+  (async) — the one-shot orchestration, in order:
+  1. **The new device authorizes itself** — [`authorize_device`] submits
+     `DeviceAuthorized { cert }` (`cert = DeviceCert::create(identity,
+     &new_device_pubkey, now)`): the **identity** key signs the cert (binding the
+     new device to the identity), the **new device** key signs the event
+     (`event_log_state.rs:781-802`).
+  2. **The new device publishes a KeyPackage** — reused [`publish_key_package`],
+     from the new device's own store (its KeyPackage private material lives there).
+  3. **The existing confirmed device self-adds the new device** — reused
+     [`add_member`], targeting the new device's `(identity, device_id)`; the
+     steward's identity equals the added identity, so the self-add rule holds.
+  `steward` is the existing device (its `identity` must equal `ctx.identity`,
+  guarded up front), `new_chain`/`steward_chain` are the two per-(server, device)
+  chains, and `group` is the existing device's loaded group. A `stale-epoch`
+  rejection of the add surfaces `E2eeError::StaleEpochDiverged` (same divergence
+  contract as `add_member`).
+- `authorize_device(transport, actor, chain) -> DeviceAuthorizedOutcome` (async) —
+  the primitive behind step 1: submit `DeviceAuthorized { cert }` and advance the
+  chain on accept. `actor.identity` signs the cert; `actor.device` signs the
+  event. A live-device-cap rejection surfaces as `E2eeError::DeviceCapReached`
+  with the fold's reason preserved verbatim.
+- `OwnDeviceContext<'a> { identity, new_device, new_store,
+  new_store_instance_hash, steward }` — the fixed inputs for the orchestration
+  (two actors, two chains, so bundled to stay under the clippy arg bound).
+- `DeviceAuthorizedOutcome { event_hash, cert }` / `AddOwnDeviceOutcome {
+  device_authorized_hash, key_package_hash, commit_event_hash, welcome_event_hash,
+  local_epoch, post_epoch_authenticator, post_tree_hash }`.
+
+**Device cap (8):** the fold enforces the live-device cap at `DeviceAuthorized`
+(`event_log_state.rs:840-849`; live = non-revoked + cert-unexpired, at most
+`MAX_LIVE_DEVICES_PER_IDENTITY` = 8). The crate holds no fold `LogState`, so it
+cannot count live devices client-side — instead `authorize_device` surfaces the
+fold's verbatim `"identity already has the maximum number of live devices"`
+rejection as `E2eeError::DeviceCapReached` (via
+`TransportError::is_device_cap_reached()`), never silently swallowed.
+
 ### Sealed send + receive (`sealed.rs`)
 
 - `send_sealed(transport, actor, chain, ctx, group, eligibility) -> SealedSendOutcome`
@@ -468,11 +517,14 @@ The crate's one error type. Notable variants:
 - `RekeyRateLimited { reason }` — the fold refused a commit under the
   commit-rate rule (a rekey, or a drift discharge whose removes did not
   discharge anything). Same divergence caveat as `StaleEpochDiverged`.
+- `DeviceCapReached { reason }` — the fold refused a `DeviceAuthorized` under
+  the live-device cap (8); surfaced by `device.rs`'s `authorize_device`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.
 
 Predicate methods (machine-readable signals over the fold's rejection strings):
 `is_stale_epoch_diverged()`, `is_rekey_rate_limited()`,
-`is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`.
+`is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`,
+`is_device_cap_reached()`.
 
 ---
 

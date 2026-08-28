@@ -16,6 +16,7 @@ pub mod chain;
 pub mod channel;
 pub mod channel_key;
 pub mod commit;
+pub mod device;
 pub mod drift;
 pub mod join;
 pub mod rekey;
@@ -40,6 +41,7 @@ pub use commit::{
     add_member, process_incoming_commit, AddMemberOutcome, DeclaredCommit, DeviceCertResolver,
     IncomingCommitOutcome, StewardContext,
 };
+pub use device::{add_own_device, authorize_device, AddOwnDeviceOutcome, DeviceAuthorizedOutcome, OwnDeviceContext};
 pub use drift::{
     dead_leaves_from_revocation, discharge_drift, DriftDischargeContext, DriftDischargeOutcome,
 };

@@ -138,6 +138,19 @@ impl TransportError {
         )
     }
 
+    /// True iff the server rejected a `DeviceAuthorized` because the identity
+    /// already holds the maximum number of live devices:
+    /// `"event rejected: identity already has the maximum number of live
+    /// devices"` — the fold's live-device cap (`event_log_state.rs:840-849`).
+    /// C6's `authorize_device` maps this to `E2eeError::DeviceCapReached`.
+    pub fn is_device_cap_reached(&self) -> bool {
+        matches!(
+            self,
+            Self::ServerRejected { reason }
+                if reason.contains("identity already has the maximum number of live devices")
+        )
+    }
+
     /// The rejection/transport reason string, verbatim. For
     /// [`Self::ServerRejected`] this is the server's reason (including the
     /// `"event rejected: "` prefix when present); for [`Self::Transport`] it is
@@ -369,6 +382,28 @@ mod tests {
         )
         .is_sealed_pending_removals());
         assert!(!TransportError::transport("connection reset").is_sealed_pending_removals());
+    }
+
+    #[test]
+    fn device_cap_predicate_matches_the_fold_rejection() {
+        // The fold's verbatim cap message, wrapped the way the server wraps
+        // every non-bare fold rejection (`handlers.rs:2340`).
+        let e = TransportError::rejected(
+            "event rejected: identity already has the maximum number of live devices",
+        );
+        assert!(e.is_device_cap_reached());
+        // Disjoint from the other sub-5a predicates.
+        assert!(!e.is_commit_rate_limited());
+        assert!(!e.is_sealed_pending_removals());
+        assert!(!e.is_stale_epoch());
+    }
+
+    #[test]
+    fn device_cap_predicate_rejects_other_rejections() {
+        assert!(!TransportError::rejected("event rejected: bad signature").is_device_cap_reached());
+        assert!(!TransportError::rejected("event rejected: device already revoked")
+            .is_device_cap_reached());
+        assert!(!TransportError::transport("connection reset").is_device_cap_reached());
     }
 
     #[test]

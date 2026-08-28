@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Mutex;
 
-use farder_crypto::event_log::Event;
+use farder_crypto::event_log::{Event, EventPayload};
 use farder_crypto::identity::PublicKey;
 
 use crate::transport::{E2eeTransport, EventAccepted, MlsControl, TransportError, Welcomes};
@@ -138,13 +138,27 @@ impl E2eeTransport for FakeTransport {
         member: &PublicKey,
         device: &str,
     ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
-        let events = self
+        // Explicitly-served bytes win; otherwise fall back to any
+        // `MlsKeyPackagePublished` events this transport has already accepted
+        // (a faithful stand-in for the real fold, which serves a published
+        // package back to a later fetch — this lets an orchestration like
+        // `add_own_device` publish then add in one call without a real server).
+        let mut events = self
             .key_packages
             .lock()
             .unwrap()
             .get(&(member.clone(), device.to_string()))
             .cloned()
             .unwrap_or_default();
+        if events.is_empty() {
+            let submitted = self.submitted.lock().unwrap();
+            events = submitted
+                .iter()
+                .filter(|e| &e.core.author == member && e.core.device.as_str() == device)
+                .filter(|e| matches!(&e.core.payload, EventPayload::MlsKeyPackagePublished { .. }))
+                .map(|e| e.to_bytes())
+                .collect();
+        }
         async move { Ok(events) }
     }
 
