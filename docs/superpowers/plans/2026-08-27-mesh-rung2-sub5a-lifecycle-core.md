@@ -152,3 +152,29 @@ Both guards verified by breaking them and watching the pinning test fail. The
 call site in `commands.rs` itself is compile-checked only — no test in the Tauri
 crate exercises `add_current_members_to_group` (it needs `AppState` + a live
 transport); the behavior it now delegates to is pinned in the crate.
+
+### F4 (sub-5a, found by mutation testing the harness) — test 1's name overstates what it pins
+
+`ban_send_gate_rekey_forward_secrecy` (H1 test 1) is honest in structure — it has
+an explicit positive control, so the joiner is proven able to decrypt BEFORE the
+ban — but deleting the `rekey_channel` call from it leaves the test **passing**.
+The banned member is already locked out by the drift-discharge REMOVE commit,
+which rotates the group secrets on its own; the subsequent rekey adds nothing the
+test can see. So test 1 proves "a removed member cannot read later traffic", not
+"the rekey is what makes old state useless".
+
+Not a security defect — the property holds, and by the stronger of the two
+mechanisms — but do not cite test 1 as the rekey's proof. **The rekey IS pinned
+end-to-end elsewhere:** deleting the same call from
+`stale_channel_blocks_then_unblocks_after_rekey` DOES fail it, against the real
+in-process QUIC server and the real fold. Verified by mutation, 2026-08-27.
+
+### Test-strength note (recorded so nobody over-reads the green count)
+
+`FakeTransport::submit_event` accepts by default (a rejection must be queued with
+`reject_next`). The ~110 crate unit tests therefore prove client-side orchestration
+and shape, NOT that the fold would accept the events. Fold acceptance is proven by
+the 9 tests over a real in-process QUIC server (`tests/e2ee_lifecycle.rs`,
+`tests/e2ee_two_client.rs`) and by the crate tests that replay a real `LogState`
+(`reset.rs` most heavily, plus `rekey`/`drift`/`cert`/`commit`/`device`). When
+adding a rule, pin it against one of those, not against the fake.
