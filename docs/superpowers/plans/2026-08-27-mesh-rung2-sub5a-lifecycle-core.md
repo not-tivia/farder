@@ -59,3 +59,29 @@ The standard rules: verify each load-bearing guard by breaking it and watching i
 - F2: KeyPackage expiry still effectively infinite; needs a `log_pos` surface (deferred).
 - "channel needs a key refresh" UI state (5b, once C2 exposes the ceiling/staleness signal).
 - The owner's Windows run for 5b.
+
+---
+
+## Findings recorded during the build (controller)
+
+### F1 (sub-5a) — a rejected own-commit diverges local state, and there is NO recovery path yet
+
+`self_update`/`add_members`/`bootstrap_group` all merge locally *before* the submit is
+accepted. So a rejected own-commit — `stale-epoch` (epoch CAS) OR the commit-rate rule —
+leaves the local `MlsChannelGroup` one epoch AHEAD of the server, with no rollback (4a's
+finding F4 already noted this for `LeafBindingFailure`; it is the same class for the
+commit-rate/stale rejections). C2 added rekey (another own-commit) and C3 will add
+drift-discharge (remove, another own-commit), so the surface keeps growing.
+
+**There is currently no client-side "rebuild the group from the log" recovery.** A
+divergent group can only be fixed by re-joining (getting a fresh Welcome for a new
+generation) — which is precisely the spec's "MLS-state-loss-without-device-loss recovery"
+item. This must land in C7 (store re-provisioning) as a REAL recovery path, not just the
+"self-DeviceRevoked + fresh device" terminal path: a device whose MLS store diverged (but
+whose device key is fine) should re-join the channel without revoking itself.
+
+**Carry-forward into C7:** implement `recover_diverged_group` = detect divergence (own
+commit rejected), self-remove the stale leaf, and re-add a fresh leaf for the same device
+(via a new KeyPackage + Welcome), or — if the group is beyond local repair — re-provision.
+Until then, `RekeyRateLimited`/`StaleEpochDiverged` are effectively terminal for the local
+group, which is unacceptable for a *lifecycle* sub-project.
