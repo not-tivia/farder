@@ -52,6 +52,12 @@ export interface PerServerState {
    *  `decrypted` holds the plaintext; `undecryptable` is the distinct
    *  "couldn't decrypt" marker. Absent = not yet decrypted (T5 placeholder). */
   sealedDecrypts: Record<number, SealedDecryptEntry>;
+  /** Channels whose locally stored history has been loaded into
+   *  `sealedDecrypts`. Load-bearing, not bookkeeping: `useSealedDecrypt` must
+   *  NOT open a ciphertext before this is true for its channel, because a
+   *  message we already hold locally has had its ratchet key consumed — the
+   *  open would fail and cache "couldn't decrypt" over restored history. */
+  historyHydrated: Record<number, boolean>;
 }
 
 export interface AppState {
@@ -95,6 +101,7 @@ const initialPerServerState: PerServerState = {
   mlsControlEvents: [],
   mlsStates: {},
   sealedDecrypts: {},
+  historyHydrated: {},
 };
 
 /** Combined chip cap for the active-widgets bar — mirrors the server's
@@ -182,7 +189,8 @@ export type AppAction =
   | { type: "MLS_CONTROL_EVENT"; serverId: string; payload: MlsControlEventInfo }
   | { type: "SEALED_DECRYPTED"; serverId: string; payload: { messageId: number; eventHash: string | null; content: string } }
   | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } }
-  | { type: "MLS_STATE"; serverId: string; payload: { channelId: number; confirmed: boolean; outcome: "advanced" | "equivocation"; reason: string | null } };
+  | { type: "MLS_STATE"; serverId: string; payload: { channelId: number; confirmed: boolean; outcome: "advanced" | "equivocation"; reason: string | null } }
+  | { type: "HISTORY_HYDRATED"; serverId: string; payload: { channelId: number } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -373,6 +381,11 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       if (state.mlsControlEvents.some((e) => e.eventHash === action.payload.eventHash)) return state;
       return { ...state, mlsControlEvents: [...state.mlsControlEvents, action.payload] };
     }
+    case "HISTORY_HYDRATED":
+      return {
+        ...state,
+        historyHydrated: { ...state.historyHydrated, [action.payload.channelId]: true },
+      };
     case "SEALED_DECRYPTED":
       return {
         ...state,

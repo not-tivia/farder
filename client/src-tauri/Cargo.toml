@@ -14,6 +14,7 @@ farder-crypto = { path = "../../crates/farder-crypto" }
 farder-node = { path = "../../crates/farder-node" }
 farder-protocol = { path = "../../crates/farder-protocol" }
 farder-e2ee-client = { path = "../../crates/farder-e2ee-client" }
+farder-history = { path = "../../crates/farder-history" }
 farder-mls = { path = "../../crates/farder-mls" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"

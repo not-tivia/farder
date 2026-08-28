@@ -271,6 +271,52 @@ export async function decryptSealedMessage(serverId: string, logServerId: string
   return invoke<SealedDecryptResult>("decrypt_sealed_message", { serverId, logServerId, channelId, ciphertext });
 }
 
+/** One row of locally stored (sealed-at-rest) E2EE history. `author` is raw
+ *  public-key bytes — the same bytes as a message row's `author.bytes`. */
+export interface HistoryRow {
+  channel_id: number;
+  message_id: number;
+  event_hash: string;
+  timestamp: number;
+  author: number[];
+  content: string;
+  reply_to: string | null;
+  attachments: string[];
+}
+
+/** Persist ONE decrypted message. Called exactly once per successful decrypt —
+ *  a failed decrypt writes nothing, because a failure must never be cached as
+ *  history. */
+export async function historyPut(row: HistoryRow): Promise<void> {
+  return invoke<void>("history_put", { row });
+}
+
+/** A page of locally stored history for one channel, newest-first. Rows here are
+ *  rendered INSTEAD of re-opening the ciphertext: a second open is impossible
+ *  and would burn the ratchet key for nothing. */
+export async function historyPage(channelId: number, beforeId: number | null, limit: number): Promise<HistoryRow[]> {
+  return invoke<HistoryRow[]>("history_page", { channelId, beforeId, limit });
+}
+
+/** Search stored history in one channel. E2EE rows never enter the server's FTS
+ *  index, so this is the only way to search them. */
+export async function historySearch(channelId: number, query: string, limit: number): Promise<HistoryRow[]> {
+  return invoke<HistoryRow[]>("history_search", { channelId, query, limit });
+}
+
+/** Fold a delete into the local archive (the compliant-client purge rule). */
+export async function historyPurgeMessage(channelId: number, messageId: number): Promise<number> {
+  return invoke<number>("history_purge_message", { channelId, messageId });
+}
+
+export async function historyPurgeBefore(channelId: number, beforeTs: number): Promise<number> {
+  return invoke<number>("history_purge_before", { channelId, beforeTs });
+}
+
+export async function historyPurgeAuthor(author: number[]): Promise<number> {
+  return invoke<number>("history_purge_author", { author });
+}
+
 export async function createCategory(serverId: string, name: string): Promise<void> {
   return invoke<void>("create_category", { serverId, name });
 }

@@ -194,6 +194,12 @@ export function useServerEvents(): void {
         serverId,
         payload: { channelId: data.channel_id, messageId: data.message_id },
       });
+      // Compliant-client purge rule: server-side a delete only removes the
+      // ciphertext, so end to end it means nothing unless this device also drops
+      // its own decrypted copy.
+      void api
+        .historyPurgeMessage(data.channel_id, data.message_id)
+        .catch((err) => console.warn("[history] purge failed:", err));
     }).then(safePush);
 
     listen("server:sealed_message", (e) => {
@@ -221,6 +227,12 @@ export function useServerEvents(): void {
         serverId,
         payload: { channelId: data.channel_id, messageId: data.message_id },
       });
+      // Compliant-client purge rule: server-side a delete only removes the
+      // ciphertext, so end to end it means nothing unless this device also drops
+      // its own decrypted copy.
+      void api
+        .historyPurgeMessage(data.channel_id, data.message_id)
+        .catch((err) => console.warn("[history] purge failed:", err));
     }).then(safePush);
 
     listen("server:channel_created_v2", (e) => {

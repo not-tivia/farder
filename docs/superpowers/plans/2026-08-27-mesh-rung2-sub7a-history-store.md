@@ -106,22 +106,22 @@ sealed archive next to the keys that open it.
 
 ### Wiring (the part that makes history actually come back)
 
-- [ ] **T7 — key derivation + lifecycle.** `history_key` derived per D4 at unlock,
+- [x] **T7 — key derivation + lifecycle.** `history_key` derived per D4 at unlock,
       held in `AppState` beside `signing_key_bytes`, zeroized on lock. Never written
       to disk, never logged, never crosses the Tauri boundary.
-- [ ] **T8 — Tauri commands.** `history_put` / `history_page` / `history_search` /
+- [x] **T8 — Tauri commands.** `history_put` / `history_page` / `history_search` /
       `history_purge_*` as thin wrappers, each documented in
       `docs/modules/tauri-commands.md` in the SAME commit, and each name
       cross-checked by `scripts/seam_audit.py` (the untyped seam that shipped a
       broken voice join before).
-- [ ] **T9 — write on decrypt.** `useSealedDecrypt` persists every successful
+- [x] **T9 — write on decrypt.** `useSealedDecrypt` persists every successful
       decrypt exactly once. This is the ONLY writer; a decrypt that fails writes
       nothing (never cache a failure as history).
-- [ ] **T10 — read before decrypt.** On channel open, a sealed row already in the
+- [x] **T10 — read before decrypt.** On channel open, a sealed row already in the
       local store renders from it and is NEVER handed to `decrypt_sealed_message`.
       This is what makes restart work, and it also protects the ratchet: today a
       restart burns a key per message for nothing.
-- [ ] **T11 — fold the purges.** `MessageDeleted` (and the redaction/retention paths
+- [x] **T11 — fold the purges.** `MessageDeleted` (and the redaction/retention paths
       the client already sees) call the T4 purges, so a delete that lands while the
       client is running does not survive in the local archive.
 
