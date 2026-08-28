@@ -13,6 +13,7 @@ mod display;
 #[cfg(windows)]
 mod display_wgc;
 mod identity;
+mod history;
 mod mls_state;
 mod opus_codec;
 mod state;
@@ -90,6 +91,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_public_key,
             identity::identity_status,
+            history::history_put,
+            history::history_page,
+            history::history_search,
+            history::history_purge_message,
+            history::history_purge_before,
+            history::history_purge_author,
             identity::create_identity,
             identity::unlock_identity,
             identity::migrate_plaintext_identity,

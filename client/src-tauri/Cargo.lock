@@ -1515,6 +1515,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 name = "farder-client"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
  "audiopus",
@@ -1524,6 +1525,7 @@ dependencies = [
  "dirs 5.0.1",
  "farder-crypto",
  "farder-e2ee-client",
+ "farder-history",
  "farder-mls",
  "farder-node",
  "farder-protocol",
@@ -1588,12 +1590,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "farder-history"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "farder-crypto",
+ "hkdf",
+ "hmac",
+ "rand 0.8.5",
+ "rmp-serde",
+ "rusqlite",
+ "serde",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "farder-mls"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "farder-crypto",
  "hex",
+ "hmac",
  "openmls",
  "openmls_rust_crypto",
  "openmls_sqlite_storage",

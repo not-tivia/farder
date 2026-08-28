@@ -752,6 +752,7 @@ version = "0.1.0"
 dependencies = [
  "farder-crypto",
  "farder-e2ee-client",
+ "farder-history",
  "farder-mls",
  "farder-node",
  "farder-protocol",
@@ -821,12 +822,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "farder-history"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "farder-crypto",
+ "hkdf",
+ "hmac",
+ "rand 0.8.5",
+ "rmp-serde",
+ "rusqlite",
+ "serde",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
 name = "farder-mls"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "farder-crypto",
  "hex",
+ "hmac",
  "openmls",
  "openmls_rust_crypto",
  "openmls_sqlite_storage",

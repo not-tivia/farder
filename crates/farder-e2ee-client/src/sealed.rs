@@ -435,6 +435,53 @@ mod tests {
         assert_decrypted(reply_opened, "roger that");
     }
 
+    /// The decrypt-once property, stated as a test because it has a PRODUCT
+    /// consequence that is easy to forget: opening a sealed message consumes
+    /// that generation's ratchet key IN THE PERSISTED STORE, so the same
+    /// ciphertext can never be opened again — not after a re-render, and not
+    /// after an app restart. Combined with the 4b decision that decrypted
+    /// content lives in frontend memory only, this means an E2EE channel's
+    /// history is UNREADABLE after a restart until a local plaintext history
+    /// store exists (spec sub-project 7). Verified, not assumed.
+    #[tokio::test]
+    async fn opening_a_sealed_message_twice_is_impossible_so_history_needs_a_local_store() {
+        let mut f = two_member(1 << 61);
+        let k = key(1 << 61);
+        let transport = FakeTransport::new();
+        let alice_actor = actor(&f.alice_id, &f.alice_dev);
+        let mut alice_chain = mid_chain();
+        let ctx = SealContext {
+            key: &k,
+            generation: 0,
+            store: &f.alice_store,
+            content: "history probe",
+            reply_to: None,
+        };
+        send_sealed(
+            &transport,
+            &alice_actor,
+            &mut alice_chain,
+            &ctx,
+            &mut f.alice_group,
+            &SendEligibility::confirmed(),
+        )
+        .await
+        .unwrap();
+        let (ciphertext, ..) = last_sealed_payload(&transport);
+        let byte_for_byte_clone = ciphertext.clone();
+
+        let first = receive_sealed(&f.bob_store, &mut f.bob_group, ciphertext);
+        assert_decrypted(first, "history probe");
+
+        // The SAME store and group, the SAME bytes: the key is already burned.
+        match receive_sealed(&f.bob_store, &mut f.bob_group, byte_for_byte_clone) {
+            SealedOutcome::Undecryptable { reason } => assert!(!reason.is_empty()),
+            SealedOutcome::Decrypted(_) => {
+                panic!("a consumed generation key re-opened its message — forward secrecy is broken")
+            }
+        }
+    }
+
     #[test]
     fn tampered_ciphertext_is_undecryptable_without_panicking() {
         let mut f = two_member(1 << 61);

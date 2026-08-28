@@ -2305,7 +2305,7 @@ pub async fn create_invite(
                     let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
                     Keypair::from_signing_key_bytes(&bytes)
                 };
-                let device = crate::device::load_or_create_device_keypair()?;
+                let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
                 let mut ds = crate::device::DeviceState::load(&log_sid)?
                     .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
 
@@ -4342,7 +4342,7 @@ pub async fn submit_event(
         let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
         Keypair::from_signing_key_bytes(&bytes)
     };
-    let device = crate::device::load_or_create_device_keypair()?;
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
 
     // Serialize all chain writes: load → mutate → save must not interleave with
     // concurrent commands (join_log_server, create_invite) that touch the same
@@ -4508,7 +4508,7 @@ where
         let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
         Keypair::from_signing_key_bytes(&bytes)
     };
-    let device = crate::device::load_or_create_device_keypair()?;
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
 
     let state_arc = Arc::clone(state);
     let result = tokio::task::spawn_blocking(move || -> Result<T, String> {
@@ -5862,7 +5862,24 @@ pub async fn decrypt_sealed_message(
     channel_id: u64,
     ciphertext: Vec<u8>,
 ) -> Result<DecryptSealedMessageResult, String> {
-    let device = crate::device::load_or_create_device_keypair()?;
+    // The device subkey is now WRAPPED under the identity (sub-7a H1), so an
+    // open needs the identity unlocked. That is a deliberate narrowing of this
+    // command's old contract ("needs only the device subkey + on-disk store"):
+    // reading sealed history while the app is locked was a hole in the very
+    // property the PIN exists to provide. It stays fail-closed rather than an
+    // Err, matching how this command reports every other local failure.
+    let identity_seed = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        match *lock {
+            Some(bytes) => bytes,
+            None => {
+                return Ok(DecryptSealedMessageResult::Undecryptable {
+                    reason: "identity is locked".to_string(),
+                })
+            }
+        }
+    };
+    let device = crate::device::load_or_create_device_keypair(&identity_seed)?;
     let data_dir = farder_data_dir();
     let key = farder_e2ee_client::ChannelKey::new(log_server_id.clone(), channel_id)?;
 
@@ -5946,7 +5963,7 @@ pub async fn redact_attachment(
         let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
         Keypair::from_signing_key_bytes(&bytes)
     };
-    let device = crate::device::load_or_create_device_keypair()?;
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
 
     // Serialize all chain writes: load → mutate → save must not interleave with
     // concurrent commands (join_log_server, submit_event) that touch the same
@@ -6015,7 +6032,7 @@ pub async fn join_log_server(
         let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
         Keypair::from_signing_key_bytes(&bytes)
     };
-    let device = crate::device::load_or_create_device_keypair()?;
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
 
     // Serialize chain writes against submit_event and create_invite.
     let _chain_guard = state.device_chain_lock.lock().await;
@@ -6097,7 +6114,7 @@ async fn moderate_member(
         let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
         Keypair::from_signing_key_bytes(&bytes)
     };
-    let device = crate::device::load_or_create_device_keypair()?;
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
 
     // Serialize chain writes against submit_event and join_log_server.
     let _chain_guard = state.device_chain_lock.lock().await;

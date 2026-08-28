@@ -207,9 +207,31 @@ profile copy, VM snapshot rollback, cloud-synced home dir. Hence:
 
 - `RmpCodec` — `openmls_sqlite_storage::Codec` via canonical rmp-serde bytes
   (same MessagePack convention as farder-crypto's `EventCore`). Errors are
-  `RmpCodecError::{Encode, Decode}`.
+  `RmpCodecError::{Encode, Decode, Crypto}`. **No longer the store's codec** —
+  kept for plain encoding; the store uses `SealedRmpCodec`.
+- `SealedRmpCodec` — the codec the store actually uses (sub-7a H2): rmp-serde,
+  then AES-256-GCM. This file holds the group's ratchet secrets, and it used to
+  be plain sqlite, so anyone with the file plus some ciphertext could read the
+  channel. **Three things about it are load-bearing and easy to break:**
+  - The key is **per store**, published to a thread-local by
+    `OpenMlsProvider::storage(&self)` — the accessor every storage operation
+    passes through — because `Codec`'s methods are static and cannot take one.
+    A plain global would cross-seal two stores alive in one process.
+  - The encryption is **deterministic** (SIV nonce derived from the plaintext),
+    and must be: `openmls_sqlite_storage` encodes its lookup KEYS through this
+    same codec straight into `WHERE key = ?`, so a random nonce makes every
+    lookup miss and the store behave as if empty. The price is equality
+    leakage, which is acceptable for random secrets and group ids.
+  - An unarmed key falls back to a **per-process random** key, never plaintext,
+    so tests need no test-only key. A store created under the fallback records
+    that key's fingerprint and the next launch refuses loudly (`KeyMismatch`).
+- `arm_store_key(key)` / `disarm_store_key()` — the client arms this at the
+  identity chokepoint (`identity.rs`'s `store_key`), derived via
+  `farder_history::derive_local_key(seed, b"farder-mls-store-v1")`. A path that
+  sets the identity WITHOUT arming would create stores under the random fallback
+  and be unable to resume them next launch.
 - `FarderMlsStore` — sqlite-backed `OpenMlsProvider` (owns the rusqlite
-  `Connection` inside a `SqliteStorageProvider<RmpCodec, Connection>`, plus
+  `Connection` inside a `SqliteStorageProvider<SealedRmpCodec, Connection>`, plus
   `RustCrypto` for crypto/rand). Every credential/group/envelope API takes it
   interchangeably with the in-memory test provider.
 - `FarderMlsStore::create(db_path: &Path) -> Result<(Self, [u8; 16])>` —
@@ -230,6 +252,11 @@ profile copy, VM snapshot rollback, cloud-synced home dir. Hence:
     (poisoned-store posture; also returned for zero or multiple meta rows or
     a wrong-sized blob).
   - `Io` — the store can't be read at all (missing file, corruption, ...).
+  - `KeyMismatch` — the values were sealed under a different at-rest key, or the
+    store predates at-rest encryption (no key fingerprint at all). Checked
+    against the AMBIENT armed key, never the thread-local — comparing the
+    thread-local would pit the store against itself and never fire. Terminal:
+    re-provision, or recreate the channel for a pre-encryption store.
 
   **`InstanceMismatch`/`MissingInstanceId` are terminal for that store: the
   caller must self-`DeviceRevoked` and re-provision as a fresh device (sub-5

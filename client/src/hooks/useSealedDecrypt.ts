@@ -40,12 +40,17 @@ export function useSealedDecrypt(): void {
   const logServerId = server?.logServerId ?? null;
   const messages = server?.messages ?? {};
   const sealedDecrypts = server?.sealedDecrypts ?? {};
+  const historyHydrated = server?.historyHydrated ?? {};
 
   useEffect(() => {
     if (!activeServerId || !logServerId) return;
 
     for (const [channelIdStr, list] of Object.entries(messages)) {
       const channelId = Number(channelIdStr);
+      // Gate (T10): never open a ciphertext before the local store has been
+      // consulted. A message we already hold has had its ratchet key consumed,
+      // so the open would fail and cache "couldn't decrypt" over good history.
+      if (!historyHydrated[channelId]) continue;
       for (const msg of list) {
         // A sealed row has empty content and ciphertext in `sealed`.
         const isSealed = msg.is_e2ee === true && msg.sealed != null && msg.content === "";
@@ -71,6 +76,23 @@ export function useSealedDecrypt(): void {
                 serverId: activeServerId,
                 payload: { messageId: msg.id, eventHash, content: result.envelope.content },
               });
+              // Persist it (T9): this is the ONLY writer, and it runs only on a
+              // SUCCESSFUL decrypt — a failure must never be cached as history.
+              // The key was just consumed, so if this write is lost the message
+              // is unrecoverable; it is still fire-and-forget, because failing
+              // the render over a storage error would help nobody.
+              void api
+                .historyPut({
+                  channel_id: channelId,
+                  message_id: msg.id,
+                  event_hash: eventHash ?? "",
+                  timestamp: msg.timestamp ?? 0,
+                  author: msg.author?.bytes ?? [],
+                  content: result.envelope.content,
+                  reply_to: null,
+                  attachments: [],
+                })
+                .catch((e) => console.warn("[history] put failed:", e));
             } else {
               dispatch({
                 type: "SEALED_UNDECRYPTABLE",
@@ -95,5 +117,5 @@ export function useSealedDecrypt(): void {
         inFlight.set(key, promise);
       }
     }
-  }, [activeServerId, logServerId, messages, sealedDecrypts, dispatch]);
+  }, [activeServerId, logServerId, messages, sealedDecrypts, historyHydrated, dispatch]);
 }

@@ -6,6 +6,7 @@ import { DataSaverProvider } from "./context/DataSaverContext";
 import { useServerEvents } from "./hooks/useServerEvents";
 import { useMlsSteward } from "./hooks/useMlsSteward";
 import { useSealedDecrypt } from "./hooks/useSealedDecrypt";
+import { useLocalHistory } from "./hooks/useLocalHistory";
 import ConnectDialog from "./components/ConnectDialog";
 import AppShell from "./components/AppShell";
 import IdentityGate from "./components/IdentityGate";
@@ -29,6 +30,8 @@ function AppInner() {
   const [pendingInvite, setPendingInvite] = useState<string | null>(null);
   useServerEvents();
   useMlsSteward();
+  // Order matters: hydration sets the gate `useSealedDecrypt` waits on.
+  useLocalHistory();
   useSealedDecrypt();
 
   // Handle farder:// deep links passed via CLI argument at launch.

@@ -509,7 +509,13 @@ open — 4a). Returns a tag-discriminated `DecryptSealedMessageResult`: either
 poisoned group surface as `undecryptable`, never a command error, so the
 frontend renders a fail-closed state rather than garbage. Deliberately NOT
 `run_e2ee`: decryption is a local, read-only open that needs only the device
-subkey + on-disk store (not the unlocked identity, not device authorization); it
+subkey + on-disk store (not device authorization). **Since sub-7a H1 it DOES
+require the identity to be unlocked**, because the device subkey is now wrapped
+at rest under an identity-derived key; a locked identity returns
+`{ kind: "undecryptable", reason: "identity is locked" }` rather than an error,
+matching how this command reports every other local failure. Reading sealed
+history while the app was locked was a hole in the property the PIN exists to
+provide. It
 still holds `device_chain_lock` so the synchronous open cannot race a concurrent
 send/steward write to the same sqlite store.
 **Parameters:** `server_id` — the connection key (diagnostics only; the store is
@@ -2794,3 +2800,63 @@ Cancel one of **my** pending reminders.
 **Side effects:** sends `ServerRequest::CancelReminder { reminder_id }`; the server's `UPDATE` is scoped `owner = caller AND status = 'pending'`. Someone else's id (or a nonexistent one) rejects with the byte-identical opaque `"reminder not found"`. No broadcast — reminders are private. Rate-limited by `widget_limiter`, but **not** timeout-gated (see the group preamble).
 
 **invoke name:** `"cancel_reminder"` → `cancelReminder(serverId, reminderId)`.
+
+---
+
+## Local history store (sub-7a)
+
+Thin wrappers over the `farder-history` crate — see `docs/modules/farder-history.md`
+for what is sealed, what deliberately is not, and why. All six derive the archive
+key per call from the identity key already held in `AppState.signing_key_bytes`
+(an HKDF expand, cheap); **no key material becomes state**, so the archive is
+readable exactly while the identity is unlocked. A locked identity is an ordinary
+`Err("identity is locked")`, never a panic. The store lives at
+`<FARDER_DATA>/history.db`.
+
+### `history_put(state, row) -> Result<(), String>`
+
+**What it does:** persists ONE decrypted message, sealed at rest. Idempotent on
+`(channel_id, message_id, event_hash)`.
+**Parameters:** `row` — `HistoryRow { channel_id, message_id, event_hash,
+timestamp, author, content, reply_to, attachments }`; `author` is raw public-key
+bytes (a message row's `author.bytes`).
+**Called by:** `useSealedDecrypt.ts`, exactly once per **successful** decrypt. A
+failed decrypt writes nothing — a failure must never be cached as history.
+**invoke name:** `"history_put"` → `historyPut(row)`.
+
+### `history_page(state, channel_id, before_id, limit) -> Result<Vec<HistoryRow>, String>`
+
+**What it does:** a page of stored history for one channel, newest-first,
+mirroring `fetch_history_v2`'s shape. **This is what makes an E2EE channel have
+history across restarts**: the ciphertext cannot be re-opened (the ratchet key was
+consumed on first read), so rows are rendered from here instead.
+**Called by:** `useLocalHistory.ts` on channel open, before any decrypt runs.
+**invoke name:** `"history_page"` → `historyPage(channelId, beforeId, limit)`.
+
+### `history_search(state, channel_id, query, limit) -> Result<Vec<HistoryRow>, String>`
+
+**What it does:** case-insensitive substring search over one channel's stored
+history. Sealed rows never enter the server's FTS index, so this is the ONLY way
+to search an E2EE channel.
+**invoke name:** `"history_search"` → `historySearch(channelId, query, limit)`.
+
+### `history_purge_message(state, channel_id, message_id) -> Result<usize, String>`
+
+**What it does:** drops every local row for one message — the compliant-client
+purge rule. Server-side a delete only removes ciphertext, so end to end it means
+nothing unless this device drops its decrypted copy too.
+**Called by:** `useServerEvents.ts` on BOTH `server:message_deleted` and
+`server:message_tombstoned` (the E2EE path).
+**invoke name:** `"history_purge_message"` → `historyPurgeMessage(channelId, messageId)`.
+
+### `history_purge_before(state, channel_id, before_ts) -> Result<usize, String>`
+
+**What it does:** retention expiry for one channel.
+**invoke name:** `"history_purge_before"` → `historyPurgeBefore(channelId, beforeTs)`.
+
+### `history_purge_author(state, author) -> Result<usize, String>`
+
+**What it does:** anonymize-on-leave — drops everything one author wrote, found
+through the HMAC blind index so the author is never stored or compared in the
+clear.
+**invoke name:** `"history_purge_author"` → `historyPurgeAuthor(author)`.

@@ -49,6 +49,7 @@ These three files together are the entire client-side state layer. `ServerContex
 | `events` | `Record<number, { event: EventInfo; myRsvp: string \| null }>` | Live event-card state keyed by event id. Populated lazily by `EventWidget` (`EVENT_STATE` after `getEvent` — also refreshed by the widget's `refetch="mount"/"interval"` prop when rendered as a linked card), patched by `EVENT_UPDATED` broadcasts and `EVENT_MY_RSVP`. `myRsvp` is `"going"`/`"maybe"`/`"no"`/`null` and is **self-only** — it never arrives in a broadcast |
 | `activeWidgets` | `{ channelId: number; polls: number[]; giveaways: number[]; events: number[] } \| null` | The viewed channel's open-widget **id lists** for the active-widgets bar (`ActiveWidgetsBar.tsx`); the infos are upserted into `polls`/`giveaways`/`events` so chips share one source of truth with the widgets. Replaced whole by `ACTIVE_WIDGETS` (fetched via `listActiveWidgets` on channel switch/reconnect), maintained live by `POLL_UPDATED`/`GIVEAWAY_UPDATED`/`EVENT_UPDATED` (append on open/upcoming-and-missing, remove on closed/ended/cancelled/started, 20 cap **combined across all three lists**). `null` until the first fetch |
 | `mlsControlEvents` | `MlsControlEventInfo[]` | Pending MLS control events (KeyPackage / Commit / Welcome / LeafConfirmed / GroupReset) received via `server:mls_control_event`. Record-only in T4 — the steward (T9, 4b-2) drains the queue; deduplicated by `eventHash` |
+| `historyHydrated` | `Record<number, boolean>` | Channels whose locally stored history has been loaded into `sealedDecrypts`. Load-bearing: `useSealedDecrypt` must not open a ciphertext in a channel until this is true (sub-7a) |
 | `sealedDecrypts` | `Record<number, SealedDecryptEntry>` | Per-message decrypt results for sealed rows, keyed by message id (T10, D2/D4). Each sealed row is decrypted **exactly once** (the ratchet is consumed on open) and the result cached here: `{ kind: "decrypted", content, eventHash }` or `{ kind: "undecryptable", reason, eventHash }`. `eventHash` is the opened ciphertext's log event hash so a sealed edit (same id, new ciphertext) triggers a fresh decrypt. Absent = not yet decrypted (the T5 placeholder renders) |
 
 ---
@@ -150,6 +151,7 @@ All per-server actions carry a `serverId: string` field and are routed by `appRe
 | Action type | What it mutates |
 |---|---|
 | `MLS_CONTROL_EVENT` | Appends an `MlsControlEventInfo` to `mlsControlEvents` (deduplicated by `eventHash`). Record-only — the steward (T9) drains the queue and processes each event via `fetch_mls_control` |
+| `HISTORY_HYDRATED` | Marks `historyHydrated[channelId] = true`, releasing the decrypt gate for that channel |
 | `SEALED_DECRYPTED` | Upserts `sealedDecrypts[messageId] = { kind: "decrypted", content, eventHash }` |
 | `SEALED_UNDECRYPTABLE` | Upserts `sealedDecrypts[messageId] = { kind: "undecryptable", reason, eventHash }` |
 
@@ -272,6 +274,17 @@ history load (`SET_MESSAGES` / `PREPEND_MESSAGES`).
 On success it dispatches `SEALED_DECRYPTED`; on `undecryptable` (or a command
 failure) it dispatches `SEALED_UNDECRYPTABLE`. Decrypted content lives only in
 frontend memory (`sealedDecrypts`) — never persisted to disk in 4b (D4).
+
+**Sub-7a changed that, and added a gate.** Decrypted content is now persisted to
+the local sealed-at-rest store (`farder-history`), because the ratchet key is
+consumed on open: without it, a restart re-fetched the ciphertext, failed to open
+it, and rendered every already-read message as "couldn't decrypt". `useLocalHistory`
+hydrates `sealedDecrypts` from that store on channel open and then sets
+`historyHydrated[channelId]`; `useSealedDecrypt` **must not** open any ciphertext
+in a channel until that flag is set, or it would attempt a message we already hold,
+fail (the key is gone), and cache the failure over good history. The flag is set
+even when hydration FAILS, so a locked identity or missing store degrades to the
+old behavior instead of wedging the channel shut.
 
 ---
 
