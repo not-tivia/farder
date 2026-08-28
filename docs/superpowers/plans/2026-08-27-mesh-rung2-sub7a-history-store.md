@@ -81,27 +81,27 @@ sealed archive next to the keys that open it.
 
 ### The store (headless, harness-tested)
 
-- [ ] **T1 — the crate skeleton + schema.** New `crates/farder-history` in the root
+- [x] **T1 — the crate skeleton + schema.** New `crates/farder-history` in the root
       workspace. `HistoryStore::open(path, store_key)`, schema with the D2 columns,
       the D3 blind index, a schema-version row, and `WITHOUT ROWID` where it pays.
       No client wiring yet.
-- [ ] **T2 — seal/unseal one row.** AES-256-GCM per row with a per-row random nonce
+- [x] **T2 — seal/unseal one row.** AES-256-GCM per row with a per-row random nonce
       stored beside the blob; AAD binds `(channel_id, message_id, event_hash)` so a
       row cannot be moved between channels or messages and still open. Round-trip
       + wrong-key + moved-row tests.
-- [ ] **T3 — put/get/paginate.** `put(record)` (idempotent on `(channel_id,
+- [x] **T3 — put/get/paginate.** `put(record)` (idempotent on `(channel_id,
       message_id, event_hash)`), `page(channel_id, before_id, limit)` mirroring
       `fetch_history_v2`'s shape so the frontend merge is a drop-in.
-- [ ] **T4 — the purge obligations (the compliant-client rule).** `purge_message`
+- [x] **T4 — the purge obligations (the compliant-client rule).** `purge_message`
       (tombstone / `MessageDeleted`), `purge_attachment` (redaction),
       `purge_before(channel_id, ts)` (retention expiry), `purge_author(tag)`
       (anonymize-on-leave). Each is a DELETE by index — no decryption, no scan.
-- [ ] **T5 — the observation test (named deliverable).** Write a known needle
+- [x] **T5 — the observation test (named deliverable).** Write a known needle
       through the real put path, then scan **every table and every column** of the
       closed database file for that needle, exactly like `assert_no_plaintext_anywhere`
       — plus a positive control that the scanner finds a needle deliberately written
       in the clear, so the test cannot pass by being blind.
-- [ ] **T6 — search.** `search(channel_id, query, limit)`, decrypt-and-scan per D5,
+- [x] **T6 — search.** `search(channel_id, query, limit)`, decrypt-and-scan per D5,
       case-insensitive, returning the same record shape as `page`.
 
 ### Wiring (the part that makes history actually come back)

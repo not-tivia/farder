@@ -47,6 +47,8 @@ Data crosses several hard boundaries; each is a place bugs hide.
 | `crates/farder-protocol/` | The wire contract: `ServerRequest`, `ServerResponse`, `ServerEvent`, shared types. The single source of truth for client↔server messages. |
 | `crates/farder-crypto/` | Ed25519 identity, X25519 key exchange, AES-GCM, E2EE DM + media key wrapping. |
 | `crates/farder-mls/` | OpenMLS 0.8.1 wrapper for E2EE channel groups (mesh rung 2). Client-side only — the server never links it and never holds group keys. See `docs/modules/farder-mls.md`. |
+| `crates/farder-e2ee-client/` | The client-side E2EE vertical over `farder-mls`: channel create/join, KeyPackages, commits and the two receive-side gates, sealed send/receive, resync, and the sub-5 lifecycle (rekey, drift discharge, revocation, reset, multi-device, re-provisioning). Transport-agnostic behind `E2eeTransport`. See `docs/modules/farder-e2ee-client.md`. |
+| `crates/farder-history/` | The local decrypted-history store for E2EE channels — every row sealed at rest under a key derived from the unlocked identity. Without it an E2EE channel has no history at all, because opening a sealed message consumes its ratchet key. See `docs/modules/farder-history.md`. |
 | `crates/farder-node/` | Personal node embedded in the client (DMs). |
 | `crates/farder-relay/` | Relay node (IP masking). |
 | `crates/farder-notify/` | Desktop notifications helper. |
