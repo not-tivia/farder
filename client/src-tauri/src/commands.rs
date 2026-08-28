@@ -5702,10 +5702,31 @@ async fn run_send_sealed_message(
         SendEligibility::not_confirmed()
     };
 
-    let outcome = match send_sealed(&transport, &actor, &mut chain, &ctx, &mut group, &eligibility)
-        .await
+    // Keep-alive (sub-5b K1): the fold seals a channel's sealed content once the
+    // freshness ceiling is reached, and 5a's answer (`rekey_channel`) shipped
+    // dormant with no caller — so an ordinary channel stopped accepting messages
+    // after ~500 of them, permanently. `send_sealed_keepalive` rekeys once and
+    // retries; every other rejection, including the divergence class, surfaces
+    // unchanged. Pinned end-to-end by the harness's
+    // `the_freshness_ceiling_does_not_brick_a_channel`.
+    let rekey_ctx = farder_e2ee_client::RekeyContext {
+        key: &key,
+        generation,
+        store: &store,
+        store_instance_hash: &store_instance_hash,
+    };
+    let outcome = match farder_e2ee_client::send_sealed_keepalive(
+        &transport,
+        &actor,
+        &mut chain,
+        &ctx,
+        &rekey_ctx,
+        &mut group,
+        &eligibility,
+    )
+    .await
     {
-        Ok(send) => send,
+        Ok(k) => k.send,
         // F6: the bare "stale-epoch" rejection also fires for
         // MessagePostedE2ee. Resync is bounded (unproductive + total caps) and
         // terminates under every transport behaviour; it never spins.

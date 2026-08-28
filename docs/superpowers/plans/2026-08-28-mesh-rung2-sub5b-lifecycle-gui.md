@@ -65,7 +65,7 @@ ceiling signal.** Cadence state (`RekeyCadence`) persists in the existing
 
 ## Tasks — 5b-1 (keep-alive + actions, headless)
 
-- [ ] **K1 — react to the two seal signals on send.** `send_sealed_message` maps
+- [x] **K1 — react to the two seal signals on send.** `send_sealed_message` maps
       `is_freshness_ceiling_reached` → rekey-then-retry (once), and
       `is_sealed_pending_removals` → surface a typed, actionable state. No loops:
       one attempt, then a typed error the UI can act on.
