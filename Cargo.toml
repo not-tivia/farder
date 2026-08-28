@@ -52,6 +52,10 @@ name = "e2ee_two_client"
 path = "tests/e2ee_two_client.rs"
 
 [[test]]
+name = "e2ee_lifecycle"
+path = "tests/e2ee_lifecycle.rs"
+
+[[test]]
 name = "security_observation"
 path = "tests/security_observation.rs"
 
