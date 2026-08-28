@@ -232,3 +232,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
+/// One in-channel transparency notice (sub-5b G1): a device gained or lost the
+/// ability to read this channel.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NoticeRow {
+    pub channel_id: u64,
+    pub id: String,
+    pub timestamp: u64,
+    pub kind: String,
+    pub identity: String,
+    pub device: String,
+}
+
+impl From<farder_history::NoticeRecord> for NoticeRow {
+    fn from(n: farder_history::NoticeRecord) -> Self {
+        Self {
+            channel_id: n.channel_id,
+            id: n.id,
+            timestamp: n.timestamp,
+            kind: n.kind,
+            identity: n.identity,
+            device: n.device,
+        }
+    }
+}
+
+impl From<NoticeRow> for farder_history::NoticeRecord {
+    fn from(n: NoticeRow) -> Self {
+        Self {
+            channel_id: n.channel_id,
+            id: n.id,
+            timestamp: n.timestamp,
+            kind: n.kind,
+            identity: n.identity,
+            device: n.device,
+        }
+    }
+}
+
+/// Record one leaf-change notice. Idempotent on its deterministic id, so the
+/// cursor-based steward observing the same change twice cannot stack duplicates.
+#[tauri::command]
+pub fn history_put_notice(state: State<'_, Arc<AppState>>, notice: NoticeRow) -> Result<(), String> {
+    store(&state)?
+        .put_notice(&notice.into())
+        .map_err(|e| e.to_string())
+}
+
+/// A channel's transparency notices, oldest-first (they render in the timeline).
+#[tauri::command]
+pub fn history_notices(
+    state: State<'_, Arc<AppState>>,
+    channel_id: u64,
+    limit: u32,
+) -> Result<Vec<NoticeRow>, String> {
+    let rows = store(&state)?
+        .notices(channel_id, limit)
+        .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(NoticeRow::from).collect())
+}

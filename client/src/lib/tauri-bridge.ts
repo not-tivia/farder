@@ -246,7 +246,14 @@ export async function publishOwnKeyPackage(serverId: string, logServerId: string
   return invoke("publish_own_key_package", { serverId, logServerId, channelId });
 }
 
-export async function processMlsControlEvents(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; outcome: string; reason: string | null; processed: number; epoch: number; generation: number; confirmed: boolean; cursor: number }> {
+/** One `(identity, device)` whose read access to a channel changed. Derived from
+ *  the group's ACTUAL leaf view, never from a commit's declared adds. */
+export interface LeafChange {
+  identity: string;
+  device: string;
+}
+
+export async function processMlsControlEvents(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; outcome: string; reason: string | null; processed: number; epoch: number; generation: number; confirmed: boolean; cursor: number; leaves_gained: LeafChange[]; leaves_lost: LeafChange[] }> {
   return invoke("process_mls_control_events", { serverId, logServerId, channelId });
 }
 
@@ -308,6 +315,26 @@ export interface HistoryRow {
   content: string;
   reply_to: string | null;
   attachments: string[];
+}
+
+/** One in-channel transparency notice: a device gained or lost the ability to
+ *  read this channel. `id` is deterministic, so recording the same change twice
+ *  replaces rather than duplicates. */
+export interface NoticeRow {
+  channel_id: number;
+  id: string;
+  timestamp: number;
+  kind: "gained" | "lost";
+  identity: string;
+  device: string;
+}
+
+export async function historyPutNotice(notice: NoticeRow): Promise<void> {
+  return invoke<void>("history_put_notice", { notice });
+}
+
+export async function historyNotices(channelId: number, limit: number): Promise<NoticeRow[]> {
+  return invoke<NoticeRow[]>("history_notices", { channelId, limit });
 }
 
 /** Persist ONE decrypted message. Called exactly once per successful decrypt —

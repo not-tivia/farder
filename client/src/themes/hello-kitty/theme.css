@@ -3377,3 +3377,63 @@ body {
   background: var(--xp-panel-bg);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
 }
+
+/* --- E2EE leaf-change transparency notice (sub-5b G1) ---------------------
+   A change to WHO can read a private channel is the fact a compromise would
+   most want to slip past you, so this renders in the timeline where it
+   happened and cannot be dismissed. Colours come from theme variables only. */
+.e2ee-leaf-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  background: var(--xp-panel-bg, #fff0f6);
+  border-left: 3px solid var(--xp-blue, #ff6fa5);
+  color: var(--xp-text-muted, #a1748a);
+}
+
+.e2ee-leaf-notice-gained {
+  border-left-color: var(--xp-blue, #ff6fa5);
+}
+
+.e2ee-leaf-notice-lost {
+  border-left-color: var(--xp-text-muted, #a1748a);
+  opacity: 0.85;
+}
+
+.e2ee-leaf-notice-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+
+.e2ee-leaf-notice-text {
+  flex: 1 1 auto;
+  color: var(--xp-text-normal, #4a2c39);
+}
+
+.e2ee-leaf-notice-text strong {
+  font-weight: 600;
+}
+
+.e2ee-leaf-notice-device {
+  color: var(--xp-text-muted, #a1748a);
+  font-family: monospace;
+  font-size: 11px;
+}
+
+/* --- Empty encrypted channel: the no-history explainer as an in-list banner.
+   Distinct from .e2ee-interstitial, which is a full-panel takeover — this one
+   sits ABOVE the composer so the channel stays usable (a channel with no
+   composer could never receive its first message). */
+.e2ee-no-history-banner {
+  margin: 12px;
+  padding: 16px;
+  border-radius: 4px;
+  background: var(--xp-panel-bg, #fff0f6);
+  border: 1px solid var(--xp-border, #f3c6d9);
+  text-align: center;
+}

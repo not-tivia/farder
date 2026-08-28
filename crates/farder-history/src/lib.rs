@@ -144,6 +144,36 @@ struct SealedPayload {
     attachments: Vec<String>,
 }
 
+/// One in-channel transparency notice: a device gained or lost the ability to
+/// read this channel (spec sub-project 5, "device-list transparency in the UI").
+///
+/// Stored here rather than rendered from memory because a notice you can miss by
+/// restarting is not a transparency notice. Sealed with the same key as messages:
+/// who can read which private channel is exactly the kind of thing this store
+/// exists to keep off the disk in the clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeRecord {
+    pub channel_id: u64,
+    /// Deterministic id — `"<kind>:<identity>:<device>:<epoch>"`. The steward is
+    /// cursor-based and idempotent, so it can observe the same leaf change twice;
+    /// a deterministic id makes the second write replace the first instead of
+    /// stacking duplicate notices in the timeline.
+    pub id: String,
+    pub timestamp: u64,
+    /// `"gained"` or `"lost"`.
+    pub kind: String,
+    /// The owning identity, as the frontend's `vk_<hex>` string.
+    pub identity: String,
+    pub device: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SealedNotice {
+    kind: String,
+    identity: String,
+    device: String,
+}
+
 /// The local history database for one identity (all servers, all channels).
 pub struct HistoryStore {
     conn: Connection,
@@ -187,7 +217,17 @@ impl HistoryStore {
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS idx_history_channel_ts
                  ON messages(channel_id, timestamp);
-             CREATE INDEX IF NOT EXISTS idx_history_author ON messages(author_tag);",
+             CREATE INDEX IF NOT EXISTS idx_history_author ON messages(author_tag);
+             CREATE TABLE IF NOT EXISTS notices (
+                 channel_id INTEGER NOT NULL,
+                 id         TEXT NOT NULL,
+                 timestamp  INTEGER NOT NULL,
+                 nonce      BLOB NOT NULL,
+                 sealed     BLOB NOT NULL,
+                 PRIMARY KEY (channel_id, id)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS idx_notices_channel_ts
+                 ON notices(channel_id, timestamp);",
         )?;
         let existing: Option<i64> = conn
             .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
@@ -413,6 +453,67 @@ impl HistoryStore {
         Ok(true)
     }
 
+    /// Store one transparency notice. Idempotent on `(channel_id, id)`.
+    pub fn put_notice(&self, n: &NoticeRecord) -> Result<()> {
+        let payload = SealedNotice {
+            kind: n.kind.clone(),
+            identity: n.identity.clone(),
+            device: n.device.clone(),
+        };
+        let plain = rmp_serde::to_vec(&payload).context("serialize notice")?;
+        let nonce_bytes: [u8; 12] = rand::random();
+        let cipher = Aes256Gcm::new_from_slice(&self.keys.row).expect("32-byte key");
+        // Same AAD discipline as messages: bind the blob to its coordinates so a
+        // notice cannot be relocated to another channel and still open.
+        let mut aad = n.channel_id.to_be_bytes().to_vec();
+        aad.extend_from_slice(n.id.as_bytes());
+        let sealed = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), Payload { msg: &plain, aad: &aad })
+            .map_err(|_| anyhow::anyhow!("seal notice"))?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO notices (channel_id, id, timestamp, nonce, sealed)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![n.channel_id as i64, n.id, n.timestamp as i64, nonce_bytes.to_vec(), sealed],
+        )?;
+        Ok(())
+    }
+
+    /// A channel's notices, oldest-first (they render inline in the timeline).
+    pub fn notices(&self, channel_id: u64, limit: u32) -> Result<Vec<NoticeRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, timestamp, nonce, sealed FROM notices
+             WHERE channel_id = ?1 ORDER BY timestamp ASC, id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![channel_id as i64, limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        let cipher = Aes256Gcm::new_from_slice(&self.keys.row).expect("32-byte key");
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, ts, nonce, sealed) = row?;
+            let mut aad = channel_id.to_be_bytes().to_vec();
+            aad.extend_from_slice(id.as_bytes());
+            let plain = cipher
+                .decrypt(Nonce::from_slice(&nonce), Payload { msg: &sealed, aad: &aad })
+                .map_err(|_| anyhow::anyhow!("unseal notice (wrong key or moved row)"))?;
+            let p: SealedNotice = rmp_serde::from_slice(&plain).context("deserialize notice")?;
+            out.push(NoticeRecord {
+                channel_id,
+                id,
+                timestamp: ts as u64,
+                kind: p.kind,
+                identity: p.identity,
+                device: p.device,
+            });
+        }
+        Ok(out)
+    }
+
     /// Row count for one channel (diagnostics + tests).
     pub fn count(&self, channel_id: u64) -> Result<u64> {
         Ok(self.conn.query_row(
@@ -591,6 +692,68 @@ mod tests {
         assert!(!s.redact_attachment(9, 1, "a.png").unwrap(), "already gone");
     }
 
+    fn notice(id: &str, kind: &str) -> NoticeRecord {
+        NoticeRecord {
+            channel_id: 9,
+            id: id.to_string(),
+            timestamp: 500,
+            kind: kind.to_string(),
+            identity: "vk_alice".to_string(),
+            device: "dev-a2".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_notice_round_trips_and_is_idempotent_on_its_id() {
+        let s = HistoryStore::open_in_memory(keys(1)).unwrap();
+        let n = notice("gained:vk_alice:dev-a2:4", "gained");
+        s.put_notice(&n).unwrap();
+        // The steward is cursor-based and idempotent, so it can observe the same
+        // leaf change twice; the second write must REPLACE, not stack.
+        s.put_notice(&n).unwrap();
+
+        let all = s.notices(9, 50).unwrap();
+        assert_eq!(all, vec![n], "one notice, not two");
+    }
+
+    #[test]
+    fn notices_come_back_oldest_first_and_are_scoped_to_their_channel() {
+        let s = HistoryStore::open_in_memory(keys(1)).unwrap();
+        let mut older = notice("gained:vk_alice:dev-a2:4", "gained");
+        older.timestamp = 100;
+        let mut newer = notice("lost:vk_bob:dev-b:5", "lost");
+        newer.timestamp = 200;
+        let mut elsewhere = notice("gained:vk_carol:dev-c:1", "gained");
+        elsewhere.channel_id = 10;
+
+        s.put_notice(&newer).unwrap();
+        s.put_notice(&older).unwrap();
+        s.put_notice(&elsewhere).unwrap();
+
+        let got = s.notices(9, 50).unwrap();
+        assert_eq!(got.len(), 2, "only this channel's notices");
+        assert_eq!(got[0].timestamp, 100, "oldest first — they render in a timeline");
+        assert_eq!(got[1].kind, "lost");
+    }
+
+    /// Notices carry who can read a private channel, so they get the same AAD
+    /// binding as messages: a blob relocated to another channel must not open.
+    #[test]
+    fn a_notice_moved_to_another_channel_fails_to_open() {
+        let path = temp_path("notice-moved");
+        let s = HistoryStore::open(&path, keys(1)).unwrap();
+        s.put_notice(&notice("gained:vk_alice:dev-a2:4", "gained")).unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO notices (channel_id, id, timestamp, nonce, sealed)
+                 SELECT 10, id, timestamp, nonce, sealed FROM notices WHERE channel_id = 9",
+                [],
+            )
+            .unwrap();
+        assert!(s.notices(10, 50).is_err(), "a relocated notice must not open");
+        assert!(s.notices(9, 50).is_ok(), "the original still opens");
+    }
+
     // -- T5: the observation test ------------------------------------------
 
     /// Scan every column of every table in a CLOSED database file for `needle`.
@@ -650,6 +813,29 @@ mod tests {
         assert!(
             !file_contains(&path, "author-needle-do-not-leak"),
             "the author reached the disk in the clear"
+        );
+
+        // Notices name who can read a private channel — the same class of secret.
+        let notice_path = temp_path("observation-notice");
+        {
+            let s = HistoryStore::open(&notice_path, keys(1)).unwrap();
+            s.put_notice(&NoticeRecord {
+                channel_id: 9,
+                id: "gained:vk_needle:dev-needle:1".to_string(),
+                timestamp: 1,
+                kind: "gained".to_string(),
+                identity: "vk_identity-needle-do-not-leak".to_string(),
+                device: "device-needle-do-not-leak".to_string(),
+            })
+            .unwrap();
+        }
+        assert!(
+            !file_contains(&notice_path, "identity-needle-do-not-leak"),
+            "a notice's identity reached the disk in the clear"
+        );
+        assert!(
+            !file_contains(&notice_path, "device-needle-do-not-leak"),
+            "a notice's device reached the disk in the clear"
         );
     }
 

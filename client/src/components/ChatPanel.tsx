@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
@@ -9,6 +9,7 @@ import MessageInput from "./MessageInput";
 import ThreadPanel from "./ThreadPanel";
 import ActiveWidgetsBar from "./ActiveWidgetsBar";
 import { openMessageSearch } from "./AppShell";
+import { E2eeLeafNotice } from "./E2eeLeafNotice";
 
 export default function ChatPanel() {
   const { dispatch } = useApp();
@@ -49,6 +50,8 @@ export default function ChatPanel() {
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
   const undecryptableCount = channelMessages.filter((m) => activeServer?.sealedDecrypts?.[m.id]?.kind === "undecryptable").length;
+  // Leaf-change transparency notices for this channel (G1), oldest-first.
+  const channelNotices = (currentChannelId !== null ? activeServer?.notices?.[currentChannelId] : undefined) ?? [];
 
   const highlightMessageId = activeServer?.highlightMessageId ?? null;
   useEffect(() => {
@@ -143,22 +146,18 @@ export default function ChatPanel() {
     );
   }
 
-  if (isE2ee && mlsState != null && !equivocated && mlsState.confirmed === true && channelMessages.length === 0) {
-    return (
-      <div className="chat-panel">
-        <div className="channel-header">
-          <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
-          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
-        </div>
-        <div className="e2ee-interstitial">
-          <div className="e2ee-interstitial-heading">No history before you joined</div>
-          <div className="e2ee-interstitial-text">
-            Messages sent before you joined this encrypted channel are not visible to you. New messages will appear here as they arrive.
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // An empty encrypted channel shows the no-history explainer as a BANNER inside
+  // the normal panel (see the render below) — never as a replacement for it.
+  //
+  // It used to return its own panel with no `MessageInput`, which meant every
+  // encrypted channel with zero messages had nowhere to type. A freshly created
+  // channel always has zero messages, so the first message could never be sent
+  // and the feature was unusable end to end. The "waiting for keys" state above
+  // DOES still replace the panel, and correctly so: until this device's leaf is
+  // confirmed a send is genuinely impossible, so hiding the composer is honest
+  // rather than merely tidy.
+  const showNoHistoryBanner =
+    isE2ee && mlsState != null && !equivocated && mlsState.confirmed === true && channelMessages.length === 0;
 
   return (
     <div className="chat-panel">
@@ -202,6 +201,14 @@ export default function ChatPanel() {
       <ActiveWidgetsBar serverId={serverId} channelId={currentChannelId} />
       <div className="message-list" onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
+        {showNoHistoryBanner && (
+          <div className="e2ee-no-history-banner">
+            <div className="e2ee-interstitial-heading">No history before you joined</div>
+            <div className="e2ee-interstitial-text">
+              Messages sent before you joined this encrypted channel are not visible to you. New messages will appear here as they arrive.
+            </div>
+          </div>
+        )}
         {undecryptableCount > 0 && (
           <div className="e2ee-unverified-marker">
             {undecryptableCount} message{undecryptableCount === 1 ? "" : "s"} could not be verified
@@ -214,8 +221,30 @@ export default function ChatPanel() {
           const withinWindow = prev &&
             (msg.timestamp - prev.timestamp) < 300;
           const grouped = !!(sameAuthor && withinWindow);
-          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} sealedDecrypt={activeServer.sealedDecrypts?.[msg.id]} onReply={(msg) => setReplyTo(msg)} />;
+          // Transparency notices (G1) sit at the point in the timeline where the
+          // leaf change happened, so "who could read this when" reads in order.
+          const before = channelNotices.filter(
+            (n) => n.timestamp <= msg.timestamp && (!prev || n.timestamp > prev.timestamp),
+          );
+          return (
+            <React.Fragment key={msg.id}>
+              {before.map((n) => (
+                <E2eeLeafNotice key={n.id} notice={n} memberName={memberNames[n.identity]} />
+              ))}
+              <Message message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} sealedDecrypt={activeServer.sealedDecrypts?.[msg.id]} onReply={(msg) => setReplyTo(msg)} />
+            </React.Fragment>
+          );
         })}
+        {/* Anything newer than the last message (or every notice in an empty
+            channel) still has to appear — a notice must never be swallowed. */}
+        {channelNotices
+          .filter((n) => {
+            const last = channelMessages[channelMessages.length - 1];
+            return !last || n.timestamp > last.timestamp;
+          })
+          .map((n) => (
+            <E2eeLeafNotice key={n.id} notice={n} memberName={memberNames[n.identity]} />
+          ))}
         <div ref={bottomRef} />
       </div>
       {othersTyping.length > 0 && (
