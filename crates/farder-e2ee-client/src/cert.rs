@@ -13,7 +13,7 @@
 //!
 //! # What is verified, and what is deliberately NOT
 //!
-//! The resolver checks exactly three things about a cert before returning it:
+//! The resolver checks exactly five things about a cert before returning it:
 //!
 //! 1. **Source** — the cert was fetched from the log (via
 //!    [`E2eeTransport::fetch_device_certs`]), never synthesized from the commit
@@ -22,27 +22,31 @@
 //!    `cert.core.device_id` equals the requested device.
 //! 3. **Signature** — [`DeviceCert::verify`] passes: the embedded `device_id`
 //!    matches `device_pubkey`, and the identity key signed the cert core.
+//! 4. **Revocation** — the device is not named by any `DeviceRevoked` event in
+//!    the fetched stream (sub-5 C1).
+//! 5. **Expiry** — the winning cert's `DeviceCertCore.expires_at`, if present,
+//!    has not yet passed the client's local clock (sub-5 C1).
 //!
-//! It does **not** check revocation or expiry. `DeviceRevoked` and
-//! `DeviceCertCore.expires_at` are *fold state* — a `LogState` decides whether
-//! the device is currently un-revoked and un-expired — and this crate has no
-//! local `LogState`. A cert that verifies here can still be dead on the server;
-//! that awareness belongs to sub-5, which owns `DeviceRevoked`, rekey cadence
-//! and re-provisioning. This resolver verifies the **cryptographic binding**,
-//! not the **fold liveness**. Do not read "log-valid" as "un-revoked".
+//! Revocation and expiry are *fold state* in a `LogState`, and this crate has no
+//! local `LogState`; the resolver reconstructs the two liveness bits it needs
+//! from the fetched stream instead of keeping a full fold. A cert that verifies
+//! here is therefore a **cryptographic binding** that is also currently
+//! un-revoked and un-expired as far as the resolver can tell — but the client's
+//! local clock is the expiry authority (see [`resolve_device_cert`]), so do not
+//! read "resolved" as "the server agrees it is live".
 //!
 //! Sub-5 (S1) widened the server's `FetchDeviceCerts` stream to mix the
 //! identity's `DeviceRevoked` events in alongside its `DeviceAuthorized` ones.
-//! This resolver SKIPS any non-`DeviceAuthorized` payload (told apart by
-//! decoding the event's payload enum), preserving its pre-C1 behavior exactly;
-//! the revocation-aware fold that rejects a revoked device lands in sub-5 C1.
+//! A non-`DeviceAuthorized` payload (told apart by decoding the event's payload
+//! enum) is never a cert source.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use farder_crypto::event_log::{DeviceCert, Event, EventPayload};
 use farder_crypto::identity::PublicKey;
 use farder_mls::group::DeclaredMember;
 
+use crate::chain::event_now_secs;
 use crate::channel::E2eeError;
 use crate::commit::DeviceCertResolver;
 use crate::transport::E2eeTransport;
@@ -76,24 +80,41 @@ impl DeviceCertResolver for VerifiedCertResolver {
 /// [`process_incoming_commit`](crate::commit::process_incoming_commit) turns into
 /// [`LeafBindingFailure`](crate::commit::IncomingCommitOutcome::LeafBindingFailure).
 ///
-/// The newest matching, verifying cert wins (events arrive oldest-first).
+/// The resolver is revocation- and expiry-aware (sub-5 C1): a device named by
+/// any `DeviceRevoked` in the stream is never returned, and the winning cert is
+/// rejected if its `expires_at` has already passed. The newest matching,
+/// verifying, un-revoked cert wins (events arrive oldest-first).
 pub async fn resolve_device_cert<T: E2eeTransport + Sync>(
     transport: &T,
     identity: &PublicKey,
     device: &str,
 ) -> Result<Option<DeviceCert>, E2eeError> {
     let events = transport.fetch_device_certs(identity).await?;
+
+    // First pass: collect every device this identity has revoked. `DeviceRevoked
+    // { device }` names the REVOKED device in its payload, NOT the event's
+    // authoring `core.device` (which is the revoker — the owner, or another of
+    // the identity's devices). A device that appears here must never have its
+    // cert returned, regardless of where the revocation sits in the
+    // (oldest-first) stream. The events are trusted as log-accepted: the server
+    // only serves `DeviceRevoked` rows that target one of this identity's
+    // authorized devices.
+    let mut revoked: HashSet<String> = HashSet::new();
+    for bytes in &events {
+        let event = Event::from_bytes(bytes)
+            .map_err(|e| E2eeError::Mls(anyhow::anyhow!("decode device-lifecycle event: {e}")))?;
+        if let EventPayload::DeviceRevoked { device } = &event.core.payload {
+            revoked.insert(device.clone());
+        }
+    }
+
     let mut found: Option<DeviceCert> = None;
     for bytes in events {
         let event = Event::from_bytes(&bytes)
             .map_err(|e| E2eeError::Mls(anyhow::anyhow!("decode device-lifecycle event: {e}")))?;
-        // Sub-5 (S1) widened the fetch to mix `DeviceAuthorized` and
-        // `DeviceRevoked` in one byte stream. The resolver distinguishes them by
-        // decoding the payload enum; a `DeviceRevoked` (or any other) payload is
-        // SKIPPED here — folding revocations into a "reject this device" verdict
-        // is the revocation-aware resolver's job (sub-5 C1), not this primitive's.
-        // Skipping rather than erroring keeps the pre-C1 behavior exactly as it
-        // was for a stream that now legitimately contains revocations.
+        // Only `DeviceAuthorized` carries a cert; a `DeviceRevoked` (or any
+        // other) payload is not a cert source. Revocations are folded through
+        // the `revoked` set collected above, not here.
         let EventPayload::DeviceAuthorized { cert } = &event.core.payload else {
             continue;
         };
@@ -104,11 +125,34 @@ pub async fn resolve_device_cert<T: E2eeTransport + Sync>(
         if &cert.core.identity != identity || cert.core.device_id.as_str() != device {
             continue;
         }
+        // Revocation-aware: a cert for a device named in any `DeviceRevoked`
+        // event is dead on the server; never hand it to Gate 2, even if it is
+        // the newest verifying cert in the stream.
+        if revoked.contains(&cert.core.device_id) {
+            continue;
+        }
         if cert.verify().is_err() {
             continue;
         }
         found = Some(cert.clone());
     }
+
+    // Expiry-aware: check the WINNING (newest verifying) cert, not any older
+    // fallback — a device re-authorized with an expiring cert that has since
+    // lapsed is dead, even if an older non-expiring cert for it survives in the
+    // log. The clock is the CLIENT'S local time (`event_now_secs`), not the
+    // device's own untrusted `core.timestamp`: a revoked/expired device's clock
+    // cannot be trusted, and cert expiry is a wall-clock property. Local time is
+    // the conservative bound — a clock-skewed client may reject a cert
+    // marginally early (fail-closed), but will never serve an expired one.
+    if let Some(cert) = &found {
+        if let Some(expires_at) = cert.core.expires_at {
+            if expires_at < event_now_secs() {
+                return Ok(None);
+            }
+        }
+    }
+
     Ok(found)
 }
 
@@ -223,6 +267,28 @@ mod tests {
             0,
             created_at,
             EventPayload::DeviceAuthorized { cert },
+        );
+        event.to_bytes()
+    }
+
+    /// Sign a `DeviceRevoked` event revoking `revoked_device`, authored by
+    /// `identity` from `revoker` (any of its devices may revoke a sibling), and
+    /// return its raw signed bytes. Mirrors production: the payload names the
+    /// VICTIM, while `core.device` is the revoker's device.
+    fn device_revoked_bytes(
+        identity: &Keypair,
+        revoker: &Keypair,
+        revoked_device: &str,
+        timestamp: u64,
+    ) -> Vec<u8> {
+        let event = farder_crypto::event_log::Event::next(
+            revoker,
+            identity.public_key(),
+            "server".to_string(),
+            None,
+            0,
+            timestamp,
+            EventPayload::DeviceRevoked { device: revoked_device.to_string() },
         );
         event.to_bytes()
     }
@@ -362,5 +428,79 @@ mod tests {
             "the resolver must return the cert for the requested device, not a sibling device"
         );
         assert_eq!(cert.core.identity, identity.public_key());
+    }
+
+    #[tokio::test]
+    async fn a_revoked_devices_cert_is_not_returned_even_when_newest() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let revoker = Keypair::generate(); // a sibling device of the identity
+        let dev_id = device_id(&device.public_key());
+
+        // The device is authorized, then revoked. The revocation names the
+        // VICTIM in its payload while the event is authored by the revoker —
+        // reading `core.device` off the revoke event would give the wrong id.
+        let auth = device_authorized_bytes(&identity, &device, 1);
+        let revoke = device_revoked_bytes(&identity, &revoker, &dev_id, 2);
+
+        let transport = CertTransport::new(vec![auth, revoke]);
+        let cert = resolve_device_cert(&transport, &identity.public_key(), &dev_id)
+            .await
+            .unwrap();
+        assert!(cert.is_none(), "a revoked device's cert must never resolve");
+    }
+
+    #[tokio::test]
+    async fn a_cert_with_a_past_expiry_is_not_returned() {
+        let identity = Keypair::generate();
+        let device = Keypair::generate();
+        let dev_id = device_id(&device.public_key());
+
+        // expires_at = 100 unix seconds is far in the past (today is ~1.78e9),
+        // so this cert is unambiguously expired regardless of clock skew.
+        let cert = DeviceCert::create_expiring(&identity, &device.public_key(), 1, 100);
+        let event = farder_crypto::event_log::Event::next(
+            &device,
+            identity.public_key(),
+            "server".to_string(),
+            None,
+            0,
+            1,
+            EventPayload::DeviceAuthorized { cert },
+        );
+        let transport = CertTransport::new(vec![event.to_bytes()]);
+
+        let resolved = resolve_device_cert(&transport, &identity.public_key(), &dev_id)
+            .await
+            .unwrap();
+        assert!(resolved.is_none(), "a cert whose expiry is in the past must fail closed");
+    }
+
+    #[tokio::test]
+    async fn revoking_one_device_does_not_block_the_identitys_other_devices() {
+        let identity = Keypair::generate();
+        let device_a = Keypair::generate();
+        let device_b = Keypair::generate();
+        let dev_a_id = device_id(&device_a.public_key());
+        let dev_b_id = device_id(&device_b.public_key());
+
+        let auth_a = device_authorized_bytes(&identity, &device_a, 1);
+        let auth_b = device_authorized_bytes(&identity, &device_b, 2);
+        // Revoke device_b from device_a.
+        let revoke_b = device_revoked_bytes(&identity, &device_a, &dev_b_id, 3);
+
+        let transport = CertTransport::new(vec![auth_a, auth_b, revoke_b]);
+
+        // device_a (un-revoked) still resolves...
+        let cert = resolve_device_cert(&transport, &identity.public_key(), &dev_a_id)
+            .await
+            .unwrap()
+            .expect("revoking a sibling device must not block this device's cert");
+        assert_eq!(cert.core.device_id, dev_a_id);
+        // ...while device_b (revoked) does not.
+        let revoked = resolve_device_cert(&transport, &identity.public_key(), &dev_b_id)
+            .await
+            .unwrap();
+        assert!(revoked.is_none(), "the revoked device's cert must not resolve");
     }
 }

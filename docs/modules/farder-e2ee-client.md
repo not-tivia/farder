@@ -193,7 +193,7 @@ had no production cert source). `resolve_device_cert(transport, identity, device
 is the primitive: it fetches the identity's device-lifecycle events
 (`DeviceAuthorized` + `DeviceRevoked`, since sub-5 S1) over
 `fetch_device_certs`, decodes each one, and returns a [`DeviceCert`] only after
-**all three** checks pass. `build_cert_resolver(transport, members)` batches it
+**all five** checks pass. `build_cert_resolver(transport, members)` batches it
 into a sync [`VerifiedCertResolver`] for [`process_incoming_commit`] (which is
 sync and runs Gate 2 over the already-merged commit).
 
@@ -204,23 +204,24 @@ sync and runs Gate 2 over the already-merged commit).
   member is simply absent from the map, so Gate 2 fails closed for it.
 - `VerifiedCertResolver` — `impl DeviceCertResolver` over an in-memory map.
 
-**What it verifies, and what it does NOT (honest limitation):**
+**What it verifies:**
 
-- It verifies **source** (fetched from the log, never from the commit under
-  validation), **binding** (`cert.core.identity == identity` AND
+- **Source** (fetched from the log, never from the commit under validation),
+  **binding** (`cert.core.identity == identity` AND
   `cert.core.device_id == device`), and **signature** (`DeviceCert::verify()`:
   `device_id` matches `device_pubkey` and the identity key signed the core).
-- It does **NOT** verify revocation or expiry. `DeviceRevoked` and
-  `DeviceCertCore.expires_at` are *fold state* — a `LogState` decides whether the
-  device is currently un-revoked and un-expired — and this crate holds no local
-  `LogState`. A cert that verifies here can still be dead on the server.
-  Revocation/expiry awareness belongs to sub-5 (which owns `DeviceRevoked`, rekey
-  cadence and re-provisioning). This resolver verifies the **cryptographic
-  binding**, not the **fold liveness**; do not read "log-valid" as "un-revoked".
-- Since sub-5 S1 the fetch stream mixes `DeviceRevoked` in; the resolver tells
-  the payloads apart by decoding the event's payload enum and **skips**
-  non-`DeviceAuthorized` payloads, preserving the pre-C1 behavior. The fold that
-  actually rejects a revoked device is sub-5 C1, on top of this primitive.
+- **Revocation** (sub-5 C1) — it collects every `DeviceRevoked { device }` in
+  the fetched stream (the payload names the VICTIM; `core.device` is the
+  revoker) and never returns a cert for a device in that set, even if it is the
+  newest verifying cert in the stream.
+- **Expiry** (sub-5 C1) — if the winning (newest verifying) cert's
+  `DeviceCertCore.expires_at` has passed the client's **local clock**
+  (`event_now_secs`), it is rejected. The local clock is used deliberately: a
+  revoked/expired device's own `core.timestamp` cannot be trusted, and cert
+  expiry is a wall-clock property — local time is the conservative bound (may
+  fail closed marginally early on a skewed clock, never serves an expired cert).
+- Since sub-5 S1 the fetch stream mixes `DeviceRevoked` in; a
+  non-`DeviceAuthorized` payload is never a cert source.
 
 ### Sealed send + receive (`sealed.rs`)
 

@@ -4893,7 +4893,19 @@ async fn add_current_members_to_group(
             };
             let mut ids: Vec<String> = events
                 .iter()
-                .filter_map(|bytes| Event::from_bytes(bytes).ok().map(|ev| ev.core.device))
+                .filter_map(|bytes| {
+                    let ev = Event::from_bytes(bytes).ok()?;
+                    match ev.core.payload {
+                        // Only an authorization names a device we may add. A
+                        // `DeviceRevoked` (or any other) payload must not
+                        // contribute here: its `core.device` is the REVOKER's
+                        // device, not the revoked one. Excluding revoked
+                        // devices from this roster is the cert resolver's job
+                        // (Gate 2), which fails closed for them downstream.
+                        EventPayload::DeviceAuthorized { cert } => Some(cert.core.device_id),
+                        _ => None,
+                    }
+                })
                 .collect();
             ids.sort();
             ids.dedup();
