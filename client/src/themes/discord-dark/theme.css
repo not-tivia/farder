@@ -3416,3 +3416,16 @@ body {
   font-family: monospace;
   font-size: 11px;
 }
+
+/* --- Empty encrypted channel: the no-history explainer as an in-list banner.
+   Distinct from .e2ee-interstitial, which is a full-panel takeover — this one
+   sits ABOVE the composer so the channel stays usable (a channel with no
+   composer could never receive its first message). */
+.e2ee-no-history-banner {
+  margin: 12px;
+  padding: 16px;
+  border-radius: 4px;
+  background: var(--xp-panel-bg, #2b2d31);
+  border: 1px solid var(--xp-border, #3f4147);
+  text-align: center;
+}

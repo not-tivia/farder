@@ -146,22 +146,18 @@ export default function ChatPanel() {
     );
   }
 
-  if (isE2ee && mlsState != null && !equivocated && mlsState.confirmed === true && channelMessages.length === 0) {
-    return (
-      <div className="chat-panel">
-        <div className="channel-header">
-          <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
-          <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
-        </div>
-        <div className="e2ee-interstitial">
-          <div className="e2ee-interstitial-heading">No history before you joined</div>
-          <div className="e2ee-interstitial-text">
-            Messages sent before you joined this encrypted channel are not visible to you. New messages will appear here as they arrive.
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // An empty encrypted channel shows the no-history explainer as a BANNER inside
+  // the normal panel (see the render below) — never as a replacement for it.
+  //
+  // It used to return its own panel with no `MessageInput`, which meant every
+  // encrypted channel with zero messages had nowhere to type. A freshly created
+  // channel always has zero messages, so the first message could never be sent
+  // and the feature was unusable end to end. The "waiting for keys" state above
+  // DOES still replace the panel, and correctly so: until this device's leaf is
+  // confirmed a send is genuinely impossible, so hiding the composer is honest
+  // rather than merely tidy.
+  const showNoHistoryBanner =
+    isE2ee && mlsState != null && !equivocated && mlsState.confirmed === true && channelMessages.length === 0;
 
   return (
     <div className="chat-panel">
@@ -205,6 +201,14 @@ export default function ChatPanel() {
       <ActiveWidgetsBar serverId={serverId} channelId={currentChannelId} />
       <div className="message-list" onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
+        {showNoHistoryBanner && (
+          <div className="e2ee-no-history-banner">
+            <div className="e2ee-interstitial-heading">No history before you joined</div>
+            <div className="e2ee-interstitial-text">
+              Messages sent before you joined this encrypted channel are not visible to you. New messages will appear here as they arrive.
+            </div>
+          </div>
+        )}
         {undecryptableCount > 0 && (
           <div className="e2ee-unverified-marker">
             {undecryptableCount} message{undecryptableCount === 1 ? "" : "s"} could not be verified
