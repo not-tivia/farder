@@ -61,18 +61,23 @@ export function useSealedDecrypt(): void {
 
         const eventHash = msg.event_hash ?? null;
         const existing = sealedDecrypts[msg.id];
-        // Already decrypted THIS ciphertext (same message id + event hash) —
-        // never re-open it.
-        if (existing && existing.eventHash === eventHash) continue;
 
         // OUR OWN send: render what we typed. A sender cannot decrypt its own
         // MLS message (the ratchet has no decryption side for it), so handing
-        // this to `decrypt_sealed_message` would show the author their own words
-        // as "couldn't decrypt" — which is exactly what it did before this
-        // check existed. Persist it too, so it survives a restart like any
-        // other message.
+        // this to `decrypt_sealed_message` shows the author their own words as
+        // "couldn't decrypt".
+        //
+        // This check MUST come before the settled-cache guard below. The server
+        // broadcasts the sealed row back to us before `send_sealed_message`
+        // returns, so the decrypt pass races ahead of the event hash we are
+        // waiting on, fails, and caches the failure. If the guard ran first, a
+        // settled failure would be permanent and the echo could never correct
+        // it — which is exactly the bug this ordering fixes. Overwriting a
+        // cached failure with the author's own text is always right: we are the
+        // authority on what we typed.
         const own = eventHash ? ownSealedSends[eventHash] : undefined;
         if (own !== undefined) {
+          if (existing?.kind === "decrypted" && existing.eventHash === eventHash) continue;
           dispatch({
             type: "SEALED_DECRYPTED",
             serverId: activeServerId,
@@ -92,6 +97,11 @@ export function useSealedDecrypt(): void {
             .catch((e) => console.warn("[history] put (own send) failed:", e));
           continue;
         }
+
+        // Already settled for THIS ciphertext (same message id + event hash) —
+        // never re-open it. The ratchet is consumed on open, so a retry cannot
+        // succeed anyway.
+        if (existing && existing.eventHash === eventHash) continue;
 
         const key = `${activeServerId}:${msg.id}:${eventHash}`;
         if (inFlight.has(key)) continue; // an open is already in flight; join it
