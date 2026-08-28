@@ -55,7 +55,14 @@ export function useLocalHistory(): void {
               serverId: activeServerId,
               payload: {
                 messageId: row.message_id,
-                eventHash: row.event_hash,
+                // Restore null-ness. `historyPut` stores a missing event hash as
+                // "", and `useSealedDecrypt` compares the cached `eventHash`
+                // against the message row's (`string | null`) to decide whether a
+                // row still needs opening. Handing back "" where the row has null
+                // would look like a MISMATCH, re-open a message we already hold,
+                // fail (the key is consumed) and cache "couldn't decrypt" over
+                // the history we just restored.
+                eventHash: row.event_hash === "" ? null : row.event_hash,
                 content: row.content,
               },
             });
