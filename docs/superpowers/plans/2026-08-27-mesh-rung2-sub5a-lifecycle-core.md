@@ -85,3 +85,19 @@ commit rejected), self-remove the stale leaf, and re-add a fresh leaf for the sa
 (via a new KeyPackage + Welcome), or — if the group is beyond local repair — re-provision.
 Until then, `RekeyRateLimited`/`StaleEpochDiverged` are effectively terminal for the local
 group, which is unacceptable for a *lifecycle* sub-project.
+
+### F2 (sub-5a, found by H1) — `reprovision_device` does not recover a multi-identity channel
+
+The harness proved the recovery path's happy case (owner-only multi-device, gap=1) but
+exposed that a genuine 2-identity recovery is broken: when a device self-revokes, its
+confirmed leaf becomes drift (`pending_removals`), which SEALS the channel. The subsequent
+`add_own_device` is an add-only commit — it does NOT discharge that drift (adds don't match
+`pending_removals`), and in a channel with ≥2 committing identities it falls under the
+commit-rate rule and is refused. So a 2-identity device-loss recovery gets stuck sealed.
+
+**Fix required:** `reprovision_device` must discharge the old leaf's drift (a remove-commit
+for the dead `(identity, old_device)`) as part of the recovery sequence, in the right order
+(discharge first, then add the fresh device), so the channel un-seals. This is C3's
+`discharge_drift` composed with C6/C7 — a genuine gap, not a scope choice. The
+`DeviceRevoked`-broadcast → revocation-aware-resolver path (S1/C1) also has no end-to-end
+harness test yet; add one.
