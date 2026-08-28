@@ -20,6 +20,7 @@ pub mod device;
 pub mod drift;
 pub mod join;
 pub mod rekey;
+pub mod reprovision;
 pub mod reset;
 pub mod resync;
 pub mod revoke;
@@ -54,6 +55,10 @@ pub use rekey::{
     rekey_channel, rekey_permitted_by_rate_rule, should_rekey, HoldReason, RekeyCadence,
     RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger, REKEY_SEALED_SEND_INTERVAL,
     REKEY_WALL_CLOCK_SECS,
+};
+pub use reprovision::{
+    recover_diverged_group, reprovision_device, ReprovisionContext, ReprovisionLive,
+    ReprovisionOutcome,
 };
 pub use reset::{join_reset, member_live_leaves, reset_group, ResetContext, ResetOutcome};
 pub use revoke::{revoke_device, RevokeOutcome};

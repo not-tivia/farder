@@ -211,6 +211,24 @@ impl E2eeError {
     pub fn is_device_cap_reached(&self) -> bool {
         matches!(self, Self::DeviceCapReached { .. })
     }
+
+    /// True iff this error leaves the local group one epoch ahead of the server
+    /// with no rollback — the divergence class finding F1 describes. Covers the
+    /// own-commit rejections ([`E2eeError::StaleEpochDiverged`] /
+    /// [`E2eeError::RekeyRateLimited`]) and the resync terminal/equivocation
+    /// errors ([`E2eeError::ResyncEquivocation`] /
+    /// [`E2eeError::ResyncPoisoned`]). A caller maps these to
+    /// [`crate::reprovision::recover_diverged_group`] rather than keeping the
+    /// group.
+    pub fn is_diverged(&self) -> bool {
+        matches!(
+            self,
+            Self::StaleEpochDiverged { .. }
+                | Self::RekeyRateLimited { .. }
+                | Self::ResyncEquivocation { .. }
+                | Self::ResyncPoisoned { .. }
+        )
+    }
 }
 
 impl fmt::Display for E2eeError {

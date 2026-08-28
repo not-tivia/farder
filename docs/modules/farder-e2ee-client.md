@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke,reset,device}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke,reprovision,reset,device}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-27
 
@@ -28,8 +28,9 @@ per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 Sub-5a lifecycle: C1 (revocation/expiry-aware cert resolver), C2 (rekey +
 cadence, `rekey.rs`), C3 (drift discharge, `drift.rs`), C4 (`DeviceRevoked`
-emission, `revoke.rs`), C5 (group reset, `reset.rs`) and C6 (multi-device
-self-add, `device.rs`) are COMPLETE.
+emission, `revoke.rs`), C5 (group reset, `reset.rs`), C6 (multi-device
+self-add, `device.rs`) and C7 (store re-provisioning + diverged-group recovery,
+`reprovision.rs`) are COMPLETE.
 
 ---
 
@@ -423,6 +424,45 @@ fold's verbatim `"identity already has the maximum number of live devices"`
 rejection as `E2eeError::DeviceCapReached` (via
 `TransportError::is_device_cap_reached()`), never silently swallowed.
 
+### Store re-provisioning + diverged-group recovery (`reprovision.rs`) — sub-5a C7
+
+The recovery primitive that makes finding F1's terminal state non-fatal.
+Because MLS ratchet state lives in the store, recovery is a **NEW leaf for the
+same identity** (authorized + published + self-added via C6), never a
+resurrection of the old leaf. The old store path is poison and is never reused
+or deleted in place — the fresh store is caller-minted at a NEW path (a fresh
+per-device `data_dir`), because only the caller knows where to persist the new
+device key and store path.
+
+- `reprovision_device(transport, ctx, live) -> ReprovisionOutcome` (async) — the
+  full recovery, in order:
+  1. [`revoke_device`] — the OLD device signs its own `DeviceRevoked` (victim id
+     = `device_id(&old_device.public_key())`), authorized by the fold's
+     "owning identity OR owner" arm (`event_log_state.rs:996-1010`).
+  2. [`add_own_device`] — the FRESH device authorizes itself (`DeviceAuthorized`
+     with an identity-signed cert), publishes its KeyPackage from its fresh
+     store, and the healthy steward self-adds its leaf.
+- `recover_diverged_group(transport, ctx, trigger, live) -> ReprovisionOutcome`
+  (async) — a thin wrapper: if `trigger.is_diverged()` it runs
+  `reprovision_device`; otherwise it returns `trigger` unchanged (taken by
+  value, so a non-diverged error is returned exactly as-is).
+- `ReprovisionContext<'a> { old_device, fresh }` — the fixed inputs: the OLD
+  device key (signs the self-revoke) and the fresh device's [`OwnDeviceContext`]
+  (identity + fresh device key + fresh store + instance hash + steward).
+- `ReprovisionLive<'a> { old_chain, new_chain, steward, steward_chain, group }`
+  — the transient mutated inputs (three chains + the healthy steward's commit
+  surface), bundled to stay under the clippy arg bound.
+- `ReprovisionOutcome { device_revoked_hash, add }` — the revoked event's hash
+  plus the full [`AddOwnDeviceOutcome`].
+
+**Seam:** the caller supplies the fresh device key + store (no generator) — it
+owns persistence, it chooses the fresh path, and it keeps `reprovision_device` a
+pure orchestration with no filesystem coupling. **Honest limitation:** the
+self-add must be authored by an existing confirmed device of the same identity,
+so a single-device identity whose only store is lost has no healthy author and
+needs an owner `MlsGroupReset` (C5) or another device — out of C7's scope, wired
+by H1.
+
 ### Sealed send + receive (`sealed.rs`)
 
 - `send_sealed(transport, actor, chain, ctx, group, eligibility) -> SealedSendOutcome`
@@ -524,7 +564,10 @@ The crate's one error type. Notable variants:
 Predicate methods (machine-readable signals over the fold's rejection strings):
 `is_stale_epoch_diverged()`, `is_rekey_rate_limited()`,
 `is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`,
-`is_device_cap_reached()`.
+`is_device_cap_reached()`, `is_diverged()` (the finding-F1 divergence class:
+`StaleEpochDiverged` / `RekeyRateLimited` / `ResyncEquivocation` /
+`ResyncPoisoned` — the local group is one epoch ahead with no rollback, mapped
+to `reprovision.rs`'s `recover_diverged_group`).
 
 ---
 
