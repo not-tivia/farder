@@ -77,6 +77,25 @@ pub enum KeepaliveAction {
     DischargedThenSent,
 }
 
+/// The number of distinct identities holding a leaf in this group — the client's
+/// estimate of the fold's `committing_identities()`, which feeds the commit-rate
+/// half of [`crate::rekey::should_rekey`].
+///
+/// Read from the ACTUAL leaf view, like every other decision in this crate. An
+/// unreadable tree yields `1` (the freest gap) rather than an error: this is an
+/// input to a *cadence* decision, and refusing to send because we could not
+/// count identities would be the wrong failure. An underestimate only costs a
+/// surfaced `RekeyRateLimited`, never a wrong commit.
+pub fn committing_identities(group: &MlsChannelGroup) -> u64 {
+    let Ok(leaves) = group.leaves() else {
+        return 1;
+    };
+    let mut ids: Vec<_> = leaves.into_iter().map(|l| l.member.identity).collect();
+    ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    ids.dedup();
+    (ids.len() as u64).max(1)
+}
+
 /// The two repairs a keep-alive send may need, bundled so the call stays under
 /// clippy's argument bound (the same reason `ReprovisionLive` exists).
 ///

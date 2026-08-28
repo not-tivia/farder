@@ -69,7 +69,7 @@ ceiling signal.** Cadence state (`RekeyCadence`) persists in the existing
       `is_freshness_ceiling_reached` → rekey-then-retry (once), and
       `is_sealed_pending_removals` → surface a typed, actionable state. No loops:
       one attempt, then a typed error the UI can act on.
-- [ ] **K2 — the rekey trigger.** Persist `RekeyCadence` in `mls_state.json`;
+- [x] **K2 — the rekey trigger.** Persist `RekeyCadence` in `mls_state.json`;
       consult `should_rekey` on channel open and after each own send; call
       `rekey_channel` when it says so. Proactive cadence AND the ceiling override.
 - [x] **K3 — the drift-discharge trigger.** On the sealed-pending-removals signal,

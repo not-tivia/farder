@@ -4699,6 +4699,7 @@ async fn run_create_e2ee_channel(
         confirmed: true,
         cursor: 0,
         poisoned: None,
+        ..Default::default()
     }
     .save(&log_server_id, channel_id)?;
 
@@ -5066,6 +5067,7 @@ async fn add_current_members_to_group(
                         confirmed: true,
                         cursor: 0,
                         poisoned: None,
+                        ..Default::default()
                     }
                     .save(log_server_id, channel_id)?;
                     result.added.push(AddedE2eeMember {
@@ -5251,6 +5253,7 @@ async fn run_publish_own_key_package(
         confirmed: false,
         cursor: 0,
         poisoned: None,
+        ..Default::default()
     }
     .save(&log_server_id, channel_id)?;
 
@@ -5368,6 +5371,7 @@ async fn run_process_mls_control_events(
             confirmed: false,
             cursor: 0,
             poisoned: None,
+            ..Default::default()
         });
 
     // Terminal from a previous run (F4): the impostor leaf is already merged
@@ -5663,6 +5667,7 @@ async fn run_send_sealed_message(
             confirmed: false,
             cursor: 0,
             poisoned: None,
+            ..Default::default()
         });
 
     // F4 (terminal): the group is poisoned by an impostor leaf. Never send into
@@ -5822,20 +5827,55 @@ async fn run_send_sealed_message(
     ds.lamport = chain.lamport;
     ds.save(&log_server_id)?;
 
+    // -- Proactive rekey cadence (sub-5b K2) ------------------------------
+    //
+    // K1 handles the ceiling REACTIVELY: a send bounces, we rekey, we retry.
+    // That alone leaves every 500th message paying a visible round trip and
+    // relies on the wall always being hit rather than avoided. `should_rekey` is
+    // 5a's pure, loop-free policy for refreshing BEFORE that: it fires on the
+    // send-count or wall-clock cadence, but only when the commit-rate rule would
+    // accept the commit, so it can never spin against a server saying no.
+    //
+    // Best-effort on purpose: the message is already delivered and the device
+    // chain is already persisted. A failed proactive rekey must not fail the
+    // send — the ceiling backstop still catches the channel if this never works.
+    mls.note_sealed_send();
+    let decision = farder_e2ee_client::should_rekey(
+        false,
+        &mls.cadence(group.epoch(), farder_e2ee_client::committing_identities(&group)),
+        farder_e2ee_client::event_now_secs(),
+    );
+    if matches!(decision, farder_e2ee_client::RekeyDecision::Rekey(_)) {
+        match farder_e2ee_client::rekey_channel(&transport, &actor, &mut chain, &rekey_ctx, &mut group)
+            .await
+        {
+            Ok(rekeyed) => {
+                mls.note_rekey(rekeyed.local_epoch, farder_e2ee_client::event_now_secs());
+                mls.epoch = rekeyed.local_epoch;
+                ds.next_seq = chain.next_seq;
+                ds.last_event_hash = chain.last_event_hash.clone();
+                ds.lamport = chain.lamport;
+                ds.save(&log_server_id)?;
+            }
+            Err(e) => {
+                // Never fatal to the send. A DIVERGED group is the one case worth
+                // recording, because the local group is now one epoch ahead of the
+                // server (finding F1) and the next operation must not trust it.
+                if e.is_diverged() {
+                    mls.poisoned = Some(format!("proactive rekey diverged the group: {e}"));
+                }
+                eprintln!("E2EE: proactive rekey skipped for channel {channel_id}: {e}");
+            }
+        }
+    }
+    mls.save(&log_server_id, channel_id)?;
+
     Ok(SendSealedMessageResult {
         event_hash: outcome.event_hash,
         epoch: outcome.epoch,
     })
 }
 
-/// Build the Gate-2 trust anchor for the bounded resync loop: a
-/// [`farder_e2ee_client::VerifiedCertResolver`] over every current server
-/// member's authorized devices. A `stale-epoch` winning commit may add a
-/// member, and `send_sealed_resync` resolves each fetched commit's declared
-/// `adds` against this resolver — so it must cover the roster, fetched from the
-/// log via the crate's own `resolve_device_cert` (never synthesized from the
-/// commit). Reuses the same device-enumeration shape as
-/// `add_current_members_to_group`.
 /// The client's view of which `(identity, device)` leaves are still ENTITLED to
 /// be in an E2EE channel's group: every current roster member crossed with their
 /// live (authorized, un-revoked, un-expired) devices, plus our own leaf.
@@ -5883,6 +5923,14 @@ async fn live_channel_leaves(
     Ok(live)
 }
 
+/// Build the Gate-2 trust anchor for the bounded resync loop: a
+/// [`farder_e2ee_client::VerifiedCertResolver`] over every current server
+/// member's authorized devices. A `stale-epoch` winning commit may add a
+/// member, and `send_sealed_resync` resolves each fetched commit's declared
+/// `adds` against this resolver — so it must cover the roster, fetched from the
+/// log via the crate's own `resolve_device_cert` (never synthesized from the
+/// commit). Reuses the same device-enumeration shape as
+/// `add_current_members_to_group`.
 async fn build_roster_cert_resolver(
     transport: &crate::e2ee_transport::E2eeTransportImpl<'_>,
     state: &AppState,
@@ -6017,6 +6065,7 @@ pub async fn decrypt_sealed_message(
             confirmed: false,
             cursor: 0,
             poisoned: None,
+            ..Default::default()
         });
 
     if let Some(reason) = mls.poisoned.clone() {
