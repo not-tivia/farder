@@ -47,6 +47,8 @@ pub struct RmpCodec;
 pub enum RmpCodecError {
     Encode(rmp_serde::encode::Error),
     Decode(rmp_serde::decode::Error),
+    /// Seal/open failed: the wrong key, or a tampered value.
+    Crypto,
 }
 
 impl fmt::Display for RmpCodecError {
@@ -54,6 +56,9 @@ impl fmt::Display for RmpCodecError {
         match self {
             RmpCodecError::Encode(e) => write!(f, "rmp encode: {e}"),
             RmpCodecError::Decode(e) => write!(f, "rmp decode: {e}"),
+            RmpCodecError::Crypto => {
+                write!(f, "MLS store value could not be sealed/opened (wrong key or tampered)")
+            }
         }
     }
 }
@@ -72,6 +77,185 @@ impl Codec for RmpCodec {
     }
 }
 
+// ---------------------------------------------------------------------------
+// At-rest encryption of every value OpenMLS persists (sub-7a H2)
+// ---------------------------------------------------------------------------
+//
+// This store holds the group's ratchet secrets. It was a plain sqlite file, so
+// anyone holding the file plus some ciphertext could read the channel — which
+// made sealing the local history archive beside it theatre.
+//
+// The `Codec` seam is the right place to fix that: it is OURS, and every value
+// the storage provider writes passes through it. The awkward part is that
+// `Codec`'s methods are STATIC (no `&self`), so the key cannot be threaded
+// through as a parameter — it has to be ambient. Hence the process-global below.
+//
+// It is deliberately fail-closed: an unarmed key is an ERROR, never a silent
+// fall back to plaintext. That is the whole point of the change, and a
+// "temporarily unencrypted" mode would be indistinguishable from the bug.
+
+/// The process-wide key that seals every value in every MLS store. Armed once
+/// when the identity unlocks; cleared when it locks.
+static STORE_KEY: std::sync::RwLock<Option<[u8; 32]>> = std::sync::RwLock::new(None);
+
+/// Arm the at-rest key for MLS stores. The client calls this right after the
+/// identity is unlocked, with a key derived from the identity (see
+/// `farder_history::derive_local_key`). Idempotent.
+pub fn arm_store_key(key: [u8; 32]) {
+    if let Ok(mut guard) = STORE_KEY.write() {
+        *guard = Some(key);
+    }
+}
+
+/// Forget the at-rest key (identity locked / app shutting down). Any subsequent
+/// store operation fails closed until it is armed again.
+pub fn disarm_store_key() {
+    if let Ok(mut guard) = STORE_KEY.write() {
+        *guard = None;
+    }
+}
+
+/// The fallback used when nothing armed a key: ONE random key per process.
+///
+/// The property that must never break is "MLS secrets are never written in the
+/// clear", and a random key keeps it. What it deliberately does NOT do is make an
+/// unarmed process silently correct: a store created under the fallback records
+/// that key's fingerprint, so the next launch — with the real key armed — refuses
+/// to resume with [`StoreResumeError::KeyMismatch`] instead of quietly producing
+/// garbage. Loud and recoverable beats silent.
+///
+/// It also lets every test create and resume stores without arming anything,
+/// which is why there is no test-only key to keep out of production.
+static FALLBACK_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+thread_local! {
+    /// The key of the store whose operation is currently running on this thread.
+    ///
+    /// `Codec`'s methods are static, so the key cannot be passed to them — but
+    /// every storage operation reaches the provider through
+    /// `OpenMlsProvider::storage(&self)`, synchronously on one thread. That
+    /// accessor publishes the store's own key here first, so the codec seals with
+    /// the key belonging to THE STORE BEING USED rather than whatever was armed
+    /// globally last. Without this, two stores alive in one process (any test
+    /// binary; a future second identity) would silently seal each other's values
+    /// with the wrong key.
+    static ACTIVE_KEY: std::cell::Cell<Option<[u8; 32]>> = const { std::cell::Cell::new(None) };
+}
+
+fn publish_active_key(key: [u8; 32]) {
+    ACTIVE_KEY.with(|k| k.set(Some(key)));
+}
+
+/// The key each new store adopts: whatever the identity armed, or a per-process
+/// random fallback (see [`FALLBACK_KEY`]).
+fn key_for_new_store() -> [u8; 32] {
+    if let Some(key) = STORE_KEY.read().ok().and_then(|g| *g) {
+        return key;
+    }
+    *FALLBACK_KEY.get_or_init(|| {
+        let mut k = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut k);
+        k
+    })
+}
+
+fn current_key() -> Result<[u8; 32], RmpCodecError> {
+    ACTIVE_KEY
+        .with(|k| k.get())
+        .map_or_else(|| Ok(key_for_new_store()), Ok)
+}
+
+/// A short, non-secret fingerprint of the armed key, persisted beside the store
+/// so resuming with the WRONG key is a loud refusal instead of a pile of decode
+/// failures. Non-secret: it is a hash, and it identifies the key without
+/// revealing anything usable.
+fn key_fingerprint(key: &[u8; 32]) -> [u8; 8] {
+    let full: [u8; 32] = Sha256::digest([b"farder-mls-store-key-id-v1".as_slice(), key].concat()).into();
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&full[..8]);
+    out
+}
+
+/// Nonce length for the value AEAD. The layout is `nonce || ciphertext`.
+const VALUE_NONCE_LEN: usize = 12;
+
+/// Derive this value's nonce from the value itself (an SIV construction):
+/// `HMAC-SHA256(nonce_subkey, plaintext)` truncated to 12 bytes.
+///
+/// **This makes the encryption deterministic, and that is REQUIRED here, not a
+/// shortcut.** `openmls_sqlite_storage` encodes its lookup KEYS through the same
+/// `Codec` as its values (`wrappers.rs`'s `KeyRefWrapper`), and those encoded
+/// bytes go straight into `WHERE key = ?`. With a random nonce the same logical
+/// key encodes differently on every call, so every lookup misses and the store
+/// silently behaves as if it were empty.
+///
+/// The cost is the standard one for deterministic encryption: it leaks EQUALITY.
+/// An attacker holding the file can tell that two stored values are identical
+/// without learning either. That is acceptable here — the values are MLS secrets
+/// (unique and random, so equality never occurs in practice) and group ids (whose
+/// equality the row structure already reveals).
+///
+/// Nonce reuse is safe in this construction because it only recurs for the SAME
+/// (key, plaintext) pair, which produces the same ciphertext anyway; distinct
+/// plaintexts get distinct nonces with overwhelming probability.
+fn siv_nonce(key: &[u8; 32], plaintext: &[u8]) -> [u8; VALUE_NONCE_LEN] {
+    let mut mac = <hmac::Hmac<Sha256> as hmac::Mac>::new_from_slice(key)
+        .expect("HMAC accepts any key length");
+    hmac::Mac::update(&mut mac, b"farder-mls-store-siv-v1");
+    hmac::Mac::update(&mut mac, plaintext);
+    let tag = hmac::Mac::finalize(mac).into_bytes();
+    let mut nonce = [0u8; VALUE_NONCE_LEN];
+    nonce.copy_from_slice(&tag[..VALUE_NONCE_LEN]);
+    nonce
+}
+
+/// The codec actually used by [`FarderMlsStore`]: rmp-serde, then AES-256-GCM
+/// under the ambient key.
+///
+/// No associated data: `Codec` sees only the value, never the table or key it
+/// belongs to, so there is nothing row-specific to bind. Relocating a value
+/// inside the file is therefore not detected HERE — the store's instance
+/// binding is what guards clone/rollback tampering, and that check runs before
+/// any read.
+#[derive(Debug, Default)]
+pub struct SealedRmpCodec;
+
+impl Codec for SealedRmpCodec {
+    type Error = RmpCodecError;
+
+    fn to_vec<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, Self::Error> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+        let plain = rmp_serde::to_vec(value).map_err(RmpCodecError::Encode)?;
+        let key = current_key()?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| RmpCodecError::Crypto)?;
+        let nonce = siv_nonce(&key, &plain);
+        let ct = cipher
+            .encrypt(Nonce::from_slice(&nonce), plain.as_slice())
+            .map_err(|_| RmpCodecError::Crypto)?;
+        let mut out = nonce.to_vec();
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    fn from_slice<T: serde::de::DeserializeOwned>(slice: &[u8]) -> Result<T, Self::Error> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+        if slice.len() <= VALUE_NONCE_LEN {
+            return Err(RmpCodecError::Crypto);
+        }
+        let key = current_key()?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| RmpCodecError::Crypto)?;
+        let plain = cipher
+            .decrypt(
+                Nonce::from_slice(&slice[..VALUE_NONCE_LEN]),
+                &slice[VALUE_NONCE_LEN..],
+            )
+            .map_err(|_| RmpCodecError::Crypto)?;
+        rmp_serde::from_slice(&plain).map_err(RmpCodecError::Decode)
+    }
+}
+
 /// Why [`FarderMlsStore::resume`] refused. `InstanceMismatch` and
 /// `MissingInstanceId` are **terminal** for the store on disk: never retry,
 /// never re-create in place — self-`DeviceRevoked` and provision fresh.
@@ -87,6 +271,12 @@ pub enum StoreResumeError {
     /// The store could not be read at all (missing file, permissions,
     /// corruption). Also terminal for resume: this fn never creates a store.
     Io(anyhow::Error),
+    /// The store's values were sealed under a DIFFERENT at-rest key than the one
+    /// armed now — or, for a store written before at-rest encryption existed, no
+    /// key at all. Terminal: the ratchet state in there cannot be read, so the
+    /// device must re-provision (or, for a pre-encryption store, the channel must
+    /// be recreated — the deliberate one-time cost of sub-7a H2).
+    KeyMismatch,
 }
 
 impl fmt::Display for StoreResumeError {
@@ -99,6 +289,12 @@ impl fmt::Display for StoreResumeError {
                 write!(f, "MLS store has no instance-id metadata")
             }
             StoreResumeError::Io(e) => write!(f, "MLS store could not be read: {e}"),
+            StoreResumeError::KeyMismatch => write!(
+                f,
+                "MLS store was sealed under a different key (or predates at-rest \
+                 encryption); it cannot be resumed — re-provision this device, or \
+                 recreate the channel if the store predates encryption"
+            ),
         }
     }
 }
@@ -110,17 +306,23 @@ impl std::error::Error for StoreResumeError {}
 /// and the store's 16-byte instance id. Every group/credential/envelope API
 /// in this crate takes it interchangeably with the in-memory test provider.
 pub struct FarderMlsStore {
-    storage: SqliteStorageProvider<RmpCodec, Connection>,
+    storage: SqliteStorageProvider<SealedRmpCodec, Connection>,
     crypto: RustCrypto,
     instance_id: [u8; 16],
+    /// This store's at-rest key, adopted when it was opened. Published to the
+    /// thread-local on every `storage()` call — see [`ACTIVE_KEY`].
+    key: [u8; 32],
 }
 
 impl OpenMlsProvider for FarderMlsStore {
     type CryptoProvider = RustCrypto;
     type RandProvider = RustCrypto;
-    type StorageProvider = SqliteStorageProvider<RmpCodec, Connection>;
+    type StorageProvider = SqliteStorageProvider<SealedRmpCodec, Connection>;
 
     fn storage(&self) -> &Self::StorageProvider {
+        // Every storage operation goes through here, so this is where the codec
+        // learns which key to seal with.
+        publish_active_key(self.key);
         &self.storage
     }
 
@@ -152,16 +354,21 @@ impl FarderMlsStore {
         let conn = Connection::open(db_path)
             .with_context(|| format!("open new MLS store at {}", db_path.display()))?;
 
+        // The key this store ADOPTS — the ambient armed key, never the
+        // thread-local, which may still name a different store used earlier on
+        // this thread.
+        let key = key_for_new_store();
+
         let mut instance_id = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut instance_id);
         conn.execute(
-            "CREATE TABLE farder_store_meta (instance_id BLOB NOT NULL)",
+            "CREATE TABLE farder_store_meta (instance_id BLOB NOT NULL, key_id BLOB)",
             [],
         )
         .context("create farder_store_meta table")?;
         conn.execute(
-            "INSERT INTO farder_store_meta (instance_id) VALUES (?1)",
-            [&instance_id[..]],
+            "INSERT INTO farder_store_meta (instance_id, key_id) VALUES (?1, ?2)",
+            rusqlite::params![&instance_id[..], &key_fingerprint(&key)[..]],
         )
         .context("persist store instance id")?;
 
@@ -201,13 +408,34 @@ impl FarderMlsStore {
             return Err(StoreResumeError::InstanceMismatch);
         }
 
+        // Verify the AT-REST KEY before any read, so resuming with the wrong
+        // identity is one clear refusal instead of a pile of decode failures from
+        // deep inside OpenMLS. Judged against the ambient armed key — reading the
+        // thread-local here would compare the store against ITSELF whenever
+        // another store was used earlier on this thread, and never fire.
+        let key = key_for_new_store();
+        match read_key_id(&conn) {
+            // A store written before H2 has no key_id column/value at all. It is
+            // plaintext and cannot be read by the sealing codec: say so plainly.
+            Ok(None) => return Err(StoreResumeError::KeyMismatch),
+            Ok(Some(id)) if id != key_fingerprint(&key) => {
+                return Err(StoreResumeError::KeyMismatch)
+            }
+            Ok(Some(_)) => {}
+            Err(e) => return Err(e),
+        }
+
         Self::finish_open(conn, instance_id).map_err(StoreResumeError::Io)
     }
 
     /// Shared tail of `create`/`resume`: wrap the connection in the OpenMLS
     /// sqlite provider and apply its migrations (idempotent).
     fn finish_open(conn: Connection, instance_id: [u8; 16]) -> Result<Self> {
-        let mut storage: SqliteStorageProvider<RmpCodec, Connection> =
+        // Adopt the key BEFORE the migrations, which read and write through the
+        // codec like any other storage operation.
+        let key = key_for_new_store();
+        publish_active_key(key);
+        let mut storage: SqliteStorageProvider<SealedRmpCodec, Connection> =
             SqliteStorageProvider::new(conn);
         storage
             .run_migrations()
@@ -216,6 +444,7 @@ impl FarderMlsStore {
             storage,
             crypto: RustCrypto::default(),
             instance_id,
+            key,
         })
     }
 }
@@ -224,6 +453,33 @@ impl FarderMlsStore {
 /// row. A missing table, zero rows, multiple rows, or a wrong-sized blob are
 /// all [`StoreResumeError::MissingInstanceId`] — a store whose identity is
 /// absent or ambiguous is treated as poisoned, never resumed.
+/// Read the store's at-rest key fingerprint. `Ok(None)` means the store predates
+/// at-rest encryption (no `key_id` column, or a NULL value) — its values are
+/// plaintext rmp and the sealing codec cannot read them.
+fn read_key_id(conn: &Connection) -> Result<Option<[u8; 8]>, StoreResumeError> {
+    let has_column: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('farder_store_meta') WHERE name = 'key_id'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| StoreResumeError::Io(anyhow!("inspect MLS store schema: {e}")))?;
+    if has_column == 0 {
+        return Ok(None);
+    }
+    let raw: Option<Vec<u8>> = conn
+        .query_row("SELECT key_id FROM farder_store_meta", [], |row| row.get(0))
+        .map_err(|e| StoreResumeError::Io(anyhow!("read MLS store key id: {e}")))?;
+    match raw {
+        None => Ok(None),
+        Some(bytes) => bytes
+            .as_slice()
+            .try_into()
+            .map(Some)
+            .map_err(|_| StoreResumeError::Io(anyhow!("MLS store key id has the wrong length"))),
+    }
+}
+
 fn read_instance_id(conn: &Connection) -> Result<[u8; 16], StoreResumeError> {
     let table_exists: i64 = conn
         .query_row(
@@ -429,5 +685,95 @@ mod tests {
 
         // create() refuses the existing file too — no in-place resurrection.
         assert!(FarderMlsStore::create(&path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod at_rest_tests {
+    use super::*;
+    use crate::credential::{credential_with_key, DeviceSigner};
+    use crate::group::MlsChannelGroup;
+    use farder_crypto::identity::Keypair;
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "farder-mls-at-rest-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("store.mls")
+    }
+
+    fn file_contains(path: &std::path::Path, needle: &[u8]) -> bool {
+        let raw = std::fs::read(path).unwrap_or_default();
+        raw.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// The H2 observation test: the values OpenMLS persists must not be readable
+    /// in the file. The group id is the handle we control end-to-end — with the
+    /// old plaintext codec it appeared verbatim (rmp writes byte strings raw), so
+    /// its absence is a real check rather than a tautology.
+    #[test]
+    fn the_mls_store_file_holds_no_plaintext_values() {
+        let path = temp_db("observation");
+        let group_id: &[u8] = b"NEEDLE-GROUP-ID-must-not-appear-in-the-file";
+        let id = Keypair::generate();
+        let dev = Keypair::generate();
+
+        {
+            let (store, _) = FarderMlsStore::create(&path).unwrap();
+            let _group = MlsChannelGroup::create(
+                &store,
+                &DeviceSigner(&dev),
+                credential_with_key(&dev, &id.public_key()),
+                group_id,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            !file_contains(&path, group_id),
+            "the group id reached the store file in the clear"
+        );
+        // Positive control: the scanner can see bytes that ARE there. The
+        // instance id is stored deliberately in the clear (it is a random
+        // handle, not a secret), so it is the honest thing to point at.
+        let conn = Connection::open(&path).unwrap();
+        let instance: Vec<u8> = conn
+            .query_row("SELECT instance_id FROM farder_store_meta", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        assert!(
+            file_contains(&path, &instance),
+            "the scanner cannot see plaintext it was pointed straight at"
+        );
+    }
+
+    /// Resuming a store sealed under a DIFFERENT key must be one clear refusal,
+    /// not a pile of decode failures from inside OpenMLS.
+    #[test]
+    fn a_store_sealed_under_another_key_refuses_to_resume() {
+        let path = temp_db("key-mismatch");
+        arm_store_key([1u8; 32]);
+        let hash = {
+            let (store, _) = FarderMlsStore::create(&path).unwrap();
+            store.store_instance_hash()
+        };
+
+        arm_store_key([2u8; 32]);
+        match FarderMlsStore::resume(&path, &hash) {
+            Err(StoreResumeError::KeyMismatch) => {}
+            Err(other) => panic!("expected KeyMismatch, got {other}"),
+            Ok(_) => panic!("a store sealed under another key must not resume"),
+        }
+
+        // The right key still opens it.
+        arm_store_key([1u8; 32]);
+        assert!(FarderMlsStore::resume(&path, &hash).is_ok());
+        disarm_store_key();
     }
 }

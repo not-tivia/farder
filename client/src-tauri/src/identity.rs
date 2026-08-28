@@ -166,7 +166,19 @@ fn validate_pin(pin: &str) -> Result<(), IdentityError> {
 // frontend; the private key never does.
 // ---------------------------------------------------------------------------
 
+/// Load the unlocked identity into `AppState` **and arm every at-rest key that
+/// hangs off it**. The single chokepoint for create / unlock / restore / migrate,
+/// which is why the arming belongs here: a path that set the identity without
+/// arming would create MLS stores under the random fallback key, and the next
+/// launch would refuse to resume them (`StoreResumeError::KeyMismatch`).
 fn store_key(state: &Arc<AppState>, key_bytes: [u8; 32]) -> Result<(), IdentityError> {
+    // The MLS store's at-rest key (sub-7a H2). Its own HKDF info string keeps it
+    // independent of the history-row and device-key subkeys.
+    farder_mls::store::arm_store_key(farder_history::derive_local_key(
+        &key_bytes,
+        b"farder-mls-store-v1",
+    ));
+
     let mut lock = state
         .signing_key_bytes
         .lock()

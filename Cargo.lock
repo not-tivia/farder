@@ -842,9 +842,11 @@ dependencies = [
 name = "farder-mls"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "farder-crypto",
  "hex",
+ "hmac",
  "openmls",
  "openmls_rust_crypto",
  "openmls_sqlite_storage",

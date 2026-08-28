@@ -127,14 +127,41 @@ sealed archive next to the keys that open it.
 
 ### Honesty (Task H — do not ship a sealed archive next to bare keys)
 
-- [ ] **H1 — wrap the device signing key** at rest with the same scheme, with a
+- [x] **H1 — wrap the device signing key** at rest with the same scheme, with a
       one-time migration from the existing raw-32-byte file.
-- [ ] **H2 — assess encrypting the MLS store's values** through its `Codec` seam
+- [x] **H2 — assess encrypting the MLS store's values** through its `Codec` seam
       (`SqliteStorageProvider<RmpCodec, Connection>` — the codec is OURS, so an
       encrypting codec seals every value openmls writes). **Assess, then decide in
       the plan before building:** it is a breaking on-disk change needing either a
       migration or a stated wipe, and the wipe cost is real. Record the verdict here
       either way.
+
+### H2 verdict (owner decided 2026-08-27: WIPE, no migration)
+
+**Built.** `SealedRmpCodec` encrypts every value OpenMLS persists. Three things
+were learned doing it, all of which shaped the design:
+
+1. **`Codec`'s methods are STATIC** (no `&self`), so the key cannot be a
+   parameter. It is published to a thread-local by
+   `OpenMlsProvider::storage(&self)`, which every storage operation passes
+   through, so the codec seals with the key of the store *being used* rather than
+   whatever was armed globally last. A pure global would silently cross-seal two
+   stores alive in one process.
+2. **The encryption must be DETERMINISTIC.** `openmls_sqlite_storage` encodes its
+   lookup KEYS through the same codec (`wrappers.rs`'s `KeyRefWrapper`) straight
+   into `WHERE key = ?`. With a random nonce every lookup misses and the store
+   behaves as if empty. Hence an SIV nonce derived from the plaintext — which
+   leaks value EQUALITY, acceptable here because the values are random secrets and
+   group ids whose equality the row structure already shows.
+3. **An unarmed key falls back to a per-process RANDOM key, never plaintext.**
+   That keeps every test working with no test-only key to leak into production,
+   and a store created under the fallback records that key's fingerprint, so the
+   next launch refuses with `KeyMismatch` instead of producing garbage.
+
+**The wipe:** a store written before this has no key fingerprint, so `resume`
+returns `KeyMismatch` with a message saying to recreate the channel. Existing
+E2EE channels on the owner's Windows box must be recreated. No migration, per the
+owner's call.
 
 ## Gates
 - `cargo test --workspace` ≥ 905, never fewer.
