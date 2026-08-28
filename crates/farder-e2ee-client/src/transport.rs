@@ -118,6 +118,26 @@ impl TransportError {
         )
     }
 
+    /// True iff the server rejected a sealed send because the channel has
+    /// pending removals (drift): `"event rejected: channel is sealed until a
+    /// rekey discharges its pending removals"`. This is the reactive drift
+    /// signal — the fold SEALED the channel because some leaf is now drift (a
+    /// revoked/expired device or a banned/kicked member) and it stays sealed
+    /// until a remaining confirmed member authors a `remove_members` commit
+    /// that discharges the pending removals (see [`crate::drift`]).
+    ///
+    /// Despite the message's wording, a *rekey* does NOT discharge drift — only
+    /// a remove-commit whose declared `removes` intersects `pending_removals`
+    /// does (`event_log_state.rs:636-646, 1445-1448`). The predicate keys on the
+    /// verbatim string so callers can map the signal without re-deriving it.
+    pub fn is_sealed_pending_removals(&self) -> bool {
+        matches!(
+            self,
+            Self::ServerRejected { reason }
+                if reason.contains("channel is sealed until a rekey discharges its pending removals")
+        )
+    }
+
     /// The rejection/transport reason string, verbatim. For
     /// [`Self::ServerRejected`] this is the server's reason (including the
     /// `"event rejected: "` prefix when present); for [`Self::Transport`] it is
@@ -321,6 +341,34 @@ mod tests {
             .is_freshness_ceiling_reached());
         assert!(!TransportError::rejected("stale-epoch").is_freshness_ceiling_reached());
         assert!(!TransportError::transport("connection reset").is_freshness_ceiling_reached());
+    }
+
+    #[test]
+    fn sealed_pending_removals_predicate_matches_the_fold_rejection() {
+        // The fold's verbatim drift gate, wrapped the way the server wraps
+        // every non-bare fold rejection (`handlers.rs`). This is the reactive
+        // drift signal: the channel is sealed until a remove-commit discharges
+        // its pending removals.
+        let e = TransportError::rejected(
+            "event rejected: channel is sealed until a rekey discharges its pending removals",
+        );
+        assert!(e.is_sealed_pending_removals());
+        // Disjoint from the freshness ceiling: drift seals the channel, the
+        // ceiling is the "please rekey" backstop — two different gates.
+        assert!(!e.is_freshness_ceiling_reached());
+        assert!(!e.is_commit_rate_limited());
+    }
+
+    #[test]
+    fn sealed_pending_removals_predicate_rejects_other_rejections() {
+        assert!(!TransportError::rejected("event rejected: bad signature")
+            .is_sealed_pending_removals());
+        assert!(!TransportError::rejected("stale-epoch").is_sealed_pending_removals());
+        assert!(!TransportError::rejected(
+            "event rejected: freshness ceiling reached: the channel is sealed until somebody rekeys"
+        )
+        .is_sealed_pending_removals());
+        assert!(!TransportError::transport("connection reset").is_sealed_pending_removals());
     }
 
     #[test]

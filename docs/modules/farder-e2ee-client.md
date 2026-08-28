@@ -1,8 +1,8 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
-> **Last reviewed:** 2026-08-26
+> **Last reviewed:** 2026-08-27
 
 ## Purpose
 
@@ -26,6 +26,8 @@ receive-side gates / sealed send + receive / bounded stale-epoch resync), plus
 Task 10 (production `DeviceCertResolver` + `FetchDeviceCerts` protocol surface),
 per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
+Sub-5a lifecycle: C1 (revocation/expiry-aware cert resolver), C2 (rekey +
+cadence, `rekey.rs`) and C3 (drift discharge, `drift.rs`) are COMPLETE.
 
 ---
 
@@ -64,6 +66,21 @@ for `"event rejected"` would miss it. Since finding F6 the server emits it for
 `MessagePostedE2ee` / `MessageEditedE2ee` too, not just `MlsCommit`, so it is
 the one signal the resync loop keys on for a sealed send that lost the epoch
 race.
+
+The sub-5a lifecycle added three more fold-rejection predicates, each keyed on
+the fold's **verbatim** rejection string (wrapped by the server as
+`"event rejected: …"`):
+
+- `is_commit_rate_limited()` — `"commit-rate rule: …"` (a non-drift-discharging
+  commit is not permitted yet).
+- `is_freshness_ceiling_reached()` — `"freshness ceiling reached: …"` (the
+  fold's guarantee a rekey is now permitted).
+- `is_sealed_pending_removals()` — `"channel is sealed until a rekey discharges
+  its pending removals"` (the reactive drift signal: a dead leaf seals the
+  channel until a remove-commit discharges `pending_removals`; see `drift.rs`).
+
+`rejection_reason()` returns the server reason verbatim (with the
+`"event rejected: "` prefix when present).
 
 ---
 
@@ -223,6 +240,71 @@ sync and runs Gate 2 over the already-merged commit).
 - Since sub-5 S1 the fetch stream mixes `DeviceRevoked` in; a
   non-`DeviceAuthorized` payload is never a cert source.
 
+### Rekey (`rekey.rs`) — sub-5a C2
+
+A *rekey* is [`MlsChannelGroup::self_update`] — an own-commit with empty
+adds/removes. Because the crate holds no fold `LogState`, the commit-rate rule
+and the freshness ceiling are only observable reactively (the fold's rejection
+strings) or via a **local cadence**:
+
+- `rekey_channel(transport, actor, chain, ctx, group) -> RekeyOutcome` (async) —
+  run `self_update`, submit the empty-adds/removes `MlsCommit` with the real
+  chaining values, advance the chain on accept. A `stale-epoch` rejection is
+  `E2eeError::StaleEpochDiverged`; a `"commit-rate rule:"` rejection is
+  `E2eeError::RekeyRateLimited`. It never loops.
+- `RekeyContext<'a> { key, generation, store, store_instance_hash }` /
+  `RekeyOutcome { event_hash, local_epoch, post_epoch_authenticator,
+  post_tree_hash }`.
+- `should_rekey(ceiling_signalled, cadence, now_secs) -> RekeyDecision` — a pure,
+  total decision function: a `"freshness ceiling reached"` signal forces a rekey;
+  otherwise the proactive cadence (`REKEY_SEALED_SEND_INTERVAL` /
+  `REKEY_WALL_CLOCK_SECS`) rekeys only when
+  `rekey_permitted_by_rate_rule(...)` (a local re-derivation of
+  `event_log_state.rs:1187-1203`) says the commit-rate rule would accept it.
+- `RekeyCadence`, `RekeyDecision::{ Rekey(RekeyTrigger), Hold(HoldReason) }`,
+  `RekeyTrigger::{ CeilingSignalled, Proactive }`, `HoldReason::{ Cadence,
+  RateRule }`, `REKEY_SEALED_SEND_INTERVAL` (= 100), `REKEY_WALL_CLOCK_SECS`
+  (= 7 days).
+
+### Drift discharge (`drift.rs`) — sub-5a C3
+
+When a member's device is revoked/expired or a member is banned/kicked, the
+fold puts the dead leaf in `pending_removals`, which SEALS the channel
+(`event_log_state.rs:576-587, 1445-1448`). A rekey does NOT discharge drift —
+`commit_discharges_drift` requires a commit whose declared `removes` intersect
+`pending_removals` (`event_log_state.rs:636-646`). Drift discharge is therefore
+a distinct operation: a [`MlsChannelGroup::remove_members`] commit listing the
+dead `(identity, device)` leaves.
+
+- `discharge_drift(transport, actor, chain, ctx, group, dead_leaves) -> DriftDischargeOutcome`
+  (async) — run `remove_members` over `dead_leaves` and submit the `MlsCommit`
+  with `removes` = the actually-removed leaves. Mirrors
+  `bootstrap_group`/`add_member`/`rekey_channel`'s submit + chain-advance.
+  - A `stale-epoch` rejection → `E2eeError::StaleEpochDiverged` (the discharge
+    race: another member won the epoch CAS; `remove_members` already merged
+    locally, so the caller must resync and retry once — no loop).
+  - A `"commit-rate rule:"` rejection → `E2eeError::RekeyRateLimited` (a
+    genuine discharge is commit-rate-exempt, so this means the removes did NOT
+    intersect `pending_removals` — the dead-leaf set was wrong).
+  - An absent target leaf errors at `remove_members` **before** any submit
+    (`E2eeError::Mls`), and an empty `dead_leaves` is refused up front — no
+    silent no-op, no spin.
+- `DriftDischargeContext<'a> { key, generation, store, store_instance_hash }` /
+  `DriftDischargeOutcome { event_hash, local_epoch, post_epoch_authenticator,
+  post_tree_hash }`.
+- `dead_leaves_from_revocation(revoked_device, members) -> Vec<DeclaredMember>` —
+  the minimal helper for the reactive signal: the `DeviceRevoked { device }`
+  payload names only the REVOKED device (not its identity), so the identity half
+  is resolved against the group's member list. Returns every leaf whose `device`
+  matches, empty when the device is not in the group.
+- `E2eeError::is_sealed_pending_removals()` /
+  `TransportError::is_sealed_pending_removals()` — the reactive drift predicate
+  keyed on `"channel is sealed until a rekey discharges its pending removals"`.
+
+The reactive wiring (detect the sealed-send rejection / `DeviceRevoked` /
+`MembershipChanged` broadcast and call `discharge_drift`) is H1/5b, not here —
+C3 provides the primitive + the predicate + the helper.
+
 ### Sealed send + receive (`sealed.rs`)
 
 - `send_sealed(transport, actor, chain, ctx, group, eligibility) -> SealedSendOutcome`
@@ -314,7 +396,14 @@ The crate's one error type. Notable variants:
 - `ResyncPoisoned { member, reason }` — F4, terminal: resync processed a commit
   that failed leaf binding, so the impostor leaf is already merged and the
   local group is poisoned.
+- `RekeyRateLimited { reason }` — the fold refused a commit under the
+  commit-rate rule (a rekey, or a drift discharge whose removes did not
+  discharge anything). Same divergence caveat as `StaleEpochDiverged`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.
+
+Predicate methods (machine-readable signals over the fold's rejection strings):
+`is_stale_epoch_diverged()`, `is_rekey_rate_limited()`,
+`is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`.
 
 ---
 

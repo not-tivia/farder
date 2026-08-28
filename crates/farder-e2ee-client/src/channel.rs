@@ -187,6 +187,16 @@ impl E2eeError {
     pub fn is_freshness_ceiling_reached(&self) -> bool {
         matches!(self, Self::Transport(e) if e.is_freshness_ceiling_reached())
     }
+
+    /// True iff a sealed send was rejected because the channel has pending
+    /// removals (drift): the fold's guarantee that the channel is sealed until
+    /// a remaining confirmed member authors a drift-discharging remove-commit.
+    /// Keys on the `"channel is sealed until a rekey discharges its pending
+    /// removals"` reason inside [`E2eeError::Transport`]. This is the reactive
+    /// drift signal the caller maps to [`crate::drift::discharge_drift`].
+    pub fn is_sealed_pending_removals(&self) -> bool {
+        matches!(self, Self::Transport(e) if e.is_sealed_pending_removals())
+    }
 }
 
 impl fmt::Display for E2eeError {
