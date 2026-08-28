@@ -1,6 +1,6 @@
 # farder-e2ee-client
 
-> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke}.rs`
+> **File(s):** `crates/farder-e2ee-client/src/{lib,transport,channel_key,chain,channel,join,commit,cert,sealed,resync,rekey,drift,revoke,reset}.rs`
 > **Layer:** Crypto crate (client-side only — the server NEVER links this crate)
 > **Last reviewed:** 2026-08-27
 
@@ -27,8 +27,8 @@ Task 10 (production `DeviceCertResolver` + `FetchDeviceCerts` protocol surface),
 per
 `docs/superpowers/plans/2026-08-26-mesh-rung2-sub4a-sealed-vertical.md`.
 Sub-5a lifecycle: C1 (revocation/expiry-aware cert resolver), C2 (rekey +
-cadence, `rekey.rs`), C3 (drift discharge, `drift.rs`) and C4 (`DeviceRevoked`
-emission, `revoke.rs`) are COMPLETE.
+cadence, `rekey.rs`), C3 (drift discharge, `drift.rs`), C4 (`DeviceRevoked`
+emission, `revoke.rs`) and C5 (group reset, `reset.rs`) are COMPLETE.
 
 ---
 
@@ -332,6 +332,47 @@ cert is dead, its chain frozen, and its MLS leaf becomes drift lazily via
   `"revocation cites an unknown device"`, and `"only the owning identity or the
   server owner may revoke a device"`.
 - `RevokeOutcome { event_hash }` — the accepted event's hash.
+
+### Group reset (`reset.rs`) — sub-5a C5
+
+The owner's "big hammer" to recover a broken/diverged channel: tear the MLS
+group down and rebuild it at `generation + 1`. The fold forces this exact
+sequence (`event_log_state.rs:1342-1394`, `:1239-1246`, `:1284-1316`), and
+`reset_group` builds it from the lower-level `MlsChannelGroup` methods — it is
+NOT `add_member` (which submits an `MlsCommit` at the CURRENT generation; a
+reset stages Welcomes for the NEXT generation with no accepted commit, because
+the new generation has no group in the fold until the reset lands).
+
+- `reset_group(transport, actor, chain, ctx, generation, members) -> ResetOutcome`
+  (async, owner) — mint a FRESH one-member group at `generation + 1`, add every
+  member in ONE commit (so every welcomed leaf lands at the SAME post-tree-hash;
+  one add per member would give each a different tree hash and only the last
+  could confirm), stage one next-generation `MlsWelcome` per member
+  (owner-only), then submit `MlsGroupReset { new_generation, welcomes,
+  post_tree_hash }`. The `commit` ref on each staged Welcome is a documented
+  sentinel — the reset generation's add-commit is never a log event, and the
+  fold's next-generation Welcome arm never reads it. There is no divergence
+  caveat (the fresh group is never submitted as a commit, so no epoch CAS to
+  lose); a rejection surfaces as `E2eeError::Transport` with the fold's reason.
+- `ResetContext<'a> { key, store, store_instance_hash }` — shared by the
+  resetter and a welcomed member. `ResetOutcome { event_hash, new_generation,
+  post_tree_hash }`.
+- `join_reset(transport, actor, chain, ctx, welcome, reset_post_tree_hash) -> LeafConfirmation`
+  (async, member) — `join_channel` from the staged Welcome, then confirm the
+  leaf with `tree_hash == reset_post_tree_hash` (the confirmation wall's anchor
+  for a reset generation, whose add-commit is never a log event —
+  `event_log_state.rs:1284-1316`). It also fails closed locally if the joined
+  group's real `JoinInfo.tree_hash` does not match the declared hash, before
+  emitting a doomed confirmation.
+- `member_live_leaves(transport, identity) -> Vec<DeclaredMember>` (async) — the
+  exact-cover helper: enumerate one identity's LIVE devices (authorized,
+  un-revoked, un-expired) from the log, revocation- and expiry-aware like
+  `cert.rs`'s resolver. The reset caller passes the complete current
+  member × live-device set minus the owner's own device as `members` (the fold's
+  non-selective-reset rule); this is the CALLER's responsibility.
+
+The exact-cover and confirmation-wall rules are validated against a real
+`LogState` replay in `reset.rs`'s tests (mirroring `farder-mls/tests/fold_chain.rs`).
 
 ### Sealed send + receive (`sealed.rs`)
 

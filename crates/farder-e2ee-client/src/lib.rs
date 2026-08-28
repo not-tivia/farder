@@ -19,6 +19,7 @@ pub mod commit;
 pub mod drift;
 pub mod join;
 pub mod rekey;
+pub mod reset;
 pub mod resync;
 pub mod revoke;
 pub mod sealed;
@@ -52,6 +53,7 @@ pub use rekey::{
     RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger, REKEY_SEALED_SEND_INTERVAL,
     REKEY_WALL_CLOCK_SECS,
 };
+pub use reset::{join_reset, member_live_leaves, reset_group, ResetContext, ResetOutcome};
 pub use revoke::{revoke_device, RevokeOutcome};
 pub use resync::{
     fetch_mls_control_exhaustive, send_sealed_resync, ResyncOutcome, ResyncRequest,
