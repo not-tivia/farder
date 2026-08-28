@@ -752,6 +752,7 @@ version = "0.1.0"
 dependencies = [
  "farder-crypto",
  "farder-e2ee-client",
+ "farder-history",
  "farder-mls",
  "farder-node",
  "farder-protocol",
@@ -818,6 +819,23 @@ dependencies = [
  "serde",
  "tls_codec",
  "tokio",
+]
+
+[[package]]
+name = "farder-history"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "farder-crypto",
+ "hkdf",
+ "hmac",
+ "rand 0.8.5",
+ "rmp-serde",
+ "rusqlite",
+ "serde",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]

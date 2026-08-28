@@ -10,6 +10,7 @@ members = [
     "crates/farder-server",
     "crates/farder-mls",
     "crates/farder-e2ee-client",
+    "crates/farder-history",
 ]
 
 [package]
@@ -25,6 +26,7 @@ farder-node = { path = "crates/farder-node" }
 farder-server = { path = "crates/farder-server" }
 farder-mls = { path = "crates/farder-mls" }
 farder-e2ee-client = { path = "crates/farder-e2ee-client" }
+farder-history = { path = "crates/farder-history" }
 quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.13"

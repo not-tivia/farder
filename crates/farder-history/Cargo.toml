@@ -1,0 +1,23 @@
+[package]
+name = "farder-history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+farder-crypto = { workspace = true }
+anyhow = { workspace = true }
+# The same pinned versions the rest of the workspace already uses, so this adds
+# no new third-party crate to the tree — only direct edges to existing ones.
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+# `hmac`/`hkdf` are already in Cargo.lock as transitive deps at these exact
+# versions; this promotes them to direct edges rather than adding crates.
+hmac = "0.12"
+hkdf = "0.12"
+serde = { workspace = true }
+# The workspace's existing compact serializer (farder-e2ee-client already uses it).
+rmp-serde = "1"
