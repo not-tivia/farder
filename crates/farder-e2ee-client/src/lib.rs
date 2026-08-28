@@ -19,6 +19,7 @@ pub mod commit;
 pub mod device;
 pub mod drift;
 pub mod join;
+pub mod keepalive;
 pub mod rekey;
 pub mod reprovision;
 pub mod reset;
@@ -50,6 +51,10 @@ pub use farder_mls::group::JoinInfo;
 pub use join::{
     confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,
     LeafConfirmation, PendingWelcome, SendEligibility,
+};
+pub use keepalive::{
+    committing_identities, dead_leaves, leaf_diff, leaf_snapshot, send_sealed_keepalive,
+    KeepaliveAction, KeepaliveOutcome, KeepaliveRepairs, LeafDiff,
 };
 pub use rekey::{
     rekey_channel, rekey_permitted_by_rate_rule, should_rekey, HoldReason, RekeyCadence,

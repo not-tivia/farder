@@ -458,7 +458,12 @@ retrying or continuing.
 **Parameters:** `server_id` — the connection key (address); `log_server_id` —
 the genesis hash keying the device chain; `channel_id` — the E2EE channel id.
 **Returns:** `ProcessMlsControlEventsResult { channel_id, outcome, reason,
-processed, epoch, generation, confirmed, cursor }`. `outcome` is `"advanced"`
+processed, epoch, generation, confirmed, cursor, leaves_gained, leaves_lost }`.
+`leaves_gained` / `leaves_lost` (sub-5b K5) are the `(identity, device)` pairs
+whose read access changed during this run, diffed from the group's **actual**
+leaf view before and after — the fact the in-channel transparency notice is made
+of. Never derived from a commit's declared adds: a notice built from declared
+data is a notice an attacker writes. `outcome` is `"advanced"`
 (normal, possibly zero steps) or `"equivocation"` (poisoned; `reason` set).
 **Side effects:** persists `servers/<log_server_id>/mls/<channel_id>.mls_state.json`
 (`generation`, `epoch`, `confirmed`, `cursor`, `poisoned`); on a confirmed
@@ -2860,3 +2865,57 @@ nothing unless this device drops its decrypted copy too.
 through the HMAC blind index so the author is never stored or compared in the
 clear.
 **invoke name:** `"history_purge_author"` → `historyPurgeAuthor(author)`.
+
+---
+
+## E2EE lifecycle actions (sub-5b K4)
+
+5a built the whole lifecycle — rekey, device revocation, group reset — and
+shipped it with **no caller**. These are the wrappers that make it reachable.
+Every rule lives in `farder-e2ee-client`; each command resolves state, calls one
+crate function, and persists. All four are irreversible in some way, so the
+frontend gates each behind a confirmation that states what is lost.
+
+### `rekey_e2ee_channel(state, server_id, log_server_id, channel_id) -> Result<RekeyChannelResult, String>`
+
+**What it does:** refreshes the channel's keys by hand — the escape hatch for a
+channel already sealed by the freshness ceiling. The automatic paths normally
+cover this: a send that hits the ceiling rekeys and retries (K1), and the
+proactive cadence rekeys before the wall (K2).
+**Returns:** `{ event_hash, epoch }`. Persists the new epoch and the cadence.
+**Note:** a REJECTED rekey has already merged locally (finding F1), leaving the
+group one epoch ahead of the server; the error surfaces rather than being
+retried.
+**invoke name:** `"rekey_e2ee_channel"` → `rekeyE2eeChannel(...)`.
+
+### `revoke_own_device(state, server_id, log_server_id) -> Result<String, String>`
+
+**What it does:** retires THIS device by emitting a self-`DeviceRevoked` (the
+victim IS the signer, which is the fold arm authorizing an identity's own
+device). **Irreversible and server-wide, not per channel:** the fold's
+`revoked_devices` set is permanent, so this device can never hold a leaf again
+anywhere on that server. Locally decrypted history stays on the machine (the
+history store is untouched), but no new sealed content will arrive.
+**invoke name:** `"revoke_own_device"` → `revokeOwnDevice(...)`.
+
+### `revoke_member_device(state, server_id, log_server_id, device) -> Result<String, String>`
+
+**What it does:** revokes another member's device (owner action). The fold
+authorizes by "the owning identity OR the server owner", so a non-owner is
+refused server-side with the fold's own reason — **the UI gate is a courtesy,
+not the boundary.**
+**invoke name:** `"revoke_member_device"` → `revokeMemberDevice(...)`.
+
+### `reset_e2ee_channel(state, server_id, log_server_id, channel_id) -> Result<ResetChannelResult, String>`
+
+**What it does:** rebuilds the channel's group at the next generation — the
+owner's recovery hammer for a channel that cannot be repaired otherwise. The
+fold requires **exact cover**: the staged Welcomes must match the current member
+× live-device set minus the resetter's own device, no more and no fewer, or the
+reset is refused and the channel stays dead. The member set therefore comes from
+the same live view drift detection uses, so the two can never disagree about who
+is entitled to a leaf.
+**Returns:** `{ event_hash, new_generation, welcomed }`.
+**Side effects:** moves the local state to the new generation and **clears the
+cursor and rekey cadence**, which described a group that no longer exists.
+**invoke name:** `"reset_e2ee_channel"` → `resetE2eeChannel(...)`.

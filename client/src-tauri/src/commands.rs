@@ -4699,6 +4699,7 @@ async fn run_create_e2ee_channel(
         confirmed: true,
         cursor: 0,
         poisoned: None,
+        ..Default::default()
     }
     .save(&log_server_id, channel_id)?;
 
@@ -5066,6 +5067,7 @@ async fn add_current_members_to_group(
                         confirmed: true,
                         cursor: 0,
                         poisoned: None,
+                        ..Default::default()
                     }
                     .save(log_server_id, channel_id)?;
                     result.added.push(AddedE2eeMember {
@@ -5251,6 +5253,7 @@ async fn run_publish_own_key_package(
         confirmed: false,
         cursor: 0,
         poisoned: None,
+        ..Default::default()
     }
     .save(&log_server_id, channel_id)?;
 
@@ -5281,6 +5284,32 @@ pub struct ProcessMlsControlEventsResult {
     pub generation: u64,
     pub confirmed: bool,
     pub cursor: u64,
+    /// Devices that GAINED the ability to read this channel during this run
+    /// (sub-5b K5) — the fact the in-channel transparency notice is made of.
+    /// Derived from the group's ACTUAL leaf view before and after, never from a
+    /// commit's declared adds: a notice built from declared data is a notice an
+    /// attacker writes.
+    pub leaves_gained: Vec<LeafChangeInfo>,
+    /// Devices that LOST it (a removal, a revocation, a ban's drift discharge).
+    pub leaves_lost: Vec<LeafChangeInfo>,
+}
+
+/// One `(identity, device)` whose read access to a channel changed.
+#[derive(serde::Serialize)]
+pub struct LeafChangeInfo {
+    /// The owning identity, as the frontend's `vk_<hex>` string.
+    pub identity: String,
+    /// The device id.
+    pub device: String,
+}
+
+impl From<farder_mls::group::DeclaredMember> for LeafChangeInfo {
+    fn from(m: farder_mls::group::DeclaredMember) -> Self {
+        Self {
+            identity: m.identity.to_string(),
+            device: m.device,
+        }
+    }
 }
 
 /// Advance one E2EE channel's MLS group to the server's current control-plane
@@ -5355,6 +5384,8 @@ async fn run_process_mls_control_events(
             generation: 0,
             confirmed: false,
             cursor: 0,
+            leaves_gained: Vec::new(),
+            leaves_lost: Vec::new(),
         });
     }
 
@@ -5368,6 +5399,7 @@ async fn run_process_mls_control_events(
             confirmed: false,
             cursor: 0,
             poisoned: None,
+            ..Default::default()
         });
 
     // Terminal from a previous run (F4): the impostor leaf is already merged
@@ -5381,6 +5413,8 @@ async fn run_process_mls_control_events(
             epoch: mls.epoch,
             generation: mls.generation,
             confirmed: mls.confirmed,
+            leaves_gained: Vec::new(),
+            leaves_lost: Vec::new(),
             cursor: mls.cursor,
         });
     }
@@ -5412,6 +5446,13 @@ async fn run_process_mls_control_events(
     let my_device = device_id(&device.public_key());
 
     let mut processed = 0usize;
+
+    // K5: snapshot the ACTUAL leaf view before any commit is applied, so the
+    // diff below reports what the tree really gained and lost.
+    let leaves_before = group
+        .as_ref()
+        .map(farder_e2ee_client::leaf_snapshot)
+        .unwrap_or_default();
 
     for event in &events {
         match &event.core.payload {
@@ -5491,6 +5532,8 @@ async fn run_process_mls_control_events(
                             epoch: mls.epoch,
                             generation: mls.generation,
                             confirmed: mls.confirmed,
+                            leaves_gained: Vec::new(),
+                            leaves_lost: Vec::new(),
                             cursor: next_cursor,
                         });
                     }
@@ -5559,6 +5602,14 @@ async fn run_process_mls_control_events(
     mls.cursor = next_cursor;
     mls.save(&log_server_id, channel_id)?;
 
+    let diff = farder_e2ee_client::leaf_diff(
+        &leaves_before,
+        &group
+            .as_ref()
+            .map(farder_e2ee_client::leaf_snapshot)
+            .unwrap_or_default(),
+    );
+
     Ok(ProcessMlsControlEventsResult {
         channel_id,
         outcome: "advanced".to_string(),
@@ -5568,6 +5619,8 @@ async fn run_process_mls_control_events(
         generation: mls.generation,
         confirmed: mls.confirmed,
         cursor: next_cursor,
+        leaves_gained: diff.gained.into_iter().map(LeafChangeInfo::from).collect(),
+        leaves_lost: diff.lost.into_iter().map(LeafChangeInfo::from).collect(),
     })
 }
 
@@ -5663,6 +5716,7 @@ async fn run_send_sealed_message(
             confirmed: false,
             cursor: 0,
             poisoned: None,
+            ..Default::default()
         });
 
     // F4 (terminal): the group is poisoned by an impostor leaf. Never send into
@@ -5702,10 +5756,72 @@ async fn run_send_sealed_message(
         SendEligibility::not_confirmed()
     };
 
-    let outcome = match send_sealed(&transport, &actor, &mut chain, &ctx, &mut group, &eligibility)
-        .await
-    {
-        Ok(send) => send,
+    // Keep-alive (sub-5b K1): the fold seals a channel's sealed content once the
+    // freshness ceiling is reached, and 5a's answer (`rekey_channel`) shipped
+    // dormant with no caller — so an ordinary channel stopped accepting messages
+    // after ~500 of them, permanently. `send_sealed_keepalive` rekeys once and
+    // retries; every other rejection, including the divergence class, surfaces
+    // unchanged. Pinned end-to-end by the harness's
+    // `the_freshness_ceiling_does_not_brick_a_channel`.
+    let rekey_ctx = farder_e2ee_client::RekeyContext {
+        key: &key,
+        generation,
+        store: &store,
+        store_instance_hash: &store_instance_hash,
+    };
+    let drift_ctx = farder_e2ee_client::DriftDischargeContext {
+        key: &key,
+        generation,
+        store: &store,
+        store_instance_hash: &store_instance_hash,
+    };
+
+    // First attempt with an EMPTY dead-leaf set: deriving it costs a roster
+    // fetch plus a cert fetch per member, far too much to spend on every
+    // message. A drift seal is rare, so we pay for the answer only when the
+    // channel actually reports one.
+    let first = farder_e2ee_client::send_sealed_keepalive(
+        &transport,
+        &actor,
+        &mut chain,
+        &ctx,
+        &farder_e2ee_client::KeepaliveRepairs {
+            rekey: &rekey_ctx,
+            drift: &drift_ctx,
+            dead: &[],
+        },
+        &mut group,
+        &eligibility,
+    )
+    .await;
+
+    let first = match first {
+        Err(ref e) if e.is_sealed_pending_removals() => {
+            // Now it is worth the round trips: derive whom the fold no longer
+            // owes a leaf, discharge, and retry (sub-5b K3).
+            let live =
+                live_channel_leaves(&transport, &state, &server_id, &identity, &device).await?;
+            let dead = farder_e2ee_client::dead_leaves(&group, &live).map_err(|e| e.to_string())?;
+            farder_e2ee_client::send_sealed_keepalive(
+                &transport,
+                &actor,
+                &mut chain,
+                &ctx,
+                &farder_e2ee_client::KeepaliveRepairs {
+                    rekey: &rekey_ctx,
+                    drift: &drift_ctx,
+                    dead: &dead,
+                },
+                &mut group,
+                &eligibility,
+            )
+            .await
+        }
+        other => other,
+    };
+
+    let outcome = match first {
+        Ok(k) => k.send,
         // F6: the bare "stale-epoch" rejection also fires for
         // MessagePostedE2ee. Resync is bounded (unproductive + total caps) and
         // terminates under every transport behaviour; it never spins.
@@ -5760,10 +5876,100 @@ async fn run_send_sealed_message(
     ds.lamport = chain.lamport;
     ds.save(&log_server_id)?;
 
+    // -- Proactive rekey cadence (sub-5b K2) ------------------------------
+    //
+    // K1 handles the ceiling REACTIVELY: a send bounces, we rekey, we retry.
+    // That alone leaves every 500th message paying a visible round trip and
+    // relies on the wall always being hit rather than avoided. `should_rekey` is
+    // 5a's pure, loop-free policy for refreshing BEFORE that: it fires on the
+    // send-count or wall-clock cadence, but only when the commit-rate rule would
+    // accept the commit, so it can never spin against a server saying no.
+    //
+    // Best-effort on purpose: the message is already delivered and the device
+    // chain is already persisted. A failed proactive rekey must not fail the
+    // send — the ceiling backstop still catches the channel if this never works.
+    mls.note_sealed_send();
+    let decision = farder_e2ee_client::should_rekey(
+        false,
+        &mls.cadence(group.epoch(), farder_e2ee_client::committing_identities(&group)),
+        farder_e2ee_client::event_now_secs(),
+    );
+    if matches!(decision, farder_e2ee_client::RekeyDecision::Rekey(_)) {
+        match farder_e2ee_client::rekey_channel(&transport, &actor, &mut chain, &rekey_ctx, &mut group)
+            .await
+        {
+            Ok(rekeyed) => {
+                mls.note_rekey(rekeyed.local_epoch, farder_e2ee_client::event_now_secs());
+                mls.epoch = rekeyed.local_epoch;
+                ds.next_seq = chain.next_seq;
+                ds.last_event_hash = chain.last_event_hash.clone();
+                ds.lamport = chain.lamport;
+                ds.save(&log_server_id)?;
+            }
+            Err(e) => {
+                // Never fatal to the send. A DIVERGED group is the one case worth
+                // recording, because the local group is now one epoch ahead of the
+                // server (finding F1) and the next operation must not trust it.
+                if e.is_diverged() {
+                    mls.poisoned = Some(format!("proactive rekey diverged the group: {e}"));
+                }
+                eprintln!("E2EE: proactive rekey skipped for channel {channel_id}: {e}");
+            }
+        }
+    }
+    mls.save(&log_server_id, channel_id)?;
+
     Ok(SendSealedMessageResult {
         event_hash: outcome.event_hash,
         epoch: outcome.epoch,
     })
+}
+
+/// The client's view of which `(identity, device)` leaves are still ENTITLED to
+/// be in an E2EE channel's group: every current roster member crossed with their
+/// live (authorized, un-revoked, un-expired) devices, plus our own leaf.
+///
+/// Subtracting this from the group's ACTUAL leaf view yields the fold's
+/// `pending_removals` — the drift that seals the channel (sub-5b K3). A banned
+/// member vanishes from the roster; a revoked or expired device vanishes from
+/// `member_live_leaves`. Deliberately computed ONLY when a send comes back
+/// sealed: it costs a roster fetch plus one cert fetch per member, which is far
+/// too much to spend on every message.
+async fn live_channel_leaves(
+    transport: &crate::e2ee_transport::E2eeTransportImpl<'_>,
+    state: &AppState,
+    server_id: &str,
+    identity: &Keypair,
+    own_device: &Keypair,
+) -> Result<Vec<farder_mls::group::DeclaredMember>, String> {
+    use farder_crypto::event_log::device_id;
+    use farder_mls::group::DeclaredMember;
+
+    let members: Vec<MemberInfo> = {
+        let response = bridge::send_request(state, server_id, ServerRequest::GetMembers)
+            .await
+            .map_err(|e| e.to_string())?;
+        match response {
+            ServerResponse::Members { members } => members,
+            ServerResponse::Error { reason } => return Err(reason),
+            other => return Err(format!("unexpected response to GetMembers: {other:?}")),
+        }
+    };
+
+    let mut live: Vec<DeclaredMember> = vec![DeclaredMember {
+        identity: identity.public_key(),
+        device: device_id(&own_device.public_key()),
+    }];
+    for member in members {
+        if member.public_key == identity.public_key() {
+            continue;
+        }
+        let leaves = farder_e2ee_client::member_live_leaves(transport, &member.public_key)
+            .await
+            .map_err(|e| e.to_string())?;
+        live.extend(leaves);
+    }
+    Ok(live)
 }
 
 /// Build the Gate-2 trust anchor for the bounded resync loop: a
@@ -5908,6 +6114,7 @@ pub async fn decrypt_sealed_message(
             confirmed: false,
             cursor: 0,
             poisoned: None,
+            ..Default::default()
         });
 
     if let Some(reason) = mls.poisoned.clone() {
@@ -6807,4 +7014,280 @@ mod submit_event_tests {
         assert_eq!(ev1.core.prev.as_deref(), Some(hash0.as_str()));
         assert_eq!(ev1.core.lamport, 2);
     }
+}
+
+// ---------------------------------------------------------------------------
+// E2EE lifecycle actions (sub-5b K4)
+// ---------------------------------------------------------------------------
+//
+// 5a built the whole lifecycle — rekey, device revocation, group reset — and
+// shipped it with no caller. These are the thin wrappers that make it reachable.
+// Every rule lives in `farder-e2ee-client`, where root tests can link it; each
+// command here resolves state, calls one crate function, and persists.
+//
+// All four are IRREVERSIBLE in some way, so none of them is a bare button: the
+// frontend gates each behind a confirmation that states what is lost (G4).
+
+#[derive(serde::Serialize)]
+pub struct RekeyChannelResult {
+    pub event_hash: String,
+    pub epoch: u64,
+}
+
+/// Manually refresh an E2EE channel's keys — the escape hatch when a channel is
+/// sealed by the freshness ceiling and the user would rather not wait for a send
+/// to trigger it (K1/K2 handle the automatic cases).
+#[tauri::command]
+pub async fn rekey_e2ee_channel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+) -> Result<RekeyChannelResult, String> {
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, mut ds, mut chain| async move {
+            use farder_e2ee_client::{
+                channel_group_id, rekey_channel, resume_store, Actor, ChannelKey, RekeyContext,
+            };
+            use farder_mls::credential::DeviceSigner;
+            use farder_mls::group::MlsChannelGroup;
+
+            let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+            let (store, store_instance_hash) =
+                resume_store(&farder_data_dir(), &key).map_err(|e| e.to_string())?;
+            let mut mls = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+                .ok_or_else(|| "no local MLS state for this channel".to_string())?;
+            if let Some(reason) = mls.poisoned.clone() {
+                return Err(format!("channel state could not be confirmed (poisoned): {reason}"));
+            }
+
+            let mut group = MlsChannelGroup::load(
+                &store,
+                &DeviceSigner(&device),
+                channel_group_id(&log_server_id, channel_id, mls.generation).as_bytes(),
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no local MLS group for this channel".to_string())?;
+
+            let actor = Actor {
+                device: &device,
+                identity: &identity,
+                log_server_id: &log_server_id,
+            };
+            let transport =
+                crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+            let ctx = RekeyContext {
+                key: &key,
+                generation: mls.generation,
+                store: &store,
+                store_instance_hash: &store_instance_hash,
+            };
+
+            let outcome = rekey_channel(&transport, &actor, &mut chain, &ctx, &mut group)
+                .await
+                .map_err(|e| {
+                    // A rejected rekey already merged locally (F1): the group is
+                    // one epoch ahead of the server and must not be reused.
+                    e.to_string()
+                })?;
+
+            ds.next_seq = chain.next_seq;
+            ds.last_event_hash = chain.last_event_hash.clone();
+            ds.lamport = chain.lamport;
+            ds.save(&log_server_id)?;
+
+            mls.note_rekey(outcome.local_epoch, farder_e2ee_client::event_now_secs());
+            mls.epoch = outcome.local_epoch;
+            mls.save(&log_server_id, channel_id)?;
+
+            Ok(RekeyChannelResult {
+                event_hash: outcome.event_hash,
+                epoch: outcome.local_epoch,
+            })
+        },
+    )
+    .await
+}
+
+/// Retire THIS device: emit a self-`DeviceRevoked`.
+///
+/// Irreversible and server-wide, not per channel: the fold's `revoked_devices`
+/// set is permanent, so this device can never hold a leaf again anywhere. Its
+/// decrypted history stays on this machine (the local store is untouched), but
+/// it will not receive new sealed content. The caller must warn accordingly.
+#[tauri::command]
+pub async fn revoke_own_device(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+) -> Result<String, String> {
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, mut ds, mut chain| async move {
+            use farder_crypto::event_log::device_id;
+            use farder_e2ee_client::{revoke_device, Actor};
+
+            let actor = Actor {
+                device: &device,
+                identity: &identity,
+                log_server_id: &log_server_id,
+            };
+            let transport =
+                crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+
+            // The self-revoke shape: the victim IS the signer, which is the arm
+            // of the fold's rule that authorizes an identity's own device.
+            let victim = device_id(&device.public_key());
+            let outcome = revoke_device(&transport, &actor, &mut chain, victim)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            ds.next_seq = chain.next_seq;
+            ds.last_event_hash = chain.last_event_hash.clone();
+            ds.lamport = chain.lamport;
+            ds.save(&log_server_id)?;
+
+            Ok(outcome.event_hash)
+        },
+    )
+    .await
+}
+
+/// Revoke ANOTHER member's device (owner action).
+///
+/// The fold authorizes this by "the owning identity OR the server owner", so a
+/// non-owner's attempt is refused server-side with the fold's own reason — the
+/// frontend gate is a courtesy, not the boundary.
+#[tauri::command]
+pub async fn revoke_member_device(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    device: String,
+) -> Result<String, String> {
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, own_device, mut ds, mut chain| async move {
+            use farder_e2ee_client::{revoke_device, Actor};
+
+            let actor = Actor {
+                device: &own_device,
+                identity: &identity,
+                log_server_id: &log_server_id,
+            };
+            let transport =
+                crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+
+            let outcome = revoke_device(&transport, &actor, &mut chain, device)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            ds.next_seq = chain.next_seq;
+            ds.last_event_hash = chain.last_event_hash.clone();
+            ds.lamport = chain.lamport;
+            ds.save(&log_server_id)?;
+
+            Ok(outcome.event_hash)
+        },
+    )
+    .await
+}
+
+#[derive(serde::Serialize)]
+pub struct ResetChannelResult {
+    pub event_hash: String,
+    pub new_generation: u64,
+    pub welcomed: usize,
+}
+
+/// Rebuild an E2EE channel's group from scratch at the next generation — the
+/// owner's recovery hammer for a channel that cannot be repaired any other way.
+///
+/// The fold requires EXACT COVER: the staged Welcomes must match the current
+/// member × live-device set minus the resetter's own device, no more and no
+/// fewer, or the reset is refused and the channel stays dead. The member set is
+/// therefore derived from the same live view drift detection uses, so the two
+/// can never disagree about who is entitled to a leaf.
+#[tauri::command]
+pub async fn reset_e2ee_channel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+) -> Result<ResetChannelResult, String> {
+    run_e2ee(
+        state.inner(),
+        server_id,
+        log_server_id,
+        move |state, server_id, log_server_id, identity, device, mut ds, mut chain| async move {
+            use farder_crypto::event_log::device_id;
+            use farder_e2ee_client::{reset_group, resume_store, Actor, ChannelKey, ResetContext};
+
+            let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+            let (store, store_instance_hash) =
+                resume_store(&farder_data_dir(), &key).map_err(|e| e.to_string())?;
+            let mut mls = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)?
+                .ok_or_else(|| "no local MLS state for this channel".to_string())?;
+
+            let actor = Actor {
+                device: &device,
+                identity: &identity,
+                log_server_id: &log_server_id,
+            };
+            let transport =
+                crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
+
+            // Exact cover: everyone entitled to a leaf, MINUS our own authoring
+            // device (which is the fresh group's tree by construction).
+            let own = device_id(&device.public_key());
+            let members: Vec<farder_mls::group::DeclaredMember> =
+                live_channel_leaves(&transport, &state, &server_id, &identity, &device)
+                    .await?
+                    .into_iter()
+                    .filter(|m| !(m.identity == identity.public_key() && m.device == own))
+                    .collect();
+
+            let ctx = ResetContext {
+                key: &key,
+                store: &store,
+                store_instance_hash: &store_instance_hash,
+            };
+            let outcome = reset_group(&transport, &actor, &mut chain, &ctx, mls.generation, &members)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            ds.next_seq = chain.next_seq;
+            ds.last_event_hash = chain.last_event_hash.clone();
+            ds.lamport = chain.lamport;
+            ds.save(&log_server_id)?;
+
+            // The reset moves the channel to a NEW generation with a fresh group
+            // and a fresh store instance; the old cadence and cursor describe a
+            // group that no longer exists, so they reset with it.
+            mls.generation = outcome.new_generation;
+            mls.epoch = 0;
+            mls.cursor = 0;
+            mls.confirmed = true; // the resetter's own leaf IS the new tree
+            mls.poisoned = None;
+            mls.has_committed = false;
+            mls.last_commit_epoch = 0;
+            mls.sealed_sends_since_last_commit = 0;
+            mls.last_rekey_secs = farder_e2ee_client::event_now_secs();
+            mls.save(&log_server_id, channel_id)?;
+
+            Ok(ResetChannelResult {
+                event_hash: outcome.event_hash,
+                new_generation: outcome.new_generation,
+                welcomed: members.len(),
+            })
+        },
+    )
+    .await
 }
