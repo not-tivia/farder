@@ -90,6 +90,44 @@ impl TransportError {
     pub fn is_stale_epoch(&self) -> bool {
         matches!(self, Self::ServerRejected { reason } if reason == "stale-epoch")
     }
+
+    /// True iff the server rejected the request with the commit-rate-rule
+    /// refusal: `"event rejected: commit-rate rule: ..."` — the fold's
+    /// `event_log_state.rs:1187-1203` gate saying a non-drift-discharging
+    /// commit (an empty-adds/removes rekey is exactly that) is not permitted
+    /// yet: the author has already committed and the epoch gap has not elapsed.
+    ///
+    /// Distinct from [`Self::is_stale_epoch`]: that is the bare `"stale-epoch"`
+    /// epoch-CAS bounce, while this is a *policy* refusal at the cited epoch.
+    pub fn is_commit_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Self::ServerRejected { reason } if reason.contains("commit-rate rule:")
+        )
+    }
+
+    /// True iff the server rejected a sealed send because the freshness ceiling
+    /// was reached: `"event rejected: freshness ceiling reached: ..."`. This is
+    /// the fold's guarantee that the commit-rate rule now stands aside
+    /// (`ceiling_demands_rekey`, `event_log_state.rs:267-270`), so a rekey is
+    /// permitted and the caller should rekey then retry.
+    pub fn is_freshness_ceiling_reached(&self) -> bool {
+        matches!(
+            self,
+            Self::ServerRejected { reason } if reason.contains("freshness ceiling reached")
+        )
+    }
+
+    /// The rejection/transport reason string, verbatim. For
+    /// [`Self::ServerRejected`] this is the server's reason (including the
+    /// `"event rejected: "` prefix when present); for [`Self::Transport`] it is
+    /// the connection/IO/decode message.
+    pub fn rejection_reason(&self) -> &str {
+        match self {
+            Self::ServerRejected { reason } => reason,
+            Self::Transport(message) => message,
+        }
+    }
 }
 
 impl fmt::Display for TransportError {
@@ -246,6 +284,53 @@ mod tests {
         assert!(!TransportError::rejected("event rejected: bad signature").is_stale_epoch());
         assert!(!TransportError::rejected("stale-epoch: extra").is_stale_epoch());
         assert!(!TransportError::transport("connection reset").is_stale_epoch());
+    }
+
+    #[test]
+    fn commit_rate_limited_predicate_matches_the_fold_rejection() {
+        // The fold's verbatim message, wrapped the way the server wraps every
+        // non-bare fold rejection (`handlers.rs:2340`).
+        let e = TransportError::rejected(
+            "event rejected: commit-rate rule: a non-drift-discharging commit \
+             must be its author's first or at least 2 epochs past their previous one",
+        );
+        assert!(e.is_commit_rate_limited());
+        // And it is NOT a stale-epoch: the two predicates are disjoint.
+        assert!(!e.is_stale_epoch());
+    }
+
+    #[test]
+    fn commit_rate_limited_predicate_rejects_other_rejections() {
+        assert!(!TransportError::rejected("event rejected: bad signature").is_commit_rate_limited());
+        assert!(!TransportError::rejected("stale-epoch").is_commit_rate_limited());
+        assert!(!TransportError::transport("connection reset").is_commit_rate_limited());
+    }
+
+    #[test]
+    fn freshness_ceiling_predicate_matches_the_fold_rejection() {
+        let e = TransportError::rejected(
+            "event rejected: freshness ceiling reached: the channel is sealed until somebody rekeys",
+        );
+        assert!(e.is_freshness_ceiling_reached());
+        assert!(!e.is_commit_rate_limited());
+    }
+
+    #[test]
+    fn freshness_ceiling_predicate_rejects_other_rejections() {
+        assert!(!TransportError::rejected("event rejected: bad signature")
+            .is_freshness_ceiling_reached());
+        assert!(!TransportError::rejected("stale-epoch").is_freshness_ceiling_reached());
+        assert!(!TransportError::transport("connection reset").is_freshness_ceiling_reached());
+    }
+
+    #[test]
+    fn rejection_reason_returns_the_verbatim_server_reason() {
+        let e = TransportError::rejected("event rejected: commit-rate rule: nope");
+        assert_eq!(e.rejection_reason(), "event rejected: commit-rate rule: nope");
+        assert_eq!(
+            TransportError::transport("io broke").rejection_reason(),
+            "io broke"
+        );
     }
 
     #[test]

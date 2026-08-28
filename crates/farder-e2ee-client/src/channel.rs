@@ -111,6 +111,18 @@ pub enum E2eeError {
     /// log (Task 6) before doing anything else. This is never silently
     /// swallowed and never reported as success.
     StaleEpochDiverged { local_epoch: u64 },
+    /// The server refused a rekey commit under the commit-rate rule
+    /// (`event_log_state.rs:1187-1203`): the author has already committed in
+    /// this channel and the epoch gap has not yet elapsed, so the rekey is not
+    /// permitted YET. This is a *policy* refusal at the cited epoch, not the
+    /// bare `"stale-epoch"` epoch-CAS bounce — but note `self_update` still
+    /// merged locally, so the local group is one epoch ahead of the server and
+    /// must not be reused until resynced (same divergence caveat as
+    /// [`E2eeError::StaleEpochDiverged`]). A caller must NOT retry the rekey in
+    /// a loop: when to rekey later is the cadence policy's job
+    /// ([`crate::rekey`]), keyed off the `"freshness ceiling reached"` send
+    /// rejection or a sufficient epoch gap.
+    RekeyRateLimited { reason: String },
     /// A `channel_id` below `E2EE_CHANNEL_ID_FLOOR` — the id must stay clear
     /// of the legacy DB `channels` AUTOINCREMENT space.
     ChannelIdBelowFloor { channel_id: u64 },
@@ -161,6 +173,20 @@ impl E2eeError {
     pub fn is_stale_epoch_diverged(&self) -> bool {
         matches!(self, Self::StaleEpochDiverged { .. })
     }
+
+    /// True iff the server refused a rekey under the commit-rate rule — "you
+    /// may not rekey yet". See [`E2eeError::RekeyRateLimited`].
+    pub fn is_rekey_rate_limited(&self) -> bool {
+        matches!(self, Self::RekeyRateLimited { .. })
+    }
+
+    /// True iff a sealed send was rejected because the freshness ceiling was
+    /// reached — the fold's guarantee that a rekey is now permitted, so the
+    /// caller should rekey and retry. Keys on the `"freshness ceiling reached"`
+    /// reason inside [`E2eeError::Transport`].
+    pub fn is_freshness_ceiling_reached(&self) -> bool {
+        matches!(self, Self::Transport(e) if e.is_freshness_ceiling_reached())
+    }
 }
 
 impl fmt::Display for E2eeError {
@@ -172,6 +198,9 @@ impl fmt::Display for E2eeError {
                 "server rejected our commit as stale-epoch; the local group is now at epoch \
                  {local_epoch}, one ahead of the server — resync from the log before continuing"
             ),
+            Self::RekeyRateLimited { reason } => {
+                write!(f, "rekey refused by the commit-rate rule (not permitted yet): {reason}")
+            }
             Self::ChannelIdBelowFloor { channel_id } => write!(
                 f,
                 "channel id {channel_id} is below the E2EE floor {E2EE_CHANNEL_ID_FLOOR}"

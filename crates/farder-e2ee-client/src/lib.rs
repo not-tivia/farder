@@ -17,6 +17,7 @@ pub mod channel;
 pub mod channel_key;
 pub mod commit;
 pub mod join;
+pub mod rekey;
 pub mod resync;
 pub mod sealed;
 pub mod transport;
@@ -40,6 +41,11 @@ pub use farder_mls::group::JoinInfo;
 pub use join::{
     confirm_leaf, create_joiner_store, fetch_pending_welcomes, join_channel, resume_store,
     LeafConfirmation, PendingWelcome, SendEligibility,
+};
+pub use rekey::{
+    rekey_channel, rekey_permitted_by_rate_rule, should_rekey, HoldReason, RekeyCadence,
+    RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger, REKEY_SEALED_SEND_INTERVAL,
+    REKEY_WALL_CLOCK_SECS,
 };
 pub use resync::{
     fetch_mls_control_exhaustive, send_sealed_resync, ResyncOutcome, ResyncRequest,
