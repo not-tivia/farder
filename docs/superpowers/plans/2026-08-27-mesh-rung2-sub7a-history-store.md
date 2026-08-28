@@ -181,3 +181,13 @@ positive control IS that check).
   surface") — a GUI surface, deferred to 7b with the search UI.
 - DM history is out of scope: different key mechanism, unchanged by this rung.
 - If H2 lands as "wipe", the owner needs the wipe stated in the 7b release note.
+  **It did.** Existing E2EE channels must be recreated.
+- **The ceiling on all of this is the 4-digit PIN, and it is worth saying plainly.**
+  Every at-rest key in the client now derives from the identity key, which is
+  wrapped under Argon2id(64 MiB, 3) over a 4-digit PIN — 10,000 possibilities. The
+  memory-hard KDF makes each guess cost ~0.3-0.5s and limits parallelism, but a
+  seized device still faces a bounded search. Sub-7a raised the floor from "read
+  the files" to "break the PIN first"; raising the CEILING needs a longer PIN or
+  passphrase option, which is a product decision, not a crypto one. Nothing here
+  is weaker for it — but do not describe the result as "a seized laptop reveals
+  nothing" without that caveat.
