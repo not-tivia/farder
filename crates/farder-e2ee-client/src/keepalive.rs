@@ -77,6 +77,55 @@ pub enum KeepaliveAction {
     DischargedThenSent,
 }
 
+/// Who gained or lost the ability to read a channel between two snapshots of
+/// its leaf set (sub-5b K5).
+///
+/// This is the fact the transparency notice is made of. The spec requires a
+/// leaf-set change to surface in-channel — "a new device of Alice can now read
+/// #private" — and it must be derived from the group's ACTUAL leaf view, never
+/// from a commit's declared adds/removes. A notice built from declared data is a
+/// notice an attacker writes: the whole point of Gate 2 is that what a commit
+/// CLAIMS and what the tree HOLDS are different things.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LeafDiff {
+    /// Leaves present after but not before: these devices can now read.
+    pub gained: Vec<DeclaredMember>,
+    /// Leaves present before but not after: these devices no longer can.
+    pub lost: Vec<DeclaredMember>,
+}
+
+impl LeafDiff {
+    pub fn is_empty(&self) -> bool {
+        self.gained.is_empty() && self.lost.is_empty()
+    }
+}
+
+/// Diff two leaf snapshots. Order-insensitive; a leaf in both is unchanged.
+pub fn leaf_diff(before: &[DeclaredMember], after: &[DeclaredMember]) -> LeafDiff {
+    let has = |set: &[DeclaredMember], m: &DeclaredMember| {
+        set.iter().any(|k| k.identity == m.identity && k.device == m.device)
+    };
+    LeafDiff {
+        gained: after.iter().filter(|m| !has(before, m)).cloned().collect(),
+        lost: before.iter().filter(|m| !has(after, m)).cloned().collect(),
+    }
+}
+
+/// Snapshot a group's ACTUAL leaf set, for use with [`leaf_diff`].
+///
+/// Returns an empty snapshot if the tree cannot be read. That is deliberate for
+/// this caller: a notice is a transparency signal, not a gate, and failing a
+/// channel open because we could not enumerate leaves would trade a real
+/// capability for a cosmetic one. The security decisions that DO depend on the
+/// leaf view (Gate 2, the add idempotency guard, drift detection) each fail
+/// closed on their own.
+pub fn leaf_snapshot(group: &MlsChannelGroup) -> Vec<DeclaredMember> {
+    group
+        .leaves()
+        .map(|ls| ls.into_iter().map(|l| l.member).collect())
+        .unwrap_or_default()
+}
+
 /// The number of distinct identities holding a leaf in this group — the client's
 /// estimate of the fold's `committing_identities()`, which feeds the commit-rate
 /// half of [`crate::rekey::should_rekey`].
@@ -91,7 +140,7 @@ pub fn committing_identities(group: &MlsChannelGroup) -> u64 {
         return 1;
     };
     let mut ids: Vec<_> = leaves.into_iter().map(|l| l.member.identity).collect();
-    ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    ids.sort_by_key(|a| a.to_string());
     ids.dedup();
     (ids.len() as u64).max(1)
 }
@@ -169,5 +218,81 @@ pub async fn send_sealed_keepalive<T: E2eeTransport + Sync>(
             })
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use farder_crypto::identity::Keypair;
+
+    fn member(id: &Keypair, device: &str) -> DeclaredMember {
+        DeclaredMember {
+            identity: id.public_key(),
+            device: device.to_string(),
+        }
+    }
+
+    #[test]
+    fn leaf_diff_reports_only_what_actually_changed() {
+        let alice = Keypair::generate();
+        let bob = Keypair::generate();
+        let before = vec![member(&alice, "dev-a"), member(&bob, "dev-b")];
+        let after = vec![
+            member(&alice, "dev-a"),
+            member(&alice, "dev-a2"), // Alice added a second device
+            // Bob's leaf is gone
+        ];
+
+        let diff = leaf_diff(&before, &after);
+        assert_eq!(diff.gained, vec![member(&alice, "dev-a2")]);
+        assert_eq!(diff.lost, vec![member(&bob, "dev-b")]);
+        assert!(!diff.is_empty());
+    }
+
+    #[test]
+    fn an_unchanged_leaf_set_produces_no_notice() {
+        let alice = Keypair::generate();
+        let set = vec![member(&alice, "dev-a")];
+        assert!(leaf_diff(&set, &set).is_empty(), "a no-op run must not notify");
+    }
+
+    /// The same device id under a DIFFERENT identity is a different leaf. If the
+    /// diff keyed on the device alone, an impostor reusing a device id would
+    /// slip in without a notice — exactly what the notice exists to prevent.
+    #[test]
+    fn the_diff_keys_on_identity_and_device_together() {
+        let alice = Keypair::generate();
+        let mallory = Keypair::generate();
+        let before = vec![member(&alice, "dev-a")];
+        let after = vec![member(&alice, "dev-a"), member(&mallory, "dev-a")];
+
+        let diff = leaf_diff(&before, &after);
+        assert_eq!(diff.gained, vec![member(&mallory, "dev-a")]);
+        assert!(diff.lost.is_empty());
+    }
+
+    #[test]
+    fn diff_is_order_insensitive() {
+        let alice = Keypair::generate();
+        let bob = Keypair::generate();
+        let before = vec![member(&alice, "a"), member(&bob, "b")];
+        let after = vec![member(&bob, "b"), member(&alice, "a")];
+        assert!(leaf_diff(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn dead_leaves_is_the_leaf_set_minus_the_live_set() {
+        // Exercised against a real group in the harness
+        // (`a_ban_does_not_brick_a_channel`); this pins the subtraction itself.
+        let alice = Keypair::generate();
+        let bob = Keypair::generate();
+        let live = vec![member(&alice, "dev-a")];
+        let leaves = vec![member(&alice, "dev-a"), member(&bob, "dev-b")];
+        let dead: Vec<_> = leaves
+            .into_iter()
+            .filter(|m| !live.iter().any(|k| k.identity == m.identity && k.device == m.device))
+            .collect();
+        assert_eq!(dead, vec![member(&bob, "dev-b")]);
     }
 }

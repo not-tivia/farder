@@ -271,6 +271,32 @@ export async function decryptSealedMessage(serverId: string, logServerId: string
   return invoke<SealedDecryptResult>("decrypt_sealed_message", { serverId, logServerId, channelId, ciphertext });
 }
 
+/** Manually refresh an encrypted channel's keys. The automatic paths (a send
+ *  that hits the freshness ceiling, and the proactive cadence) normally handle
+ *  this; the manual one exists for a channel already sealed. */
+export async function rekeyE2eeChannel(serverId: string, logServerId: string, channelId: number): Promise<{ event_hash: string; epoch: number }> {
+  return invoke("rekey_e2ee_channel", { serverId, logServerId, channelId });
+}
+
+/** Retire THIS device. Irreversible and server-wide: revocation is permanent in
+ *  the log, so this device can never hold a leaf again anywhere on this server.
+ *  Confirm before calling. */
+export async function revokeOwnDevice(serverId: string, logServerId: string): Promise<string> {
+  return invoke<string>("revoke_own_device", { serverId, logServerId });
+}
+
+/** Revoke another member's device (owner action). The server enforces the
+ *  permission; the UI gate is a courtesy, not the boundary. */
+export async function revokeMemberDevice(serverId: string, logServerId: string, device: string): Promise<string> {
+  return invoke<string>("revoke_member_device", { serverId, logServerId, device });
+}
+
+/** Rebuild an encrypted channel's group at the next generation — the owner's
+ *  recovery hammer. Everyone must rejoin, and it is irreversible. */
+export async function resetE2eeChannel(serverId: string, logServerId: string, channelId: number): Promise<{ event_hash: string; new_generation: number; welcomed: number }> {
+  return invoke("reset_e2ee_channel", { serverId, logServerId, channelId });
+}
+
 /** One row of locally stored (sealed-at-rest) E2EE history. `author` is raw
  *  public-key bytes — the same bytes as a message row's `author.bytes`. */
 export interface HistoryRow {

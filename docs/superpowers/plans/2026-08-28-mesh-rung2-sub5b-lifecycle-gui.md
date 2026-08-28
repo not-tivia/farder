@@ -76,11 +76,11 @@ ceiling signal.** Cadence state (`RekeyCadence`) persists in the existing
       derive the dead leaves (5a's `dead_leaves_from_revocation` / the ban's
       membership change) and call `discharge_drift`. Handle the race exactly as
       5a specified: one attempt, `stale-epoch` → back off, never spin.
-- [ ] **K4 — lifecycle commands.** `revoke_own_device`, `revoke_member_device`
+- [x] **K4 — lifecycle commands.** `revoke_own_device`, `revoke_member_device`
       (owner), `reset_e2ee_channel` (owner), `rekey_e2ee_channel` (manual escape
       hatch), each a thin wrapper over the crate, each documented in
       `tauri-commands.md` in the same commit and cross-checked by `seam_audit.py`.
-- [ ] **K5 — the leaf-diff surface.** Extend the steward's result with the
+- [x] **K5 — the leaf-diff surface.** Extend the steward's result with the
       `group.leaves()` diff per applied commit (D2), so 5b-2 renders notices from
       a fact the crate computed rather than the frontend guessing.
 - [x] **K6 — harness proof (named deliverable).** (both bricking paths proven; rekey cadence K2 still to come) Extend `tests/e2ee_lifecycle.rs`:

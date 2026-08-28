@@ -53,8 +53,8 @@ pub use join::{
     LeafConfirmation, PendingWelcome, SendEligibility,
 };
 pub use keepalive::{
-    committing_identities, dead_leaves, send_sealed_keepalive, KeepaliveAction, KeepaliveOutcome,
-    KeepaliveRepairs,
+    committing_identities, dead_leaves, leaf_diff, leaf_snapshot, send_sealed_keepalive,
+    KeepaliveAction, KeepaliveOutcome, KeepaliveRepairs, LeafDiff,
 };
 pub use rekey::{
     rekey_channel, rekey_permitted_by_rate_rule, should_rekey, HoldReason, RekeyCadence,
