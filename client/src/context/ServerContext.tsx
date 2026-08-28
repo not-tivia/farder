@@ -62,6 +62,17 @@ export interface PerServerState {
   /** Transparency notices per channel (sub-5b G1), oldest-first. Non-dismissible
    *  by design: a leaf-set change is a security-relevant fact, not a toast. */
   notices: Record<number, NoticeRow[]>;
+  /** Our OWN sealed sends, keyed by the event hash the server assigned:
+   *  `eventHash -> the text we typed`.
+   *
+   *  Load-bearing, not a cache. **A sender cannot decrypt its own MLS message** —
+   *  application messages are sealed under the sender's own ratchet, which the
+   *  sender keeps no decryption side for (pinned by farder-e2ee-client's
+   *  `a_sender_cannot_open_its_own_message_so_the_client_must_echo_locally`).
+   *  So the author's own messages MUST render from what they typed; handing the
+   *  echo to `decrypt_sealed_message` shows the author their own words as
+   *  "couldn't decrypt". Entries are consumed when the echo arrives. */
+  ownSealedSends: Record<string, string>;
 }
 
 export interface AppState {
@@ -107,6 +118,7 @@ const initialPerServerState: PerServerState = {
   sealedDecrypts: {},
   historyHydrated: {},
   notices: {},
+  ownSealedSends: {},
 };
 
 /** Combined chip cap for the active-widgets bar — mirrors the server's
@@ -196,7 +208,8 @@ export type AppAction =
   | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } }
   | { type: "MLS_STATE"; serverId: string; payload: { channelId: number; confirmed: boolean; outcome: "advanced" | "equivocation"; reason: string | null } }
   | { type: "HISTORY_HYDRATED"; serverId: string; payload: { channelId: number } }
-  | { type: "SET_NOTICES"; serverId: string; payload: { channelId: number; notices: NoticeRow[] } };
+  | { type: "SET_NOTICES"; serverId: string; payload: { channelId: number; notices: NoticeRow[] } }
+  | { type: "OWN_SEALED_SENT"; serverId: string; payload: { eventHash: string; content: string } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -387,6 +400,14 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       if (state.mlsControlEvents.some((e) => e.eventHash === action.payload.eventHash)) return state;
       return { ...state, mlsControlEvents: [...state.mlsControlEvents, action.payload] };
     }
+    case "OWN_SEALED_SENT":
+      return {
+        ...state,
+        ownSealedSends: {
+          ...state.ownSealedSends,
+          [action.payload.eventHash]: action.payload.content,
+        },
+      };
     case "SET_NOTICES":
       return {
         ...state,
@@ -397,9 +418,14 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ...state,
         historyHydrated: { ...state.historyHydrated, [action.payload.channelId]: true },
       };
-    case "SEALED_DECRYPTED":
+    case "SEALED_DECRYPTED": {
+      // Once the echo is rendered, drop our own-send entry — otherwise the map
+      // grows for the whole session.
+      const ownSealedSends = { ...state.ownSealedSends };
+      if (action.payload.eventHash) delete ownSealedSends[action.payload.eventHash];
       return {
         ...state,
+        ownSealedSends,
         sealedDecrypts: {
           ...state.sealedDecrypts,
           [action.payload.messageId]: {
@@ -409,6 +435,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
           },
         },
       };
+    }
     case "SEALED_UNDECRYPTABLE":
       return {
         ...state,

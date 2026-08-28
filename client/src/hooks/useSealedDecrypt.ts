@@ -41,6 +41,7 @@ export function useSealedDecrypt(): void {
   const messages = server?.messages ?? {};
   const sealedDecrypts = server?.sealedDecrypts ?? {};
   const historyHydrated = server?.historyHydrated ?? {};
+  const ownSealedSends = server?.ownSealedSends ?? {};
 
   useEffect(() => {
     if (!activeServerId || !logServerId) return;
@@ -63,6 +64,34 @@ export function useSealedDecrypt(): void {
         // Already decrypted THIS ciphertext (same message id + event hash) —
         // never re-open it.
         if (existing && existing.eventHash === eventHash) continue;
+
+        // OUR OWN send: render what we typed. A sender cannot decrypt its own
+        // MLS message (the ratchet has no decryption side for it), so handing
+        // this to `decrypt_sealed_message` would show the author their own words
+        // as "couldn't decrypt" — which is exactly what it did before this
+        // check existed. Persist it too, so it survives a restart like any
+        // other message.
+        const own = eventHash ? ownSealedSends[eventHash] : undefined;
+        if (own !== undefined) {
+          dispatch({
+            type: "SEALED_DECRYPTED",
+            serverId: activeServerId,
+            payload: { messageId: msg.id, eventHash, content: own },
+          });
+          void api
+            .historyPut({
+              channel_id: channelId,
+              message_id: msg.id,
+              event_hash: eventHash ?? "",
+              timestamp: msg.timestamp ?? 0,
+              author: msg.author?.bytes ?? [],
+              content: own,
+              reply_to: null,
+              attachments: [],
+            })
+            .catch((e) => console.warn("[history] put (own send) failed:", e));
+          continue;
+        }
 
         const key = `${activeServerId}:${msg.id}:${eventHash}`;
         if (inFlight.has(key)) continue; // an open is already in flight; join it
@@ -117,5 +146,5 @@ export function useSealedDecrypt(): void {
         inFlight.set(key, promise);
       }
     }
-  }, [activeServerId, logServerId, messages, sealedDecrypts, historyHydrated, dispatch]);
+  }, [activeServerId, logServerId, messages, sealedDecrypts, historyHydrated, ownSealedSends, dispatch]);
 }

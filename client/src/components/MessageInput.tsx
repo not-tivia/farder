@@ -6,7 +6,7 @@ import * as gifApi from "../lib/gifSearch";
 import type { MemberInfo, CommandInfo } from "../lib/types";
 import type { BookItem } from "../lib/book/types";
 import { publicKeyToString, isE2eeChannel } from "../lib/types";
-import { useActiveServer } from "../context/ServerContext";
+import { useActiveServer, useApp } from "../context/ServerContext";
 import SendStickerPicker from "./SendStickerPicker";
 import EmojiAutocomplete from "./EmojiAutocomplete";
 import VoiceRecorder from "./VoiceRecorder";
@@ -63,6 +63,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   }, [serverId]);
 
   const activeServer = useActiveServer();
+  const { dispatch } = useApp();
   const members = activeServer?.members ?? [];
   const isE2ee = isE2eeChannel(activeServer?.channels.find((c) => c.id === channelId) ?? null);
 
@@ -263,7 +264,15 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       setSending(true);
       setError(null);
       try {
-        await api.sendSealedMessage(serverId, logServerId, channelId, text, null);
+        // Record what we typed against the event hash the server assigns. The
+        // author cannot decrypt their own MLS message, so this is the ONLY way
+        // their own text ever renders — see `ownSealedSends`.
+        const sent = await api.sendSealedMessage(serverId, logServerId, channelId, text, null);
+        dispatch({
+          type: "OWN_SEALED_SENT",
+          serverId,
+          payload: { eventHash: sent.event_hash, content: text },
+        });
         setContent("");
         setAttachedFileId(null);
         setAttachedFileName(null);

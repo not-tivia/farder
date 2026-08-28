@@ -482,6 +482,50 @@ mod tests {
         }
     }
 
+
+    /// **A sender CANNOT open its own sealed message**, and a client that tries
+    /// will show the author their own text as "couldn't decrypt".
+    ///
+    /// This is MLS working correctly, not a defect: application messages are
+    /// sealed under the sender's own ratchet, which the sender does not keep a
+    /// decryption side for. It is pinned here because it is invisible in every
+    /// other test — the roundtrip tests all have ONE party send and the OTHER
+    /// open — and because it dictates a client design rule:
+    ///
+    /// **The author's own messages must render from what they typed, recorded
+    /// locally at send time. Never by decrypting the echo from the server.**
+    #[tokio::test]
+    async fn a_sender_cannot_open_its_own_message_so_the_client_must_echo_locally() {
+        let mut f = two_member(1 << 62);
+        let k = key(1 << 62);
+        let transport = FakeTransport::new();
+        let alice_actor = actor(&f.alice_id, &f.alice_dev);
+        let mut alice_chain = mid_chain();
+        let ctx = SealContext {
+            key: &k,
+            generation: 0,
+            store: &f.alice_store,
+            content: "can i read myself",
+            reply_to: None,
+        };
+        send_sealed(&transport, &alice_actor, &mut alice_chain, &ctx, &mut f.alice_group,
+                    &SendEligibility::confirmed()).await.unwrap();
+        let (ciphertext, ..) = last_sealed_payload(&transport);
+
+        match receive_sealed(&f.alice_store, &mut f.alice_group, ciphertext.clone()) {
+            SealedOutcome::Undecryptable { reason } => assert!(!reason.is_empty()),
+            SealedOutcome::Decrypted(_) => {
+                panic!("a sender opened its own message — MLS would have to have changed")
+            }
+        }
+
+        // The counterpart still works: the RECIPIENT reads it fine.
+        assert_decrypted(
+            receive_sealed(&f.bob_store, &mut f.bob_group, ciphertext),
+            "can i read myself",
+        );
+    }
+
     #[test]
     fn tampered_ciphertext_is_undecryptable_without_panicking() {
         let mut f = two_member(1 << 61);
