@@ -13,6 +13,39 @@ import * as api from "../lib/tauri-bridge";
 // Non-spinning by construction: the effect fires only when the (server,
 // channel) pair changes (tracked in a ref, not a dependency), and the steward
 // command itself is cursor-based + idempotent, so a re-run is a cheap no-op.
+/** Persist this run's leaf changes as notices, then return the channel's full
+ *  notice list for rendering. Best-effort: a storage failure must never break
+ *  the steward — a missing notice is a lesser harm than a channel that will not
+ *  advance — but it IS logged, because a silently missing transparency notice
+ *  defeats the point of having one. */
+async function recordLeafNotices(
+  serverId: string,
+  channelId: number,
+  epoch: number,
+  gained: api.LeafChange[],
+  lost: api.LeafChange[],
+): Promise<api.NoticeRow[] | null> {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    for (const [kind, list] of [["gained", gained], ["lost", lost]] as const) {
+      for (const change of list) {
+        await api.historyPutNotice({
+          channel_id: channelId,
+          id: `${kind}:${change.identity}:${change.device}:${epoch}`,
+          timestamp: now,
+          kind,
+          identity: change.identity,
+          device: change.device,
+        });
+      }
+    }
+    return await api.historyNotices(channelId, 200);
+  } catch (e) {
+    console.warn(`[e2ee] transparency notice not recorded for ${serverId}/${channelId}:`, e);
+    return null;
+  }
+}
+
 export function useMlsSteward(): void {
   const { state, dispatch } = useApp();
   const activeServerId = state.activeServerId;
@@ -54,6 +87,23 @@ export function useMlsSteward(): void {
             reason: result.reason,
           },
         });
+        // G1: turn the leaf diff into in-channel transparency notices. The
+        // spec requires a leaf-set change to be visible in the channel — "a new
+        // device of Alice can now read #private" — because silent read-access
+        // changes are exactly what an attacker wants. Persisted (not toasted)
+        // so restarting cannot make you miss one; the id is deterministic, so
+        // the cursor-based steward re-observing a change replaces rather than
+        // stacks.
+        void recordLeafNotices(activeServerId, result.channel_id, result.epoch, result.leaves_gained, result.leaves_lost)
+          .then((notices) => {
+            if (notices) {
+              dispatch({
+                type: "SET_NOTICES",
+                serverId: activeServerId,
+                payload: { channelId: result.channel_id, notices },
+              });
+            }
+          });
         // Publish our KeyPackage only if we are NOT yet a confirmed member.
         // CRITICAL non-destructive guard (T9's flag): `publish_own_key_package`
         // overwrites `mls_state.json` back to `confirmed: false` / epoch 0, so

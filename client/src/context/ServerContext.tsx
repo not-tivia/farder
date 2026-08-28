@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
 import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, MlsChannelStateInfo, SealedDecryptEntry } from "../lib/types";
 import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
+import type { NoticeRow } from "../lib/tauri-bridge";
 
 export interface PerServerState {
   serverName: string;
@@ -58,6 +59,9 @@ export interface PerServerState {
    *  message we already hold locally has had its ratchet key consumed — the
    *  open would fail and cache "couldn't decrypt" over restored history. */
   historyHydrated: Record<number, boolean>;
+  /** Transparency notices per channel (sub-5b G1), oldest-first. Non-dismissible
+   *  by design: a leaf-set change is a security-relevant fact, not a toast. */
+  notices: Record<number, NoticeRow[]>;
 }
 
 export interface AppState {
@@ -102,6 +106,7 @@ const initialPerServerState: PerServerState = {
   mlsStates: {},
   sealedDecrypts: {},
   historyHydrated: {},
+  notices: {},
 };
 
 /** Combined chip cap for the active-widgets bar — mirrors the server's
@@ -190,7 +195,8 @@ export type AppAction =
   | { type: "SEALED_DECRYPTED"; serverId: string; payload: { messageId: number; eventHash: string | null; content: string } }
   | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } }
   | { type: "MLS_STATE"; serverId: string; payload: { channelId: number; confirmed: boolean; outcome: "advanced" | "equivocation"; reason: string | null } }
-  | { type: "HISTORY_HYDRATED"; serverId: string; payload: { channelId: number } };
+  | { type: "HISTORY_HYDRATED"; serverId: string; payload: { channelId: number } }
+  | { type: "SET_NOTICES"; serverId: string; payload: { channelId: number; notices: NoticeRow[] } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -381,6 +387,11 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       if (state.mlsControlEvents.some((e) => e.eventHash === action.payload.eventHash)) return state;
       return { ...state, mlsControlEvents: [...state.mlsControlEvents, action.payload] };
     }
+    case "SET_NOTICES":
+      return {
+        ...state,
+        notices: { ...state.notices, [action.payload.channelId]: action.payload.notices },
+      };
     case "HISTORY_HYDRATED":
       return {
         ...state,

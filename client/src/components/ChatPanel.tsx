@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
@@ -9,6 +9,7 @@ import MessageInput from "./MessageInput";
 import ThreadPanel from "./ThreadPanel";
 import ActiveWidgetsBar from "./ActiveWidgetsBar";
 import { openMessageSearch } from "./AppShell";
+import { E2eeLeafNotice } from "./E2eeLeafNotice";
 
 export default function ChatPanel() {
   const { dispatch } = useApp();
@@ -49,6 +50,8 @@ export default function ChatPanel() {
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
   const undecryptableCount = channelMessages.filter((m) => activeServer?.sealedDecrypts?.[m.id]?.kind === "undecryptable").length;
+  // Leaf-change transparency notices for this channel (G1), oldest-first.
+  const channelNotices = (currentChannelId !== null ? activeServer?.notices?.[currentChannelId] : undefined) ?? [];
 
   const highlightMessageId = activeServer?.highlightMessageId ?? null;
   useEffect(() => {
@@ -214,8 +217,30 @@ export default function ChatPanel() {
           const withinWindow = prev &&
             (msg.timestamp - prev.timestamp) < 300;
           const grouped = !!(sameAuthor && withinWindow);
-          return <Message key={msg.id} message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} sealedDecrypt={activeServer.sealedDecrypts?.[msg.id]} onReply={(msg) => setReplyTo(msg)} />;
+          // Transparency notices (G1) sit at the point in the timeline where the
+          // leaf change happened, so "who could read this when" reads in order.
+          const before = channelNotices.filter(
+            (n) => n.timestamp <= msg.timestamp && (!prev || n.timestamp > prev.timestamp),
+          );
+          return (
+            <React.Fragment key={msg.id}>
+              {before.map((n) => (
+                <E2eeLeafNotice key={n.id} notice={n} memberName={memberNames[n.identity]} />
+              ))}
+              <Message message={msg} memberNames={memberNames} grouped={grouped} serverId={serverId} highlighted={msg.id === highlightMessageId} sealedDecrypt={activeServer.sealedDecrypts?.[msg.id]} onReply={(msg) => setReplyTo(msg)} />
+            </React.Fragment>
+          );
         })}
+        {/* Anything newer than the last message (or every notice in an empty
+            channel) still has to appear — a notice must never be swallowed. */}
+        {channelNotices
+          .filter((n) => {
+            const last = channelMessages[channelMessages.length - 1];
+            return !last || n.timestamp > last.timestamp;
+          })
+          .map((n) => (
+            <E2eeLeafNotice key={n.id} notice={n} memberName={memberNames[n.identity]} />
+          ))}
         <div ref={bottomRef} />
       </div>
       {othersTyping.length > 0 && (

@@ -97,6 +97,8 @@ fn main() {
             history::history_purge_message,
             history::history_purge_before,
             history::history_purge_author,
+            history::history_put_notice,
+            history::history_notices,
             identity::create_identity,
             identity::unlock_identity,
             identity::migrate_plaintext_identity,
