@@ -255,11 +255,21 @@ pub async fn add_member<T: E2eeTransport + Sync>(
         },
     );
 
-    // 4. Submit the commit; a stale-epoch rejection is the divergence error.
+    // 4. Submit the commit. `add_members` already merged locally, so EVERY
+    //    rejection here diverges the group (finding F3) — a stale-epoch bounce
+    //    gets its named variant, and any other fold refusal (e.g. "declared add
+    //    of a device that is not live") surfaces as `CommitRejectedDiverged`
+    //    rather than a plain transport error the caller would keep going after.
     let accepted = match transport.submit_event(&commit_event).await {
         Ok(a) => a,
         Err(e) if e.is_stale_epoch() => {
             return Err(E2eeError::StaleEpochDiverged {
+                local_epoch: group.epoch(),
+            });
+        }
+        Err(crate::transport::TransportError::ServerRejected { reason }) => {
+            return Err(E2eeError::CommitRejectedDiverged {
+                reason,
                 local_epoch: group.epoch(),
             });
         }
@@ -753,6 +763,76 @@ mod tests {
                 assert_eq!(local_epoch, 2);
             }
             other => panic!("expected StaleEpochDiverged, got {other:?}"),
+        }
+    }
+
+    /// Finding F3: `add_members` merges locally BEFORE the submit, so a fold
+    /// refusal that is not the stale-epoch bounce diverges the group exactly the
+    /// same way. The reachable case is a revoked device — the fold answers
+    /// "declared add of a device that is not live". Before F3 this surfaced as a
+    /// plain `Transport` error, `is_diverged()` was false, and the caller kept
+    /// using a group one epoch ahead of the server.
+    #[tokio::test]
+    async fn add_member_a_non_stale_fold_refusal_also_surfaces_as_diverged() {
+        let transport = FakeTransport::new();
+        let (alice_id, alice_dev, k, mut group, store, hash, mut chain) =
+            stewarded_channel(&transport, 1 << 57).await;
+        let a = actor(&alice_id, &alice_dev);
+
+        let bob_id = Keypair::generate();
+        let bob_dev = Keypair::generate();
+        let bob_bundle =
+            generate_key_package(&store, &bob_dev, &bob_id.public_key()).unwrap();
+        let bob_kp_bytes = bob_bundle.key_package().tls_serialize_detached().unwrap();
+        let kp_event = build_next_event(
+            &bob_dev,
+            &bob_id,
+            SERVER_ID,
+            &ChainState::default(),
+            event_now_secs(),
+            EP::MlsKeyPackagePublished {
+                key_package: bob_kp_bytes,
+                store_instance_hash: [0u8; 32],
+                expires_at_log_pos: u64::MAX,
+            },
+        );
+        transport.serve_key_packages(
+            &bob_id.public_key(),
+            &device_id(&bob_dev.public_key()),
+            vec![kp_event.to_bytes()],
+        );
+        // The verbatim fold refusal for a revoked device
+        // (`event_log_state.rs:1114-1119`).
+        transport.reject_next(
+            "event rejected: declared add of a device that is not live \
+             (unknown, revoked, or cert-expired)",
+        );
+
+        let ctx = StewardContext {
+            key: &k,
+            generation: 0,
+            store: &store,
+            store_instance_hash: &hash,
+        };
+        let err = add_member(
+            &transport,
+            &a,
+            &mut chain,
+            &ctx,
+            &mut group,
+            &declared(&bob_id, &bob_dev),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.is_diverged(), "a post-merge refusal must be divergence, got {err}");
+        match err {
+            E2eeError::CommitRejectedDiverged { reason, local_epoch } => {
+                assert!(reason.contains("not live"), "fold reason preserved: {reason}");
+                // The add merged locally before the rejection.
+                assert_eq!(local_epoch, 2);
+            }
+            other => panic!("expected CommitRejectedDiverged, got {other:?}"),
         }
     }
 

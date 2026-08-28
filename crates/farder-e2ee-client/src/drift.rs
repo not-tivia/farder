@@ -221,6 +221,14 @@ pub async fn discharge_drift<T: E2eeTransport + Sync>(
                 reason: e.rejection_reason().to_string(),
             });
         }
+        Err(crate::transport::TransportError::ServerRejected { reason }) => {
+            // The local commit already merged (finding F3): any other fold
+            // refusal diverges the group just as a stale-epoch bounce does.
+            return Err(E2eeError::CommitRejectedDiverged {
+                reason,
+                local_epoch: group.epoch(),
+            });
+        }
         Err(e) => return Err(e.into()),
     };
     chain.advance(&event);

@@ -4872,11 +4872,27 @@ async fn add_current_members_to_group(
         let member_identity = member.public_key.clone();
         let member_name = member.display_name.clone();
 
-        // Enumerate this identity's authorized devices (the roster carries only
-        // the identity, not the device id — leaves are per (identity, device)).
+        // Enumerate this identity's LIVE devices (the roster carries only the
+        // identity, not the device id — leaves are per (identity, device)).
+        //
+        // `member_live_leaves` is the crate's single definition of "live":
+        // authorized, un-revoked (sub-5 S1 widened this fetch to carry
+        // `DeviceRevoked`), and cert-unexpired — the same three facts the fold
+        // checks in `declared add of a device that is not live (unknown,
+        // revoked, or cert-expired)` (`event_log_state.rs:1114-1119`).
+        //
+        // Filtering HERE is load-bearing, not tidiness (finding F3). `add_member`
+        // merges the add into the local group BEFORE it submits, and there is no
+        // rollback, so authoring an add the fold will refuse leaves this
+        // steward's group one epoch ahead of the server — diverged, and
+        // recoverable only by re-provisioning. A revoked-but-still-authorized
+        // device is the reachable case: `reprovision_device` revokes the old
+        // device and publishes a KeyPackage for the fresh one, and that publish
+        // is itself an auto-add trigger, so the old device's surviving
+        // KeyPackages would be offered to `add_member` on the very next run.
         let device_ids: Vec<String> = {
-            let events = match transport.fetch_device_certs(&member_identity).await {
-                Ok(events) => events,
+            match farder_e2ee_client::member_live_leaves(&transport, &member_identity).await {
+                Ok(leaves) => leaves.into_iter().map(|l| l.device).collect(),
                 Err(e) => {
                     let reason = format!("fetch device certs: {e}");
                     eprintln!(
@@ -4890,26 +4906,7 @@ async fn add_current_members_to_group(
                     });
                     continue;
                 }
-            };
-            let mut ids: Vec<String> = events
-                .iter()
-                .filter_map(|bytes| {
-                    let ev = Event::from_bytes(bytes).ok()?;
-                    match ev.core.payload {
-                        // Only an authorization names a device we may add. A
-                        // `DeviceRevoked` (or any other) payload must not
-                        // contribute here: its `core.device` is the REVOKER's
-                        // device, not the revoked one. Excluding revoked
-                        // devices from this roster is the cert resolver's job
-                        // (Gate 2), which fails closed for them downstream.
-                        EventPayload::DeviceAuthorized { cert } => Some(cert.core.device_id),
-                        _ => None,
-                    }
-                })
-                .collect();
-            ids.sort();
-            ids.dedup();
-            ids
+            }
         };
 
         if device_ids.is_empty() {

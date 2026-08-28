@@ -436,6 +436,12 @@ mod tests {
         }
         .is_diverged());
 
+        assert!(E2eeError::CommitRejectedDiverged {
+            reason: "declared add of a device that is not live".to_string(),
+            local_epoch: 3,
+        }
+        .is_diverged());
+
         // Not divergence: transport/chain/MLS/cap/resume-terminal are all
         // different failure classes with their own recovery (or none).
         assert!(!E2eeError::NotConfirmed.is_diverged());

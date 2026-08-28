@@ -123,6 +123,21 @@ pub enum E2eeError {
     /// ([`crate::rekey`]), keyed off the `"freshness ceiling reached"` send
     /// rejection or a sufficient epoch gap.
     RekeyRateLimited { reason: String },
+    /// The server refused an own-commit for a reason that is neither the bare
+    /// `"stale-epoch"` epoch CAS nor the commit-rate rule — for example
+    /// `"declared add of a device that is not live (unknown, revoked, or
+    /// cert-expired)"` (`event_log_state.rs:1114-1119`).
+    ///
+    /// Every own-commit primitive (`bootstrap_group` / `add_members` /
+    /// `self_update` / `remove_members`) merges **locally before the submit**,
+    /// and farder-mls offers no rollback, so ANY rejection at that point leaves
+    /// the local group one epoch ahead of the server — the same divergence
+    /// contract as [`E2eeError::StaleEpochDiverged`], and the reason finding F1
+    /// gives for [`crate::reprovision::recover_diverged_group`]. Classifying
+    /// only the two *known* rejections as divergence let every other fold
+    /// refusal poison the group silently, reported as a plain transport error.
+    /// The caller must NOT keep using the group; recover, do not retry.
+    CommitRejectedDiverged { reason: String, local_epoch: u64 },
     /// A `channel_id` below `E2EE_CHANNEL_ID_FLOOR` — the id must stay clear
     /// of the legacy DB `channels` AUTOINCREMENT space.
     ChannelIdBelowFloor { channel_id: u64 },
@@ -225,6 +240,7 @@ impl E2eeError {
             self,
             Self::StaleEpochDiverged { .. }
                 | Self::RekeyRateLimited { .. }
+                | Self::CommitRejectedDiverged { .. }
                 | Self::ResyncEquivocation { .. }
                 | Self::ResyncPoisoned { .. }
         )
@@ -243,6 +259,11 @@ impl fmt::Display for E2eeError {
             Self::RekeyRateLimited { reason } => {
                 write!(f, "rekey refused by the commit-rate rule (not permitted yet): {reason}")
             }
+            Self::CommitRejectedDiverged { reason, local_epoch } => write!(
+                f,
+                "server rejected our commit ({reason}); the local group is now at epoch \
+                 {local_epoch}, one ahead of the server — recover before continuing"
+            ),
             Self::ChannelIdBelowFloor { channel_id } => write!(
                 f,
                 "channel id {channel_id} is below the E2EE floor {E2EE_CHANNEL_ID_FLOOR}"
@@ -537,12 +558,19 @@ pub async fn bootstrap_group<T: E2eeTransport + Sync>(
         },
     );
 
-    // 3. Submit; surface a stale-epoch rejection as the explicit divergence
-    //    error rather than a generic transport error.
+    // 3. Submit; the bootstrap commit merged locally already, so surface a
+    //    stale-epoch bounce AND any other fold refusal as divergence (finding
+    //    F3) rather than a generic transport error.
     let accepted = match transport.submit_event(&event).await {
         Ok(a) => a,
         Err(e) if e.is_stale_epoch() => {
             return Err(E2eeError::StaleEpochDiverged {
+                local_epoch: group.epoch(),
+            });
+        }
+        Err(crate::transport::TransportError::ServerRejected { reason }) => {
+            return Err(E2eeError::CommitRejectedDiverged {
+                reason,
                 local_epoch: group.epoch(),
             });
         }
