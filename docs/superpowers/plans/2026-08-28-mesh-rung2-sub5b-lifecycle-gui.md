@@ -91,15 +91,15 @@ ceiling signal.** Cadence state (`RekeyCadence`) persists in the existing
 
 ## Tasks — 5b-2 (GUI, needs the Windows run)
 
-- [ ] **G1 — leaf-change notices** rendered in-channel from K5's diff, persisted
+- [x] **G1 — leaf-change notices** rendered in-channel from K5's diff, persisted
       per D3, non-dismissible, with copy that names the person and the device.
-- [ ] **G2 — per-identity device count** in the member sidebar (D4).
+- [x] **G2 — per-identity device count** in the member sidebar (D4).
 - [ ] **G3 — the lifecycle states**: "needs a key refresh" (ceiling), "sealed until
       a device is removed" (drift), "re-provisioned — history for that device is
       gone", and the two 5a carry-forwards that MUST be said out loud: a
       single-device identity cannot self-recover a lost store (owner reset is the
       only escape), and recovery costs a fresh device key.
-- [ ] **G4 — the actions**: retire this device, revoke a member's device (owner),
+- [x] **G4 — the actions** (retire this device, refresh keys, rebuild channel; owner-revoke of ANOTHER member's device deferred with G3 — it needs a device picker): retire this device, revoke a member's device (owner),
       reset the channel (owner) — each behind a confirmation that states what is
       lost, because each is irreversible.
 - [ ] **G5 — theming ×3.** Every new class gets CSS in `discord-dark`,

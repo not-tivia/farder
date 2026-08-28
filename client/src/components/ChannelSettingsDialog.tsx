@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, RoleInfo, WebhookInfo, WebhookTokenResult } from "../lib/types";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
+import { isE2eeChannel } from "../lib/types";
+import { E2eeConfirmDialog } from "./E2eeConfirmDialog";
 
 // ---------------------------------------------------------------------------
 // Relay webhook ingest base URL (v1: single known relay; change here when
@@ -28,6 +30,33 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [activeTab, setActiveTab] = useState<"general" | "permissions" | "webhooks">("general");
+  // -- Encryption actions (sub-5b G4) -------------------------------------
+  const isE2ee = isE2eeChannel(channel);
+  const logServerId = activeServer?.logServerId ?? null;
+  const [e2eeAction, setE2eeAction] = useState<null | "rekey" | "reset">(null);
+  const [e2eeBusy, setE2eeBusy] = useState(false);
+  const [e2eeError, setE2eeError] = useState<string | null>(null);
+  const [e2eeNote, setE2eeNote] = useState<string | null>(null);
+
+  async function runE2eeAction() {
+    if (!serverId || !logServerId || !e2eeAction) return;
+    setE2eeBusy(true);
+    setE2eeError(null);
+    try {
+      if (e2eeAction === "rekey") {
+        await api.rekeyE2eeChannel(serverId, logServerId, channel.id);
+        setE2eeNote("Keys refreshed.");
+      } else {
+        const r = await api.resetE2eeChannel(serverId, logServerId, channel.id);
+        setE2eeNote(`Channel rebuilt — ${r.welcomed} member device(s) re-invited.`);
+      }
+      setE2eeAction(null);
+    } catch (e) {
+      setE2eeError(String(e));
+    } finally {
+      setE2eeBusy(false);
+    }
+  }
 
   // ── Webhooks tab state ────────────────────────────────────────────────────
   const [webhooks, setWebhooks] = useState<WebhookInfo[]>([]);
@@ -151,6 +180,26 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
                   {saving ? "Saving..." : "Save Changes"}
                 </button>
               </div>
+
+              {isE2ee && (
+                <div className="connect-section" style={{ marginTop: 16, borderTop: "1px solid var(--xp-border)", paddingTop: 12 }}>
+                  <label className="connect-label">🔒 Encryption</label>
+                  <div style={{ fontSize: 11, color: "var(--xp-text-muted)", marginBottom: 8, lineHeight: 1.5 }}>
+                    This channel is end-to-end encrypted: the server stores only ciphertext and
+                    the host cannot read it. Keys refresh automatically as people talk — these are
+                    manual controls for when something is wrong.
+                  </div>
+                  {e2eeNote && <div className="success-text" style={{ marginBottom: 8 }}>{e2eeNote}</div>}
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button className="xp-button" onClick={() => { setE2eeNote(null); setE2eeAction("rekey"); }}>
+                      Refresh keys
+                    </button>
+                    <button className="xp-button" onClick={() => { setE2eeNote(null); setE2eeAction("reset"); }}>
+                      Rebuild channel…
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -260,6 +309,51 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
           )}
         </div>
       </div>
+
+      {e2eeAction === "rekey" && (
+        <E2eeConfirmDialog
+          title="Refresh this channel's keys?"
+          consequence={
+            <>
+              This rotates the channel&apos;s encryption keys so anyone removed can no longer
+              read new messages. Everyone currently in the channel keeps their access, and
+              nothing already sent is affected.
+              <br /><br />
+              Normally this happens by itself. Use it if the channel has stopped accepting
+              messages and is asking for a key refresh.
+            </>
+          }
+          confirmLabel="Refresh keys"
+          busy={e2eeBusy}
+          error={e2eeError}
+          onCancel={() => setE2eeAction(null)}
+          onConfirm={runE2eeAction}
+        />
+      )}
+
+      {e2eeAction === "reset" && (
+        <E2eeConfirmDialog
+          title="Rebuild this channel from scratch?"
+          consequence={
+            <>
+              <strong>This cannot be undone.</strong> The channel&apos;s encryption is torn down
+              and rebuilt, and every member has to be re-invited into it by their client.
+              <br /><br />
+              Messages already sent stay readable <em>only</em> on devices that already
+              decrypted them. Anyone who had not read them — and any device that reinstalls —
+              loses them for good.
+              <br /><br />
+              This is a last resort for a channel that is broken and cannot be repaired any
+              other way. Try <strong>Refresh keys</strong> first.
+            </>
+          }
+          confirmLabel="Rebuild channel"
+          busy={e2eeBusy}
+          error={e2eeError}
+          onCancel={() => setE2eeAction(null)}
+          onConfirm={runE2eeAction}
+        />
+      )}
     </div>
   );
 }

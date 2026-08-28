@@ -138,6 +138,7 @@ fn main() {
             commands::revoke_own_device,
             commands::revoke_member_device,
             commands::reset_e2ee_channel,
+            commands::e2ee_channel_leaves,
             commands::decrypt_sealed_message,
             commands::create_category,
             commands::delete_channel,

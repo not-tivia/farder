@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, Fragment } from "react";
 import { getMemberSidebarWidth, setMemberSidebarWidth, clampMemberWidth, MEMBER_SIDEBAR_DEFAULT } from "../lib/memberWidth";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import type { MemberInfo, RoleInfo } from "../lib/types";
-import { publicKeyToString, memberDisplayName } from "../lib/types";
+import { publicKeyToString, memberDisplayName, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
@@ -31,11 +31,15 @@ function nameColor(member: MemberInfo, roles: RoleInfo[]): string | undefined {
   return mine[0]?.color ?? undefined;
 }
 
-function MemberRow({ member, serverId, roles, showModBadges, onClick, onContextMenu }: {
+function MemberRow({ member, serverId, roles, showModBadges, deviceCount, onClick, onContextMenu }: {
   member: MemberInfo;
   serverId: string;
   roles: RoleInfo[];
   showModBadges: boolean;
+  /** How many of this member's DEVICES can read the current encrypted channel
+   *  (sub-5b G2). `undefined` outside encrypted channels. Devices are what read
+   *  a channel, not accounts, so a count above one is a fact worth showing. */
+  deviceCount?: number;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
@@ -59,6 +63,18 @@ function MemberRow({ member, serverId, roles, showModBadges, onClick, onContextM
             ? <span className="member-presence" style={{ opacity: 0.6 }}>fetching price&#x2026;</span>
             : status && <span className="member-status" title={status}>{status}</span>}
       </span>
+      {deviceCount !== undefined && deviceCount > 0 && (
+        <span
+          className="member-device-count"
+          title={
+            deviceCount === 1
+              ? "1 device of this member can read this encrypted channel"
+              : `${deviceCount} devices of this member can read this encrypted channel`
+          }
+        >
+          {deviceCount === 1 ? "🔑" : `🔑${deviceCount}`}
+        </span>
+      )}
       {member.is_bot && <span className="member-bot-badge">BOT</span>}
       {showModBadges && (
         <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
@@ -70,9 +86,40 @@ function MemberRow({ member, serverId, roles, showModBadges, onClick, onContextM
 export default function MemberSidebar() {
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
+  // Device counts for the current encrypted channel (sub-5b G2). Read from the
+  // group's ACTUAL leaf view via one command — not one round trip per member,
+  // and not the claimed roster.
+  const [deviceCounts, setDeviceCounts] = useState<Record<string, number>>({});
   const [profilePopup, setProfilePopup] = useState<{ member: MemberInfo; x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ target: MemberInfo; position: { x: number; y: number } } | null>(null);
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
+
+  // Load the device counts whenever the active ENCRYPTED channel changes. In a
+  // plaintext channel there is no group and no counts to show.
+  const currentChannelId = activeServer?.currentChannelId ?? null;
+  const logServerIdForCounts = activeServer?.logServerId ?? null;
+  const currentChannelIsE2ee = isE2eeChannel(
+    currentChannelId != null ? activeServer?.channels.find((c) => c.id === currentChannelId) ?? null : null,
+  );
+  useEffect(() => {
+    if (!currentChannelIsE2ee || currentChannelId == null || !logServerIdForCounts) {
+      setDeviceCounts({});
+      return;
+    }
+    let cancelled = false;
+    api
+      .e2eeChannelLeaves(logServerIdForCounts, currentChannelId)
+      .then((leaves) => {
+        if (cancelled) return;
+        const counts: Record<string, number> = {};
+        for (const leaf of leaves) counts[leaf.identity] = (counts[leaf.identity] ?? 0) + 1;
+        setDeviceCounts(counts);
+      })
+      // A missing group or locked identity is not an error state for a sidebar
+      // decoration — just show nothing.
+      .catch(() => { if (!cancelled) setDeviceCounts({}); });
+    return () => { cancelled = true; };
+  }, [currentChannelIsE2ee, currentChannelId, logServerIdForCounts]);
 
   // Draggable width (handle on the left edge). Persisted + clamped.
   const [width, setWidth] = useState(getMemberSidebarWidth());
@@ -161,6 +208,7 @@ export default function MemberSidebar() {
                 {sectionMembers.map((member) => (
                   <MemberRow
                     key={member.public_key.bytes.join(",")}
+                    deviceCount={deviceCounts[publicKeyToString(member.public_key)]}
                     member={member}
                     serverId={serverId}
                     roles={roles}
@@ -180,6 +228,7 @@ export default function MemberSidebar() {
                 {ungroupedMembers.map((member) => (
                   <MemberRow
                     key={member.public_key.bytes.join(",")}
+                    deviceCount={deviceCounts[publicKeyToString(member.public_key)]}
                     member={member}
                     serverId={serverId}
                     roles={roles}

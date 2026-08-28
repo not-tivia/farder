@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
+import { E2eeConfirmDialog } from "./E2eeConfirmDialog";
 import type { ChannelInfo } from "../lib/types";
 import BannedMembersTab from "./BannedMembersTab";
 import AuditLogTab from "./AuditLogTab";
@@ -25,6 +26,27 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [serverAvatarUrl, setServerAvatarUrl] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"general" | "banned" | "audit" | "bots">("general");
+  // -- Retire this device (sub-5b G4) -------------------------------------
+  const logServerId = activeServer?.logServerId ?? null;
+  const [showRetire, setShowRetire] = useState(false);
+  const [retireBusy, setRetireBusy] = useState(false);
+  const [retireError, setRetireError] = useState<string | null>(null);
+  const [retireNote, setRetireNote] = useState<string | null>(null);
+
+  async function retireThisDevice() {
+    if (!serverId || !logServerId) return;
+    setRetireBusy(true);
+    setRetireError(null);
+    try {
+      await api.revokeOwnDevice(serverId, logServerId);
+      setRetireNote("This device has been retired. It can no longer read new encrypted messages on this server.");
+      setShowRetire(false);
+    } catch (e) {
+      setRetireError(String(e));
+    } finally {
+      setRetireBusy(false);
+    }
+  }
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
 
   useEffect(() => {
@@ -220,6 +242,23 @@ export default function ServerSettingsDialog({ onClose }: Props) {
             <BotsTab serverId={serverId} />
           )}
           {activeTab === "general" && <>
+            {/* Encryption & devices (sub-5b G4). Per-server, because device
+                revocation is recorded in THAT server's log. */}
+            {logServerId && (
+              <div className="organizer-create" style={{ marginTop: 8, marginBottom: 16, borderBottom: "1px solid var(--xp-border)", paddingBottom: 12 }}>
+                <label className="connect-label">🔒 Encryption &amp; devices</label>
+                <div style={{ fontSize: 11, color: "var(--xp-text-muted)", margin: "4px 0 8px", lineHeight: 1.5 }}>
+                  Encrypted channels are read by <em>devices</em>, not accounts. If you lose a
+                  machine, retire its access here — your account and your other devices are
+                  unaffected.
+                </div>
+                {retireNote && <div className="success-text" style={{ marginBottom: 8 }}>{retireNote}</div>}
+                <button className="xp-button" onClick={() => { setRetireNote(null); setShowRetire(true); }}>
+                  Retire this device…
+                </button>
+              </div>
+            )}
+
           {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
 
           {/* Server Icon */}
@@ -391,6 +430,29 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           </>}
         </div>
       </div>
+
+      {showRetire && (
+        <E2eeConfirmDialog
+          title="Retire this device?"
+          consequence={
+            <>
+              <strong>This cannot be undone.</strong> This device will no longer be able to read
+              new messages in encrypted channels on this server, and it can never be re-enabled —
+              a retired device stays retired permanently.
+              <br /><br />
+              Your account is <em>not</em> affected: your other devices keep working, and you can
+              set this machine up again as a new device.
+              <br /><br />
+              Encrypted messages already saved on this machine stay readable here.
+            </>
+          }
+          confirmLabel="Retire this device"
+          busy={retireBusy}
+          error={retireError}
+          onCancel={() => setShowRetire(false)}
+          onConfirm={retireThisDevice}
+        />
+      )}
     </div>
   );
 }

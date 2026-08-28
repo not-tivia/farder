@@ -3429,3 +3429,18 @@ body {
   border: 1px solid var(--xp-border, #3f4147);
   text-align: center;
 }
+
+/* --- Per-member device count in an encrypted channel (sub-5b G2).
+   Devices read a channel, not accounts, so a member with more than one device
+   holding a key is a fact worth surfacing rather than hiding. */
+.member-device-count {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  color: var(--xp-text-muted, #949ba4);
+  background: var(--xp-panel-bg, #2b2d31);
+  cursor: default;
+}

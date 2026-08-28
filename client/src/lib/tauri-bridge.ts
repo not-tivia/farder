@@ -278,6 +278,21 @@ export async function decryptSealedMessage(serverId: string, logServerId: string
   return invoke<SealedDecryptResult>("decrypt_sealed_message", { serverId, logServerId, channelId, ciphertext });
 }
 
+/** One device that can read an encrypted channel, from the group's ACTUAL leaf
+ *  view — the claimed roster is not the same thing. */
+export interface ChannelLeaf {
+  identity: string;
+  device: string;
+  is_own: boolean;
+}
+
+/** Which devices can read this encrypted channel. Returns [] for a locked
+ *  identity or a channel with no local group, so callers can decorate a member
+ *  list without risking the whole sidebar. */
+export async function e2eeChannelLeaves(logServerId: string, channelId: number): Promise<ChannelLeaf[]> {
+  return invoke<ChannelLeaf[]>("e2ee_channel_leaves", { logServerId, channelId });
+}
+
 /** Manually refresh an encrypted channel's keys. The automatic paths (a send
  *  that hits the freshness ceiling, and the proactive cadence) normally handle
  *  this; the manual one exists for a channel already sealed. */

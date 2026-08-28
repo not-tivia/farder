@@ -7291,3 +7291,81 @@ pub async fn reset_e2ee_channel(
     )
     .await
 }
+
+/// One `(identity, device)` leaf of an E2EE channel's group.
+#[derive(serde::Serialize)]
+pub struct ChannelLeafInfo {
+    /// Owning identity as the frontend's `vk_<hex>` string.
+    pub identity: String,
+    pub device: String,
+    /// True for this device's own leaf, so the UI can label it "this device"
+    /// and refuse to offer a revoke that would lock the user out silently.
+    pub is_own: bool,
+}
+
+/// The devices that can read one E2EE channel, read from the group's ACTUAL leaf
+/// view (sub-5b G2/G4).
+///
+/// This is the security-relevant number for "how many of Alice's devices can read
+/// #vault" — the claimed roster is not, which is the same reason Gate 2 and the
+/// add idempotency guard both use `leaves()`. It also costs no round trip per
+/// member: the group already knows.
+///
+/// Deliberately NOT `run_e2ee`: this is a local read of the on-disk store needing
+/// only the device subkey, like `decrypt_sealed_message`. It still takes the
+/// device-chain lock so the read cannot race a concurrent steward/send write to
+/// the same sqlite store.
+#[tauri::command]
+pub async fn e2ee_channel_leaves(
+    state: State<'_, Arc<AppState>>,
+    log_server_id: String,
+    channel_id: u64,
+) -> Result<Vec<ChannelLeafInfo>, String> {
+    use farder_crypto::event_log::device_id;
+    use farder_e2ee_client::{channel_group_id, resume_store, ChannelKey};
+    use farder_mls::credential::DeviceSigner;
+    use farder_mls::group::MlsChannelGroup;
+
+    let identity_seed = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        match *lock {
+            Some(bytes) => bytes,
+            // Locked identity: an empty list, not an error. The caller is
+            // decorating a member list; it must not fail the whole sidebar.
+            None => return Ok(Vec::new()),
+        }
+    };
+    let device = crate::device::load_or_create_device_keypair(&identity_seed)?;
+    let own_device = device_id(&device.public_key());
+
+    let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
+    let mls = match crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)? {
+        Some(m) => m,
+        None => return Ok(Vec::new()),
+    };
+
+    let _guard = state.device_chain_lock.lock().await;
+    let (store, _hash) = match resume_store(&farder_data_dir(), &key) {
+        Ok(s) => s,
+        // No local store yet (never opened, or re-provisioning): nothing to show.
+        Err(_) => return Ok(Vec::new()),
+    };
+    let group = match MlsChannelGroup::load(
+        &store,
+        &DeviceSigner(&device),
+        channel_group_id(&log_server_id, channel_id, mls.generation).as_bytes(),
+    ) {
+        Ok(Some(g)) => g,
+        _ => return Ok(Vec::new()),
+    };
+
+    let leaves = farder_e2ee_client::leaf_snapshot(&group);
+    Ok(leaves
+        .into_iter()
+        .map(|m| ChannelLeafInfo {
+            identity: m.identity.to_string(),
+            is_own: m.device == own_device,
+            device: m.device,
+        })
+        .collect())
+}
