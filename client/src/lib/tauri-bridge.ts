@@ -498,6 +498,34 @@ export async function deleteMessage(serverId: string, messageId: number): Promis
   return invoke<void>("delete_message", { serverId, messageId });
 }
 
+/** Delete a LOG-SOURCED message by writing a tombstone EVENT.
+ *
+ *  Required on a mesh server: the legacy `deleteMessage` above removes only the
+ *  derived row, so the next server start re-derives the message from its still
+ *  stored event and it comes back. Use this whenever the message has an
+ *  `event_hash`; fall back to `deleteMessage` when it does not. */
+export async function submitMessageDeleted(serverId: string, logServerId: string, channelId: number, target: string, ownMessage: boolean): Promise<{ event_hash: string; timestamp: number }> {
+  return invoke("submit_message_deleted", { serverId, logServerId, channelId, target, ownMessage });
+}
+
+/** Delete a message the right way for whichever kind of server it lives on:
+ *  a tombstone event when the message came from the log, the legacy request
+ *  otherwise. Callers should prefer this over either one directly. */
+export async function deleteMessageAnywhere(opts: {
+  serverId: string;
+  logServerId: string | null;
+  channelId: number;
+  messageId: number;
+  eventHash: string | null;
+  ownMessage: boolean;
+}): Promise<void> {
+  if (opts.logServerId && opts.eventHash) {
+    await submitMessageDeleted(opts.serverId, opts.logServerId, opts.channelId, opts.eventHash, opts.ownMessage);
+    return;
+  }
+  await deleteMessage(opts.serverId, opts.messageId);
+}
+
 export async function assignRole(serverId: string, memberKey: string, roleId: number): Promise<void> {
   return invoke<void>("assign_role", { serverId, memberKey, roleId });
 }

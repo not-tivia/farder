@@ -3444,3 +3444,20 @@ body {
   background: var(--xp-panel-bg, #2b2d31);
   cursor: default;
 }
+
+/* --- Channel-class explainer at creation (owner decision, 2026-08-28).
+   A server is not fully encrypted; specific channels are. That choice is only
+   defensible if the difference is legible where the choice is made. */
+.channel-class-explainer {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--xp-text-normal, #dbdee1);
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--xp-panel-bg, #2b2d31);
+  border-left: 3px solid var(--xp-blue, #5865f2);
+}
+
+.channel-class-cost {
+  color: var(--xp-text-muted, #949ba4);
+}

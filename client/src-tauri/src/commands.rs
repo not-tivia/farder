@@ -7369,3 +7369,65 @@ pub async fn e2ee_channel_leaves(
         })
         .collect())
 }
+
+/// Delete a log-sourced message by writing a `MessageDeleted` **event**, rather
+/// than only asking the server to drop the derived row.
+///
+/// # Why this exists
+///
+/// On a mesh server a message is an event in the log, and the visible row is
+/// DERIVED from it. The legacy `DeleteMessage` request deletes only that row —
+/// it writes no tombstone — so `reconcile_messages` at the next startup sees an
+/// event with no row and no tombstone and **re-derives it. The message comes
+/// back.** Reported by the owner on the first Windows run, and confirmed by
+/// reading the ingest path: everything server-side was already correct
+/// (`apply_tombstone` hard-deletes the row, the broadcast fires, and reconcile
+/// consults the tombstone set at every boot) — nothing was writing the event.
+///
+/// `reason` follows the fold's own split: `Author` for your own message (ingest
+/// checks authorship against the row), `Moderation` otherwise (the fold checks
+/// the `kick` capability itself). Sending the wrong one is refused rather than
+/// silently downgraded.
+#[tauri::command]
+pub async fn submit_message_deleted(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    channel_id: u64,
+    target: String,   // the target message's event hash
+    own_message: bool,
+) -> Result<EventAcceptedResult, String> {
+    use farder_crypto::event_log::{DeleteReason, EventPayload};
+
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
+
+    let _chain_guard = state.device_chain_lock.lock().await;
+    let mut ds = crate::device::DeviceState::load(&log_server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    let event = event_build_next(
+        &device,
+        &identity,
+        &log_server_id,
+        ds.last_event_hash.clone(),
+        ds.next_seq,
+        ds.lamport,
+        EventPayload::MessageDeleted {
+            channel_id,
+            target,
+            reason: if own_message { DeleteReason::Author } else { DeleteReason::Moderation },
+        },
+    );
+    let result = event_send_submit(&state, &server_id, &event).await?;
+
+    ds.next_seq = event.core.seq + 1;
+    ds.last_event_hash = Some(event.hash());
+    ds.lamport = event.core.lamport;
+    ds.save(&log_server_id)?;
+    Ok(result)
+}

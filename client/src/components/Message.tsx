@@ -400,7 +400,17 @@ export default function Message({ message, memberNames, grouped = false, serverI
     ...(isOwnMessage ? [{
       label: "Delete Message",
       onClick: () => {
-        void api.deleteMessage(serverId, message.id).catch((e) => { toast.error(`Couldn't delete message: ${e}`); });
+        // Log-sourced messages need a tombstone EVENT, or the next server
+        // start re-derives them from the still-stored event and the message
+        // comes back. `deleteMessageAnywhere` picks the right path.
+        void api.deleteMessageAnywhere({
+          serverId,
+          logServerId: activeServer?.logServerId ?? null,
+          channelId: message.channel_id,
+          messageId: message.id,
+          eventHash: message.event_hash ?? null,
+          ownMessage: isOwnMessage,
+        }).catch((e) => { toast.error(`Couldn't delete message: ${e}`); });
       },
     }] : []),
   ];
@@ -834,8 +844,16 @@ export default function Message({ message, memberNames, grouped = false, serverI
             )}
             {isOwnMessage && (
               <div className="context-menu-item delete" onClick={async () => {
-                try { await api.deleteMessage(serverId, message.id); }
-                catch (e) { toast.error(`Couldn't delete message: ${e}`); }
+                try {
+                  await api.deleteMessageAnywhere({
+                    serverId,
+                    logServerId: activeServer?.logServerId ?? null,
+                    channelId: message.channel_id,
+                    messageId: message.id,
+                    eventHash: message.event_hash ?? null,
+                    ownMessage: isOwnMessage,
+                  });
+                } catch (e) { toast.error(`Couldn't delete message: ${e}`); }
                 setContextMenu(null);
               }}>Delete Message</div>
             )}

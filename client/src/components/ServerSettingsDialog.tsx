@@ -333,8 +333,32 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               </label>
               <button className="xp-button" onClick={handleCreateChannel} disabled={!newChName.trim()}>Add</button>
             </div>
-            <div style={{ marginBottom: 8 }}>
-              <span className="connect-label">End-to-end encrypted — the server can't read messages.</span>
+            {/* The owner's 2026-08-28 decision: a server is NOT fully encrypted;
+                specific channels are. That is only defensible if the difference is
+                legible AT THE POINT OF CHOICE, so this explains whichever option is
+                currently selected — including what a normal channel already
+                protects, which the old copy never said. */}
+            <div className="channel-class-explainer" style={{ marginBottom: 8 }}>
+              {newChE2ee ? (
+                <>
+                  <strong>Encrypted channel.</strong> Only members can read messages — the server
+                  host cannot, even though they run it.
+                  <br />
+                  <span className="channel-class-cost">
+                    Polls, reactions, threads, bots, link previews and server-side search do not
+                    work in encrypted channels.
+                  </span>
+                </>
+              ) : (
+                <>
+                  <strong>Normal channel.</strong> Messages are encrypted in transit and the
+                  server is yours, but whoever runs it can read them.
+                  <br />
+                  <span className="channel-class-cost">
+                    Everything works: polls, reactions, threads, bots, link previews and search.
+                  </span>
+                </>
+              )}
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "flex-end" }}>
               <div style={{ flex: 1 }}>
