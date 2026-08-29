@@ -5907,11 +5907,25 @@ async fn run_send_sealed_message(
                 ds.save(&log_server_id)?;
             }
             Err(e) => {
-                // Never fatal to the send. A DIVERGED group is the one case worth
-                // recording, because the local group is now one epoch ahead of the
-                // server (finding F1) and the next operation must not trust it.
-                if e.is_diverged() {
-                    mls.poisoned = Some(format!("proactive rekey diverged the group: {e}"));
+                // NEVER poison the channel from here. `poisoned` is the F4
+                // terminal state for an impostor leaf that is already merged and
+                // cannot be rolled back — it blocks every send AND every decrypt,
+                // permanently. A refused proactive rekey is nothing of the kind:
+                // the local group is one epoch ahead of the server (finding F1),
+                // which the send path's existing bounded resync already recovers
+                // from on the next send. Marking it poisoned PREVENTED that
+                // recovery and bricked the channel for a routine policy refusal —
+                // the exact "over-conservative guard becomes an unexitable state"
+                // shape this codebase keeps rediscovering.
+                //
+                // A rate-limit refusal is also worth LEARNING from: it means the
+                // server has seen a commit from us that our local cadence did not
+                // know about (a record written before the cadence fields existed
+                // defaults to `has_committed: false`, so we wrongly believed we
+                // were exempt). Record the commit so the cadence backs off instead
+                // of asking again on every single send.
+                if e.is_rekey_rate_limited() {
+                    mls.note_own_commit(group.epoch());
                 }
                 eprintln!("E2EE: proactive rekey skipped for channel {channel_id}: {e}");
             }

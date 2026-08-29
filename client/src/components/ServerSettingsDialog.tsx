@@ -341,21 +341,34 @@ export default function ServerSettingsDialog({ onClose }: Props) {
             <div className="channel-class-explainer" style={{ marginBottom: 8 }}>
               {newChE2ee ? (
                 <>
-                  <strong>Encrypted channel.</strong> Only members can read messages — the server
-                  host cannot, even though they run it.
+                  <strong>Encrypted channel — only the people in it can read the messages.</strong>
+                  <br />
+                  <span className="channel-class-who">
+                    Messages are scrambled on your device and only unscrambled on the devices of
+                    the people in this channel. <strong>Whoever runs this server cannot read
+                    them</strong>, even with full access to the machine — and neither can a relay
+                    or anyone watching the network.
+                  </span>
                   <br />
                   <span className="channel-class-cost">
-                    Polls, reactions, threads, bots, link previews and server-side search do not
-                    work in encrypted channels.
+                    The cost: polls, reactions, threads, bots, link previews and server-side
+                    search do not work here, because those all need the server to read messages.
                   </span>
                 </>
               ) : (
                 <>
-                  <strong>Normal channel.</strong> Messages are encrypted in transit and the
-                  server is yours, but whoever runs it can read them.
+                  <strong>Normal channel — the person running this server can read the messages.</strong>
+                  <br />
+                  <span className="channel-class-who">
+                    Messages are protected in transit and stored on your own server rather than a
+                    company&apos;s, and a relay never sees their contents — but they are stored
+                    unscrambled, so <strong>whoever administers this server can read them</strong>.
+                    On your own server that is you; on someone else&apos;s, it is them.
+                  </span>
                   <br />
                   <span className="channel-class-cost">
-                    Everything works: polls, reactions, threads, bots, link previews and search.
+                    In exchange, everything works: polls, reactions, threads, bots, link previews
+                    and search.
                   </span>
                 </>
               )}

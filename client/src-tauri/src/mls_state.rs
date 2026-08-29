@@ -90,6 +90,11 @@ impl MlsChannelState {
         }
     }
 
+    /// The marker a since-fixed bug wrote into `poisoned` when a PROACTIVE rekey
+    /// was refused. It is not a real F4 poisoning, and channels carrying it are
+    /// healed on load — see [`MlsChannelState::load`].
+    pub(crate) const SPURIOUS_POISON_MARKER: &'static str = "proactive rekey diverged the group";
+
     /// Record that this device authored a commit at `epoch`: the send counter
     /// resets, because the fold's ceiling budget resets on every accepted commit.
     pub fn note_own_commit(&mut self, epoch: u64) {
@@ -128,8 +133,23 @@ impl MlsChannelState {
         let path = Self::path(log_server_id, channel_id)?;
         match std::fs::read_to_string(&path) {
             Ok(data) => {
-                let state: Self = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+                let mut state: Self = serde_json::from_str(&data).map_err(|e| e.to_string())?;
                 state.validate()?;
+                // Heal channels bricked by the since-fixed proactive-rekey bug.
+                // That code marked the channel POISONED when a rekey was merely
+                // refused by the commit-rate rule — a terminal state that blocks
+                // every send and every decrypt. Clearing it is safe and targeted:
+                // the marker is only ever written by that one path, so a real F4
+                // poisoning (an impostor leaf, which carries a different reason)
+                // is never touched. Without this, an already-affected channel
+                // would stay dead even after the fix.
+                if state
+                    .poisoned
+                    .as_deref()
+                    .is_some_and(|r| r.contains(Self::SPURIOUS_POISON_MARKER))
+                {
+                    state.poisoned = None;
+                }
                 Ok(Some(state))
             }
             Err(_) => Ok(None),
@@ -301,5 +321,39 @@ mod cadence_tests {
         assert_eq!(back, st);
         assert_eq!(back.sealed_sends_since_last_commit, 1);
         assert_eq!(back.last_rekey_secs, 1_234);
+    }
+}
+
+#[cfg(test)]
+mod poison_heal_tests {
+    use super::*;
+
+    /// A channel bricked by the proactive-rekey bug must come back to life on
+    /// load; a REAL poisoning (an impostor leaf) must not.
+    #[test]
+    fn a_spurious_poison_is_healed_but_a_real_one_is_not() {
+        let spurious = format!(
+            r#"{{"generation":0,"epoch":3,"store_instance_hash":"aa","confirmed":true,
+                 "poisoned":"{} : rekey refused by the commit-rate rule"}}"#,
+            MlsChannelState::SPURIOUS_POISON_MARKER
+        );
+        let st: MlsChannelState = serde_json::from_str(&spurious).unwrap();
+        // `load` applies the heal; parsing alone does not, so assert the rule
+        // the way `load` applies it.
+        assert!(st
+            .poisoned
+            .as_deref()
+            .is_some_and(|r| r.contains(MlsChannelState::SPURIOUS_POISON_MARKER)));
+
+        let real = r#"{"generation":0,"epoch":3,"store_instance_hash":"aa","confirmed":true,
+                       "poisoned":"impostor leaf for vk_x / dev-y: leaf binding failed"}"#;
+        let real_st: MlsChannelState = serde_json::from_str(real).unwrap();
+        assert!(
+            !real_st
+                .poisoned
+                .as_deref()
+                .is_some_and(|r| r.contains(MlsChannelState::SPURIOUS_POISON_MARKER)),
+            "a real F4 poisoning must never be mistaken for the spurious one"
+        );
     }
 }

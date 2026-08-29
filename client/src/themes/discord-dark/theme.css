@@ -3508,3 +3508,9 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Who can read it — the sentence that actually answers the user's question. */
+.channel-class-who {
+  display: inline-block;
+  margin-top: 2px;
+}
