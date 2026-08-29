@@ -6,6 +6,7 @@ import * as gifApi from "../lib/gifSearch";
 import type { MemberInfo, CommandInfo } from "../lib/types";
 import type { BookItem } from "../lib/book/types";
 import { publicKeyToString, isE2eeChannel } from "../lib/types";
+import { describeE2eeFailure } from "../lib/e2eeStates";
 import { useActiveServer, useApp } from "../context/ServerContext";
 import SendStickerPicker from "./SendStickerPicker";
 import EmojiAutocomplete from "./EmojiAutocomplete";
@@ -64,6 +65,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
 
   const activeServer = useActiveServer();
   const { dispatch } = useApp();
+  const [repairing, setRepairing] = useState(false);
   const members = activeServer?.members ?? [];
   const isE2ee = isE2eeChannel(activeServer?.channels.find((c) => c.id === channelId) ?? null);
 
@@ -510,7 +512,46 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
             )}
           </div>
         )}
-        {error && <div className="error-text" style={{ padding: "2px 4px" }}>{error}</div>}
+        {error && !isE2ee && <div className="error-text" style={{ padding: "2px 4px" }}>{error}</div>}
+        {error && isE2ee && (() => {
+          // G3: encryption failures are real conditions with real remedies, not
+          // error text to shrug at. Each one names what happened and offers the
+          // single action that fixes it, where one exists.
+          const state = describeE2eeFailure(error);
+          return (
+            <div className={`e2ee-state${state.terminal ? " e2ee-state-terminal" : ""}`}>
+              <div className="e2ee-state-title">{state.title}</div>
+              <div className="e2ee-state-detail">{state.detail}</div>
+              {state.repair === "refresh-keys" && (
+                <button
+                  className="xp-button"
+                  style={{ marginTop: 6 }}
+                  disabled={repairing}
+                  onClick={async () => {
+                    const logServerId = activeServer?.logServerId ?? null;
+                    if (!logServerId) return;
+                    setRepairing(true);
+                    try {
+                      await api.rekeyE2eeChannel(serverId, logServerId, channelId);
+                      setError(null);
+                    } catch (e) {
+                      setError(String(e));
+                    } finally {
+                      setRepairing(false);
+                    }
+                  }}
+                >
+                  {repairing ? "Refreshing…" : "Refresh keys"}
+                </button>
+              )}
+              {state.repair === "owner-rebuild" && (
+                <div className="e2ee-state-detail" style={{ marginTop: 6, fontStyle: "italic" }}>
+                  Channel settings → Encryption → Rebuild channel (owner only).
+                </div>
+              )}
+            </div>
+          );
+        })()}
         {me?.timeout_until != null && me.timeout_until > Date.now() && (
           <TimeoutBanner untilMs={me.timeout_until} reason={me.timeout_reason ?? null} />
         )}

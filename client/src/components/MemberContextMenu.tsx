@@ -10,6 +10,8 @@ import UserProfilePopup from "./UserProfilePopup";
 import { getTranslationSettings, setTranslationSettings } from "../lib/translation/api";
 import { SourceLanguagePicker } from "./SourceLanguagePicker";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
+import { isE2eeChannel } from "../lib/types";
+import { E2eeMemberDevices } from "./E2eeMemberDevices";
 
 interface Props {
   target: MemberInfo;
@@ -63,6 +65,14 @@ const submenuStyle: CSSProperties = {
 export default function MemberContextMenu({ target, serverId, position, ownPk, onClose }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const activeServer = useActiveServer();
+  const [showDevices, setShowDevices] = useState(false);
+  const logServerId = activeServer?.logServerId ?? null;
+  const currentChannelId = activeServer?.currentChannelId ?? null;
+  const e2eeChannelId = isE2eeChannel(
+    currentChannelId != null ? activeServer?.channels.find((c) => c.id === currentChannelId) ?? null : null,
+  )
+    ? currentChannelId
+    : null;
   const [showRoleSubmenu, setShowRoleSubmenu] = useState(false);
   const [showLanguageSubmenu, setShowLanguageSubmenu] = useState(false);
   const [overrideValue, setOverrideValue] = useState<string | null>(null);
@@ -254,6 +264,16 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     rows.push({ kind: "separator" });
     rows.push({ kind: "submenu", label: "Assign Role…  ▶" });
   }
+  // Encryption devices (sub-5b G3). Only meaningful inside an ENCRYPTED
+  // channel, because a leaf belongs to a channel's group — "which of Alice's
+  // devices can read this" has no answer in a plaintext channel. Shown to
+  // anyone: seeing who can read a channel you are in is transparency, not a
+  // moderator power. The revoke inside is gated by the server, which authorizes
+  // it for the owning identity or the server owner and refuses everyone else.
+  if (!target.is_bot && e2eeChannelId != null && logServerId) {
+    rows.push({ kind: "separator" });
+    rows.push({ kind: "item", label: "Encryption devices…", onClick: () => setShowDevices(true) });
+  }
   if (!isSelf && !target.is_bot && (canKick || canBan || canTimeout)) {
     rows.push({ kind: "separator" });
     if (canTimeout) {
@@ -409,6 +429,17 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
           </div>
         )}
       </div>
+      )}
+
+      {showDevices && e2eeChannelId != null && logServerId && serverId && (
+        <E2eeMemberDevices
+          serverId={serverId}
+          logServerId={logServerId}
+          channelId={e2eeChannelId}
+          identity={publicKeyToString(target.public_key)}
+          memberName={target.display_name}
+          onClose={() => { setShowDevices(false); onClose(); }}
+        />
       )}
 
       {showBanDialog && (

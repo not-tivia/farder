@@ -3479,3 +3479,50 @@ body {
 .channel-class-cost {
   color: var(--xp-text-muted, #666660);
 }
+
+/* --- Encryption state shown at the composer (sub-5b G3).
+   These are real conditions with real remedies, so they get a readable block
+   with an action rather than a line of red error text. */
+.e2ee-state {
+  margin: 4px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--xp-panel-bg, #f1f1f1);
+  border-left: 3px solid var(--xp-blue, #2a5fd6);
+  color: var(--xp-text-normal, #1a1a1a);
+}
+
+.e2ee-state-terminal {
+  border-left-color: var(--xp-danger, #a80000);
+}
+
+.e2ee-state-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.e2ee-state-detail {
+  color: var(--xp-text-muted, #666660);
+}
+
+/* --- Member device rows in the encryption device list (sub-5b G3). */
+.e2ee-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 3px;
+  background: var(--xp-panel-bg, #f1f1f1);
+}
+
+.e2ee-device-id {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--xp-text-muted, #666660);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
