@@ -5904,7 +5904,9 @@ async fn run_send_sealed_message(
                 ds.next_seq = chain.next_seq;
                 ds.last_event_hash = chain.last_event_hash.clone();
                 ds.lamport = chain.lamport;
-                ds.save(&log_server_id)?;
+                if let Err(e) = ds.save(&log_server_id) {
+                    eprintln!("E2EE: chain save after proactive rekey failed: {e}");
+                }
             }
             Err(e) => {
                 // NEVER poison the channel from here. `poisoned` is the F4
@@ -5931,8 +5933,17 @@ async fn run_send_sealed_message(
             }
         }
     }
-    mls.save(&log_server_id, channel_id)?;
+    if let Err(e) = mls.save(&log_server_id, channel_id) {
+        eprintln!("E2EE: cadence save failed for channel {channel_id}: {e}");
+    }
 
+    // NOTHING below the accepted send may return Err. The message is already
+    // delivered and broadcast by this point, so reporting failure makes the UI
+    // treat a sent message as unsent — and for a sealed send that is not a
+    // cosmetic difference: the frontend records the author's own plaintext ONLY
+    // on the success path, so a late Err loses the one copy of the text that can
+    // ever be displayed to its author, and the message renders to them as
+    // "couldn't decrypt" forever.
     Ok(SendSealedMessageResult {
         event_hash: outcome.event_hash,
         epoch: outcome.epoch,

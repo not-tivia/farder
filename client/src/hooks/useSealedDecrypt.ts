@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
+import { publicKeyToString } from "../lib/types";
 
 // ---------------------------------------------------------------------------
 // Decrypt-once guard (D2/D4): the ratchet is consumed on open, so a sealed
@@ -24,6 +25,21 @@ import * as api from "../lib/tauri-bridge";
 // consumed, so the second attempt deterministically returns `undecryptable`.
 const inFlight = new Map<string, Promise<void>>();
 
+// Our own public key, fetched once. Identity is PIN-locked at startup, so an
+// eager fetch can fail; a failed fetch retries on the next pass.
+let cachedOwnPk: string | null = null;
+let ownPkPromise: Promise<string | null> | null = null;
+function getOwnPk(): Promise<string | null> {
+  if (cachedOwnPk != null) return Promise.resolve(cachedOwnPk);
+  if (!ownPkPromise) {
+    ownPkPromise = api
+      .getPublicKey()
+      .then((pk) => { cachedOwnPk = pk; return pk; })
+      .catch(() => { ownPkPromise = null; return null; });
+  }
+  return ownPkPromise;
+}
+
 /**
  * Scan the active server's messages for sealed rows and decrypt each one once.
  *
@@ -42,6 +58,13 @@ export function useSealedDecrypt(): void {
   const sealedDecrypts = server?.sealedDecrypts ?? {};
   const historyHydrated = server?.historyHydrated ?? {};
   const ownSealedSends = server?.ownSealedSends ?? {};
+  const [ownPk, setOwnPk] = useState<string | null>(cachedOwnPk);
+  useEffect(() => {
+    if (ownPk) return;
+    let cancelled = false;
+    void getOwnPk().then((pk) => { if (!cancelled && pk) setOwnPk(pk); });
+    return () => { cancelled = true; };
+  }, [ownPk]);
 
   useEffect(() => {
     if (!activeServerId || !logServerId) return;
@@ -75,6 +98,17 @@ export function useSealedDecrypt(): void {
         // it — which is exactly the bug this ordering fixes. Overwriting a
         // cached failure with the author's own text is always right: we are the
         // authority on what we typed.
+        // Belt and braces: NEVER hand a row we authored to the decryptor. A
+        // sender has no decryption side for its own message, so the attempt is
+        // guaranteed to fail and — worse — caches a failure that renders the
+        // author's own words as "couldn't decrypt". If our text is missing (the
+        // send reported an error after the server had already accepted it, or it
+        // was sent from another device) the right answer is to leave the row
+        // pending, not to prove the impossible.
+        if (ownPk && publicKeyToString(msg.author) === ownPk && !(eventHash && ownSealedSends[eventHash])) {
+          continue;
+        }
+
         const own = eventHash ? ownSealedSends[eventHash] : undefined;
         if (own !== undefined) {
           if (existing?.kind === "decrypted" && existing.eventHash === eventHash) continue;
@@ -156,5 +190,5 @@ export function useSealedDecrypt(): void {
         inFlight.set(key, promise);
       }
     }
-  }, [activeServerId, logServerId, messages, sealedDecrypts, historyHydrated, ownSealedSends, dispatch]);
+  }, [activeServerId, logServerId, messages, sealedDecrypts, historyHydrated, ownSealedSends, ownPk, dispatch]);
 }
