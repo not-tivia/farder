@@ -25,8 +25,18 @@ import { publicKeyToString } from "../lib/types";
 // consumed, so the second attempt deterministically returns `undecryptable`.
 const inFlight = new Map<string, Promise<void>>();
 
-// Our own public key, fetched once. Identity is PIN-locked at startup, so an
-// eager fetch can fail; a failed fetch retries on the next pass.
+// Our own public key.
+//
+// This hook mounts at app startup, BEFORE the PIN is entered, and while the
+// identity is locked `get_public_key` correctly answers "nothing". Caching that
+// `null` as the final answer left the app not knowing who it was for the whole
+// session — which is exactly how an author's own message ended up being handed
+// to the decryptor and cached as "couldn't decrypt".
+//
+// So: only a REAL key is cached. A `null` clears the in-flight promise so the
+// next caller asks again, once unlocking has actually happened. Handling only
+// the throwing case (as the previous version did) misses this, because "locked"
+// is a successful answer, not an error.
 let cachedOwnPk: string | null = null;
 let ownPkPromise: Promise<string | null> | null = null;
 function getOwnPk(): Promise<string | null> {
@@ -34,7 +44,11 @@ function getOwnPk(): Promise<string | null> {
   if (!ownPkPromise) {
     ownPkPromise = api
       .getPublicKey()
-      .then((pk) => { cachedOwnPk = pk; return pk; })
+      .then((pk) => {
+        if (pk) cachedOwnPk = pk;
+        else ownPkPromise = null; // still locked — ask again next time
+        return pk;
+      })
       .catch(() => { ownPkPromise = null; return null; });
   }
   return ownPkPromise;
@@ -59,15 +73,21 @@ export function useSealedDecrypt(): void {
   const historyHydrated = server?.historyHydrated ?? {};
   const ownSealedSends = server?.ownSealedSends ?? {};
   const [ownPk, setOwnPk] = useState<string | null>(cachedOwnPk);
-  useEffect(() => {
-    if (ownPk) return;
-    let cancelled = false;
-    void getOwnPk().then((pk) => { if (!cancelled && pk) setOwnPk(pk); });
-    return () => { cancelled = true; };
-  }, [ownPk]);
 
   useEffect(() => {
     if (!activeServerId || !logServerId) return;
+
+    // Fail SAFE on not knowing who we are. Every decision below depends on
+    // telling our own messages apart from everyone else's, and getting that
+    // wrong is destructive: a sealed row can only be opened once, so decrypting
+    // one of ours burns its key and caches a permanent failure over the author's
+    // own words. "Don't know yet" must therefore mean "do nothing yet", never
+    // "assume it isn't mine". The fetch below resolves within a tick of unlock,
+    // and this effect re-runs when it lands.
+    if (!ownPk) {
+      void getOwnPk().then((pk) => { if (pk) setOwnPk(pk); });
+      return;
+    }
 
     for (const [channelIdStr, list] of Object.entries(messages)) {
       const channelId = Number(channelIdStr);
@@ -105,7 +125,8 @@ export function useSealedDecrypt(): void {
         // send reported an error after the server had already accepted it, or it
         // was sent from another device) the right answer is to leave the row
         // pending, not to prove the impossible.
-        if (ownPk && publicKeyToString(msg.author) === ownPk && !(eventHash && ownSealedSends[eventHash])) {
+        // `ownPk` is guaranteed non-null here (checked above).
+        if (publicKeyToString(msg.author) === ownPk && !(eventHash && ownSealedSends[eventHash])) {
           continue;
         }
 

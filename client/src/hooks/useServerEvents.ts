@@ -22,7 +22,12 @@ function getOwnPk(): Promise<string | null> {
     ownPkPromise = api
       .getPublicKey()
       .then((pk) => {
-        cachedOwnPk = pk;
+        // Only a REAL key is cached. While the identity is still PIN-locked the
+        // command answers `null` SUCCESSFULLY, and caching that pinned "we don't
+        // know who we are" for the whole session — the same root cause behind
+        // the stacking-reactions bug this comment already describes.
+        if (pk) cachedOwnPk = pk;
+        else ownPkPromise = null;
         return pk;
       })
       .catch(() => {
