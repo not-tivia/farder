@@ -815,6 +815,7 @@ async fn ban_send_gate_rekey_forward_secrecy() {
         store: &owner_store,
         content: pre_plain,
         reply_to: None,
+        attachments: &[],
     };
     send_sealed(
         &owner_transport,
@@ -858,6 +859,7 @@ async fn ban_send_gate_rekey_forward_secrecy() {
         store: &owner_store,
         content: "this must not go out",
         reply_to: None,
+        attachments: &[],
     };
     let err = send_sealed(
         &owner_transport,
@@ -921,6 +923,7 @@ async fn ban_send_gate_rekey_forward_secrecy() {
         store: &owner_store,
         content: post_plain,
         reply_to: None,
+        attachments: &[],
     };
     send_sealed(
         &owner_transport,
@@ -1011,6 +1014,7 @@ async fn ghost_welcome_drift_self_heals() {
         store: &owner_store,
         content: "blocked by the ghost leaf",
         reply_to: None,
+        attachments: &[],
     };
     let err = send_sealed(
         &owner_transport,
@@ -1056,6 +1060,7 @@ async fn ghost_welcome_drift_self_heals() {
         store: &owner_store,
         content: "the channel self-healed",
         reply_to: None,
+        attachments: &[],
     };
     send_sealed(
         &owner_transport,
@@ -1110,6 +1115,7 @@ async fn stale_channel_blocks_then_unblocks_after_rekey() {
             store: &owner_store,
             content: "ceil-fill",
             reply_to: None,
+            attachments: &[],
         };
         send_sealed(
             &owner_transport,
@@ -1130,6 +1136,7 @@ async fn stale_channel_blocks_then_unblocks_after_rekey() {
         store: &owner_store,
         content: "over the ceiling",
         reply_to: None,
+        attachments: &[],
     };
     let err = send_sealed(
         &owner_transport,
@@ -1170,6 +1177,7 @@ async fn stale_channel_blocks_then_unblocks_after_rekey() {
         store: &owner_store,
         content: "sends resume after the rekey",
         reply_to: None,
+        attachments: &[],
     };
     send_sealed(
         &owner_transport,
@@ -1495,6 +1503,7 @@ async fn the_freshness_ceiling_does_not_brick_a_channel() {
         store: &owner_store,
         content,
         reply_to: None,
+        attachments: &[],
     };
 
     // 1. Spend the budget with the PLAIN send path until the fold seals the
@@ -1636,6 +1645,7 @@ async fn a_ban_does_not_brick_a_channel() {
         store: &owner_store,
         content,
         reply_to: None,
+        attachments: &[],
     };
     let rekey_ctx = RekeyContext {
         key: &key,

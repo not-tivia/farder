@@ -81,7 +81,7 @@ nothing and hides an attack.
 - [ ] **W1 — sealed upload.** In an E2EE channel, seal before upload and carry the
       key/name/MIME in the envelope. Plaintext channels keep the existing path
       exactly.
-- [ ] **W2 — `send_sealed` carries attachments** (removing the 4a placeholder and
+- [x] **W2 — `send_sealed` carries attachments** (removing the 4a placeholder and
       the test that asserts they are empty).
 - [ ] **W3 — sealed download.** Fetch ciphertext, open with the in-envelope key,
       run the F1 policy, and only then render or write. A policy refusal renders

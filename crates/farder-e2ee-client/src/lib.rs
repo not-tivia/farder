@@ -72,6 +72,7 @@ pub use resync::{
     MAX_TOTAL_RESYNC_ATTEMPTS, MAX_UNPRODUCTIVE_RESYNC_ATTEMPTS,
 };
 pub use sealed::{
+    SealedAttachment,
     receive_sealed, send_sealed, SealContext, SealedOutcome, SealedSendOutcome,
 };
 pub use transport::{E2eeTransport, EventAccepted, MlsControl, TransportError, Welcomes};

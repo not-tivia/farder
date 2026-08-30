@@ -645,6 +645,7 @@ mod tests {
             store: &f.bob_store,
             content: "hello",
             reply_to: None,
+            attachments: &[],
         };
         let certs = EmptyCerts;
         let request = ResyncRequest {
@@ -686,6 +687,7 @@ mod tests {
             store: &f.bob_store,
             content: "doomed",
             reply_to: None,
+            attachments: &[],
         };
         let certs = EmptyCerts;
         let request = ResyncRequest {
@@ -739,6 +741,7 @@ mod tests {
             store: &f.bob_store,
             content: "always losing",
             reply_to: None,
+            attachments: &[],
         };
         let certs = EmptyCerts;
         let request = ResyncRequest {
@@ -832,6 +835,7 @@ mod tests {
             store: &f.bob_store,
             content: "into a poisoned group",
             reply_to: None,
+            attachments: &[],
         };
         let certs = EmptyCerts;
         let request = ResyncRequest {

@@ -747,6 +747,7 @@ async fn drive_full_path(
         store: &created.store,
         content: owner_plaintext,
         reply_to: None,
+        attachments: &[],
     };
     send_sealed(
         &owner_transport,
@@ -775,6 +776,7 @@ async fn drive_full_path(
         store: &joiner_store,
         content: joiner_plaintext,
         reply_to: None,
+        attachments: &[],
     };
     send_sealed(
         &joiner_transport,

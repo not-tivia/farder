@@ -5749,6 +5749,7 @@ async fn run_send_sealed_message(
         store: &store,
         content: &content,
         reply_to: reply_to.clone(),
+        attachments: &[],
     };
     let eligibility = if mls.confirmed {
         SendEligibility::confirmed()
