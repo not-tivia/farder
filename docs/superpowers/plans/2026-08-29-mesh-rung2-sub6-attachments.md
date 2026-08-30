@@ -58,17 +58,17 @@ nothing and hides an attack.
 
 ## Tasks — 6a (headless, WSL-verifiable)
 
-- [ ] **F1 — `farder-crypto::file_policy`.** `safe_filename(raw) -> Result<String>`:
+- [x] **F1 — `farder-crypto::file_policy`.** `safe_filename(raw) -> Result<String>`:
       basename only, reject path separators and traversal, strip bidi/RTL-override
       and control characters, collapse whitespace, enforce a length bound, apply
       the extension allowlist. `sniff(bytes) -> Option<SniffedType>` over the
       magic numbers the server already knows, plus `matches_claim(sniffed, mime)`.
-- [ ] **F2 — the hostile-input suite (named deliverable).** `../../.ssh/authorized_keys`,
+- [x] **F2 — the hostile-input suite (named deliverable).** `../../.ssh/authorized_keys`,
       `C:\Windows\System32\x`, `invoice.pdf.exe`, RTL-override tricks
       (`\u202Egnp.exe`), NUL and control bytes, empty and all-dot names, a 4 KB
       name, a `.png` whose bytes are an ELF, a `.txt` whose bytes are a PNG.
       Each asserts the SPECIFIC refusal, not merely "an error".
-- [ ] **F3 — seal/unseal a file.** `seal_file(bytes) -> (key, ciphertext)` /
+- [x] **F3 — seal/unseal a file.** `seal_file(bytes) -> (key, ciphertext)` /
       `open_file(key, ciphertext)` over the existing AEAD. Round-trip, wrong key,
       flipped byte, truncated blob.
 - [ ] **F4 — the server keeps working on ciphertext.** A test that cap-vs-blob
