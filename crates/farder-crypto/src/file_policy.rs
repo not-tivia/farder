@@ -506,3 +506,54 @@ mod seal_tests {
         assert_eq!(check_contents(&opened, "image/png").unwrap().mime, "image/png");
     }
 }
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+
+    /// The property the sealed-download path depends on: a sanitized name can
+    /// never escape the directory it is joined to.
+    ///
+    /// This is what makes `downloads.join(&file_name)` safe, and it is asserted
+    /// here rather than trusted, because "the name was sanitized earlier" is
+    /// exactly the assumption that rots when someone reorders the steps.
+    #[test]
+    fn a_sanitized_name_cannot_escape_its_directory() {
+        let base = std::path::Path::new("/home/user/Downloads");
+        for hostile in [
+            "../../.ssh/authorized_keys",
+            r"..\..\evil.png",
+            "/etc/passwd",
+            "sub/dir/file.png",
+        ] {
+            // Every one of these is refused outright...
+            assert!(
+                safe_filename(hostile).is_err(),
+                "{hostile:?} should never survive sanitization"
+            );
+        }
+        // ...and anything that DOES survive stays inside the directory.
+        for ok in ["holiday.png", "notes.md", "voice.ogg", "Report 2026.pdf"] {
+            let safe = safe_filename(ok).unwrap();
+            let joined = base.join(&safe);
+            assert_eq!(
+                joined.parent(),
+                Some(base),
+                "{safe:?} escaped its directory when joined"
+            );
+        }
+    }
+
+    /// The recipient must interpret bytes by what they ARE, not by what the
+    /// sender said. A sender who labels an ELF as a PNG gets a refusal, so no
+    /// path exists where a renderer is handed bytes of an unexpected type.
+    #[test]
+    fn the_sender_does_not_get_to_choose_how_their_bytes_are_read() {
+        let elf = [0x7F, b'E', b'L', b'F', 1, 1, 1, 0];
+        assert!(check_contents(&elf, "image/png").is_err());
+
+        // And for an honest file, the type used downstream is the SNIFFED one.
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\0";
+        assert_eq!(check_contents(png, "image/png").unwrap().mime, "image/png");
+    }
+}

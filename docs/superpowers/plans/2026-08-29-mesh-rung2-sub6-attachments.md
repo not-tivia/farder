@@ -78,12 +78,12 @@ nothing and hides an attack.
 
 ## Tasks — 6b (wiring + GUI)
 
-- [ ] **W1 — sealed upload.** In an E2EE channel, seal before upload and carry the
+- [x] **W1 — sealed upload.** In an E2EE channel, seal before upload and carry the
       key/name/MIME in the envelope. Plaintext channels keep the existing path
       exactly.
 - [x] **W2 — `send_sealed` carries attachments** (removing the 4a placeholder and
       the test that asserts they are empty).
-- [ ] **W3 — sealed download.** Fetch ciphertext, open with the in-envelope key,
+- [x] **W3 — sealed download.** Fetch ciphertext, open with the in-envelope key,
       run the F1 policy, and only then render or write. A policy refusal renders
       the reason, never the file.
 - [ ] **W4 — voice messages** ride the sealed path (coexistence row 16).

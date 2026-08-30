@@ -140,6 +140,8 @@ fn main() {
             commands::reset_e2ee_channel,
             commands::e2ee_channel_leaves,
             commands::submit_message_deleted,
+            commands::upload_sealed_file,
+            commands::download_sealed_file,
             commands::decrypt_sealed_message,
             commands::create_category,
             commands::delete_channel,

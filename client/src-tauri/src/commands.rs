@@ -1553,17 +1553,12 @@ async fn upload_file_internal_with_channel(
     channel_id: u64,
     file_path: &str,
 ) -> Result<UploadOutcome, String> {
-    use sha2::{Digest, Sha256};
-
     // Read file from disk
     let data = std::fs::read(file_path).map_err(|e| e.to_string())?;
     let file_name = std::path::Path::new(file_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".to_string());
-
-    // Compute SHA-256
-    let hash = format!("{:x}", Sha256::digest(&data));
 
     let mime_type = match file_name.rsplit('.').next() {
         Some("png") => "image/png",
@@ -1581,6 +1576,28 @@ async fn upload_file_internal_with_channel(
         _ => "application/octet-stream",
     }
     .to_string();
+
+    upload_bytes_with_channel(state, server_id, channel_id, data, file_name, mime_type).await
+}
+
+/// The network half of an upload, shared by the plaintext path above and the
+/// SEALED path (sub-6 W1). Split out so a sealed upload streams the exact same
+/// way — the server sees an upload it cannot tell apart, which is the point.
+///
+/// `data` is whatever gets stored: the file for a plaintext channel, the
+/// ciphertext for a sealed one. The hash is computed over `data`, so for a
+/// sealed upload it hashes the CIPHERTEXT, exactly as the cap must.
+pub(crate) async fn upload_bytes_with_channel(
+    state: &AppState,
+    server_id: &str,
+    channel_id: u64,
+    data: Vec<u8>,
+    file_name: String,
+    mime_type: String,
+) -> Result<UploadOutcome, String> {
+    use sha2::{Digest, Sha256};
+
+    let hash = format!("{:x}", Sha256::digest(&data));
 
     // Open a new bi-stream on the existing connection
     let conn = state.get_server(server_id).map_err(|e| e.to_string())?;
@@ -1671,11 +1688,48 @@ pub async fn download_file(
     download_file_internal(&state, &server_id, file_id).await
 }
 
+/// Fetch one file's raw bytes. For a sealed attachment these are the
+/// CIPHERTEXT — the server's `file_name`/`mime_type` describe the blob and are
+/// deliberately uninformative, so the sealed path ignores them entirely and uses
+/// the real values from inside the message ciphertext instead.
+pub(crate) async fn download_bytes_internal(
+    state: &AppState,
+    server_id: &str,
+    file_id: u64,
+) -> Result<Vec<u8>, String> {
+    match download_file_raw(state, server_id, file_id).await? {
+        (data, _name, _mime) => Ok(data),
+    }
+}
+
 pub(crate) async fn download_file_internal(
     state: &AppState,
     server_id: &str,
     file_id: u64,
 ) -> Result<DownloadResult, String> {
+    let (data, file_name, mime_type) = download_file_raw(state, server_id, file_id).await?;
+
+    // Images and audio render inline in the chat, so return their bytes as a
+    // base64 data URL; everything else saves to disk.
+    let inline = mime_type.starts_with("image/") || mime_type.starts_with("audio/");
+    if inline {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+        let data_url = format!("data:{};base64,{}", mime_type, b64);
+        Ok(DownloadResult { data_url: Some(data_url), file_name, mime_type, saved_path: None })
+    } else {
+        let downloads = dirs::download_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+        let save_path = downloads.join(&file_name);
+        std::fs::write(&save_path, &data).map_err(|e| e.to_string())?;
+        Ok(DownloadResult { data_url: None, file_name, mime_type, saved_path: Some(save_path.to_string_lossy().to_string()) })
+    }
+}
+
+async fn download_file_raw(
+    state: &AppState,
+    server_id: &str,
+    file_id: u64,
+) -> Result<(Vec<u8>, String, String), String> {
     let conn = state.get_server(server_id).map_err(|e| e.to_string())?;
     let quic_conn = conn.connection.clone();
     let (mut send, mut recv) = quic_conn.open_bi().await.map_err(|e| e.to_string())?;
@@ -1709,21 +1763,7 @@ pub(crate) async fn download_file_internal(
                 }
             }
 
-            // Images and audio render inline in the chat, so return their
-            // bytes as a base64 data URL; everything else saves to disk.
-            let inline = mime_type.starts_with("image/") || mime_type.starts_with("audio/");
-            if inline {
-                use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                let data_url = format!("data:{};base64,{}", mime_type, b64);
-                Ok(DownloadResult { data_url: Some(data_url), file_name, mime_type, saved_path: None })
-            } else {
-                // Save to downloads directory
-                let downloads = dirs::download_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
-                let save_path = downloads.join(&file_name);
-                std::fs::write(&save_path, &data).map_err(|e| e.to_string())?;
-                Ok(DownloadResult { data_url: None, file_name, mime_type, saved_path: Some(save_path.to_string_lossy().to_string()) })
-            }
+            Ok((data, file_name, mime_type))
         }
         farder_protocol::server::DownloadResponse::Error { reason } => Err(reason),
     }
@@ -7456,4 +7496,210 @@ pub async fn submit_message_deleted(
     ds.lamport = event.core.lamport;
     ds.save(&log_server_id)?;
     Ok(result)
+}
+
+/// The result of sealing and uploading one attachment for an E2EE channel.
+///
+/// `key` is hex so it can cross the Tauri boundary; the frontend hands it
+/// straight back to `send_sealed_message` and never stores it. It is the ONLY
+/// thing that can open the uploaded blob, and it travels inside the message
+/// ciphertext from there.
+#[derive(serde::Serialize)]
+pub struct SealedUploadOutcome {
+    pub file_id: u64,
+    /// SHA-256 of the CIPHERTEXT — what the cap describes.
+    pub content_hash: String,
+    /// Size of the ciphertext.
+    pub size: u64,
+    /// Hex per-file key.
+    pub key_hex: String,
+    /// The real filename, to be carried inside the message ciphertext.
+    pub file_name: String,
+    /// The real MIME, likewise.
+    pub mime_type: String,
+}
+
+/// Seal a file and upload the CIPHERTEXT, for an E2EE channel (sub-6 W1).
+///
+/// What the server receives is deliberately uniform and uninformative: a blob
+/// named `attachment.bin` with type `application/octet-stream`. The real name
+/// and type, and the key that opens it, go back to the caller to be placed
+/// inside the message ciphertext.
+///
+/// The sender's own file is checked against the SAME policy the recipient will
+/// apply. That is not belt-and-braces politeness: it means a file that cannot be
+/// safely delivered is refused at the point where the user can still do
+/// something about it, rather than arriving as an undisplayable blob.
+#[tauri::command]
+pub async fn upload_sealed_file(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    file_path: String,
+) -> Result<SealedUploadOutcome, String> {
+    use farder_crypto::file_policy;
+
+    let data = std::fs::read(&file_path).map_err(|e| e.to_string())?;
+    let raw_name = std::path::Path::new(&file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+
+    // Refuse here, where the user can still pick a different file.
+    let file_name = file_policy::safe_filename(&raw_name).map_err(|e| e.to_string())?;
+    let mime_type = mime_for_extension(&file_name);
+    file_policy::check_contents(&data, &mime_type).map_err(|e| e.to_string())?;
+
+    let (key, ciphertext) = file_policy::seal_file(&data).map_err(|e| e.to_string())?;
+    let outcome = upload_bytes_with_channel(
+        &state,
+        &server_id,
+        channel_id,
+        ciphertext,
+        // A uniform, uninformative blob name. The real one is sealed.
+        "attachment.bin".to_string(),
+        "application/octet-stream".to_string(),
+    )
+    .await?;
+
+    Ok(SealedUploadOutcome {
+        file_id: outcome.file_id,
+        content_hash: outcome.content_hash,
+        size: outcome.size,
+        key_hex: hex::encode(key),
+        file_name,
+        mime_type,
+    })
+}
+
+/// The extension→MIME table, shared by the plaintext and sealed upload paths so
+/// they cannot disagree about what a file claims to be.
+pub(crate) fn mime_for_extension(file_name: &str) -> String {
+    match file_name.rsplit('.').next().map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
+        Some("m4a") => "audio/mp4",
+        Some("flac") => "audio/flac",
+        Some("webm") => "audio/webm",
+        Some("mp4") => "video/mp4",
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// The result of opening a sealed attachment.
+///
+/// Tag-discriminated on purpose. A file that fails the policy is NOT a download
+/// that happens to have an error string attached — it is a thing the client
+/// refuses to write or render, and the UI has to be unable to accidentally treat
+/// it as a file.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SealedDownloadResult {
+    Opened {
+        /// Data URL for inline rendering (images/audio), else null.
+        data_url: Option<String>,
+        /// The SANITIZED filename — never the raw one from the ciphertext.
+        file_name: String,
+        mime_type: String,
+        saved_path: Option<String>,
+    },
+    /// The blob could not be opened, or the file failed the client-side policy.
+    Refused { reason: String },
+}
+
+/// Fetch, open and check one sealed attachment (sub-6 W3).
+///
+/// # The ordering is the point
+///
+/// Fetch ciphertext → open with the per-file key → **run the policy** → only
+/// then render or write. The server applied no file hardening to these bytes and
+/// could not have: it never saw them. Everything protecting the recipient
+/// happens here, in this order.
+///
+/// A sanitizer that runs after the write is decoration. So the sanitized name is
+/// computed immediately before use, the raw name from the ciphertext is never
+/// written anywhere, and a refusal returns a REFUSAL rather than a file with a
+/// warning attached.
+#[tauri::command]
+pub async fn download_sealed_file(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    file_id: u64,
+    key_hex: String,
+    // `claimed_name` and `claimed_mime` come from inside the message ciphertext
+    // and are ATTACKER-CONTROLLED: no server sanitizer has ever seen them.
+    claimed_name: String,
+    claimed_mime: String,
+) -> Result<SealedDownloadResult, String> {
+    use farder_crypto::file_policy;
+
+    let key_bytes = hex::decode(&key_hex).map_err(|_| "malformed attachment key".to_string())?;
+    let key: [u8; 32] = key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "attachment key has the wrong length".to_string())?;
+
+    let ciphertext = download_bytes_internal(&state, &server_id, file_id).await?;
+
+    // 1. Open. A wrong key or tampered blob fails closed here, before anything
+    //    touches a renderer.
+    let data = match file_policy::open_file(&key, &ciphertext) {
+        Ok(d) => d,
+        Err(_) => {
+            return Ok(SealedDownloadResult::Refused {
+                reason: "This file could not be unscrambled — it may have been altered."
+                    .to_string(),
+            })
+        }
+    };
+
+    // 2. The name, sanitized. Nothing has vetted `claimed_name`: it came from
+    //    inside a message and no server sanitizer ever saw it.
+    let file_name = match file_policy::safe_filename(&claimed_name) {
+        Ok(n) => n,
+        Err(e) => return Ok(SealedDownloadResult::Refused { reason: e.to_string() }),
+    };
+
+    // 3. The bytes, against the claim. This is the check the server would have
+    //    done and cannot.
+    let sniffed = match file_policy::check_contents(&data, &claimed_mime) {
+        Ok(t) => t,
+        Err(e) => return Ok(SealedDownloadResult::Refused { reason: e.to_string() }),
+    };
+
+    // 4. Only now may it be rendered or written. The MIME used is the SNIFFED
+    //    one, not the claimed one — the sender does not get to choose how their
+    //    bytes are interpreted.
+    let mime_type = sniffed.mime.to_string();
+    let inline = mime_type.starts_with("image/") || mime_type.starts_with("audio/");
+    if inline {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+        Ok(SealedDownloadResult::Opened {
+            data_url: Some(format!("data:{};base64,{}", mime_type, b64)),
+            file_name,
+            mime_type,
+            saved_path: None,
+        })
+    } else {
+        let downloads = dirs::download_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+        // `file_name` is the sanitized value: no separators, no traversal, no
+        // overrides. `join` on it therefore cannot escape the directory.
+        let save_path = downloads.join(&file_name);
+        std::fs::write(&save_path, &data).map_err(|e| e.to_string())?;
+        Ok(SealedDownloadResult::Opened {
+            data_url: None,
+            file_name,
+            mime_type,
+            saved_path: Some(save_path.to_string_lossy().to_string()),
+        })
+    }
 }
