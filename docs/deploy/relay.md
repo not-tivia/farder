@@ -152,15 +152,15 @@ If you want users (and invite links) to reference a hostname instead of a raw IP
 
    | Type | Name             | Value          |
    |------|------------------|----------------|
-   | A    | relay.farder.gg  | 203.0.113.42   |
+   | A    | relay.farder.xyz  | 203.0.113.42   |
 
 2. DNS propagation typically takes a few minutes to an hour. You can check it with:
 
    ```bash
-   dig +short relay.farder.gg
+   dig +short relay.farder.xyz
    ```
 
-3. Your relay address is now `relay.farder.gg:4433` instead of `203.0.113.42:4433`.
+3. Your relay address is now `relay.farder.xyz:4433` instead of `203.0.113.42:4433`.
 
 **Caveat — the hostname is cosmetic today.** The client parses `DEFAULT_RELAY.addr` (and the address inside every relay invite link) as a literal `IP:port`; a hostname there fails to parse and silently leaves the build with *no* default relay. So a DNS record is useful for documentation and for humans reading a link, but step 5 still takes the raw IP. Teaching the client to resolve hostnames is a small change we have not made yet — without it, moving the relay to a new IP means rebuilding the client even if the DNS name stays the same.
 

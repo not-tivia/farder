@@ -71,7 +71,9 @@ link as the server's address means reconnect on relaunch re-parses it — no
 
 A relayed server's "Create Invite" (`create_invite`, `commands.rs`) detects the
 relay form (`parse_relay_target`) and encodes a relay deep link with the new code
-as base64url into a self-describing `https://farder.gg/join/<base64>` web link
+as base64url into a self-describing `https://farder.xyz/join/<base64>` web link
+(host: `connection::WEB_INVITE_HOST`, mirrored by `WEB_INVITE_HOST` in
+`client/src/lib/invite.ts`)
 (no backend). Direct invites keep their existing `address/code` encoding.
 
 The deep link form depends on whether the server uses the default relay:

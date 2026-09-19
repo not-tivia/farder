@@ -4,7 +4,16 @@ export interface ParsedInvite {
   setupToken?: string;
 }
 
-// Decode URL-safe base64 (no-pad) used by farder.gg/join links.
+/** The host that serves web invite links. Mirrors `WEB_INVITE_HOST` in
+ *  `client/src-tauri/src/connection.rs` — the two cannot share a constant
+ *  across the language boundary, so a domain move means editing both. */
+export const WEB_INVITE_HOST = "farder.xyz";
+
+/** `WEB_INVITE_HOST` as a regex-safe fragment (a TLD dot must not match any
+ *  character, or `farderaxyz/join/...` would parse as ours). */
+const HOST_PATTERN = WEB_INVITE_HOST.replace(/\./g, "\\.");
+
+// Decode URL-safe base64 (no-pad) used by <host>/join links.
 function b64urlDecode(s: string): string {
   let t = s.replace(/-/g, "+").replace(/_/g, "/");
   while (t.length % 4) t += "=";
@@ -26,8 +35,15 @@ export function parseInviteLink(input: string): ParsedInvite {
   const trimmed = input.trim();
   if (!trimmed) return {};
 
-  // farder.gg/join/ENCODED
-  const joinMatch = trimmed.match(/(?:https?:\/\/)?farder\.gg\/join\/([A-Za-z0-9_-]+)/);
+  // <WEB_INVITE_HOST>/join/ENCODED
+  //
+  // Anchored to the start or a space so the host cannot be borrowed as a PATH:
+  // the old pattern matched anywhere, so `https://evil.com/farder.xyz/join/X`
+  // parsed as one of ours. Still tolerant of a link pasted inside a sentence,
+  // which is how invites actually arrive.
+  const joinMatch = trimmed.match(
+    new RegExp(`(?:^|\\s)(?:https?://)?${HOST_PATTERN}/join/([A-Za-z0-9_-]+)`),
+  );
   if (joinMatch) {
     try {
       const decoded = b64urlDecode(joinMatch[1]);

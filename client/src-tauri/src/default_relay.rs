@@ -9,7 +9,9 @@
 use std::net::SocketAddr;
 
 pub struct DefaultRelay {
-    /// The relay's address, e.g. "relay.farder.gg:4433".
+    /// The relay's address, e.g. "203.0.113.42:4433". A literal IP:port — the
+    /// parser below does not resolve hostnames, so `relay.farder.xyz:4433` here
+    /// would silently leave the build with no default relay.
     pub addr: &'static str,
     /// SHA-256 of the relay's certificate DER, hex (64 chars).
     pub cert_fp_hex: &'static str,

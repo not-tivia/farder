@@ -1725,7 +1725,8 @@ skips the music source on the next tick.
 
 **What it does:** creates a server invite. Builds
 two shareable URLs from the returned invite code:
-- `link`: `https://farder.gg/join/<base64url(address/code)>`
+- `link`: `https://farder.xyz/join/<base64url(address/code)>` (the host is
+  `connection::WEB_INVITE_HOST`)
 - `deep_link`: `farder://<address>/<code>`
 
 When `log_server_id` is `Some`, also emits a signed `InviteCreated` log event to

@@ -1,13 +1,13 @@
 /**
  * invite.js — Parse invite URL and handle deep link launch for Farder
  *
- * URL format:  farder.gg/join/ENCODED_TOKEN
- * Example:     farder.gg/join/cGxheS5mYXJkZXIuZ2c6NDQzNS9BYkMxMjN4WQ
+ * URL format:  farder.xyz/join/ENCODED_TOKEN
+ * Example:     farder.xyz/join/cGxheS5mYXJkZXIuZ2c6NDQzNS9BYkMxMjN4WQ
  *
  * ENCODED_TOKEN is URL-safe base64 (no padding) of either:
  *   - "server_address/invite_code"  (direct server invite)
  *   - "farder://..."                (relay or full deep link — self-describing)
- * Deep link:   farder://play.farder.gg:4435/AbC123xY
+ * Deep link:   farder://play.farder.xyz:4435/AbC123xY
  *              farder://relay/1.2.3.4:4433/aabb/ccdd/CODE
  */
 

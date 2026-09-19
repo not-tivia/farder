@@ -101,7 +101,12 @@ localhost fixture server).
    the whole `resolve_embed` call (the relay gives the resolver a 10 s outer budget,
    which is slightly looser than the per-request 8 s, covering adapter logic time).
 
-6. **User-Agent** — identifies outbound requests as `FarderRelay/1.0 (+https://farder.gg)`.
+6. **User-Agent** — a BROWSER string (`Mozilla/5.0 ... Chrome/120 ...`), not a
+   Farder identifier. The doc used to claim `FarderRelay/1.0 (+https://farder.gg)`;
+   the code has never sent that. Several providers (Reddit, some oEmbed
+   endpoints) reject or rate-limit non-browser agents, so the relay does not
+   announce itself. It does NOT defeat the datacenter-IP blocking some sites
+   apply to the relay's host — see `SafeFetcher::new` in `embed.rs`.
 
 `fetch_media` (used by `handle_media`, not via `LinkFetcher`) applies the same
 allowlist + SSRF gate, then enforces:

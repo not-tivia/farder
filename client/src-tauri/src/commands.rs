@@ -477,7 +477,7 @@ pub async fn get_invite_preview(link: String) -> Result<InvitePreviewResult, Str
         }
     }
 
-    // Web-wrapped invites (https://farder.gg/join/<b64>) — the form create_invite
+    // Web-wrapped invites (https://<WEB_INVITE_HOST>/join/<b64>) — the form create_invite
     // hands out — carry the real deep link inside; unwrap before parsing.
     let effective: String =
         crate::connection::unwrap_web_invite(&link).unwrap_or_else(|| link.clone());
@@ -2356,7 +2356,7 @@ pub async fn create_invite(
                     let deep_link = format!("farder://{}/{}", server_id, code);
                     (encoded, deep_link)
                 };
-            let link = format!("https://farder.gg/join/{}", encoded);
+            let link = crate::connection::build_web_invite(&encoded);
 
             // Mesh server: also record the invite as a signed InviteCreated event
             // in the log, so a joiner can cite it in their MemberJoined.

@@ -253,17 +253,39 @@ pub fn parse_direct_invite(s: &str) -> Option<(String, String)> {
     Some((addr.to_string(), token.to_string()))
 }
 
-/// Unwrap a `https://farder.gg/join/<base64url>` web invite into the inner
-/// deep link it carries — the form `create_invite` actually hands out and the
-/// frontend's parseInviteLink decodes. Returns None when `s` is not a
-/// farder.gg join link (callers fall back to parsing `s` itself).
+/// The host that serves web invite links: `https://<host>/join/<base64url>`.
+///
+/// One constant, because the host appeared in six places (this parser, the
+/// builder in `commands.rs`, both website pages, the deploy doc and the
+/// frontend's own parser) and a domain that lives in six places is a domain
+/// nobody can change. Note the other five are NOT compiled against this one —
+/// `client/src/lib/invite.ts` has its own copy by necessity, and the website is
+/// plain HTML — so a move still means a search; it is one line per surface
+/// instead of one line per mention.
+///
+/// **Links already handed out do not migrate.** An invite carrying the old host
+/// stops resolving the moment DNS stops answering for it.
+pub const WEB_INVITE_HOST: &str = "farder.xyz";
+
+/// Build the web-wrapped invite link for an already-encoded deep link.
+pub fn build_web_invite(encoded: &str) -> String {
+    format!("https://{WEB_INVITE_HOST}/join/{encoded}")
+}
+
+/// Unwrap a `https://<WEB_INVITE_HOST>/join/<base64url>` web invite into the
+/// inner deep link it carries — the form `create_invite` actually hands out and
+/// the frontend's parseInviteLink decodes. Returns None when `s` is not a join
+/// link (callers fall back to parsing `s` itself).
 pub fn unwrap_web_invite(s: &str) -> Option<String> {
     use base64::Engine;
     let t = s.trim();
-    let rest = t
-        .strip_prefix("https://farder.gg/join/")
-        .or_else(|| t.strip_prefix("http://farder.gg/join/"))
-        .or_else(|| t.strip_prefix("farder.gg/join/"))?;
+    // Scheme first, then host: the same three accepted forms as before
+    // (https://, http://, bare) with one allocation instead of three.
+    let without_scheme = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))
+        .unwrap_or(t);
+    let rest = without_scheme.strip_prefix(&format!("{WEB_INVITE_HOST}/join/"))?;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(rest.as_bytes())
         .ok()?;
@@ -365,9 +387,8 @@ mod tests {
         use base64::Engine;
         // Mirror create_invite's encoding of a compact relayd link.
         let inner = format!("farder://relayd/{}/AbCd1234", hex::encode([7u8; 32]));
-        let wrapped = format!(
-            "https://farder.gg/join/{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inner.as_bytes())
+        let wrapped = build_web_invite(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inner.as_bytes()),
         );
         assert_eq!(unwrap_web_invite(&wrapped).as_deref(), Some(inner.as_str()));
         // Scheme-less form too.
@@ -375,7 +396,9 @@ mod tests {
         assert_eq!(unwrap_web_invite(bare).as_deref(), Some(inner.as_str()));
         // Non-join links and garbage payloads do not unwrap.
         assert!(unwrap_web_invite("farder://relayd/aabb/code").is_none());
-        assert!(unwrap_web_invite("https://farder.gg/join/!!!notb64!!!").is_none());
+        assert!(unwrap_web_invite(&build_web_invite("!!!notb64!!!")).is_none());
+        // A link for a DIFFERENT host is not ours to unwrap, however well-formed.
+        assert!(unwrap_web_invite("https://farder.gg/join/ZmFyZGVy").is_none());
     }
 
     #[test]
@@ -393,7 +416,7 @@ mod tests {
         assert!(parse_direct_invite("farder://relay/1.2.3.4:1/aa/bb/code").is_none());
         assert!(parse_direct_invite("farder://relayd/aabb/code").is_none());
         // Web URLs must never be mis-read as host:port (the port is not numeric).
-        assert!(parse_direct_invite("https://farder.gg/join/ZmFyZGVy").is_none());
+        assert!(parse_direct_invite(&build_web_invite("ZmFyZGVy")).is_none());
         assert!(parse_direct_invite("https://example.com/whatever").is_none());
         assert!(parse_direct_invite("AbCd1234").is_none());
     }
