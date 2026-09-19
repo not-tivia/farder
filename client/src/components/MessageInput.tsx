@@ -134,6 +134,19 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setError(null);
   }
 
+  // A staged attachment belongs to the channel it was picked in. This component
+  // is not keyed by channel, so without this the file follows you: stage one in
+  // an encrypted channel, switch to a plaintext one, hit send, and the plaintext
+  // path posts the CIPHERTEXT blob — an `attachment.bin` nobody can open, in a
+  // channel where the whole point is that everyone can. (The same staleness
+  // existed for plaintext uploads; it was just less visible.)
+  useEffect(() => {
+    handleRemoveAttachment();
+    // Only on a channel change — handleRemoveAttachment is stable enough here
+    // and re-running this on every render would clear an attachment mid-pick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channelId]);
+
   async function handleGifButtonClick() {
     try {
       const settings = await gifApi.getGifSearchSettings();

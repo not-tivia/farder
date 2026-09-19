@@ -56,8 +56,11 @@ export function useHistoryRetention(): void {
       const cutoff = Math.max(0, nowSecs - window);
       void api.historyPurgeBefore(ch.id, cutoff).catch((e) => {
         // A locked identity is the ordinary case here (the store cannot be
-        // opened yet), not an error worth surfacing: the sweep retries on the
-        // next tick, and nothing was read in the meantime either.
+        // opened yet), not an error worth surfacing. The timestamp above is
+        // recorded on the ATTEMPT, not on success, so a failure waits out the
+        // full interval before trying again — deliberately, because the
+        // alternative is retrying on every render while the identity stays
+        // locked. Nothing was readable in the meantime either.
         console.warn("[history] retention sweep failed:", e);
       });
     }
