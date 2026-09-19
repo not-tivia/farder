@@ -16,6 +16,9 @@ interface Props { onClose: () => void; }
 export default function ServerSettingsDialog({ onClose }: Props) {
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
+  // Named in the title bar: "Server Settings" and "Your Settings" sitting behind
+  // two near-identical gears is the confusion this is fixing.
+  const serverName = activeServer?.serverName ?? null;
   const [newChName, setNewChName] = useState("");
   const [newChType, setNewChType] = useState("Text");
   const [newChCatId, setNewChCatId] = useState<number | undefined>(undefined);
@@ -194,7 +197,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-dialog" onClick={(e) => e.stopPropagation()} style={{ minWidth: 480, maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
         <div className="modal-titlebar">
-          <span>Server Settings</span>
+          <span>Server Settings{serverName ? ` — ${serverName}` : ""}</span>
           <button className="modal-close" onClick={onClose}>X</button>
         </div>
         {/* Tab bar */}

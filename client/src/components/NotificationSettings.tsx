@@ -5,9 +5,16 @@ import { useApp } from "../context/ServerContext";
 import { refreshNotifPrefsCache } from "../hooks/useServerEvents";
 import { publicKeyToString } from "../lib/types";
 
-interface Props { onClose: () => void; }
-
-export default function NotificationSettings({ onClose }: Props) {
+/**
+ * Notification preferences, as a PANEL inside your own settings.
+ *
+ * This used to be a modal of its own, opened by a button labelled "N" next to
+ * the gear in the user footer — two settings entry points a pixel apart, one of
+ * them a single letter. The preferences are per-identity (they live in
+ * `notifications.json` in your data directory, not on any server), so the place
+ * they belong is beside Appearance, Voice and Privacy.
+ */
+export default function NotificationSettings() {
     const { state } = useApp();
     const [prefs, setPrefs] = useState<NotificationPrefs | null>(null);
     const [newKeyword, setNewKeyword] = useState("");
@@ -46,13 +53,9 @@ export default function NotificationSettings({ onClose }: Props) {
     if (!prefs) return null;
 
     return (
-        <div className="modal-overlay" onClick={onClose}>
-            <div className="modal-dialog" onClick={e => e.stopPropagation()} style={{ minWidth: 400, maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
-                <div className="modal-titlebar">
-                    <span>Notification Settings</span>
-                    <button className="modal-close" onClick={onClose}>X</button>
-                </div>
-                <div className="modal-body" style={{ overflowY: "auto", flex: 1 }}>
+        <div className="settings-panel">
+            <h2 className="settings-panel-title">Notifications</h2>
+            <div>
 
                     {/* DM Notifications */}
                     <div className="connect-section">
@@ -181,8 +184,7 @@ export default function NotificationSettings({ onClose }: Props) {
                         </label>
                     </div>
 
-                    {saved && <div className="success-text">Settings saved!</div>}
-                </div>
+                {saved && <div className="success-text">Settings saved!</div>}
             </div>
         </div>
     );

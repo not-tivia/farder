@@ -10,7 +10,6 @@ import ServerSettingsDialog from "./ServerSettingsDialog";
 import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 import UserProfilePopup from "./UserProfilePopup";
-import NotificationSettings from "./NotificationSettings";
 import SettingsModal from "./settings/SettingsModal";
 import VoiceControlBar from "./VoiceControlBar";
 import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
@@ -22,7 +21,6 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
   const [name, setName] = useState<string | null>(null);
   const [ownPk, setOwnPk] = useState<string | null>(null);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
-  const [showNotifSettings, setShowNotifSettings] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
@@ -42,18 +40,16 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
         >
           ● {name ?? "Unknown"}
         </span>
+        {/* YOUR settings. It sits next to your own name on purpose — the other
+            gear, in the server header, is the SERVER's. The tooltip says which
+            one this is, because two gear icons a few pixels apart did not. */}
         <button
           className="server-invite-btn"
           onClick={() => setShowSettings(true)}
-          title="Settings"
-          style={{ fontSize: 10, marginRight: 4 }}
-        >⚙</button>
-        <button
-          className="server-invite-btn"
-          onClick={() => setShowNotifSettings(true)}
-          title="Notification Settings"
+          title="Your settings — appearance, voice, notifications, privacy"
+          aria-label="Your settings"
           style={{ fontSize: 10 }}
-        >N</button>
+        >⚙</button>
       </div>
       {profilePopup && ownMember && serverId && (
         <UserProfilePopup
@@ -65,7 +61,6 @@ function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("
           serverId={serverId}
         />
       )}
-      {showNotifSettings && <NotificationSettings onClose={() => setShowNotifSettings(false)} />}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </>
   );
