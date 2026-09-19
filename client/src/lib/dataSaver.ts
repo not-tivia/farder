@@ -8,6 +8,12 @@ export interface DataSaverSettings {
   clickToLoadEmbeds: boolean;  // link previews -> "Load preview"
   freezeAvatars: boolean;      // animated avatars -> still first frame
   thresholdMB: number;         // size cutoff for images, in MB
+  /** Hard ceiling, in MB, above which NOTHING downloads without being asked —
+   *  images included, Data Saver on or off. Separate from `thresholdMB` on
+   *  purpose: that one is a preference about saving data, this one is about not
+   *  letting someone else's 2 GB clip start arriving on your connection because
+   *  you scrolled past it. */
+  askAboveMB: number;
 }
 
 export const DATA_SAVER_DEFAULTS: DataSaverSettings = {
@@ -16,6 +22,7 @@ export const DATA_SAVER_DEFAULTS: DataSaverSettings = {
   clickToLoadEmbeds: true,
   freezeAvatars: true,
   thresholdMB: 1,
+  askAboveMB: 8,
 };
 
 /**
@@ -60,6 +67,31 @@ export function thresholdBytes(s: DataSaverSettings): number {
  */
 export function imageIsGated(s: DataSaverSettings, sizeBytes: number): boolean {
   return s.enabled && s.gateImages && sizeBytes > thresholdBytes(s);
+}
+
+export function askAboveBytes(s: DataSaverSettings): number {
+  // 0 or a negative value would mean "ask about everything", which is a
+  // legitimate choice; NaN from a hand-edited store is not, and defaults.
+  const mb = Number.isFinite(s.askAboveMB) ? Math.max(0, s.askAboveMB) : DATA_SAVER_DEFAULTS.askAboveMB;
+  return mb * 1024 * 1024;
+}
+
+/**
+ * True when a file is large enough that it must not be fetched until the person
+ * receiving it says so.
+ *
+ * Unconditional by design — it does not consult `enabled`. Data Saver is a
+ * preference someone opts into; this is the floor under everyone, because the
+ * cost of getting it wrong is paid by the person on the metered connection who
+ * did nothing but open a channel.
+ *
+ * Test-notes (verified by inspection), ceiling 8 MB:
+ *   - 2 MB, Data Saver off -> false
+ *   - 40 MB, Data Saver off -> true
+ *   - 40 MB, Data Saver on  -> true
+ */
+export function needsDownloadConsent(s: DataSaverSettings, sizeBytes: number): boolean {
+  return sizeBytes > askAboveBytes(s);
 }
 
 /**

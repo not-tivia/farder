@@ -29,7 +29,7 @@ import LinkedWidgetCard from "./LinkedWidgetCard";
 import type { WidgetLink } from "./LinkedWidgetCard";
 import MemberAvatar from "./MemberAvatar";
 import { useDataSaver } from "../context/DataSaverContext";
-import { imageIsGated } from "../lib/dataSaver";
+import { imageIsGated, needsDownloadConsent } from "../lib/dataSaver";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
@@ -1059,10 +1059,17 @@ function SealedAttachmentDisplay({
   // size is the CIPHERTEXT's (a few bytes over the real one) and it is the only
   // size anyone knows before opening — which is the right basis anyway, since
   // that is what actually comes over the connection.
+  // The ceiling applies to sealed files too, on the CIPHERTEXT size — which is
+  // the only size anyone knows before opening, and is what actually crosses the
+  // connection.
+  const tooBigToAutoLoad =
+    !sealedOpenCache.has(cacheKey) && needsDownloadConsent(ds, attachment.size);
+
   const gated =
-    sealedRef.mimeType.startsWith("image/") &&
-    !sealedOpenCache.has(cacheKey) &&
-    imageIsGated(ds, attachment.size);
+    tooBigToAutoLoad ||
+    (sealedRef.mimeType.startsWith("image/") &&
+      !sealedOpenCache.has(cacheKey) &&
+      imageIsGated(ds, attachment.size));
 
   async function open() {
     // Already opened this session: reuse the bytes AND the name the policy
@@ -1123,11 +1130,20 @@ function SealedAttachmentDisplay({
   if (state.kind === "idle") {
     return (
       <div className="attachment-item">
-        <button className="link-embed-chip" onClick={() => void open()}>
-          {gated
-            ? `🔒 Load encrypted image (${formatSize(attachment.size)})`
-            : `🔒 Open encrypted file (${formatSize(attachment.size)})`}
-        </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <button className="link-embed-chip" onClick={() => void open()}>
+            {tooBigToAutoLoad
+              ? `\u{1F512} Accept and download (${formatSize(attachment.size)})`
+              : gated
+                ? `\u{1F512} Load encrypted image (${formatSize(attachment.size)})`
+                : `\u{1F512} Open encrypted file (${formatSize(attachment.size)})`}
+          </button>
+          {tooBigToAutoLoad && (
+            <div style={{ fontSize: 11, color: "var(--xp-text-muted)" }}>
+              Nothing has been downloaded yet.
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -1185,11 +1201,23 @@ function AttachmentDisplay({
   const isAudio = attachment.mime_type.startsWith("audio/");
   const { settings: ds } = useDataSaver();
   const [userLoaded, setUserLoaded] = useState(false);
-  const gated =
-    isImage &&
+  // Two different gates, and they are not the same idea.
+  //
+  //  - `imageIsGated` is Data Saver: a preference, images only, opt-in.
+  //  - `needsDownloadConsent` is the ceiling: ANY file over it, for everyone,
+  //    Data Saver or not. Someone dropping a 2 GB clip into a channel should
+  //    not start spending the bandwidth of everyone who scrolls past it.
+  const tooBigToAutoLoad =
     !userLoaded &&
     !imageCache.has(attachment.file_id) &&
-    imageIsGated(ds, attachment.size);
+    needsDownloadConsent(ds, attachment.size);
+
+  const gated =
+    tooBigToAutoLoad ||
+    (isImage &&
+      !userLoaded &&
+      !imageCache.has(attachment.file_id) &&
+      imageIsGated(ds, attachment.size));
 
   useEffect(() => {
     if (!isImage && !isAudio) return;
@@ -1245,6 +1273,29 @@ function AttachmentDisplay({
       <div className="attachment-item">
         <span>&#x1F6AB;</span>
         <span>Removed by {who}</span>
+      </div>
+    );
+  }
+
+  if (tooBigToAutoLoad) {
+    // Any type, any settings. The size is the whole message: it is what the
+    // person is being asked to spend.
+    return (
+      <div className="attachment-item">
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div className="attachment-name">
+            &#x1F4E5; {attachment.name} &mdash; {formatSize(attachment.size)}
+          </div>
+          <div>
+            <button className="link-embed-chip" onClick={() => setUserLoaded(true)}>
+              Accept and download
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--xp-text-muted)" }}>
+            Nothing has been downloaded yet. Change the limit in Settings &rarr;
+            Privacy &amp; Data.
+          </div>
+        </div>
       </div>
     );
   }

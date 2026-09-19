@@ -207,6 +207,30 @@ export default function PrivacyDataSettings() {
       </SettingsSection>
 
       <div className="settings-divider" />
+      <SettingsSection label="Large Files">
+        <label className="settings-row">
+          Always ask before downloading files over&nbsp;
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={ds.askAboveMB}
+            onChange={(e) => updateDs({ askAboveMB: Math.max(0, parseFloat(e.target.value) || 0) })}
+            style={{ width: 64 }}
+          />
+          &nbsp;MB
+        </label>
+        <p className="settings-help">
+          This one applies whether Data Saver is on or off, and to every kind of
+          file. Anything larger shows its name and size with an
+          &ldquo;Accept and download&rdquo; button, and nothing crosses your
+          connection until you press it &mdash; so a 2&nbsp;GB clip someone drops
+          in a channel cannot start arriving because you scrolled past it. Set it
+          to 0 to be asked about everything.
+        </p>
+      </SettingsSection>
+
+      <div className="settings-divider" />
       <SettingsSection label="Embeds &amp; Players">
         <label className="settings-row">
           <input
