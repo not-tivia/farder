@@ -35,6 +35,10 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const [attachedFileId, setAttachedFileId] = useState<number | null>(null);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
   const [attachedCap, setAttachedCap] = useState<AttachmentCapInput | null>(null);
+  /** The sealed upload staged for an E2EE channel (sub-6). Distinct from
+   *  `attachedCap`: that one describes a PLAINTEXT blob the server can read,
+   *  this one carries the per-file key that never leaves the ciphertext. */
+  const [sealedAttachment, setSealedAttachment] = useState<api.SealedUploadOutcome | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
@@ -97,14 +101,26 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setAttachedFileName(fileName);
     setUploading(true);
     try {
-      const outcome = await api.uploadFile(serverId, channelId, path);
-      setAttachedFileId(outcome.fileId);
-      setAttachedCap({ contentHash: outcome.contentHash, declaredType: outcome.declaredType, size: outcome.size });
+      if (isE2ee) {
+        // Sealed before it leaves the machine: the server stores ciphertext
+        // under a neutral name, and the key rides inside the message. A file
+        // that fails the policy is refused HERE, while another can still be
+        // picked.
+        const sealed = await api.uploadSealedFile(serverId, channelId, path);
+        setSealedAttachment(sealed);
+        setAttachedFileId(sealed.file_id);
+        setAttachedFileName(sealed.file_name);
+      } else {
+        const outcome = await api.uploadFile(serverId, channelId, path);
+        setAttachedFileId(outcome.fileId);
+        setAttachedCap({ contentHash: outcome.contentHash, declaredType: outcome.declaredType, size: outcome.size });
+      }
     } catch (e) {
       setError(String(e));
       setAttachedFileName(null);
       setAttachedFileId(null);
       setAttachedCap(null);
+      setSealedAttachment(null);
     } finally {
       setUploading(false);
     }
@@ -114,6 +130,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setAttachedFileId(null);
     setAttachedFileName(null);
     setAttachedCap(null);
+    setSealedAttachment(null);
     setError(null);
   }
 
@@ -206,6 +223,29 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setShowVoiceRecorder(false);
     setSending(true);
     try {
+      // W4: in an encrypted channel a voice message is exactly an attachment
+      // with nothing typed, so it rides the sealed path rather than uploading a
+      // readable WAV to the server.
+      if (isE2ee) {
+        const logServerId = activeServer?.logServerId ?? null;
+        if (!logServerId) {
+          setError("This channel is encrypted but the server has no log id");
+          return;
+        }
+        const sealed = await api.uploadSealedFile(serverId, channelId, filePath);
+        const sent = await api.sendSealedMessage(serverId, logServerId, channelId, "", null, [sealed]);
+        dispatch({
+          type: "OWN_SEALED_SENT",
+          serverId,
+          payload: {
+            eventHash: sent.event_hash,
+            content: "",
+            attachments: [{ keyHex: sealed.key_hex, fileName: sealed.file_name, mimeType: sealed.mime_type }],
+          },
+        });
+        return;
+      }
+
       // Upload the WAV file via existing system
       const outcome = await api.uploadFile(serverId, channelId, filePath);
 
@@ -269,16 +309,29 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         // Record what we typed against the event hash the server assigns. The
         // author cannot decrypt their own MLS message, so this is the ONLY way
         // their own text ever renders — see `ownSealedSends`.
-        const sent = await api.sendSealedMessage(serverId, logServerId, channelId, text, null);
+        const staged = sealedAttachment ? [sealedAttachment] : [];
+        const sent = await api.sendSealedMessage(serverId, logServerId, channelId, text, null, staged);
         dispatch({
           type: "OWN_SEALED_SENT",
           serverId,
-          payload: { eventHash: sent.event_hash, content: text },
+          payload: {
+            eventHash: sent.event_hash,
+            content: text,
+            // Our own files need the same local echo as our own words: the
+            // sender cannot open its own ciphertext, so this is the only place
+            // the key, name and type survive.
+            attachments: staged.map((a) => ({
+              keyHex: a.key_hex,
+              fileName: a.file_name,
+              mimeType: a.mime_type,
+            })),
+          },
         });
         setContent("");
         setAttachedFileId(null);
         setAttachedFileName(null);
         setAttachedCap(null);
+        setSealedAttachment(null);
         if (onSent) onSent();
       } catch (e) {
         setError(String(e));

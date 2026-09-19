@@ -257,11 +257,59 @@ export async function processMlsControlEvents(serverId: string, logServerId: str
   return invoke("process_mls_control_events", { serverId, logServerId, channelId });
 }
 
-/** Seal + submit one E2EE channel message (T10). Returns the accepted event hash
- *  and the epoch the ciphertext was sealed in. `replyTo` is an event-hash ref;
- *  pass null for a top-level post (legacy numeric replies are not mapped yet). */
-export async function sendSealedMessage(serverId: string, logServerId: string, channelId: number, content: string, replyTo: string | null): Promise<{ event_hash: string; epoch: number }> {
-  return invoke("send_sealed_message", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null });
+/** One sealed, uploaded attachment, exactly as `uploadSealedFile` returned it.
+ *  The key, real name and real MIME travel INSIDE the message ciphertext; only
+ *  the ciphertext's hash and size are visible to the server. */
+export interface SealedAttachmentInput {
+  content_hash: string;
+  size: number;
+  key_hex: string;
+  file_name: string;
+  mime_type: string;
+}
+
+/** Seal + submit one E2EE channel message (T10, attachments sub-6). Returns the
+ *  accepted event hash and the epoch the ciphertext was sealed in. `replyTo` is an
+ *  event-hash ref; pass null for a top-level post (legacy numeric replies are not
+ *  mapped yet). `content` may be empty ONLY when there is an attachment (a voice
+ *  message is exactly that case). */
+export async function sendSealedMessage(serverId: string, logServerId: string, channelId: number, content: string, replyTo: string | null, attachments?: SealedAttachmentInput[]): Promise<{ event_hash: string; epoch: number }> {
+  return invoke("send_sealed_message", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null, attachments: attachments ?? [] });
+}
+
+/** The outcome of sealing + uploading one file for an E2EE channel (sub-6 W1).
+ *  What reached the server is a uniform `attachment.bin` of
+ *  `application/octet-stream`; everything identifying rides back here to be
+ *  sealed into the message. */
+export interface SealedUploadOutcome {
+  file_id: number;
+  content_hash: string;
+  size: number;
+  key_hex: string;
+  file_name: string;
+  mime_type: string;
+}
+
+/** Seal a local file and upload the ciphertext (sub-6 W1). Refuses before any
+ *  upload if the file fails the client-side policy (bad name, or bytes that do
+ *  not match the extension's type) — the point being that the user can still
+ *  pick a different file. */
+export async function uploadSealedFile(serverId: string, channelId: number, filePath: string): Promise<SealedUploadOutcome> {
+  return invoke<SealedUploadOutcome>("upload_sealed_file", { serverId, channelId, filePath });
+}
+
+/** The result of opening a sealed attachment: tag-discriminated so a refusal
+ *  cannot be mistaken for a file. */
+export type SealedDownloadResult =
+  | { kind: "opened"; data_url: string | null; file_name: string; mime_type: string; saved_path: string | null }
+  | { kind: "refused"; reason: string };
+
+/** Fetch, open and policy-check one sealed attachment (sub-6 W3). `claimedName`
+ *  and `claimedMime` come from inside the message ciphertext and are untrusted:
+ *  the backend sanitizes the name and sniffs the bytes BEFORE anything is written
+ *  or rendered, and returns `refused` rather than a file when either fails. */
+export async function downloadSealedFile(serverId: string, fileId: number, keyHex: string, claimedName: string, claimedMime: string): Promise<SealedDownloadResult> {
+  return invoke<SealedDownloadResult>("download_sealed_file", { serverId, fileId, keyHex, claimedName, claimedMime });
 }
 
 /** The wire shape of `decrypt_sealed_message`: a tag-discriminated result.
@@ -329,7 +377,11 @@ export interface HistoryRow {
   author: number[];
   content: string;
   reply_to: string | null;
-  attachments: string[];
+  /** Sealed attachment refs (sub-6): the per-file key plus the sender's claimed
+   *  name and type. Stored because a sealed message opens only once — a key lost
+   *  at restart is a file nobody can open again. Claims stay untrusted; the
+   *  sanitizing happens in `downloadSealedFile`. */
+  attachments: { key_hex: string; file_name: string; mime_type: string }[];
 }
 
 /** One in-channel transparency notice: a device gained or lost the ability to

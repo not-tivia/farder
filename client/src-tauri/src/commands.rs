@@ -1560,22 +1560,10 @@ async fn upload_file_internal_with_channel(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".to_string());
 
-    let mime_type = match file_name.rsplit('.').next() {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("wav") => "audio/wav",
-        Some("mp3") => "audio/mpeg",
-        Some("ogg") => "audio/ogg",
-        Some("m4a") => "audio/mp4",
-        Some("flac") => "audio/flac",
-        Some("webm") => "audio/webm",
-        Some("pdf") => "application/pdf",
-        Some("txt") => "text/plain",
-        _ => "application/octet-stream",
-    }
-    .to_string();
+    // One table, shared with the sealed path: a second copy drifts, and this one
+    // already had (it matched the extension case-sensitively, so `PHOTO.PNG`
+    // uploaded as octet-stream).
+    let mime_type = mime_for_extension(&file_name);
 
     upload_bytes_with_channel(state, server_id, channel_id, data, file_name, mime_type).await
 }
@@ -5684,6 +5672,27 @@ pub struct SendSealedMessageResult {
     pub epoch: u64,
 }
 
+/// One already-sealed, already-uploaded attachment, exactly as
+/// [`upload_sealed_file`] returned it (sub-6 W2).
+///
+/// The uploader is deliberately NOT a field: it is this identity, filled in
+/// below. A caller-supplied uploader would be a cap the server refuses anyway
+/// (it validates the cap against the blob's `uploaded_by`), so accepting one
+/// would only create a way to build an event that can never materialize.
+#[derive(serde::Deserialize)]
+pub struct SealedAttachmentInput {
+    /// SHA-256 of the uploaded CIPHERTEXT.
+    pub content_hash: String,
+    /// Size of the ciphertext.
+    pub size: u64,
+    /// Hex per-file key. Travels inside the message ciphertext only.
+    pub key_hex: String,
+    /// The real filename, sealed with the message.
+    pub file_name: String,
+    /// The real MIME, sealed with the message.
+    pub mime_type: String,
+}
+
 #[tauri::command]
 pub async fn send_sealed_message(
     state: State<'_, Arc<AppState>>,
@@ -5692,9 +5701,13 @@ pub async fn send_sealed_message(
     channel_id: u64,
     content: String,
     reply_to: Option<String>, // event-hash ref; None for top-level (legacy numeric replies are not mapped yet)
+    attachments: Option<Vec<SealedAttachmentInput>>, // from upload_sealed_file; empty/omitted for text-only
 ) -> Result<SendSealedMessageResult, String> {
     let content = content.trim().to_string();
-    if content.is_empty() {
+    let attachments = attachments.unwrap_or_default();
+    // A voice message is an attachment with nothing typed, so emptiness is only
+    // an error when there is no attachment either.
+    if content.is_empty() && attachments.is_empty() {
         return Err("message content cannot be empty".to_string());
     }
 
@@ -5714,11 +5727,46 @@ pub async fn send_sealed_message(
                 chain,
                 content,
                 reply_to,
+                attachments,
             )
             .await
         },
     )
     .await
+}
+
+/// Turn the frontend's [`SealedAttachmentInput`]s into the crate's
+/// [`SealedAttachment`]s, filling in the uploader and decoding the per-file keys.
+///
+/// A malformed key is refused rather than truncated or padded: a wrong-length
+/// key would seal a message whose attachment nobody — including the sender —
+/// could ever open, and the failure would only surface on the recipient's side.
+fn build_sealed_attachments(
+    inputs: &[SealedAttachmentInput],
+    uploader: farder_crypto::identity::PublicKey,
+) -> Result<Vec<farder_e2ee_client::SealedAttachment>, String> {
+    use farder_crypto::event_log::AttachmentCap;
+
+    inputs
+        .iter()
+        .map(|a| {
+            let raw = hex::decode(&a.key_hex).map_err(|_| "attachment key is not hex".to_string())?;
+            let key: [u8; 32] = raw
+                .try_into()
+                .map_err(|_| "attachment key must be 32 bytes".to_string())?;
+            Ok(farder_e2ee_client::SealedAttachment {
+                cap: AttachmentCap {
+                    content_hash: a.content_hash.clone(),
+                    declared_type: "application/octet-stream".to_string(),
+                    size: a.size,
+                    uploader: uploader.clone(),
+                },
+                key,
+                filename: a.file_name.clone(),
+                mime: a.mime_type.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The non-Send body of [`send_sealed_message`], driven on a current-thread
@@ -5736,10 +5784,11 @@ async fn run_send_sealed_message(
     mut chain: farder_e2ee_client::ChainState,
     content: String,
     reply_to: Option<String>,
+    attachments: Vec<SealedAttachmentInput>,
 ) -> Result<SendSealedMessageResult, String> {
     use farder_e2ee_client::{
-        channel_group_id, resume_store, send_sealed, send_sealed_resync, Actor, ChannelKey,
-        ResyncRequest, SealContext, SendEligibility,
+        channel_group_id, resume_store, send_sealed_resync, Actor, ChannelKey, ResyncRequest,
+        SealContext, SendEligibility,
     };
     use farder_mls::credential::DeviceSigner;
     use farder_mls::group::MlsChannelGroup;
@@ -5783,13 +5832,20 @@ async fn run_send_sealed_message(
     };
     let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
 
+    // The caps describe the CIPHERTEXT (hash, size, octet-stream) and stay
+    // outside; the keys, real names and real MIMEs go inside the envelope. The
+    // uploader is this identity because the server validates the cap against
+    // the blob's `uploaded_by` — anything else builds an event that can never
+    // materialize an attachment.
+    let sealed_attachments = build_sealed_attachments(&attachments, identity.public_key())?;
+
     let ctx = SealContext {
         key: &key,
         generation,
         store: &store,
         content: &content,
         reply_to: reply_to.clone(),
-        attachments: &[],
+        attachments: &sealed_attachments,
     };
     let eligibility = if mls.confirmed {
         SendEligibility::confirmed()
@@ -7007,6 +7063,74 @@ mod relay_choice_tests {
 }
 
 #[cfg(test)]
+mod sealed_attachment_tests {
+    use super::*;
+    use farder_crypto::identity::Keypair;
+
+    fn input(key_hex: &str) -> SealedAttachmentInput {
+        SealedAttachmentInput {
+            content_hash: "abc".into(),
+            size: 10,
+            key_hex: key_hex.into(),
+            file_name: "note.txt".into(),
+            mime_type: "text/plain".into(),
+        }
+    }
+
+    #[test]
+    fn the_cap_describes_the_ciphertext_and_names_this_identity() {
+        let me = Keypair::generate();
+        let out = build_sealed_attachments(&[input(&"ab".repeat(32))], me.public_key()).unwrap();
+        assert_eq!(out.len(), 1);
+        let a = &out[0];
+        assert_eq!(a.cap.declared_type, "application/octet-stream", "the blob is uniform");
+        assert_eq!(a.cap.content_hash, "abc");
+        assert_eq!(a.cap.size, 10);
+        assert_eq!(a.cap.uploader, me.public_key(), "the server checks this against the blob");
+        // The name and type the recipient will see travel inside the ciphertext.
+        assert_eq!(a.filename, "note.txt");
+        assert_eq!(a.mime, "text/plain");
+        assert_eq!(a.key, [0xabu8; 32]);
+    }
+
+    #[test]
+    fn a_malformed_key_is_refused_rather_than_resized() {
+        let me = Keypair::generate();
+        // Too short, too long, and not hex at all: each would otherwise produce
+        // a message whose attachment nobody could open, failing only on the
+        // recipient's side.
+        for bad in ["ab", &"ab".repeat(33), "zz".repeat(32).as_str()] {
+            assert!(
+                build_sealed_attachments(&[input(bad)], me.public_key()).is_err(),
+                "key {bad} must be refused",
+            );
+        }
+    }
+
+    /// The two halves of the file policy have to agree: a name the allowlist
+    /// permits must resolve to a type the content check can confirm. An
+    /// extension missing from the MIME table falls through to octet-stream,
+    /// which no sniffed type ever agrees with -- so the file would be allowed by
+    /// name and refused by content, every time.
+    #[test]
+    fn every_allowed_extension_resolves_to_a_checkable_type() {
+        for ext in farder_crypto::file_policy::ALLOWED_EXTENSIONS {
+            let mime = mime_for_extension(&format!("file.{ext}"));
+            assert_ne!(
+                mime, "application/octet-stream",
+                ".{ext} is on the allowlist but has no MIME, so it could never be sent",
+            );
+        }
+    }
+
+    #[test]
+    fn no_attachments_is_an_empty_vec_not_an_error() {
+        let me = Keypair::generate();
+        assert!(build_sealed_attachments(&[], me.public_key()).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
 mod link_embed_tests {
     use super::*;
 
@@ -7587,8 +7711,16 @@ pub(crate) fn mime_for_extension(file_name: &str) -> String {
         Some("flac") => "audio/flac",
         Some("webm") => "audio/webm",
         Some("mp4") => "video/mp4",
+        Some("mov") => "video/quicktime",
         Some("pdf") => "application/pdf",
-        Some("txt") => "text/plain",
+        // The rest of `file_policy::ALLOWED_EXTENSIONS`. A type missing here
+        // resolves to octet-stream, which no sniffed type can ever agree with —
+        // i.e. an allowlisted file that can never actually be sent.
+        Some("txt") | Some("log") => "text/plain",
+        Some("md") => "text/markdown",
+        Some("csv") => "text/csv",
+        Some("json") => "application/json",
+        Some("zip") => "application/zip",
         _ => "application/octet-stream",
     }
     .to_string()

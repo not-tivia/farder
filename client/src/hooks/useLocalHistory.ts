@@ -64,6 +64,13 @@ export function useLocalHistory(): void {
                 // the history we just restored.
                 eventHash: row.event_hash === "" ? null : row.event_hash,
                 content: row.content,
+                // Without these a restored message renders an attachment whose
+                // key is gone -- and the ciphertext can never be opened again.
+                attachments: row.attachments.map((a) => ({
+                  keyHex: a.key_hex,
+                  fileName: a.file_name,
+                  mimeType: a.mime_type,
+                })),
               },
             });
           }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import type { MessageInfo, AttachmentInfo, SealedDecryptEntry } from "../lib/types";
+import type { MessageInfo, AttachmentInfo, SealedDecryptEntry, SealedAttachmentRef } from "../lib/types";
 import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
@@ -494,6 +494,19 @@ export default function Message({ message, memberNames, grouped = false, serverI
   // No decrypt result yet -> the 4b-1 placeholder (T5).
   const isSealed = isSealedRow && sealedDecrypt === undefined;
 
+  // Sealed attachments (sub-6). The envelope's refs pair with the row's
+  // attachment records POSITIONALLY: the sender builds the caps and the envelope
+  // arrays from one list, in order, and the server materializes caps in that same
+  // order. A count disagreement means a cap was quarantined (or the envelope is
+  // malformed), and there is then no honest way to say which key belongs to which
+  // blob — so nothing is offered rather than the wrong file. A mis-pairing that
+  // slipped through would still fail closed at the AEAD, which is the backstop,
+  // not the plan.
+  const sealedRefs = sealedDecrypt?.kind === "decrypted" ? sealedDecrypt.attachments ?? [] : [];
+  const sealedAttachmentsPair = isSealedRow && sealedRefs.length === message.attachments.length;
+  const showSealedAttachments = sealedAttachmentsPair && sealedRefs.length > 0;
+  const sealedAttachmentsUnpairable = isSealedRow && sealedRefs.length > 0 && !sealedAttachmentsPair;
+
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
     ? message.content
@@ -661,7 +674,10 @@ export default function Message({ message, memberNames, grouped = false, serverI
           ) : (
             <RenderedMessageContent
               text={displayContent}
-              attachments={message.attachments}
+              // A sealed row's blobs are ciphertext under a neutral name: the
+              // plaintext renderer would show "attachment.bin" and try to
+              // download bytes it cannot read. They render below instead.
+              attachments={isSealedRow ? [] : message.attachments}
               bookIndex={bookIndex}
               serverId={serverId}
               renderTextSegment={(t) => renderContent(
@@ -690,6 +706,25 @@ export default function Message({ message, memberNames, grouped = false, serverI
                 ) : null
               }
             />
+          )}
+
+          {showSealedAttachments && (
+            <div className="message-attachments">
+              {message.attachments.map((att, i) => (
+                <SealedAttachmentDisplay
+                  key={att.id}
+                  serverId={serverId}
+                  attachment={att}
+                  sealedRef={sealedRefs[i]}
+                />
+              ))}
+            </div>
+          )}
+          {sealedAttachmentsUnpairable && (
+            <div className="error-text">
+              🔒 This message has a file, but its keys do not line up with what the server
+              stored — it cannot be opened safely.
+            </div>
           )}
         </div>
       )}
@@ -900,6 +935,114 @@ function DismissDialogWhenDone({ messageId, onDone }: { messageId: string; onDon
     return () => { active = false; unsub(); };
   }, [messageId, onDone]);
   return null;
+}
+
+/** One attachment of a SEALED message.
+ *
+ *  Everything this renders comes back from `download_sealed_file`, which opens
+ *  the blob, sanitizes the sender's claimed name, sniffs the bytes against the
+ *  claimed type and only then hands anything over. Nothing here renders the
+ *  sender's claims directly — the name shown is the SANITIZED one, and a file
+ *  that fails the policy renders its reason instead of the file.
+ *
+ *  Why images auto-open and other types need a click: a non-inline type is
+ *  WRITTEN TO DISK by the backend (to Downloads). Opening a picture on sight is
+ *  what a chat client does; writing a stranger's file to disk on sight is not.
+ *  A claimed image whose bytes are something else never reaches that branch —
+ *  the sniff refuses it first. */
+function SealedAttachmentDisplay({
+  serverId,
+  attachment,
+  sealedRef,
+}: {
+  serverId: string;
+  attachment: AttachmentInfo;
+  sealedRef: SealedAttachmentRef;
+}) {
+  type State =
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "opened"; dataUrl: string | null; fileName: string; mimeType: string; savedPath: string | null }
+    | { kind: "refused"; reason: string };
+
+  const [state, setState] = useState<State>({ kind: "idle" });
+  // The CLAIM, used only to decide whether opening is safe to do unprompted.
+  const claimsInlineMedia =
+    sealedRef.mimeType.startsWith("image/") || sealedRef.mimeType.startsWith("audio/");
+
+  async function open() {
+    setState({ kind: "loading" });
+    try {
+      const r = await api.downloadSealedFile(
+        serverId,
+        attachment.file_id,
+        sealedRef.keyHex,
+        sealedRef.fileName,
+        sealedRef.mimeType,
+      );
+      if (r.kind === "refused") {
+        setState({ kind: "refused", reason: r.reason });
+        return;
+      }
+      setState({
+        kind: "opened",
+        dataUrl: r.data_url,
+        fileName: r.file_name,
+        mimeType: r.mime_type,
+        savedPath: r.saved_path,
+      });
+    } catch (e) {
+      setState({ kind: "refused", reason: String(e) });
+    }
+  }
+
+  useEffect(() => {
+    if (claimsInlineMedia) void open();
+    // One open per (blob, key): re-running would re-download and, for a
+    // non-inline type, re-write the file.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachment.file_id, sealedRef.keyHex]);
+
+  if (state.kind === "loading") {
+    return <div className="attachment-loading">🔒 Opening encrypted file...</div>;
+  }
+  if (state.kind === "refused") {
+    return <div className="error-text">🔒 {state.reason}</div>;
+  }
+  if (state.kind === "idle") {
+    return (
+      <div className="attachment-item">
+        <button className="link-embed-chip" onClick={() => void open()}>
+          🔒 Open encrypted file ({formatSize(attachment.size)})
+        </button>
+      </div>
+    );
+  }
+
+  if (state.dataUrl && state.mimeType.startsWith("audio/")) {
+    return (
+      <div className="attachment-audio">
+        <audio controls src={state.dataUrl} />
+        <div className="attachment-name">🔒 {state.fileName}</div>
+      </div>
+    );
+  }
+  if (state.dataUrl) {
+    return (
+      <div className="attachment-image">
+        <img src={state.dataUrl} alt={state.fileName} />
+        <div className="attachment-name">🔒 {state.fileName}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="attachment-item">
+      <div className="attachment-name">
+        🔒 {state.fileName}
+        {state.savedPath ? ` — saved to ${state.savedPath}` : ""}
+      </div>
+    </div>
+  );
 }
 
 function AttachmentDisplay({

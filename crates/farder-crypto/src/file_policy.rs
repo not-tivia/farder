@@ -199,15 +199,52 @@ pub fn safe_filename(raw: &str) -> Result<String, FileRefused> {
 /// Unrecognized bytes are a refusal: for a sealed attachment nothing else has
 /// inspected these bytes, so "I do not know what this is" cannot mean "write it
 /// to disk anyway".
+///
+/// # Text is the one format with no magic bytes
+///
+/// `ALLOWED_EXTENSIONS` carries `txt`, `md`, `csv`, `json` and `log`, and none of
+/// them can ever be sniffed — plain text has no signature. Left alone, the two
+/// halves of the policy contradict each other: the name check allows the file and
+/// the content check always refuses it, so a `.txt` could never be sent at all.
+///
+/// A textual CLAIM is therefore checked against textual CONTENT instead of against
+/// a signature: valid UTF-8, no NULs, no control characters beyond tab/CR/LF. That
+/// still refuses the attack this check exists for — an ELF or a PE renamed to
+/// `.txt` is not valid text, and a PNG renamed to `.txt` sniffs as `image/png` and
+/// contradicts its claim before this branch is reached.
 pub fn check_contents(bytes: &[u8], claimed_mime: &str) -> Result<SniffedType, FileRefused> {
     let sniffed = sniff(bytes);
     match sniffed {
         Some(t) if mime_agrees(t.mime, claimed_mime) => Ok(t),
+        None if is_textual_mime(claimed_mime) && looks_like_text(bytes) => {
+            Ok(SniffedType { mime: "text/plain" })
+        }
         other => Err(FileRefused::ContentMismatch {
             claimed: claimed_mime.to_string(),
             sniffed: other.map(|t| t.mime.to_string()),
         }),
     }
+}
+
+/// The claimed types that have no magic bytes and are judged as text instead.
+fn is_textual_mime(claimed: &str) -> bool {
+    let c = claimed.to_ascii_lowercase();
+    c.starts_with("text/") || c == "application/json"
+}
+
+/// Whether these bytes are plausibly text: valid UTF-8, no NUL, and no control
+/// characters other than tab, CR and LF.
+///
+/// Deliberately strict rather than heuristic. Binaries renamed to `.txt` are the
+/// thing being refused, and every executable format in practice carries NULs or
+/// control bytes in its first few hundred bytes.
+fn looks_like_text(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    !text
+        .chars()
+        .any(|c| c.is_control() && c != '\t' && c != '\r' && c != '\n')
 }
 
 /// Whether a sniffed MIME and a claimed one describe the same thing.
@@ -224,6 +261,9 @@ fn mime_agrees(sniffed: &str, claimed: &str) -> bool {
         (sniffed, claimed),
         ("video/webm", "audio/webm")
             | ("video/mp4", "audio/mp4")
+            // QuickTime and MP4 share the ISO base media container, so the same
+            // `ftyp` signature covers a .mov as well.
+            | ("video/mp4", "video/quicktime")
             | ("audio/mpeg", "audio/mp3")
     )
 }
@@ -439,6 +479,53 @@ mod tests {
         assert!(msg.contains("not allowed"), "got {msg}");
         let msg = FileRefused::PathInName.to_string();
         assert!(msg.contains("folder path"), "got {msg}");
+    }
+
+    // --- Text: the format with no signature (see `check_contents`) ---
+
+    #[test]
+    fn a_real_text_file_is_accepted_for_a_textual_claim() {
+        // Without this branch the allowlist and the sniffer contradict each
+        // other and a .txt can never be sent at all.
+        let text = b"hello\tworld\r\n- a list\n";
+        assert_eq!(check_contents(text, "text/plain").unwrap().mime, "text/plain");
+        assert_eq!(check_contents(b"{\"a\": 1}", "application/json").unwrap().mime, "text/plain");
+        assert_eq!(check_contents(b"a,b,c\n1,2,3\n", "text/csv").unwrap().mime, "text/plain");
+        // Empty is vacuously text, and an empty note is not an attack.
+        assert!(check_contents(b"", "text/plain").is_ok());
+    }
+
+    #[test]
+    fn a_binary_renamed_to_text_is_still_refused() {
+        // The attack the check exists for: an executable wearing a .txt name.
+        let elf = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00";
+        assert!(matches!(
+            check_contents(elf, "text/plain"),
+            Err(FileRefused::ContentMismatch { sniffed: None, .. }),
+        ));
+        // A PE/DOS stub, likewise -- NULs are not text.
+        let pe = b"MZ\x90\x00\x03\x00\x00\x00";
+        assert!(check_contents(pe, "text/plain").is_err());
+        // Invalid UTF-8 is not text either.
+        assert!(check_contents(&[0xff, 0xfe, 0x00, 0x41], "text/plain").is_err());
+    }
+
+    #[test]
+    fn a_sniffable_format_still_wins_over_a_textual_claim() {
+        // The textual branch is only reached when NOTHING sniffed; a PNG
+        // claiming to be text is caught by the claim check, as before.
+        let png = b"\x89PNG\r\n\x1a\n and then some";
+        assert!(matches!(
+            check_contents(png, "text/plain"),
+            Err(FileRefused::ContentMismatch { sniffed: Some(s), .. }) if s == "image/png",
+        ));
+    }
+
+    #[test]
+    fn quicktime_and_mp4_share_the_iso_container() {
+        // .mov is on the allowlist; the same `ftyp` signature covers it.
+        let mov = b"\x00\x00\x00\x18ftypqt  \x00\x00\x00\x00";
+        assert_eq!(check_contents(mov, "video/quicktime").unwrap().mime, "video/mp4");
     }
 }
 

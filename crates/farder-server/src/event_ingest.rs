@@ -2587,4 +2587,105 @@ mod tests {
         }
         assert_eq!(seen, vec![(a, 7)], "the event behind the gap must be reachable");
     }
+    /// F4 -- the server's attachment machinery works UNCHANGED on ciphertext.
+    ///
+    /// The spec's claim is that a sealed blob needs no server changes because cap
+    /// validation is hash + size + uploader, none of which look inside the bytes.
+    /// Claims like that are exactly how this project has shipped bugs, so this
+    /// drives the real path: a real sealed blob through the real `store_file`,
+    /// the real `derive_attachments`, and the real redaction.
+    #[test]
+    fn a_sealed_blob_validates_and_redacts_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+
+        let plaintext = b"a secret the server must never be able to read";
+        let (key, ciphertext) = farder_crypto::file_policy::seal_file(plaintext).unwrap();
+        let hash = crate::attachments::compute_sha256(&ciphertext);
+
+        // D3: the upload is uniform -- neutral name, octet-stream, and the hash
+        // is of the CIPHERTEXT.
+        let file_id = crate::attachments::store_file(
+            &conn, storage, &owner.public_key(), "attachment",
+            &ciphertext, &hash, "application/octet-stream", None, None, None,
+        ).unwrap();
+
+        let cap = AttachmentCap {
+            content_hash: hash.clone(),
+            declared_type: "application/octet-stream".into(),
+            size: ciphertext.len() as u64,
+            uploader: owner.public_key(),
+        };
+        let (mid, msg) = setup_message(&conn, &owner, &dev, &owner, vec![cap]);
+        assert_eq!(
+            derive_attachments(&conn, mid, &msg, &owner.public_key()).unwrap(), 1,
+            "cap validation is hash+size+uploader; sealing changes none of them",
+        );
+        assert_eq!(attachment_count(&conn, mid), 1);
+
+        // What actually landed on the server's disk is ciphertext, and only the
+        // key opens it.
+        let on_disk = std::fs::read(crate::attachments::content_path(storage, &hash)).unwrap();
+        assert_eq!(on_disk, ciphertext);
+        assert!(
+            !on_disk.windows(6).any(|w| w == b"secret"),
+            "plaintext must never reach the server's disk",
+        );
+        assert_eq!(
+            farder_crypto::file_policy::open_file(&key, &on_disk).unwrap(),
+            plaintext,
+        );
+
+        // Redaction is the only moderation a server has over bytes it cannot
+        // read, so it has to actually remove them.
+        assert!(crate::attachments::redact_blob(&conn, storage, &hash, &owner.public_key()).unwrap());
+        assert!(!crate::attachments::content_path(storage, &hash).exists());
+        let redacted_by: Option<Vec<u8>> = conn
+            .query_row("SELECT redacted_by FROM files WHERE id = ?1", params![file_id as i64], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            redacted_by.as_deref(),
+            Some(owner.public_key().as_bytes().as_slice()),
+            "redaction records who, so the tombstone is attributable",
+        );
+    }
+
+    /// F4 -- swapping the ciphertext under a cap is caught. Sealing the same
+    /// plaintext twice yields different bytes (fresh nonce), so a cap naming the
+    /// first blob cannot be satisfied by the second: the existence check is over
+    /// the ciphertext hash, which is what makes the cap binding at all.
+    #[test]
+    fn a_cap_cannot_be_satisfied_by_a_different_sealed_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+
+        let plaintext = b"same plaintext, two sealings";
+        let (_k1, c1) = farder_crypto::file_policy::seal_file(plaintext).unwrap();
+        let (_k2, c2) = farder_crypto::file_policy::seal_file(plaintext).unwrap();
+        assert_ne!(c1, c2, "each sealing uses a fresh nonce");
+        let h1 = crate::attachments::compute_sha256(&c1);
+        let h2 = crate::attachments::compute_sha256(&c2);
+        assert_ne!(h1, h2);
+
+        // Only the SECOND blob is stored; the cap names the first.
+        crate::attachments::store_file(
+            &conn, storage, &owner.public_key(), "attachment",
+            &c2, &h2, "application/octet-stream", None, None, None,
+        ).unwrap();
+        let cap = AttachmentCap {
+            content_hash: h1,
+            declared_type: "application/octet-stream".into(),
+            size: c1.len() as u64,
+            uploader: owner.public_key(),
+        };
+        let (mid, msg) = setup_message(&conn, &owner, &dev, &owner, vec![cap]);
+        assert_eq!(derive_attachments(&conn, mid, &msg, &owner.public_key()).unwrap(), 0);
+        assert_eq!(attachment_count(&conn, mid), 0, "an unmatched cap materializes nothing");
+    }
 }
