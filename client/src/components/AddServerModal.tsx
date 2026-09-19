@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import { parseInviteLink } from "../lib/invite";
@@ -6,7 +6,13 @@ import { refreshServerClasses } from "../lib/refreshServerClasses";
 
 type Step = "choice" | "create-1" | "create-2" | "join";
 
-const DEFAULT_TEMPLATES = [
+/// Shown until `listTemplates()` answers, and kept as the fallback if it cannot.
+///
+/// It is a FALLBACK, not the source: the backend owns the real catalogue, and
+/// these copies had already drifted from it (this list said "a small group", the
+/// backend says "a small group of friends"). A template the backend adds appears
+/// here without anyone editing this file; one it removes stops being offered.
+const FALLBACK_TEMPLATES = [
   { id: "blank", name: "Blank", description: "Empty server — start from scratch" },
   { id: "friend-group", name: "Friends", description: "Casual hangout for a small group" },
   { id: "gaming-community", name: "Gaming", description: "Voice lobbies, LFG, and game channels" },
@@ -18,6 +24,15 @@ const DEFAULT_TEMPLATES = [
 export default function AddServerModal({ onClose }: { onClose: () => void }) {
   const { dispatch } = useApp();
 
+  const [templates, setTemplates] = useState(FALLBACK_TEMPLATES);
+  useEffect(() => {
+    // Failing quietly is right here: the fallback is a working list, and a
+    // server-creation dialog that refuses to open because a catalogue call
+    // failed would be a worse trade than slightly stale descriptions.
+    api.listTemplates()
+      .then((list) => { if (list.length > 0) setTemplates(list); })
+      .catch(() => {});
+  }, []);
   const [step, setStep] = useState<Step>("choice");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -219,7 +234,7 @@ export default function AddServerModal({ onClose }: { onClose: () => void }) {
               <div className="connect-section">
                 <div className="connect-section-title">Choose a Template</div>
                 <div className="template-grid">
-                  {DEFAULT_TEMPLATES.map((t) => (
+                  {templates.map((t) => (
                     <div
                       key={t.id}
                       className={`template-card${selectedTemplate === t.id ? " selected" : ""}`}

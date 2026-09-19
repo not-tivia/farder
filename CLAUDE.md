@@ -41,6 +41,17 @@ When adding or touching a Tauri command:
   `generate_handler!` all agree.
 - The frontend↔backend command seam can be audited mechanically: every
   `invoke("...")` name must appear in the handler list. Keep it at zero drift.
+  `python3 scripts/seam_audit.py`.
+
+**The seam lining up is not the same as the feature being reachable.** A command
+can be written, registered, documented and wrapped in `tauri-bridge.ts` while
+nothing in the app ever calls the wrapper — blocking shipped with no way to
+unblock, "delete my data" shipped with no UI, encrypted-channel search shipped
+with nothing to search from. `python3 scripts/reachability_audit.py` asks whether
+a path exists from the UI to each command, and fails on any unreachable command
+not recorded in `scripts/dormant_allowlist.txt` with a reason. Run it alongside
+the seam audit; if something is meant to be dormant, say so in the allowlist
+rather than leaving it to be rediscovered.
 
 ## Scope of trust
 
