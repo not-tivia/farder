@@ -160,6 +160,7 @@ fn main() {
             commands::list_dms,
             commands::block_user,
             commands::unblock_user,
+            commands::list_blocked,
             commands::request_deletion,
             commands::cancel_deletion,
             commands::get_deletion_status,

@@ -2234,6 +2234,43 @@ pub async fn list_dms(
     }
 }
 
+/// One entry of the caller's block list, for the UI.
+///
+/// `public_key` is the string form the unblock command takes back, so the list
+/// and the undo speak the same language.
+#[derive(serde::Serialize)]
+pub struct BlockedUserInfo {
+    pub public_key: String,
+    pub display_name: Option<String>,
+    pub blocked_at: u64,
+}
+
+/// Who this identity has blocked on this server (newest first).
+///
+/// Blocking existed in two places in the UI with nothing to undo it and nothing
+/// to show what had been done — a one-way door. This is the list side of that.
+#[tauri::command]
+pub async fn list_blocked(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<BlockedUserInfo>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::ListBlocked)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::BlockedList { blocked } => Ok(blocked
+            .into_iter()
+            .map(|b| BlockedUserInfo {
+                public_key: b.public_key.to_string(),
+                display_name: b.display_name,
+                blocked_at: b.blocked_at,
+            })
+            .collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 #[tauri::command]
 pub async fn block_user(
     state: State<'_, Arc<AppState>>,

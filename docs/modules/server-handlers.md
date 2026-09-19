@@ -179,6 +179,7 @@ the primary mutation still completes.
 | `RemoveTimeout` | Clear a timeout early | `TIMEOUT_MEMBERS` (base) + member-hierarchy | `members::clear_timeout` | `MemberTimeoutChanged { until_ms: None }` → `All`; `AuditEventCreated` → `PermissionHolders(MANAGE_SERVER)` |
 | `BlockUser` | Block another member (personal; hides DM sends) | None | `members::block_user` | None |
 | `UnblockUser` | Remove a block | None | `members::unblock_user` | None |
+| `ListBlocked` | Who the CALLER has blocked, newest first. Takes no target — the answer is always for the authenticated connection's key, so no request shape asks about anyone else. A block outlives the membership: a member who left is still listed (with `display_name: None`), or the block would become invisible and unrevocable the moment they walked out. | None | `members::list_blocked` | None |
 
 ### Reactions and threads
 

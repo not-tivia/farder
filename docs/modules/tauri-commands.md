@@ -840,6 +840,27 @@ directory.
 
 ---
 
+### `list_blocked(state, server_id) -> Result<Vec<BlockedUserInfo>, String>`
+
+**What it does:** returns who THIS identity has blocked on that server, newest
+first. `ServerRequest::ListBlocked` takes no target: the server answers for the
+authenticated connection's key, so there is no request shape that asks about
+somebody else. A member never learns who blocked them — a block they could
+enumerate would be a notification.
+**Why it exists:** two places in the UI could block a member (the profile popup
+and the member context menu) and nothing could list or undo it. `unblock_user`
+had shipped with no caller at all.
+**Returns:** `BlockedUserInfo { public_key, display_name, blocked_at }` per entry.
+`display_name` is `null` once that member has left — the block outlives the
+membership, or it would become invisible and unrevocable the moment they walked
+out.
+**Called by:** `PrivacyDataSettings.tsx` ("Blocked Members"), which pairs each
+row with `unblock_user` and re-reads the list afterwards rather than splicing
+locally.
+**invoke name:** `"list_blocked"` → `listBlocked(serverId)`.
+
+---
+
 ### `upload_sealed_file(state, server_id, channel_id, file_path) -> Result<SealedUploadOutcome, String>`
 
 **What it does:** the E2EE channel's upload (sub-6 W1). Reads the file, runs the

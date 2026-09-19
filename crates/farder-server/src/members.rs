@@ -664,6 +664,48 @@ pub fn unblock_user(conn: &Connection, blocker: &PublicKey, blocked: &PublicKey)
     Ok(())
 }
 
+/// Who `blocker` has blocked, newest first, with the display name resolved when
+/// that member is still on the roster.
+///
+/// One direction only, deliberately: this answers "who have I blocked", never
+/// "who has blocked me". A block that the blocked party can enumerate is not a
+/// block, it is a notification.
+pub fn list_blocked(
+    conn: &Connection,
+    blocker: &PublicKey,
+) -> Result<Vec<farder_protocol::server::BlockedEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT b.blocked_key, m.display_name, b.blocked_at \
+         FROM blocked_users b \
+         LEFT JOIN members m ON m.public_key = b.blocked_key \
+         WHERE b.blocker_key = ?1 \
+         ORDER BY b.blocked_at DESC",
+    )?;
+    let rows = stmt.query_map(params![blocker.as_bytes().as_slice()], |row| {
+        let key: Vec<u8> = row.get(0)?;
+        let display_name: Option<String> = row.get(1)?;
+        let blocked_at: i64 = row.get(2)?;
+        Ok((key, display_name, blocked_at))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (key, display_name, blocked_at) = row?;
+        let Ok(bytes): Result<[u8; 32], _> = key.as_slice().try_into() else {
+            // A key we cannot parse cannot be unblocked by the client either;
+            // skipping beats handing the UI a row whose button cannot work.
+            tracing::warn!("blocked_users row holds an unparseable key; skipped");
+            continue;
+        };
+        let public_key = PublicKey::from_bytes(bytes);
+        out.push(farder_protocol::server::BlockedEntry {
+            public_key,
+            display_name,
+            blocked_at: blocked_at.max(0) as u64,
+        });
+    }
+    Ok(out)
+}
+
 /// Returns true if either user has blocked the other.
 pub fn is_blocked(conn: &Connection, user_a: &PublicKey, user_b: &PublicKey) -> Result<bool> {
     let count: i64 = conn.query_row(
@@ -685,6 +727,36 @@ mod tests {
     use super::*;
     use crate::db;
     use farder_crypto::identity::Keypair;
+
+    #[test]
+    fn the_block_list_is_yours_alone_and_survives_the_member_leaving() {
+        let conn = db::open_in_memory().unwrap();
+        let me = gen_pk();
+        let them = gen_pk();
+        register_member(&conn, &them, "Them").unwrap();
+
+        block_user(&conn, &me, &them).unwrap();
+        let mine = list_blocked(&conn, &me).unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].public_key, them);
+        assert_eq!(mine[0].display_name.as_deref(), Some("Them"));
+
+        // One direction only: being blocked tells you nothing. `is_blocked` is
+        // bidirectional on purpose (it gates DMs both ways); the LIST is not.
+        assert!(list_blocked(&conn, &them).unwrap().is_empty());
+        assert!(is_blocked(&conn, &them, &me).unwrap());
+
+        // A blocked member who leaves stays listed -- otherwise the block
+        // becomes invisible and unrevocable the moment they walk out.
+        remove_member(&conn, &them).unwrap();
+        let after = list_blocked(&conn, &me).unwrap();
+        assert_eq!(after.len(), 1, "the block outlives the membership");
+        assert_eq!(after[0].display_name, None, "with no name left to show");
+
+        unblock_user(&conn, &me, &them).unwrap();
+        assert!(list_blocked(&conn, &me).unwrap().is_empty());
+        assert!(!is_blocked(&conn, &me, &them).unwrap());
+    }
 
     fn gen_pk() -> PublicKey {
         Keypair::generate().public_key()

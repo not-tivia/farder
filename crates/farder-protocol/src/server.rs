@@ -55,6 +55,19 @@ pub struct DmEntry {
     pub last_message: Option<MessageInfo>,
 }
 
+/// One entry of [`ServerResponse::BlockedList`].
+///
+/// The display name is resolved server-side and is `None` when the blocked
+/// member has since left: a blocked key must still be listable (and unblockable)
+/// after they are gone, so the name is a convenience, never the identity.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BlockedEntry {
+    pub public_key: PublicKey,
+    pub display_name: Option<String>,
+    /// Unix seconds when the block was recorded.
+    pub blocked_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AttachmentInfo {
     pub id: u64,
@@ -656,6 +669,14 @@ pub enum ServerRequest {
     /// *within* the server by design (like `FetchKeyPackages`); membership
     /// gating still applies.
     FetchDeviceCerts { identity: PublicKey },
+    /// Who this member has blocked here. Blocking was a one-way door without
+    /// it: two places in the UI could block, nothing could list or undo it.
+    ///
+    /// **Appended at the end on purpose.** The codec is MessagePack over serde's
+    /// default enum representation, which is positional — inserting a variant
+    /// anywhere else renumbers every later one and breaks every un-updated
+    /// client on every request.
+    ListBlocked,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -781,6 +802,10 @@ pub enum ServerResponse {
     /// (one revoked `DeviceId` each). A client tells the two payloads apart by
     /// decoding each event's payload enum.
     DeviceCerts { events: Vec<Vec<u8>> },
+    /// Answer to [`ServerRequest::ListBlocked`]: who the caller has blocked,
+    /// newest first. Only ever the CALLER's own list — a member never learns
+    /// who blocked them, which is the point of a block.
+    BlockedList { blocked: Vec<BlockedEntry> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1384,6 +1409,7 @@ mod tests {
             ServerRequest::SubscribeBot { bot_public_key: kp.public_key() },
             ServerRequest::UnsubscribeBot { bot_public_key: kp.public_key() },
             ServerRequest::ListMySubscriptions,
+            ServerRequest::ListBlocked,
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };

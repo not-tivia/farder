@@ -491,6 +491,22 @@ export async function blockUser(serverId: string, targetKey: string): Promise<vo
   return invoke("block_user", { serverId, targetKey });
 }
 
+/** One entry of your own block list on a server. `display_name` is null when the
+ *  blocked member has since left — a blocked key must stay listable (and
+ *  unblockable) after they are gone. */
+export interface BlockedUserInfo {
+  public_key: string;
+  display_name: string | null;
+  blocked_at: number;
+}
+
+/** Who YOU have blocked on this server, newest first. Never who blocked you:
+ *  a block the blocked party could enumerate would be a notification, not a
+ *  block. */
+export async function listBlocked(serverId: string): Promise<BlockedUserInfo[]> {
+  return invoke<BlockedUserInfo[]>("list_blocked", { serverId });
+}
+
 export async function unblockUser(serverId: string, targetKey: string): Promise<void> {
   return invoke("unblock_user", { serverId, targetKey });
 }

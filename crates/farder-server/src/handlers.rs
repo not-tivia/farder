@@ -1916,6 +1916,13 @@ pub fn handle_request(
             ok(ServerResponse::Ok)
         }
 
+        ServerRequest::ListBlocked => {
+            // The caller's own list only. `member` is the authenticated
+            // connection's key, never a parameter, so there is no request shape
+            // that asks about somebody else.
+            ok(ServerResponse::BlockedList { blocked: members::list_blocked(conn, member)? })
+        }
+
         ServerRequest::TimeoutMember { member_key, until_ms, reason } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::TIMEOUT_MEMBERS, "TIMEOUT_MEMBERS")? {
                 return Ok(denied);
@@ -9456,6 +9463,7 @@ mod tests {
                 | ServerRequest::AssignRole { .. }
                 | ServerRequest::BanMember { .. }
                 | ServerRequest::BlockUser { .. }
+                | ServerRequest::ListBlocked
                 | ServerRequest::CancelDeletion
                 | ServerRequest::CancelEvent { .. }
                 | ServerRequest::CancelGiveaway { .. }

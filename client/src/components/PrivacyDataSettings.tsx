@@ -4,7 +4,11 @@ import {
   setPresenceEnabled,
   getPresenceMusic,
   setPresenceMusic,
+  listBlocked,
+  unblockUser,
 } from "../lib/tauri-bridge";
+import type { BlockedUserInfo } from "../lib/tauri-bridge";
+import { useActiveServerId } from "../context/ServerContext";
 import { useDataSaver } from "../context/DataSaverContext";
 import { getEmbedConsent, setEmbedConsent } from "../lib/embedPlayer";
 import { getAlwaysFloat, setAlwaysFloat } from "../lib/floatAnchor";
@@ -17,6 +21,37 @@ export default function PrivacyDataSettings() {
   const [presenceEnabled, setPresenceEnabledState] = useState<boolean>(false);
   const [presenceMusic, setPresenceMusicState] = useState<boolean>(false);
   const { settings: ds, update: updateDs } = useDataSaver();
+  // Blocking is per-server (the block lives in that server's database), so the
+  // list is the active server's.
+  const activeServerId = useActiveServerId();
+  const [blocked, setBlocked] = useState<BlockedUserInfo[] | null>(null);
+  const [blockedError, setBlockedError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeServerId) {
+      setBlocked(null);
+      return;
+    }
+    let cancelled = false;
+    listBlocked(activeServerId)
+      .then((list) => { if (!cancelled) { setBlocked(list); setBlockedError(null); } })
+      .catch((e) => { if (!cancelled) setBlockedError(String(e)); });
+    return () => { cancelled = true; };
+  }, [activeServerId]);
+
+  async function handleUnblock(publicKey: string) {
+    if (!activeServerId) return;
+    try {
+      await unblockUser(activeServerId, publicKey);
+      // Re-read rather than splicing locally: the server is the authority on
+      // what is blocked, and a failed unblock must not look like a successful
+      // one.
+      setBlocked(await listBlocked(activeServerId));
+      setBlockedError(null);
+    } catch (e) {
+      setBlockedError(String(e));
+    }
+  }
 
   useEffect(() => {
     void getPresenceEnabled().then(setPresenceEnabledState).catch(() => {});
@@ -157,6 +192,37 @@ export default function PrivacyDataSettings() {
         <p className="settings-help">
           Off by default. When on, members on your servers see your current activity
           (e.g. the song you're playing). Turn off any time.
+        </p>
+      </SettingsSection>
+
+      <div className="settings-divider" />
+      <SettingsSection label="Blocked Members">
+        {!activeServerId && (
+          <p className="settings-help">
+            Blocking is per server. Connect to a server to see and undo the blocks you
+            made there.
+          </p>
+        )}
+        {blockedError && <div className="error-text">{blockedError}</div>}
+        {activeServerId && blocked !== null && blocked.length === 0 && (
+          <p className="settings-help">You haven't blocked anyone on this server.</p>
+        )}
+        {activeServerId && blocked === null && !blockedError && (
+          <p className="settings-help">Loading...</p>
+        )}
+        {(blocked ?? []).map((b) => (
+          <div key={b.public_key} className="organizer-row">
+            <span className="organizer-name">
+              {b.display_name ?? `${b.public_key.slice(0, 12)}...`}
+            </span>
+            <button className="xp-button" onClick={() => { void handleUnblock(b.public_key); }}>
+              Unblock
+            </button>
+          </div>
+        ))}
+        <p className="settings-help">
+          A blocked member cannot DM you and you cannot DM them. They are not told,
+          and this list is only ever your own.
         </p>
       </SettingsSection>
     </div>
