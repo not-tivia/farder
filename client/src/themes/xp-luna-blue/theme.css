@@ -43,6 +43,15 @@ html, body, #root {
   overflow: hidden;
 }
 
+/* Maximized: this frame IS the window now (decorations: false), so it stops
+   imitating one -- no rounded corners against the screen edge, no drop shadow
+   under something with nothing beneath it. The attribute is set by TitleBar
+   from the real window state, so a Windows snap or Win+Up lands here too. */
+:root[data-maximized="true"] #root {
+  border-radius: 0;
+  box-shadow: none;
+}
+
 body {
   font-family: var(--xp-font);
   font-size: var(--xp-font-size);

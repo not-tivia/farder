@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Farder client",
+  "description": "Default capabilities for Farder client. The window is undecorated (tauri.conf.json decorations:false), so the app draws its own frame and needs the calls the OS used to make on its behalf: start-dragging to move it, start-resize-dragging for the edge grips, is-maximized so the titlebar glyph follows the real window state.",
   "windows": ["main", "screenshare-popout"],
   "permissions": [
     "core:default",
@@ -18,6 +18,8 @@
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-is-maximized",
     "shell:allow-execute",
     "shell:allow-spawn",
     "shell:allow-stdin-write",
