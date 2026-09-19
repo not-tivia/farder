@@ -32,9 +32,16 @@ COMPOSE=(docker compose -f deploy/relay/docker-compose.yml)
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
-if [ "$(id -u)" -eq 0 ]; then SUDO=""; else
+# $SUDO is empty when we are already root, so it must only ever be used as a
+# bare prefix: `$SUDO -E cmd` would expand to `-E cmd` and try to run `-E`.
+# $SUDO_E exists for the one call that needs the environment passed through.
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+  SUDO_E=""
+else
   command -v sudo >/dev/null 2>&1 || die "run as root, or install sudo"
   SUDO="sudo"
+  SUDO_E="sudo -E"
 fi
 
 say "Installing prerequisites"
@@ -112,7 +119,7 @@ if [ -n "${FARDER_SITE_DOMAIN:-}" ]; then
   # The `web` profile adds Caddy serving the invite site. Exported, not passed
   # inline, because compose reads it for the container's environment too.
   export FARDER_SITE_DOMAIN
-  $SUDO -E "${COMPOSE[@]}" --profile web up -d --build
+  $SUDO_E "${COMPOSE[@]}" --profile web up -d --build
 else
   $SUDO "${COMPOSE[@]}" up -d --build
 fi
