@@ -856,6 +856,44 @@ than an address.
 
 ---
 
+### `report_message(state, server_id, channel_id, message_id, event_hash, reason, evidence)`
+
+**What it does:** files a report with the server's moderators. Any member who can
+see the channel may report; the queue behind it is MANAGE_MESSAGES.
+**The `evidence` parameter is the point of the feature.** It is the reporter's
+OWN decrypted copy of the message. In an encrypted channel the server cannot read
+what is being reported, so without it a moderator has only the reporter's
+description — and with it, that plaintext now sits in the server's database where
+whoever runs it can read it. It is therefore never gathered silently:
+`ReportMessageDialog` asks per report, unticked by default, and `null` ("act on
+my word") files a perfectly valid report. A moderator can delete a message
+content-blind, which is how moderation in an encrypted channel works at all.
+**`event_hash`** rides along so the message can be deleted through the log even
+after a restart re-derives the row.
+**Side effects:** inserts into `message_reports`; broadcasts `ReportCreated` to
+MANAGE_MESSAGES holders only — a report is not an announcement.
+**invoke name:** `"report_message"` → `reportMessage()`.
+
+---
+
+### `list_reports(state, server_id, before_id, limit)` / `resolve_report(state, server_id, id, outcome)`
+
+**What they do:** read the moderator queue (newest first) and record how a report
+was handled. Both MANAGE_MESSAGES, enforced server-side.
+**Resolving does not delete.** The row keeps its outcome and who recorded it,
+because "we looked and did nothing" is an answer a moderation record has to be
+able to show — a queue that empties on dismissal cannot tell that apart from a
+report nobody ever read.
+**Names are resolved at READ time**, not stored on the report: a moderator should
+see who these people are now, not who they were when the button was clicked. A
+member who has since left comes back as `null`.
+**Called by:** `ReportsTab` in Server Settings, which shows an attached copy only
+behind a click — it is a member's decrypted message, not queue furniture.
+**invoke names:** `"list_reports"` → `listReports()`, `"resolve_report"` →
+`resolveReport()`.
+
+---
+
 ### `pin_message(state, server_id, message_id)` / `unpin_message(...)`
 
 **What they do:** pin or unpin a message. MANAGE_MESSAGES, enforced server-side;

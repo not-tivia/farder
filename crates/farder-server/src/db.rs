@@ -368,6 +368,26 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
     // Audit events: forever-retention moderator action log (Phase 2).
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reporter_pk BLOB NOT NULL,
+            channel_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            event_hash TEXT,
+            reason TEXT NOT NULL,
+            -- The reporter's decrypted copy, attached only with their explicit
+            -- consent. For an encrypted channel this is the ONLY readable record
+            -- of what was reported, and storing it is a real cost: plaintext from
+            -- a sealed channel, sitting in the server's database. NULL is the
+            -- default and a legitimate report.
+            evidence TEXT,
+            created_at INTEGER NOT NULL,
+            outcome TEXT,
+            resolved_by BLOB
+        )",
+        [],
+    )?;
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS audit_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             actor_pk BLOB NOT NULL,

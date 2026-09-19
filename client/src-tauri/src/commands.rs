@@ -3041,6 +3041,113 @@ pub async fn kick_member(
     }
 }
 
+/// One report as the moderator queue shows it.
+#[derive(serde::Serialize)]
+pub struct ReportInfoDto {
+    pub id: u64,
+    pub reporter: String,
+    pub reporter_name: Option<String>,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub event_hash: Option<String>,
+    pub author: Option<String>,
+    pub author_name: Option<String>,
+    pub reason: String,
+    pub evidence: Option<String>,
+    pub created_at: u64,
+    pub outcome: Option<String>,
+    pub resolved_by: Option<String>,
+}
+
+/// Report a message to the server's moderators.
+///
+/// `evidence` is the reporter's OWN decrypted copy and is sent only when they
+/// asked for it to be. In an encrypted channel it is the only way a moderator
+/// can see what they are being asked about — the server cannot read the message
+/// — so attaching it is the reporter choosing to hand that text to whoever runs
+/// the server. Omitting it still files a valid report.
+#[tauri::command]
+pub async fn report_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    channel_id: u64,
+    message_id: u64,
+    event_hash: Option<String>,
+    reason: String,
+    evidence: Option<String>,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::ReportMessage { channel_id, message_id, event_hash, reason, evidence },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// The moderator queue, newest first. MANAGE_MESSAGES, enforced server-side.
+#[tauri::command]
+pub async fn list_reports(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    before_id: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<ReportInfoDto>, String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::ListReports { before_id, limit: limit.unwrap_or(50) },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::ReportList { reports } => Ok(reports
+            .into_iter()
+            .map(|r| ReportInfoDto {
+                id: r.id,
+                reporter: r.reporter.to_string(),
+                reporter_name: r.reporter_name,
+                channel_id: r.channel_id,
+                message_id: r.message_id,
+                event_hash: r.event_hash,
+                author: r.author.map(|a| a.to_string()),
+                author_name: r.author_name,
+                reason: r.reason,
+                evidence: r.evidence,
+                created_at: r.created_at,
+                outcome: r.outcome,
+                resolved_by: r.resolved_by.map(|a| a.to_string()),
+            })
+            .collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Record how a report was handled. The row is kept, not deleted: a moderation
+/// log that cannot show "we looked and did nothing" is not a log.
+#[tauri::command]
+pub async fn resolve_report(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    id: u64,
+    outcome: String,
+) -> Result<(), String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::ResolveReport { id, outcome })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 #[tauri::command]
 pub async fn ban_member(
     state: State<'_, Arc<AppState>>,

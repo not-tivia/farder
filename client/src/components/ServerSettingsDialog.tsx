@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { ConfirmDialog, E2eeConfirmDialog } from "./ConfirmDialog";
+import ReportsTab from "./ReportsTab";
 import type { ChannelInfo } from "../lib/types";
 import BannedMembersTab from "./BannedMembersTab";
 import AuditLogTab from "./AuditLogTab";
@@ -53,7 +54,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newRoleColor, setNewRoleColor] = useState("#3169C6");
   const [error, setError] = useState<string | null>(null);
   const [serverAvatarUrl, setServerAvatarUrl] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"general" | "banned" | "audit" | "bots">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "banned" | "reports" | "audit" | "bots">("general");
   // -- Retire this device (sub-5b G4) -------------------------------------
   const logServerId = activeServer?.logServerId ?? null;
   const [showRetire, setShowRetire] = useState(false);
@@ -90,6 +91,9 @@ export default function ServerSettingsDialog({ onClose }: Props) {
     : { bits: 0n };
   const canBan = hasPermission(bits, PERMISSIONS.BAN_MEMBERS);
   const canManageServer = hasPermission(bits, PERMISSIONS.MANAGE_SERVER);
+  // The report queue is a moderation surface, not a server-config one: whoever
+  // can delete a message should be able to see what was reported.
+  const canManageMessages = hasPermission(bits, PERMISSIONS.MANAGE_MESSAGES);
 
   useEffect(() => {
     if (serverId) {
@@ -275,6 +279,14 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               Banned Members
             </button>
           )}
+          {canManageMessages && (
+            <button
+              className={`tab-btn${activeTab === "reports" ? " tab-btn--active" : ""}`}
+              onClick={() => setActiveTab("reports")}
+            >
+              Reports
+            </button>
+          )}
           {canManageServer && (
             <button
               className={`tab-btn${activeTab === "audit" ? " tab-btn--active" : ""}`}
@@ -296,6 +308,9 @@ export default function ServerSettingsDialog({ onClose }: Props) {
         <div className="modal-body" style={{ overflowY: "auto", flex: 1 }}>
           {activeTab === "banned" && serverId && (
             <BannedMembersTab serverId={serverId} />
+          )}
+          {activeTab === "reports" && serverId && (
+            <ReportsTab serverId={serverId} />
           )}
           {activeTab === "audit" && serverId && (
             <AuditLogTab serverId={serverId} />

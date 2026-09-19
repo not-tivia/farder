@@ -1,7 +1,7 @@
 use crate::{
     audit, channels,
     events::{BroadcastEvent, EventTarget},
-    invites, members, messages, permissions,
+    invites, members, messages, permissions, reports,
     state::ServerState,
 };
 use anyhow::Result;
@@ -1913,6 +1913,58 @@ pub fn handle_request(
 
         ServerRequest::UnblockUser { target_key } => {
             members::unblock_user(conn, member, &target_key)?;
+            ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::ReportMessage { channel_id, message_id, event_hash, reason, evidence } => {
+            // Any member may report; that is the point. The only gate is the one
+            // that already applies to the channel — you cannot report what you
+            // could not see.
+            let perms = resolve_member_perms(conn, member, channel_id, is_owner)?;
+            if !permissions::has(perms, permissions::VIEW_CHANNEL | permissions::READ_MESSAGES) {
+                return err("cannot see that channel");
+            }
+            let reason = reason.trim();
+            if reason.is_empty() || reason.chars().count() > 500 {
+                return err("a report needs a reason, of at most 500 characters");
+            }
+            // The evidence is the reporter's decrypted copy. Bounded like any
+            // other client-supplied text, and stored exactly as sent.
+            if let Some(ev) = &evidence {
+                if ev.chars().count() > 8_000 {
+                    return err("the attached copy is too long");
+                }
+            }
+            let report = reports::create(
+                conn, member, channel_id, message_id,
+                event_hash.as_deref(), reason, evidence.as_deref(),
+            )?;
+            // Moderators are told immediately: a queue nobody knows about is a
+            // queue nobody reads.
+            ok_with(ServerResponse::Ok, vec![BroadcastEvent {
+                target: EventTarget::PermissionHolders(permissions::MANAGE_MESSAGES),
+                event: ServerEvent::ReportCreated { report },
+            }])
+        }
+
+        ServerRequest::ListReports { before_id, limit } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_MESSAGES, "MANAGE_MESSAGES")? {
+                return Ok(denied);
+            }
+            ok(ServerResponse::ReportList { reports: reports::list(conn, before_id, limit)? })
+        }
+
+        ServerRequest::ResolveReport { id, outcome } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_MESSAGES, "MANAGE_MESSAGES")? {
+                return Ok(denied);
+            }
+            let outcome = outcome.trim();
+            if outcome.is_empty() || outcome.chars().count() > 200 {
+                return err("an outcome is required, of at most 200 characters");
+            }
+            if !reports::resolve(conn, id, outcome, member)? {
+                return err("no such report");
+            }
             ok(ServerResponse::Ok)
         }
 
@@ -4313,6 +4365,86 @@ mod tests {
     /// The request answers for the CALLER, and only the caller. There is no
     /// field to point it at anyone else — that is the whole design — so this
     /// pins that two members asking the same question get their own answers.
+    /// A report is a pointer plus a reason; the evidence is the reporter's
+    /// choice. Both shapes must work, because in an encrypted channel the
+    /// no-evidence report is the one that keeps the plaintext off the server.
+    #[test]
+    fn a_report_reaches_moderators_and_keeps_the_reporters_choice_about_evidence() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+        let ch = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let mid = messages::insert_message(&conn, ch, &alice, "something reportable", None).unwrap();
+
+        // With evidence attached.
+        let r = handle_request(&conn, &owner_pk, true, ServerRequest::ReportMessage {
+            channel_id: ch, message_id: mid, event_hash: None,
+            reason: "spam".into(), evidence: Some("the exact words".into()),
+        }, "", &fake_state()).unwrap();
+        // Moderators are told, and nobody else is.
+        let ev = r.events.iter().find(|e| matches!(e.event, ServerEvent::ReportCreated { .. }))
+            .expect("moderators are notified");
+        assert!(matches!(ev.target, EventTarget::PermissionHolders(p) if p == permissions::MANAGE_MESSAGES));
+
+        // Without: "act on my word" keeps the plaintext off the server entirely.
+        handle_request(&conn, &owner_pk, true, ServerRequest::ReportMessage {
+            channel_id: ch, message_id: mid, event_hash: Some("ab".repeat(32)),
+            reason: "again".into(), evidence: None,
+        }, "", &fake_state()).unwrap();
+
+        let listed = match handle_request(&conn, &owner_pk, true,
+            ServerRequest::ListReports { before_id: None, limit: 50 }, "", &fake_state()).unwrap().response {
+            ServerResponse::ReportList { reports } => reports,
+            other => panic!("expected ReportList, got {other:?}"),
+        };
+        assert_eq!(listed.len(), 2, "newest first");
+        assert_eq!(listed[0].evidence, None, "the reporter declined to attach a copy");
+        assert_eq!(listed[1].evidence.as_deref(), Some("the exact words"));
+        // The author is resolved at read time, so a moderator sees who it is now.
+        assert_eq!(listed[0].author.as_ref(), Some(&alice));
+        assert_eq!(listed[0].author_name.as_deref(), Some("Alice"));
+        assert!(listed[0].outcome.is_none(), "open until someone handles it");
+
+        // Resolving KEEPS the row: "looked, did nothing" has to be showable.
+        handle_request(&conn, &owner_pk, true,
+            ServerRequest::ResolveReport { id: listed[0].id, outcome: "no action".into() },
+            "", &fake_state()).unwrap();
+        let after = match handle_request(&conn, &owner_pk, true,
+            ServerRequest::ListReports { before_id: None, limit: 50 }, "", &fake_state()).unwrap().response {
+            ServerResponse::ReportList { reports } => reports,
+            other => panic!("expected ReportList, got {other:?}"),
+        };
+        assert_eq!(after.len(), 2, "resolving is not deleting");
+        assert_eq!(after[0].outcome.as_deref(), Some("no action"));
+        assert_eq!(after[0].resolved_by.as_ref(), Some(&owner_pk));
+    }
+
+    /// Reading the queue is a moderator power; filing a report is not.
+    #[test]
+    fn the_report_queue_is_moderators_only() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+        let ch = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+        let mid = messages::insert_message(&conn, ch, &owner_pk, "hello", None).unwrap();
+
+        // Alice can report.
+        let filed = handle_request(&conn, &alice, false, ServerRequest::ReportMessage {
+            channel_id: ch, message_id: mid, event_hash: None,
+            reason: "rude".into(), evidence: None,
+        }, "", &fake_state()).unwrap();
+        assert!(matches!(filed.response, ServerResponse::Ok));
+
+        // Alice cannot read the queue or close anything in it.
+        for req in [
+            ServerRequest::ListReports { before_id: None, limit: 10 },
+            ServerRequest::ResolveReport { id: 1, outcome: "nope".into() },
+        ] {
+            match handle_request(&conn, &alice, false, req, "", &fake_state()).unwrap().response {
+                ServerResponse::Error { .. } => {}
+                other => panic!("a non-moderator must be refused, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn list_blocked_answers_only_for_the_caller() {
         let (conn, owner_pk) = setup();
@@ -9500,6 +9632,9 @@ mod tests {
                 | ServerRequest::BanMember { .. }
                 | ServerRequest::BlockUser { .. }
                 | ServerRequest::ListBlocked
+                | ServerRequest::ReportMessage { .. }
+                | ServerRequest::ListReports { .. }
+                | ServerRequest::ResolveReport { .. }
                 | ServerRequest::CancelDeletion
                 | ServerRequest::CancelEvent { .. }
                 | ServerRequest::CancelGiveaway { .. }

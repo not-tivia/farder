@@ -55,6 +55,31 @@ pub struct DmEntry {
     pub last_message: Option<MessageInfo>,
 }
 
+/// One message report, as a moderator sees it.
+///
+/// `evidence` is present only when the reporter chose to attach their decrypted
+/// copy. A moderator reading it is reading content the server itself cannot —
+/// which is exactly why it is optional, per-report, and never gathered silently.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReportInfo {
+    pub id: u64,
+    pub reporter: PublicKey,
+    /// Resolved display name at report time, or `None` if they have since left.
+    pub reporter_name: Option<String>,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub event_hash: Option<String>,
+    /// The message's author, when the server still holds that row.
+    pub author: Option<PublicKey>,
+    pub author_name: Option<String>,
+    pub reason: String,
+    pub evidence: Option<String>,
+    pub created_at: u64,
+    /// `None` while open; the recorded outcome once handled.
+    pub outcome: Option<String>,
+    pub resolved_by: Option<PublicKey>,
+}
+
 /// One entry of [`ServerResponse::BlockedList`].
 ///
 /// The display name is resolved server-side and is `None` when the blocked
@@ -677,6 +702,29 @@ pub enum ServerRequest {
     /// anywhere else renumbers every later one and breaks every un-updated
     /// client on every request.
     ListBlocked,
+    /// Report a message to the server's moderators.
+    ///
+    /// `evidence` is the reporter's own DECRYPTED copy, attached only with their
+    /// explicit consent. In an encrypted channel it is the only way a moderator
+    /// can know what they are being asked to act on — the server cannot read the
+    /// message itself — and it is therefore the reporter choosing to reveal that
+    /// content to them. `None` means "act on my word", which is a legitimate
+    /// choice and the default for anyone who does not tick the box.
+    ReportMessage {
+        channel_id: u64,
+        message_id: u64,
+        /// Log event hash when the row came from the mesh log, so a moderator
+        /// can delete it content-blind even after the row is re-derived.
+        event_hash: Option<String>,
+        reason: String,
+        evidence: Option<String>,
+    },
+    /// Moderator queue, newest first. MANAGE_MESSAGES.
+    ListReports { before_id: Option<u64>, limit: u32 },
+    /// Mark a report handled. MANAGE_MESSAGES. The outcome is recorded rather
+    /// than the row being deleted: "we looked and did nothing" is an answer a
+    /// moderation log has to be able to show.
+    ResolveReport { id: u64, outcome: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -806,6 +854,8 @@ pub enum ServerResponse {
     /// newest first. Only ever the CALLER's own list — a member never learns
     /// who blocked them, which is the point of a block.
     BlockedList { blocked: Vec<BlockedEntry> },
+    /// Answer to [`ServerRequest::ListReports`].
+    ReportList { reports: Vec<ReportInfo> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -950,6 +1000,10 @@ pub enum ServerEvent {
     /// the only signal that tells a client to drop its own decrypted copies.
     /// Appended at the end: the codec is positional over serde enums.
     MemberDataDeleted { public_key: PublicKey },
+    /// A member reported a message. Delivered only to MANAGE_MESSAGES holders —
+    /// a report is not an announcement. v2-only, like every variant added after
+    /// v1 shipped.
+    ReportCreated { report: ReportInfo },
 }
 
 /// Whether an event may only be delivered to a connection that negotiated
@@ -967,10 +1021,10 @@ pub fn event_requires_v2(event: &ServerEvent) -> bool {
         | ServerEvent::MessageTombstoned { .. }
         | ServerEvent::MlsControlEvent { .. }
         | ServerEvent::ChannelCreatedV2 { .. }
-        // A variant added after v1 shipped: an old client cannot decode it, so
-        // it must be v2-only whatever it carries. (Its effect on a v1 client is
-        // a stale roster entry until reconnect — the same as before it existed.)
-        | ServerEvent::MemberDataDeleted { .. } => true,
+        // Variants added after v1 shipped: an old client cannot decode them, so
+        // they must be v2-only whatever they carry.
+        | ServerEvent::MemberDataDeleted { .. }
+        | ServerEvent::ReportCreated { .. } => true,
 
         // Every shipped (v1) variant, listed rather than wildcarded. v1 clients
         // keep receiving exactly what they received before.
@@ -1421,6 +1475,12 @@ mod tests {
             ServerRequest::UnsubscribeBot { bot_public_key: kp.public_key() },
             ServerRequest::ListMySubscriptions,
             ServerRequest::ListBlocked,
+            ServerRequest::ReportMessage {
+                channel_id: 3, message_id: 9, event_hash: Some("ab".repeat(32)),
+                reason: "spam".into(), evidence: Some("the text they sent".into()),
+            },
+            ServerRequest::ListReports { before_id: None, limit: 50 },
+            ServerRequest::ResolveReport { id: 1, outcome: "deleted".into() },
         ];
         for req in requests {
             let frame = ClientFrame::Request { id: 1, body: req };

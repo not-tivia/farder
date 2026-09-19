@@ -1059,6 +1059,46 @@ export async function kickMember(serverId: string, memberKey: string, logServerI
   return invoke<void>("kick_member", { serverId, memberKey, logServerId });
 }
 
+/** One report in the moderator queue. `evidence` is present only when the
+ *  reporter chose to attach their decrypted copy. */
+export interface ReportInfo {
+  id: number;
+  reporter: string;
+  reporter_name: string | null;
+  channel_id: number;
+  message_id: number;
+  event_hash: string | null;
+  author: string | null;
+  author_name: string | null;
+  reason: string;
+  evidence: string | null;
+  created_at: number;
+  outcome: string | null;
+  resolved_by: string | null;
+}
+
+/** Report a message. `evidence` is YOUR decrypted copy and is sent only if you
+ *  pass it — in an encrypted channel that is the only way a moderator can read
+ *  what you are reporting, so it is a choice the UI must ask about rather than
+ *  make. */
+export async function reportMessage(serverId: string, channelId: number, messageId: number, reason: string, opts?: { eventHash?: string | null; evidence?: string | null }): Promise<void> {
+  return invoke("report_message", {
+    serverId, channelId, messageId, reason,
+    eventHash: opts?.eventHash ?? null,
+    evidence: opts?.evidence ?? null,
+  });
+}
+
+/** The moderator queue, newest first. MANAGE_MESSAGES, enforced server-side. */
+export async function listReports(serverId: string, beforeId?: number, limit?: number): Promise<ReportInfo[]> {
+  return invoke<ReportInfo[]>("list_reports", { serverId, beforeId: beforeId ?? null, limit: limit ?? null });
+}
+
+/** Record how a report was handled; the row is kept either way. */
+export async function resolveReport(serverId: string, id: number, outcome: string): Promise<void> {
+  return invoke("resolve_report", { serverId, id, outcome });
+}
+
 export async function banMember(serverId: string, memberKey: string, logServerId: string | null, reason?: string): Promise<void> {
   return invoke<void>("ban_member", { serverId, memberKey, logServerId, reason: reason ?? null });
 }

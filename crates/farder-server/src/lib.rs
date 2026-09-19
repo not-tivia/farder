@@ -21,6 +21,7 @@ pub mod messages;
 pub mod permissions;
 pub mod polls;
 pub mod reactions;
+pub mod reports;
 pub mod relay;
 pub mod reminders;
 pub mod retention;

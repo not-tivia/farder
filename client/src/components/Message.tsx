@@ -10,6 +10,7 @@ import ReactionPicker from "./ReactionPicker";
 import UserProfilePopup from "./UserProfilePopup";
 import MemberContextMenu from "./MemberContextMenu";
 import RenderedMessageContent from "./RenderedMessageContent";
+import ReportMessageDialog from "./ReportMessageDialog";
 import TimedOutBadge from "./TimedOutBadge";
 import { getActorPermissions, isModerator, hasPermission, PERMISSIONS } from "../lib/permissions";
 import { renderUnicodeEmoji } from "../lib/unicodeEmoji";
@@ -376,6 +377,8 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   const isOwnMessage = ownPk === pkStr;
 
+  const [reporting, setReporting] = useState(false);
+
   // Computed BEFORE the action list, which needs MANAGE_MESSAGES for the pin
   // entry. (It used to sit below; nothing above it depends on the actions.)
   const { bits: viewerBits } = ownPk
@@ -415,6 +418,10 @@ export default function Message({ message, memberNames, grouped = false, serverI
       onClick: () => {
         void api.createThread(serverId, message.id).catch((e) => { toast.error(`Couldn't create thread: ${e}`); });
       },
+    }] : []),
+    ...(!isOwnMessage ? [{
+      label: "Report Message",
+      onClick: () => setReporting(true),
     }] : []),
     ...(canManageMessages ? [{
       label: message.pinned ? "Unpin Message" : "Pin Message",
@@ -759,7 +766,26 @@ export default function Message({ message, memberNames, grouped = false, serverI
             />
           )}
 
-          {showSealedAttachments && (
+          {reporting && (
+        <ReportMessageDialog
+          serverId={serverId}
+          channelId={message.channel_id}
+          messageId={message.id}
+          eventHash={message.event_hash ?? null}
+          // What THIS client can read: the decrypted text for a sealed row, the
+          // plain content otherwise, and null when we cannot read it either —
+          // in which case there is honestly nothing to attach.
+          readableText={
+            isSealedRow
+              ? (sealedDecrypt?.kind === "decrypted" ? sealedDecrypt.content : null)
+              : message.content
+          }
+          encrypted={isSealedRow}
+          onClose={() => setReporting(false)}
+        />
+      )}
+
+      {showSealedAttachments && (
             <div className="message-attachments">
               {message.attachments.map((att, i) => (
                 <SealedAttachmentDisplay
