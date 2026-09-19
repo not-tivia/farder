@@ -118,6 +118,15 @@ Farder default relay, returning a `(SocketAddr, cert_fingerprint_bytes)` pair
 parsed from the compile-time constant. Self-host mode uses the caller-supplied
 addr and fingerprint instead.
 
+`default_relay_webhook_base()` (same file) is the other consumer of that
+constant: the relay's IP on `DEFAULT_RELAY_WEBHOOK_PORT` (8080, the relay's
+`--webhook-bind` default) as `http://<ip>:8080`, surfaced to the UI by the
+`relay_webhook_base` command so the incoming-webhook ingest URL is derived
+rather than hardcoded. `DEFAULT_RELAY` is therefore the **only** place a relay
+move is recorded in the client — but because the cert fingerprint is pinned in
+the binary, a move still requires rebuilding and redistributing the client.
+Deploy steps: `docs/deploy/relay.md`.
+
 **Spawn command for a relayed server:**
 
 ```

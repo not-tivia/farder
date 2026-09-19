@@ -186,6 +186,7 @@ fn main() {
             commands::subscribe_bot,
             commands::unsubscribe_bot,
             commands::list_my_subscriptions,
+            commands::relay_webhook_base,
             commands::create_webhook,
             commands::list_webhooks,
             commands::delete_webhook,

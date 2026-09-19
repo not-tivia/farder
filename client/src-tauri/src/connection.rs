@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn relay_link_round_trips_an_empty_owner_token() {
-        let addr: std::net::SocketAddr = "45.77.70.199:4433".parse().unwrap();
+        let addr: std::net::SocketAddr = "203.0.113.42:4433".parse().unwrap();
         let target = RelayTarget {
             relay_addr: addr,
             server_id: vec![1u8; 32],

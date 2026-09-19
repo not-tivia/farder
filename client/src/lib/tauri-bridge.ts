@@ -1096,6 +1096,13 @@ export async function getPendingMembers(serverId: string): Promise<MemberInfo[]>
 
 // ── Webhook management (MANAGE_SERVER gated) ──────────────────────────────────
 
+/** The ingest base URL for incoming webhooks -- this build's default relay on its
+ *  webhook port, e.g. "http://203.0.113.42:8080". `null` when the build carries no
+ *  default relay. Full URL: `<base>/webhook/<server_id_hex>/<token>`. */
+export async function relayWebhookBase(): Promise<string | null> {
+  return invoke<string | null>("relay_webhook_base");
+}
+
 /** Create an incoming webhook for a channel. Returns id, token, and server_id_hex
  *  (relay server hex for URL building). Token is shown once; never retrievable. */
 export async function createWebhook(serverId: string, channelId: number, name: string): Promise<WebhookTokenResult> {

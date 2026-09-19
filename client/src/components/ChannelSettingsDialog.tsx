@@ -5,12 +5,6 @@ import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { isE2eeChannel } from "../lib/types";
 import { E2eeConfirmDialog } from "./E2eeConfirmDialog";
 
-// ---------------------------------------------------------------------------
-// Relay webhook ingest base URL (v1: single known relay; change here when
-// TLS / a reverse proxy is added or the relay host changes).
-// ---------------------------------------------------------------------------
-const RELAY_WEBHOOK_BASE = "http://45.77.70.199:8080";
-
 interface Props {
   channel: ChannelInfo;
   onClose: () => void;
@@ -63,6 +57,9 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
   const [webhooksLoaded, setWebhooksLoaded] = useState(false);
   const [webhookLoading, setWebhookLoading] = useState(false);
   const [webhookError, setWebhookError] = useState<string | null>(null);
+  // The ingest base comes from the build's default relay (one source of truth in
+  // default_relay.rs) -- null if this build has no default relay.
+  const [webhookBase, setWebhookBase] = useState<string | null>(null);
   const [newWebhookName, setNewWebhookName] = useState("");
   const [creating, setCreating] = useState(false);
   /** Token result shown once after create or regenerate; null otherwise. */
@@ -98,6 +95,10 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
   }
 
   // ── Webhook handlers ──────────────────────────────────────────────────────
+  useEffect(() => {
+    api.relayWebhookBase().then(setWebhookBase).catch(() => setWebhookBase(null));
+  }, []);
+
   useEffect(() => {
     if (activeTab !== "webhooks" || webhooksLoaded || !serverId) return;
     setWebhookLoading(true);
@@ -232,17 +233,22 @@ export default function ChannelSettingsDialog({ channel, onClose }: Props) {
               {shownToken && (
                 <div className="connect-section" style={{ marginBottom: 12 }}>
                   <label className="connect-label">
-                    {shownToken.server_id_hex
+                    {shownToken.server_id_hex && webhookBase
                       ? "Webhook URL (copy now — token shown once)"
                       : "Token (copy now — shown once)"}
                   </label>
-                  {shownToken.server_id_hex ? (
+                  {shownToken.server_id_hex && webhookBase ? (
                     <input
                       className="connect-input"
                       readOnly
-                      value={`${RELAY_WEBHOOK_BASE}/webhook/${shownToken.server_id_hex}/${shownToken.token}`}
+                      value={`${webhookBase}/webhook/${shownToken.server_id_hex}/${shownToken.token}`}
                       onFocus={(e) => e.currentTarget.select()}
                     />
+                  ) : shownToken.server_id_hex && !webhookBase ? (
+                    <div style={{ fontSize: 11, color: "var(--xp-text-muted)", marginTop: 4 }}>
+                      This build has no default relay configured, so there is no address for
+                      services to post to. Token: <code>{shownToken.token}</code>
+                    </div>
                   ) : (
                     <div style={{ fontSize: 11, color: "var(--xp-text-muted)", marginTop: 4 }}>
                       This server is not relay-connected — webhooks require the relay to receive inbound HTTP posts.

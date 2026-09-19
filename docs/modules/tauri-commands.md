@@ -2454,7 +2454,21 @@ List the public keys of all bots the authenticated user is subscribed to. No per
 
 ## Group 16 — Incoming webhooks
 
-Four commands for managing incoming webhooks on a channel. All are **MANAGE_SERVER-gated** on the server. A webhook is an HTTP endpoint that any external caller can POST to in order to post a message into a specific channel. The token is a secret; it is shown only at creation/rotation time and never retrievable after that.
+Five commands for incoming webhooks on a channel. The four management commands are **MANAGE_SERVER-gated** on the server. A webhook is an HTTP endpoint that any external caller can POST to in order to post a message into a specific channel. The token is a secret; it is shown only at creation/rotation time and never retrievable after that.
+
+---
+
+### `relay_webhook_base() -> Option<String>`
+
+The ingest base URL for incoming webhooks: this build's default relay IP on the relay's webhook port (`DEFAULT_RELAY_WEBHOOK_PORT` = 8080, matching `farder-relay --webhook-bind`'s default). E.g. `"http://203.0.113.42:8080"`.
+
+**Params:** none. Synchronous, no state — it reads the compile-time `DEFAULT_RELAY` constant.
+
+**Returns:** `Some(base)`, or `None` when the build carries no default relay (webhooks need the relay's inbound HTTP, so there is no address to hand out). Callers build the full URL as `<base>/webhook/<server_id_hex>/<token>` using the `server_id_hex` from `create_webhook` / `regenerate_webhook_token`.
+
+**Side effects:** none.
+
+**invoke name:** `"relay_webhook_base"` → `relayWebhookBase()` in `client/src/lib/tauri-bridge.ts`. `ChannelSettingsDialog` fetches it when the Webhooks tab opens; this is the only place the ingest URL is built, so moving the relay means editing `default_relay.rs` alone.
 
 ---
 

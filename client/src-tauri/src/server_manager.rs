@@ -239,10 +239,10 @@ mod tests {
 
     #[test]
     fn relay_mode_args_use_relay_and_data_dir_not_bind() {
-        let addr: SocketAddr = "45.77.70.199:4433".parse().unwrap();
+        let addr: SocketAddr = "203.0.113.42:4433".parse().unwrap();
         let args = build_server_args("MyServer", "blank", Path::new("/tmp/s"), &ServerMode::Relay { relay_addr: addr });
         assert!(args.iter().any(|a| a == "--relay"));
-        assert!(args.iter().any(|a| a == "45.77.70.199:4433"));
+        assert!(args.iter().any(|a| a == "203.0.113.42:4433"));
         assert!(args.iter().any(|a| a == "--data-dir"));
         assert!(!args.iter().any(|a| a == "--bind"), "relay mode must not bind a port");
     }

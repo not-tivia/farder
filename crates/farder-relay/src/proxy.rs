@@ -248,7 +248,7 @@ mod tests {
         ] {
             assert!(!is_global_ip(bad.parse().unwrap()), "{bad} must be refused");
         }
-        for good in ["203.0.113.7", "45.77.70.199", "2607:f8b0::1", "::ffff:8.8.8.8"] {
+        for good in ["203.0.113.7", "198.51.100.9", "2607:f8b0::1", "::ffff:8.8.8.8"] {
             assert!(is_global_ip(good.parse().unwrap()), "{good} must be allowed");
         }
     }

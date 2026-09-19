@@ -512,10 +512,11 @@ Four wrappers for managing and invoking server-configured slash commands. `listC
 
 ### Incoming webhooks
 
-Four wrappers for managing incoming channel webhooks. All are MANAGE_SERVER-gated on the server side. The ingest URL for a relay-backed server is constructed client-side from the constant `RELAY_WEBHOOK_BASE` (defined in `ChannelSettingsDialog.tsx` as `"http://45.77.70.199:8080"`) plus the path `/webhook/<server_id_hex>/<token>`.
+Four wrappers for managing incoming channel webhooks, plus `relayWebhookBase()`. The four management calls are MANAGE_SERVER-gated on the server side. The ingest URL for a relay-backed server is built as `<base>/webhook/<server_id_hex>/<token>`, where `base` comes from `relayWebhookBase()` — the backend's compiled-in default relay on port 8080. It used to be a hardcoded constant in `ChannelSettingsDialog.tsx`; it is now derived, so `client/src-tauri/src/default_relay.rs` is the single place a relay move is recorded.
 
 | Function | Rust command | What it does |
 |---|---|---|
+| `relayWebhookBase()` | `relay_webhook_base` | Returns `Promise<string \| null>` — the ingest base URL (`http://<default-relay-ip>:8080`), or `null` when the build has no default relay. |
 | `createWebhook(serverId, channelId, name)` | `create_webhook` | Creates a webhook for the given channel. Returns `Promise<WebhookTokenResult>` — the token is shown once. |
 | `listWebhooks(serverId, channelId)` | `list_webhooks` | Returns `Promise<WebhookInfo[]>` for the channel; no tokens. |
 | `deleteWebhook(serverId, id)` | `delete_webhook` | Deletes a webhook by id. Returns `Promise<void>`. |

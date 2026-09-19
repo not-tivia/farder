@@ -2651,6 +2651,14 @@ pub struct WebhookTokenResult {
     pub server_id_hex: Option<String>,
 }
 
+/// The base URL an external service POSTs this build's incoming webhooks to
+/// (`http://<default-relay-ip>:8080`), or `None` when the build has no default
+/// relay. The full ingest URL is `<base>/webhook/<server_id_hex>/<token>`.
+#[tauri::command]
+pub fn relay_webhook_base() -> Option<String> {
+    crate::default_relay::default_relay_webhook_base()
+}
+
 /// Create an incoming webhook for a channel. Returns id, token, and
 /// server_id_hex (relay server hex id for URL building; None on direct servers).
 #[tauri::command]
