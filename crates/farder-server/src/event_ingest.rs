@@ -529,14 +529,26 @@ pub fn apply_tombstone(conn: &Connection, event: &Event) -> Result<Option<Tombst
 /// materialized (and so not downloadable). Idempotent: a cap already materialized for
 /// this message is skipped, so reconcile can re-run safely. Returns the count newly
 /// created. Non-message payloads return `Ok(0)`.
+///
+/// **Sealed messages take the same path.** A `MessagePostedE2ee` carries caps of
+/// exactly the same shape, describing the CIPHERTEXT (hash, size,
+/// `application/octet-stream`), and every check here is over those fields — none
+/// of them reads the bytes. Skipping sealed caps did not make the server safer,
+/// it made the feature broken in two ways: the `message_attachments` row is what
+/// the download path checks permission against (so only the server owner could
+/// ever fetch a sealed attachment), and it is what holds the blob's ref count
+/// (so the orphan sweep would eventually delete a file the members could still
+/// see referenced in their messages).
 pub fn derive_attachments(
     conn: &Connection,
     message_id: u64,
     event: &Event,
     owner: &PublicKey,
 ) -> Result<usize> {
-    let EventPayload::MessagePosted { attachments, .. } = &event.core.payload else {
-        return Ok(0);
+    let attachments = match &event.core.payload {
+        EventPayload::MessagePosted { attachments, .. } => attachments,
+        EventPayload::MessagePostedE2ee { attachments, .. } => attachments,
+        _ => return Ok(0),
     };
     let author = &event.core.author;
     let mut created = 0usize;
@@ -1074,10 +1086,10 @@ pub fn fetch_device_certs(
     Ok(out)
 }
 
-/// Repair drift: for every stored `MessagePosted` event that already has a derived
-/// `messages` row, (re)materialize any missing VALID attachment rows. Idempotent
-/// (each cap is guarded inside `derive_attachments`). Returns the number of attachment
-/// rows created. No-op if there is no genesis (legacy server) — and legacy
+/// Repair drift: for every stored message event (sealed or not) that already has a
+/// derived `messages` row, (re)materialize any missing VALID attachment rows.
+/// Idempotent (each cap is guarded inside `derive_attachments`). Returns the number of
+/// attachment rows created. No-op if there is no genesis (legacy server) — and legacy
 /// `MessagePosted` events carry empty `attachments`, so this only does work for
 /// log-mode servers that crashed mid-derive or that replicate events (forward-compat).
 pub fn reconcile_attachments(conn: &Connection) -> Result<usize> {
@@ -1087,7 +1099,8 @@ pub fn reconcile_attachments(conn: &Connection) -> Result<usize> {
         let mut stmt = conn.prepare(
             "SELECT e.event_body, m.id FROM events e \
              JOIN messages m ON m.event_hash = e.event_hash \
-             WHERE e.payload_type = 'MessagePosted' ORDER BY e.accept_seq ASC",
+             WHERE e.payload_type IN ('MessagePosted', 'MessagePostedE2ee') \
+             ORDER BY e.accept_seq ASC",
         )?;
         let mapped = stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))?;
         let mut v = Vec::new();
@@ -2651,6 +2664,47 @@ mod tests {
             Some(owner.public_key().as_bytes().as_slice()),
             "redaction records who, so the tombstone is attributable",
         );
+    }
+
+    /// A sealed message's caps must materialize exactly like a plaintext
+    /// message's. They did not, and the consequences were invisible from the
+    /// crypto side: `message_attachments` is what the download path checks
+    /// permission against, so only the server owner could fetch a sealed
+    /// attachment, and it is what holds the blob's ref count, so the orphan
+    /// sweep would eventually delete files members could still see referenced.
+    #[test]
+    fn a_sealed_messages_caps_materialize_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let mut f = SealedFix::new();
+
+        let (_key, ciphertext) = farder_crypto::file_policy::seal_file(b"sealed bytes").unwrap();
+        let hash = crate::attachments::compute_sha256(&ciphertext);
+        crate::attachments::store_file(
+            &f.conn, storage, &f.owner.public_key(), "attachment.bin",
+            &ciphertext, &hash, "application/octet-stream", None, None, None,
+        ).unwrap();
+
+        let epoch = f.epoch();
+        let cap = AttachmentCap {
+            content_hash: hash,
+            declared_type: "application/octet-stream".into(),
+            size: ciphertext.len() as u64,
+            uploader: f.owner.public_key(),
+        };
+        let owner_pk = f.owner.public_key();
+        let (event, id) = f.own(EP::MessagePostedE2ee {
+            channel_id: SEALED_CH, generation: 0, epoch,
+            ciphertext: vec![0xAA; 32], reply_to: None,
+            attachments: vec![cap],
+            authz_head: "a".repeat(64),
+        });
+        let mid = id.expect("a sealed post derives a row");
+
+        assert_eq!(derive_attachments(&f.conn, mid, &event, &owner_pk).unwrap(), 1);
+        assert_eq!(attachment_count(&f.conn, mid), 1);
+        // Re-running is a no-op, so reconcile can repeat it safely.
+        assert_eq!(derive_attachments(&f.conn, mid, &event, &owner_pk).unwrap(), 0);
     }
 
     /// F4 -- swapping the ciphertext under a cap is caught. Sealing the same

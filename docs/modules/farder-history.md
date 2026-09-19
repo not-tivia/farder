@@ -28,7 +28,7 @@ crate has **no plaintext mode**, not even for tests.
 
 | On disk | Why |
 |---|---|
-| `author`, `content`, `reply_to`, `attachments` | Sealed in one AES-256-GCM blob per row — this is the part the server host genuinely cannot see. |
+| `author`, `content`, `reply_to`, `attachments` | Sealed in one AES-256-GCM blob per row — this is the part the server host genuinely cannot see. `attachments` are `HistoryAttachment { key_hex, file_name, mime_type }`: a sealed message can be opened exactly **once** (the ratchet is consumed), so a per-file key that does not survive a restart is a file nobody can ever open again. The blob's file id is deliberately not stored — the server still serves the message row that carries it. The name and MIME are kept as the sender's CLAIMS and sanitized on the way out, at the download; a name cleaned before storage is a name something later trusts. |
 | `channel_id`, `message_id`, `event_hash`, `timestamp` | **Deliberately in the clear.** Ordering, pagination, retention sweeps and tombstone purges become index operations that never decrypt anything. These four are exactly what the host already stores for every sealed row, so they tell an attacker holding this file nothing they could not get from the host's database. |
 | `author_tag` | An HMAC **blind index** over the author, so anonymize-on-leave purges run by index — without storing the author in the clear and without decrypting rows. |
 
@@ -82,9 +82,11 @@ Each is a DELETE by index — no decryption, no scan.
 - `purge_message(channel_id, message_id)` — fold a `MessageDeleted` tombstone.
 - `purge_before(channel_id, before_ts)` — retention expiry.
 - `purge_author(author)` — anonymize-on-leave, via the blind index.
-- `redact_attachment(channel_id, message_id, attachment)` — the one purge that
+- `redact_attachment(channel_id, message_id, key_hex)` — the one purge that
   needs the key, because attachments live inside the sealed blob: it re-seals the
-  row without that ref.
+  row without that ref. The attachment is named by its per-file `key_hex`,
+  because forgetting the key is precisely what makes the blob unopenable — the
+  bytes may still sit on a server, and after this they are noise forever.
 
 ---
 

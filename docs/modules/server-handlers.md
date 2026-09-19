@@ -679,9 +679,9 @@ the shape this rung supports:
 
 ### `derive_attachments(conn, message_id, event, owner) -> Result<usize>`
 
-Validates each `AttachmentCap` on a `MessagePosted` event against the stored
-blob and materializes a `message_attachments` row for each valid cap. A cap is
-valid iff:
+Validates each `AttachmentCap` on a `MessagePosted` **or `MessagePostedE2ee`**
+event against the stored blob and materializes a `message_attachments` row for
+each valid cap. A cap is valid iff:
 - A blob with its `content_hash` exists in the `files` table.
 - The blob's `size`, `mime_type`, and `uploaded_by` match the cap's `size`,
   `declared_type`, and `uploader` fields exactly.
@@ -691,7 +691,16 @@ valid iff:
 Invalid caps are **quarantined**: logged at `WARN` level and skipped. The message
 still renders; only the attachment is unavailable. Idempotent — a cap already
 materialized for this `message_id` is skipped, so reconcile can re-run safely.
-Non-`MessagePosted` payloads return `Ok(0)`.
+Payloads that are neither kind of message post return `Ok(0)`.
+
+**Sealed messages take this same path, and must.** A sealed cap describes the
+CIPHERTEXT (hash, size, `application/octet-stream`) and every check above is over
+those fields — none reads the bytes, so nothing here needs to change for E2EE.
+Skipping sealed caps did not make the server safer; it broke the feature twice
+over: `message_attachments` is what `handle_download_stream` checks permission
+against (so only the server owner could fetch a sealed attachment at all), and it
+is what holds the blob's ref count (so `cleanup_all_orphans` would eventually
+delete a file members could still see referenced in their messages).
 
 **Returns:** the count of newly-created `message_attachments` rows.
 
@@ -699,8 +708,9 @@ Non-`MessagePosted` payloads return `Ok(0)`.
 
 ### `reconcile_attachments(conn) -> Result<usize>`
 
-Startup repair: for every stored `MessagePosted` event that already has a derived
-`messages` row, (re)materializes any missing valid `message_attachments` rows by
+Startup repair: for every stored `MessagePosted` **or `MessagePostedE2ee`** event
+that already has a derived `messages` row, (re)materializes any missing valid
+`message_attachments` rows by
 calling `derive_attachments` for each event. Idempotent. No-op for legacy
 (non-log-mode) servers — returns `Ok(0)` if no genesis row exists. Called once
 at server startup after `reconcile_messages`.

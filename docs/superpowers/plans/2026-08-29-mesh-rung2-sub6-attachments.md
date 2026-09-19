@@ -71,7 +71,7 @@ nothing and hides an attack.
 - [x] **F3 — seal/unseal a file.** `seal_file(bytes) -> (key, ciphertext)` /
       `open_file(key, ciphertext)` over the existing AEAD. Round-trip, wrong key,
       flipped byte, truncated blob.
-- [ ] **F4 — the server keeps working on ciphertext.** A test that cap-vs-blob
+- [x] **F4 — the server keeps working on ciphertext.** A test that cap-vs-blob
       validation (hash, size, uploader) accepts a sealed blob unchanged, and that
       redaction deletes the bytes — the spec's "works unchanged" claims, verified
       rather than assumed.
@@ -86,8 +86,8 @@ nothing and hides an attack.
 - [x] **W3 — sealed download.** Fetch ciphertext, open with the in-envelope key,
       run the F1 policy, and only then render or write. A policy refusal renders
       the reason, never the file.
-- [ ] **W4 — voice messages** ride the sealed path (coexistence row 16).
-- [ ] **W5 — the harness case:** two clients, one sends a file in an E2EE channel,
+- [x] **W4 — voice messages** ride the sealed path (coexistence row 16).
+- [x] **W5 — the harness case:** two clients, one sends a file in an E2EE channel,
       the other opens it; `assert_no_plaintext_anywhere` covers the file bytes AND
       the filename; a non-member fetch gets ciphertext it cannot open.
 
@@ -103,6 +103,33 @@ Break every load-bearing guard. The load-bearing items: each hostile-filename
 rule (F1/F2), the magic-vs-claim check (F1), the seal round-trip (F3), and the
 "policy runs before the write" ordering (W3) — which is the one that turns a
 sanitizer into a decoration if it lands in the wrong place.
+
+## What the work actually found (2026-09-19)
+
+Three things were wired only half-way, and each was invisible from the side that
+looked finished:
+
+1. **Nothing called the sealed upload or download.** Both commands were written,
+   registered and unreferenced; `send_sealed_message` still passed
+   `attachments: &[]`, so a sealed attachment could not be sent at all. W2's
+   "carry attachments through the sealed send" was true of the crate and false of
+   the command the UI calls.
+2. **The server never materialized a sealed message's caps.** `derive_attachments`
+   matched `MessagePosted` only, so `message_attachments` had no row — which is
+   what the download path checks permission against (only the server owner could
+   fetch a sealed attachment) and what holds the blob's ref count (the orphan
+   sweep would have deleted the file). Found by W5, exactly the kind of thing the
+   harness exists for, and pinned by both the harness case and a unit test.
+3. **The allowlist and the sniffer disagreed.** `txt`/`md`/`csv`/`json`/`log`/
+   `zip`/`mov` were allowed by name and then always refused by content, because
+   they resolved to `application/octet-stream`, which no sniffed type agrees
+   with. Text is now judged as text (valid UTF-8, no control bytes) — which still
+   refuses an ELF wearing a `.txt` name.
+
+Also added beyond the plan, because the alternative was silent data loss: the
+local history store keeps the attachment refs (typed and sealed at rest). A
+sealed message opens exactly once, so a key that does not survive a restart is a
+file nobody can ever open again.
 
 ## Carry-forwards
 - Attachment count and bucketed sizes still leak; the spec accepts this.

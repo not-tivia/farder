@@ -53,7 +53,14 @@ pub fn all_tables(conn: &Connection) -> Vec<String> {
 /// (`the_observer_finds_a_needle_that_is_really_there`): it writes a needle in
 /// plaintext and asserts this function DOES panic. Keep that test alive.
 pub fn assert_no_plaintext_anywhere(conn: &Connection, needle: &str) {
-    let needle_bytes = needle.as_bytes();
+    assert_no_bytes_anywhere(conn, needle.as_bytes(), needle);
+}
+
+/// The same observation for a needle that is not text — a per-file key, a raw
+/// blob, anything whose leak would be just as total but which has no readable
+/// form to search for.
+pub fn assert_no_bytes_anywhere(conn: &Connection, needle_bytes: &[u8], label: &str) {
+    let needle = label;
     for table in all_tables(conn) {
         let sql = format!("SELECT * FROM \"{table}\"");
         let mut stmt = match conn.prepare(&sql) {

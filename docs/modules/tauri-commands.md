@@ -476,14 +476,16 @@ Welcome also advances + persists the device chain (`device_state.json`).
 
 ---
 
-### `send_sealed_message(state, server_id, log_server_id, channel_id, content, reply_to) -> Result<SendSealedMessageResult, String>`
+### `send_sealed_message(state, server_id, log_server_id, channel_id, content, reply_to, attachments) -> Result<SendSealedMessageResult, String>`
 
 **What it does:** seals + submits one E2EE channel message (T10). Runs under
 `run_e2ee` (spawn_blocking + nested runtime) because the vertical holds
 `&FarderMlsStore` across awaits. Resumes the on-disk store + group, refuses a
 poisoned group (F4), then calls the crate's proven `send_sealed` (build the
-`MessageEnvelope` with empty attachment vecs, enforce the client-side caps,
-seal against the current epoch, submit `MessagePostedE2ee`). On a bare
+`MessageEnvelope` — carrying any attachments' keys, real names and real MIMEs
+INSIDE the ciphertext — enforce the client-side caps, seal against the current
+epoch, submit `MessagePostedE2ee` with the caps describing the uploaded
+ciphertext). On a bare
 `"stale-epoch"` rejection it runs the crate's bounded `send_sealed_resync`
 (fetch winning commits → apply through the two gates with a roster-built
 `VerifiedCertResolver` → re-seal → resubmit) and persists the advanced
@@ -492,7 +494,16 @@ control-plane cursor. Never hand-rolls an MLS path.
 request; `log_server_id` — the genesis hash that stamps the events and keys the
 device chain; `channel_id` — the E2EE channel id; `content` — the message text;
 `reply_to` — an optional event-hash ref (`null` for a top-level post; legacy
-numeric replies are not mapped yet).
+numeric replies are not mapped yet); `attachments` — zero or more
+`SealedAttachmentInput { content_hash, size, key_hex, file_name, mime_type }`
+exactly as `upload_sealed_file` returned them (omit or pass `[]` for text-only).
+The cap's uploader is filled in from this identity rather than taken from the
+caller: the server validates a cap against the blob's `uploaded_by`, so any other
+value could only build an event that never materializes an attachment. A key that
+is not 32 bytes of hex is refused rather than resized — a wrong-length key would
+seal a message whose file nobody, including the sender, could ever open.
+**Empty `content` is allowed only when there is an attachment** (a voice message
+is exactly that case).
 **Returns:** `SendSealedMessageResult { event_hash, epoch }`.
 **Side effects:** advances + persists the device chain (`device_state.json`) on
 acceptance; on resync persists the advanced epoch/cursor to
@@ -826,6 +837,48 @@ returns the path in `saved_path`.
 **Side effects:** opens a new QUIC bi-stream; may write a file to the OS downloads
 directory.
 **invoke name:** `"download_file"` → `downloadFile()`.
+
+---
+
+### `upload_sealed_file(state, server_id, channel_id, file_path) -> Result<SealedUploadOutcome, String>`
+
+**What it does:** the E2EE channel's upload (sub-6 W1). Reads the file, runs the
+client-side policy over it (`file_policy::safe_filename` on the name, then
+`check_contents` of the bytes against the type the extension claims), seals it
+under a fresh random key, and uploads the **ciphertext** through the same stream
+path as `upload_file`. A file that fails the policy is refused HERE, before any
+upload, so the user can still choose a different one.
+**What the server receives is deliberately uniform:** a blob named
+`attachment.bin` of type `application/octet-stream`, whose content hash is the
+hash of the ciphertext. The real name, the real MIME and the key go back to the
+caller to be sealed INSIDE the message by `send_sealed_message`.
+**Returns:** `SealedUploadOutcome { file_id, content_hash, size, key_hex, file_name, mime_type }` — `file_name` is the SANITIZED name.
+**Side effects:** opens a new QUIC bi-stream; network I/O. No plaintext leaves the
+machine.
+**invoke name:** `"upload_sealed_file"` → `uploadSealedFile()`.
+
+---
+
+### `download_sealed_file(state, server_id, file_id, key_hex, claimed_name, claimed_mime) -> Result<SealedDownloadResult, String>`
+
+**What it does:** fetches, opens and policy-checks one sealed attachment (sub-6
+W3). **The ordering is the whole point:** fetch ciphertext → open with the
+per-file key → sanitize the name → sniff the bytes against the claimed type →
+*only then* render or write. The server applied no file hardening to these bytes
+and could not have — it never saw them — so everything protecting the recipient
+happens here, in this order.
+**`claimed_name` and `claimed_mime` come from inside the message ciphertext and
+are attacker-controlled.** No server sanitizer has ever seen them. The name that
+comes back is the sanitized one; the MIME that comes back is the SNIFFED one, so
+a sender does not get to choose how their bytes are interpreted.
+**Returns:** `SealedDownloadResult` — tag-discriminated, so a refusal cannot be
+mistaken for a file: `{ kind: "opened", data_url, file_name, mime_type, saved_path }`
+or `{ kind: "refused", reason }`. A wrong key, a tampered blob, an unsafe name or
+bytes that contradict the claim all return `refused`.
+**Side effects:** opens a new QUIC bi-stream; for a non-inline type, writes the
+file to the OS downloads directory under the sanitized name (which by
+construction cannot escape that directory).
+**invoke name:** `"download_sealed_file"` → `downloadSealedFile()`.
 
 ---
 
