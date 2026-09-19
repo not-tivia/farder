@@ -856,6 +856,21 @@ than an address.
 
 ---
 
+### `pin_message(state, server_id, message_id)` / `unpin_message(...)`
+
+**What they do:** pin or unpin a message. MANAGE_MESSAGES, enforced server-side;
+the UI hides the action without the permission, but the refusal is the server's.
+**Why they are new:** pinning was fully implemented server-side when it shipped —
+the permission check, the `messages.pinned` column, the `MessagePinned` /
+`MessageUnpinned` broadcasts — and completely unreachable. No command, no bridge
+wrapper, no UI, and `bridge.rs` dropped both events on the floor.
+**Called by:** the message context menu in `Message.tsx`. The new state arrives
+as a broadcast rather than being applied optimistically, so this client and
+everyone else learn it the same way.
+**invoke names:** `"pin_message"` → `pinMessage()`, `"unpin_message"` → `unpinMessage()`.
+
+---
+
 ### `list_blocked(state, server_id) -> Result<Vec<BlockedUserInfo>, String>`
 
 **What it does:** returns who THIS identity has blocked on that server, newest

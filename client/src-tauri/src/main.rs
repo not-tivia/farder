@@ -167,6 +167,8 @@ fn main() {
             commands::send_typing,
             commands::edit_message,
             commands::delete_message,
+            commands::pin_message,
+            commands::unpin_message,
             commands::assign_role,
             commands::remove_role,
             commands::kick_member,

@@ -157,6 +157,7 @@ export type AppAction =
   | { type: "NEW_MESSAGE"; serverId: string; payload: MessageInfo }
   | { type: "MESSAGE_EDITED"; serverId: string; payload: { channelId: number; messageId: number; newContent: string; editedAt: number } }
   | { type: "MESSAGE_DELETED"; serverId: string; payload: { channelId: number; messageId: number } }
+  | { type: "MESSAGE_PIN_CHANGED"; serverId: string; payload: { channelId: number; messageId: number; pinned: boolean } }
   | { type: "ATTACHMENT_REDACTED"; serverId: string; payload: { contentHash: string; byModerator: boolean } }
   | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean; fileId?: number } }
   | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; fileId?: number } }
@@ -323,6 +324,19 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
       return {
         ...state,
         messages: { ...state.messages, [channelId]: msgs.filter((m) => m.id !== messageId) },
+      };
+    }
+    case "MESSAGE_PIN_CHANGED": {
+      const { channelId, messageId, pinned } = action.payload;
+      const msgs = state.messages[channelId] ?? [];
+      // A pin from another client arrives as an event; without this the row
+      // kept whatever `pinned` it was fetched with until the next refetch.
+      return {
+        ...state,
+        messages: {
+          ...state.messages,
+          [channelId]: msgs.map((m) => (m.id === messageId ? { ...m, pinned } : m)),
+        },
       };
     }
     case "ATTACHMENT_REDACTED": {

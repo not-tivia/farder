@@ -514,6 +514,29 @@ export function useServerEvents(): void {
 
     // A member's data deletion was executed server-side: their messages were
     // anonymized and their files removed. Two things follow from that here.
+    // Written out rather than looped over a table: `seam_audit.py` matches the
+    // event name as a LITERAL in the listen() call, and a loop hides it — the
+    // audit reported both of these as orphan emits, which is the check working.
+    listen("server:message_pinned", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message_id: number };
+      if (data.server_id !== activeRef.current) return;
+      dispatch({
+        type: "MESSAGE_PIN_CHANGED",
+        serverId: data.server_id,
+        payload: { channelId: data.channel_id, messageId: data.message_id, pinned: true },
+      });
+    }).then(safePush);
+
+    listen("server:message_unpinned", (e) => {
+      const data = e.payload as { server_id: string; channel_id: number; message_id: number };
+      if (data.server_id !== activeRef.current) return;
+      dispatch({
+        type: "MESSAGE_PIN_CHANGED",
+        serverId: data.server_id,
+        payload: { channelId: data.channel_id, messageId: data.message_id, pinned: false },
+      });
+    }).then(safePush);
+
     listen("server:member_data_deleted", (e) => {
       const data = e.payload as { server_id: string; public_key: string; public_key_bytes: number[] };
       const serverId = data.server_id;

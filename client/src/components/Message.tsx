@@ -376,6 +376,16 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   const isOwnMessage = ownPk === pkStr;
 
+  // Computed BEFORE the action list, which needs MANAGE_MESSAGES for the pin
+  // entry. (It used to sit below; nothing above it depends on the actions.)
+  const { bits: viewerBits } = ownPk
+    ? getActorPermissions(activeServer?.members ?? [], roles, ownPk, activeServer?.ownerPublicKey ?? null)
+    : { bits: 0n };
+  const showModBadges = isModerator(viewerBits);
+  const canTakeDown = hasPermission(viewerBits, PERMISSIONS.KICK_MEMBERS);
+  const canManageMessages = hasPermission(viewerBits, PERMISSIONS.MANAGE_MESSAGES);
+  const logServerId = activeServer?.logServerId ?? null;
+
   // Build the list of message actions mirroring the context menu (same conditions),
   // so AttachmentDisplay can append them to the merged image right-click menu.
   // NOTE: these are intentionally plain onClick callbacks, not async -- the async
@@ -406,6 +416,27 @@ export default function Message({ message, memberNames, grouped = false, serverI
         void api.createThread(serverId, message.id).catch((e) => { toast.error(`Couldn't create thread: ${e}`); });
       },
     }] : []),
+    ...(canManageMessages ? [{
+      label: message.pinned ? "Unpin Message" : "Pin Message",
+      onClick: () => {
+        // The state comes back as a broadcast, so both this client and everyone
+        // else learn about it the same way -- no optimistic flip to undo.
+        //
+        // Called directly in each branch rather than through a variable holding
+        // the function: `reachability_audit.py` reported both commands as
+        // unreachable when it was `const call = ... ; call(...)`, and a person
+        // grepping for `pinMessage(` would have missed it too.
+        if (message.pinned) {
+          void api.unpinMessage(serverId, message.id).catch((e) => {
+            toast.error(`Couldn't unpin the message: ${e}`);
+          });
+        } else {
+          void api.pinMessage(serverId, message.id).catch((e) => {
+            toast.error(`Couldn't pin the message: ${e}`);
+          });
+        }
+      },
+    }] : []),
     ...(isOwnMessage ? [{
       label: "Delete Message",
       onClick: () => {
@@ -423,13 +454,6 @@ export default function Message({ message, memberNames, grouped = false, serverI
       },
     }] : []),
   ];
-
-  const { bits: viewerBits } = ownPk
-    ? getActorPermissions(activeServer?.members ?? [], roles, ownPk, activeServer?.ownerPublicKey ?? null)
-    : { bits: 0n };
-  const showModBadges = isModerator(viewerBits);
-  const canTakeDown = hasPermission(viewerBits, PERMISSIONS.KICK_MEMBERS);
-  const logServerId = activeServer?.logServerId ?? null;
 
   // Channel names for the farder://channel/<id> pill (the reminder DM's
   // link-back). An id we don't know renders the generic "Open channel".
@@ -627,6 +651,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
           )}
           <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
           {message.edited_at && <span className="message-edited">(edited)</span>}
+          {/* `pinned` has always been on the row and never shown. Reusing
+              `.message-edited` keeps it styled in every theme; a new class with
+              no CSS would render raw. */}
+          {message.pinned && (
+            <span className="message-edited" title="Pinned message">📌 pinned</span>
+          )}
         </div>
       )}
       {profilePopup && member && (

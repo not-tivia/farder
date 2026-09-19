@@ -562,6 +562,17 @@ export async function editMessage(serverId: string, messageId: number, newConten
   return invoke<void>("edit_message", { serverId, messageId, newContent });
 }
 
+/** Pin a message. MANAGE_MESSAGES, enforced server-side — the UI hides the
+ *  action without it, but the refusal is the server's. */
+export async function pinMessage(serverId: string, messageId: number): Promise<void> {
+  return invoke("pin_message", { serverId, messageId });
+}
+
+/** Unpin a message. Same gate. */
+export async function unpinMessage(serverId: string, messageId: number): Promise<void> {
+  return invoke("unpin_message", { serverId, messageId });
+}
+
 export async function deleteMessage(serverId: string, messageId: number): Promise<void> {
   return invoke<void>("delete_message", { serverId, messageId });
 }

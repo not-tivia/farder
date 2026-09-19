@@ -2448,6 +2448,53 @@ pub async fn edit_message(
     }
 }
 
+/// Pin a message (MANAGE_MESSAGES, enforced server-side).
+///
+/// Pinning has been fully implemented on the server since it shipped — the
+/// permission check, the `messages.pinned` column, the `MessagePinned`
+/// broadcast — and completely unreachable: no command, no bridge wrapper, no
+/// UI. This is the client half.
+#[tauri::command]
+pub async fn pin_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    message_id: u64,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::PinMessage { message_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Unpin a message (MANAGE_MESSAGES, enforced server-side).
+#[tauri::command]
+pub async fn unpin_message(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    message_id: u64,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::UnpinMessage { message_id },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 #[tauri::command]
 pub async fn delete_message(
     state: State<'_, Arc<AppState>>,

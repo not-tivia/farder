@@ -68,6 +68,13 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
             app.emit("server:message_edited", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "new_content": new_content, "edited_at": edited_at })),
         ServerEvent::MessageDeleted { message_id, channel_id } =>
             app.emit("server:message_deleted", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id })),
+        // Pin state changes were broadcast by the server and dropped on the
+        // floor here: neither event reached the frontend, so a pin from another
+        // client was invisible until a refetch.
+        ServerEvent::MessagePinned { message_id, channel_id } =>
+            app.emit("server:message_pinned", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id })),
+        ServerEvent::MessageUnpinned { message_id, channel_id } =>
+            app.emit("server:message_unpinned", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id })),
         ServerEvent::ReactionAdded { message_id, channel_id, emoji, public_key, file_id } =>
             app.emit("server:reaction_added", serde_json::json!({ "server_id": sid, "message_id": message_id, "channel_id": channel_id, "emoji": emoji, "public_key": public_key.to_string(), "file_id": file_id })),
         ServerEvent::ReactionRemoved { message_id, channel_id, emoji, public_key, file_id } =>
