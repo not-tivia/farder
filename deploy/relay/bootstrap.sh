@@ -69,6 +69,28 @@ else
 fi
 echo "REMINDER: your provider's own firewall / security group must allow the same two ports."
 
+# Building the relay compiles Rust inside Docker, which wants more memory than a
+# $5 box has. Last time this was hit on a 1 GB Vultr instance and the fix was a
+# swapfile; `fallocate` then failed with "Text file busy" because one already
+# existed. So: measure first, skip if there is enough, and never touch an
+# existing /swapfile.
+say "Checking memory for the build"
+mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+swap_kb=$(awk '/SwapTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+total_mb=$(( (mem_kb + swap_kb) / 1024 ))
+echo "RAM + swap: ${total_mb} MB"
+if [ "$total_mb" -lt 2500 ] && [ ! -e /swapfile ]; then
+  echo "Adding a 2G swapfile so the build does not run out of memory."
+  $SUDO fallocate -l 2G /swapfile 2>/dev/null || $SUDO dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+  $SUDO chmod 600 /swapfile
+  $SUDO mkswap /swapfile >/dev/null
+  $SUDO swapon /swapfile
+  # Survive a reboot, without duplicating the line on a re-run.
+  grep -q "^/swapfile " /etc/fstab 2>/dev/null || echo "/swapfile none swap sw 0 0" | $SUDO tee -a /etc/fstab >/dev/null
+elif [ "$total_mb" -lt 2500 ]; then
+  echo "Low memory, but /swapfile already exists - leaving it alone."
+fi
+
 say "Fetching the relay source"
 if [ -d "$FARDER_DIR/.git" ]; then
   git -C "$FARDER_DIR" pull --ff-only
