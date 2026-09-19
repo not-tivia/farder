@@ -15,5 +15,28 @@ services:
       - "8080:8080/tcp"
     volumes:
       - relay-data:/data
+
+  # The invite website, OPTIONAL: started only with `--profile web`, because a
+  # relay operator is not necessarily hosting the site too. Caddy gets its own
+  # certificate for FARDER_SITE_DOMAIN on first start, so ports 80 and 443 must
+  # be open and DNS must already point here.
+  web:
+    profiles: ["web"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      FARDER_SITE_DOMAIN: ${FARDER_SITE_DOMAIN:-farder.xyz}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Read-only: the site is static and the server has no business writing to it.
+      - ../../website:/srv:ro
+      - ../website/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
 volumes:
   relay-data:
+  caddy-data:
+  caddy-config:

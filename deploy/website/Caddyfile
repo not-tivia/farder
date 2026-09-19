@@ -1,0 +1,32 @@
+# The site that serves invite links: https://<domain>/join/<token>
+#
+# Served from the SAME box as the relay on purpose. Whoever hosts this page sees
+# the IP of everyone who clicks an invite — which is exactly the thing Farder
+# exists to avoid handing to a third party. On your own VPS those logs are
+# yours; on someone else's platform they are theirs.
+#
+# FARDER_SITE_DOMAIN is a real domain in production (Caddy then gets a
+# Let's Encrypt certificate by itself) or something like :8081 for a local
+# HTTP-only check.
+
+{$FARDER_SITE_DOMAIN} {
+	root * /srv
+	encode gzip
+
+	# A REWRITE, not a redirect. `invite.js` reads the token out of
+	# `window.location.pathname`, so the URL has to stay /join/<token> while the
+	# invite page's HTML is what gets served. A redirect would change the path
+	# and take the token with it.
+	rewrite /join/* /invite/index.html
+
+	file_server
+
+	# Nothing here is user content and nothing is uploaded; the site is four
+	# static files. These are the headers that cost nothing and close the
+	# obvious gaps.
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

@@ -11,7 +11,10 @@
 #
 # Overrides: FARDER_DIR (clone path), FARDER_REPO (git url), FARDER_PUBLIC_IP,
 # FARDER_RELAY_BACKUP (path to a relay-data tarball to restore, so the new relay
-# keeps its old identity/fingerprint and no client rebuild is needed).
+# keeps its old identity/fingerprint and no client rebuild is needed),
+# FARDER_SITE_DOMAIN (also serve the invite website for that domain over HTTPS;
+# DNS for it must already point at this box, or the certificate cannot be
+# issued).
 set -euo pipefail
 
 FARDER_REPO="${FARDER_REPO:-https://github.com/not-tivia/farder.git}"
@@ -43,12 +46,23 @@ fi
 $SUDO docker compose version >/dev/null 2>&1 || die "docker compose plugin missing (install docker-compose-plugin)"
 
 say "Opening the firewall (UDP 4433 = QUIC, TCP 8080 = incoming webhooks)"
+if [ -n "${FARDER_SITE_DOMAIN:-}" ]; then
+  echo "Also opening TCP 80 + 443 for $FARDER_SITE_DOMAIN (certificate issuance needs 80)."
+fi
 if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q "Status: active"; then
   $SUDO ufw allow 4433/udp
   $SUDO ufw allow 8080/tcp
+  if [ -n "${FARDER_SITE_DOMAIN:-}" ]; then
+    $SUDO ufw allow 80/tcp
+    $SUDO ufw allow 443/tcp
+  fi
 elif command -v firewall-cmd >/dev/null 2>&1; then
   $SUDO firewall-cmd --permanent --add-port=4433/udp
   $SUDO firewall-cmd --permanent --add-port=8080/tcp
+  if [ -n "${FARDER_SITE_DOMAIN:-}" ]; then
+    $SUDO firewall-cmd --permanent --add-port=80/tcp
+    $SUDO firewall-cmd --permanent --add-port=443/tcp
+  fi
   $SUDO firewall-cmd --reload
 else
   echo "No active host firewall found - nothing to open locally."
@@ -64,7 +78,14 @@ fi
 cd "$FARDER_DIR"
 
 say "Building and starting the relay (first build takes a few minutes)"
-$SUDO "${COMPOSE[@]}" up -d --build
+if [ -n "${FARDER_SITE_DOMAIN:-}" ]; then
+  # The `web` profile adds Caddy serving the invite site. Exported, not passed
+  # inline, because compose reads it for the container's environment too.
+  export FARDER_SITE_DOMAIN
+  $SUDO -E "${COMPOSE[@]}" --profile web up -d --build
+else
+  $SUDO "${COMPOSE[@]}" up -d --build
+fi
 
 # Compose names the volume <project>_relay-data, so ask the container rather
 # than guessing: a wrong name here silently backs up an empty new volume.
@@ -132,3 +153,13 @@ pub const DEFAULT_RELAY: Option<DefaultRelay> = Some(DefaultRelay {
 
 Logs:  ${COMPOSE[*]} logs -f
 SNIP
+
+if [ -n "${FARDER_SITE_DOMAIN:-}" ]; then
+  cat <<SITE
+Website:      https://$FARDER_SITE_DOMAIN  (invite links resolve at /join/<code>)
+
+If the certificate did not issue, DNS for $FARDER_SITE_DOMAIN is not pointing
+here yet, or TCP 80 is blocked upstream. Caddy retries by itself once either is
+fixed: ${COMPOSE[*]} logs web
+SITE
+fi

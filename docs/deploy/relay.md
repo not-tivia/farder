@@ -144,6 +144,15 @@ INFO farder_relay: webhook HTTP listening on 0.0.0.0:8080
 
 ---
 
+## 2c. (Optional) Serve the invite website from the same box
+
+`FARDER_SITE_DOMAIN=<your-domain> bash deploy/relay/bootstrap.sh` also starts
+Caddy serving `website/`, so `https://<your-domain>/join/<code>` resolves. See
+[website.md](website.md) for why it belongs on your machine rather than a
+hosting platform, and for the DNS records.
+
+---
+
 ## 3. (Optional) Point a domain at it
 
 If you want users (and invite links) to reference a hostname instead of a raw IP:
