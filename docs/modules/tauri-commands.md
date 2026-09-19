@@ -2896,6 +2896,11 @@ consumed on first read), so rows are rendered from here instead.
 **What it does:** case-insensitive substring search over one channel's stored
 history. Sealed rows never enter the server's FTS index, so this is the ONLY way
 to search an E2EE channel.
+**Called by:** `MessageSearchOverlay.tsx` (sub-7b), once per encrypted channel of
+the active server, merged with the server's FTS results. A per-channel failure is
+swallowed — a locked identity is a state, not an error, and the plaintext
+channels' results are still worth showing. Local hits are marked in the list, so
+"found on this device" never reads as "found on the server".
 **invoke name:** `"history_search"` → `historySearch(channelId, query, limit)`.
 
 ### `history_purge_message(state, channel_id, message_id) -> Result<usize, String>`
@@ -2910,6 +2915,12 @@ nothing unless this device drops its decrypted copy too.
 ### `history_purge_before(state, channel_id, before_ts) -> Result<usize, String>`
 
 **What it does:** retention expiry for one channel.
+**Called by:** `useHistoryRetention.ts`, at most once per channel per 5 minutes,
+for every channel with a `retention_secs` window. It has to be client-driven: the
+server's retention task is a silent background sweep that broadcasts nothing, and
+for an E2EE channel the server is purging ciphertext while the readable copy sits
+here — so a retention window means nothing end to end unless this device sweeps
+its own store too.
 **invoke name:** `"history_purge_before"` → `historyPurgeBefore(channelId, beforeTs)`.
 
 ### `history_purge_author(state, author) -> Result<usize, String>`
