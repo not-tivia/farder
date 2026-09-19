@@ -132,5 +132,12 @@ sealed message opens exactly once, so a key that does not survive a restart is a
 file nobody can ever open again.
 
 ## Carry-forwards
-- Attachment count and bucketed sizes still leak; the spec accepts this.
+- **Attachment sizes leak EXACTLY, not in buckets.** The spec's line reads
+  "attachment count and (bucketed) sizes still leak", which overstates what is
+  built: `seal_file` is AES-256-GCM with no padding, so the ciphertext is the
+  plaintext length plus a fixed 28 bytes. The message envelope has a padding
+  ladder; files do not. Whether they should is a real question with a real cost
+  (padding a 5 MB file to the next bucket means uploading megabytes of nothing),
+  so it is recorded here rather than decided quietly. Anyone quoting the spec's
+  privacy properties should quote the implemented one.
 - Sub-7's export/import remains out of scope.
