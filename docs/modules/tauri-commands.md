@@ -840,6 +840,22 @@ directory.
 
 ---
 
+### `get_local_servers(procs) -> Vec<ManagedServer>` / `stop_local_server(procs, port)`
+
+**What they do:** list the `farder-server` processes this client supervises, and
+stop one by its port handle. Both were registered with no caller: nothing showed
+a hosted server and nothing could stop one short of quitting the app (they ARE
+killed on exit — `main.rs`'s `ExitRequested` handler calls `stop_all`).
+**Called by:** the "Hosted Servers" settings section, which confirms before
+stopping (members lose their connection) and re-reads the list afterwards.
+**Note:** `ManagedServer.relayed` had drifted out of the TypeScript shape; a
+relayed server binds no local port, so `port` there is a process handle rather
+than an address.
+**invoke names:** `"get_local_servers"` → `getLocalServers()`,
+`"stop_local_server"` → `stopLocalServer(port)`.
+
+---
+
 ### `list_blocked(state, server_id) -> Result<Vec<BlockedUserInfo>, String>`
 
 **What it does:** returns who THIS identity has blocked on that server, newest

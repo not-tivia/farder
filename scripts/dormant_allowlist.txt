@@ -45,7 +45,5 @@ set_data_saver_embeds: legacy setting, kept readable for the migration only
 # These are features with no way in. They are listed so the audit stays green
 # and useful, NOT because the gap is fine.
 list_servers: no UI lists the servers this client knows; connect is by address
-get_local_servers: no UI shows locally hosted servers
-stop_local_server: a local server can be started from the UI and never stopped
 set_profile_color: profile colour has no control in the profile editor
 save_temp_audio: no caller since the voice-message recorder saves its own file

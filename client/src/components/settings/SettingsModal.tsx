@@ -6,12 +6,13 @@ import VoiceSettings from "../VoiceSettings";
 import PrivacyDataSettings from "../PrivacyDataSettings";
 import AlertSubscriptions from "./AlertSubscriptions";
 import MyReminders from "./MyReminders";
+import HostedServers from "./HostedServers";
 
 interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "gif" | "translation" | "voice" | "privacy" | "alerts" | "reminders";
+type SectionId = "appearance" | "gif" | "translation" | "voice" | "privacy" | "hosted" | "alerts" | "reminders";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
@@ -19,6 +20,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "translation", label: "Translation" },
   { id: "voice", label: "Voice" },
   { id: "privacy", label: "Privacy & Data" },
+  { id: "hosted", label: "Hosted Servers" },
   { id: "alerts", label: "Alerts" },
   { id: "reminders", label: "Reminders" },
 ];
@@ -65,6 +67,7 @@ export default function SettingsModal({ onClose }: Props) {
             {active === "translation" && <TranslationSettingsTab />}
             {active === "voice" && <VoiceSettings />}
             {active === "privacy" && <PrivacyDataSettings />}
+            {active === "hosted" && <HostedServers />}
             {active === "alerts" && <AlertSubscriptions />}
             {active === "reminders" && <MyReminders />}
           </section>

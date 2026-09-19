@@ -935,6 +935,9 @@ export interface ManagedServer {
   data_dir: string;
   template: string;
   privacy: string;
+  /** Relayed servers dial out and bind no local port, so `port` is a handle for
+   *  stopping the process rather than an address anyone connects to. */
+  relayed: boolean;
 }
 
 export async function createLocalServer(
