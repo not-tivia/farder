@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="xp">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,7 +13,16 @@
     A static host (e.g. Netlify, Cloudflare Pages) should rewrite /join/* to this file,
     or you can use the ?server=...&code=... query string fallback.
   -->
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="../css/style.css">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("farder.theme");
+        if (t) document.documentElement.setAttribute("data-theme", t);
+      } catch (e) { /* private mode: the default is a fine answer */ }
+    })();
+  </script>
 </head>
 <body>
 
@@ -24,9 +33,10 @@
       Farder
     </a>
     <ul class="nav-links">
-      <li><a href="../index.html#features">Features</a></li>
+      <li><a href="../index.html#what">What it is</a></li>
+      <li><a href="../index.html#encrypted">Encrypted channels</a></li>
       <li><a href="../index.html#download">Download</a></li>
-      <li><a href="https://github.com/farder/farder" target="_blank" rel="noopener">GitHub</a></li>
+      <li><a href="https://github.com/not-tivia/farder" target="_blank" rel="noopener">GitHub</a></li>
     </ul>
   </nav>
 
@@ -62,6 +72,7 @@
     </div>
   </main>
 
+  <script src="../js/theme.js"></script>
   <script src="../js/invite.js"></script>
 </body>
 </html>
