@@ -4310,6 +4310,42 @@ mod tests {
     }
 
     #[test]
+    /// The request answers for the CALLER, and only the caller. There is no
+    /// field to point it at anyone else — that is the whole design — so this
+    /// pins that two members asking the same question get their own answers.
+    #[test]
+    fn list_blocked_answers_only_for_the_caller() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+
+        handle_request(&conn, &owner_pk, true, ServerRequest::BlockUser { target_key: alice.clone() }, "", &fake_state()).unwrap();
+
+        let mine = handle_request(&conn, &owner_pk, true, ServerRequest::ListBlocked, "", &fake_state()).unwrap();
+        match mine.response {
+            ServerResponse::BlockedList { blocked } => {
+                assert_eq!(blocked.len(), 1);
+                assert_eq!(blocked[0].public_key, alice);
+                assert_eq!(blocked[0].display_name.as_deref(), Some("Alice"));
+            }
+            other => panic!("expected BlockedList, got {other:?}"),
+        }
+
+        // Alice asks the same question and learns nothing about being blocked.
+        let theirs = handle_request(&conn, &alice, false, ServerRequest::ListBlocked, "", &fake_state()).unwrap();
+        match theirs.response {
+            ServerResponse::BlockedList { blocked } => assert!(blocked.is_empty()),
+            other => panic!("expected BlockedList, got {other:?}"),
+        }
+
+        // And unblocking empties it.
+        handle_request(&conn, &owner_pk, true, ServerRequest::UnblockUser { target_key: alice }, "", &fake_state()).unwrap();
+        match handle_request(&conn, &owner_pk, true, ServerRequest::ListBlocked, "", &fake_state()).unwrap().response {
+            ServerResponse::BlockedList { blocked } => assert!(blocked.is_empty()),
+            other => panic!("expected BlockedList, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_handle_block_prevents_dm() {
         let (conn, owner_pk) = setup();
         let alice = add_member(&conn, "Alice");

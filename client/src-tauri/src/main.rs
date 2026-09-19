@@ -1,4 +1,29 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+/// One lock for every test that points `FARDER_DATA` somewhere.
+///
+/// `FARDER_DATA` is a process-global env var and FOUR test groups rewrite it —
+/// `book`, `device`, `history` and `commands::voice_settings_tests` — while
+/// cargo runs tests in parallel threads of ONE process. Each group was careful
+/// to use its own temp directory and three of them took no lock at all, so a
+/// test could be reading the directory another test had just repointed. That is
+/// a flake that appears roughly once in eight full runs, blames a random test,
+/// and reproduces for nobody.
+///
+/// The poisoned case is taken rather than unwrapped: a panicking test has
+/// already failed, and turning that into a cascade of poisoned-lock failures in
+/// every other test hides which one broke.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Hold this for as long as the test touches `FARDER_DATA`.
+    pub fn lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 mod audio;
 mod audio_cpal;
 mod book;

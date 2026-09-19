@@ -7052,15 +7052,13 @@ pub(crate) fn farder_data_dir_pub() -> std::path::PathBuf {
 mod voice_settings_tests {
     use super::*;
 
-    // Settings I/O is process-global (a single ~/.farder/settings.json keyed
-    // off the FARDER_DATA env var), so serialize tests that mutate it.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Point FARDER_DATA at a fresh temp dir for the duration of `f`, so the
     /// real `read_settings`/`write_settings` helpers operate on an isolated
     /// settings.json. Mirrors how the crate already isolates `farder_data_dir`.
     fn with_temp_config<F: FnOnce()>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Shared with every other FARDER_DATA-mutating test group, not just
+        // this one — see `crate::test_env`.
+        let _guard = crate::test_env::lock();
         let prev = std::env::var("FARDER_DATA").ok();
         let tmp = std::env::temp_dir().join(format!(
             "farder-test-{}-{:?}",

@@ -428,6 +428,8 @@ pub async fn book_save_from_url(
 mod tests {
     use super::*;
 
+    /// Every book test repoints `FARDER_DATA`, so each one holds the shared
+    /// lock for its whole body (`crate::test_env`).
     fn fresh_tmp_data_dir() -> PathBuf {
         let tmp = std::env::temp_dir().join(format!(
             "farder-book-test-{}-{}",
@@ -454,6 +456,7 @@ mod tests {
 
     #[test]
     fn upload_then_list_then_delete() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let src = tmp.join("test.png");
         std::fs::create_dir_all(&tmp).unwrap();
@@ -469,6 +472,7 @@ mod tests {
 
     #[test]
     fn rename_changes_name_in_index() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let src = tmp.join("test.png");
         std::fs::create_dir_all(&tmp).unwrap();
@@ -482,6 +486,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_extension() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let src = tmp.join("test.exe");
         std::fs::create_dir_all(&tmp).unwrap();

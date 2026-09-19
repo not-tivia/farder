@@ -203,6 +203,7 @@ mod tests {
     /// cannot cover is the untyped `invoke()` seam; that needs the app running.
     #[test]
     fn history_commands_derive_a_key_round_trip_and_refuse_while_locked() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-history-cmd-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
