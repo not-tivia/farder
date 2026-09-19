@@ -116,7 +116,7 @@ any feature complete, run this checklist:
 - [ ] New Tauri event in `bridge.rs`? → `docs/modules/tauri-bridge.md` lists the
       event name, payload, and the `useServerEvents.ts` listener that consumes it.
 - [ ] New public Rust fn in a crate? → the relevant `docs/modules/*.md` has an entry.
-- [ ] New React hook / context action? → `frontend-hooks.md` / `frontend-context.md`.
+- [ ] New React hook / context action? → `frontend-hooks.md` / `frontend-state.md`.
 - [ ] New crate, layer, or data-flow path? → `ARCHITECTURE.md` reflects it.
 
 When auditing or onboarding, prefer reading these docs first; if a doc is
