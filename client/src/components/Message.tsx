@@ -90,6 +90,15 @@ function formatSize(bytes: number): string {
 // Module-level cache: file_id → data URL
 const imageCache = new Map<number, string>();
 
+/// Sealed opens, cached by (blob, key) — the SANITIZED name and the SNIFFED type
+/// alongside the bytes.
+///
+/// Caching the data URL alone would be a trap: re-rendering from the cache has
+/// to show the same name the policy produced, and the only other name available
+/// here is the sender's raw claim. Putting them in one entry makes it impossible
+/// to reuse the bytes while forgetting what the policy said about them.
+const sealedOpenCache = new Map<string, { dataUrl: string; fileName: string; mimeType: string }>();
+
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
 
@@ -966,11 +975,29 @@ function SealedAttachmentDisplay({
     | { kind: "refused"; reason: string };
 
   const [state, setState] = useState<State>({ kind: "idle" });
+  const { settings: ds } = useDataSaver();
+  const cacheKey = `${attachment.file_id}:${sealedRef.keyHex}`;
   // The CLAIM, used only to decide whether opening is safe to do unprompted.
   const claimsInlineMedia =
     sealedRef.mimeType.startsWith("image/") || sealedRef.mimeType.startsWith("audio/");
+  // Data Saver applies here exactly as it does to a plaintext attachment. The
+  // size is the CIPHERTEXT's (a few bytes over the real one) and it is the only
+  // size anyone knows before opening — which is the right basis anyway, since
+  // that is what actually comes over the connection.
+  const gated =
+    sealedRef.mimeType.startsWith("image/") &&
+    !sealedOpenCache.has(cacheKey) &&
+    imageIsGated(ds, attachment.size);
 
   async function open() {
+    // Already opened this session: reuse the bytes AND the name the policy
+    // produced for them. Re-downloading would cost bandwidth and a second
+    // decryption for an identical result.
+    const cached = sealedOpenCache.get(cacheKey);
+    if (cached) {
+      setState({ kind: "opened", ...cached, savedPath: null });
+      return;
+    }
     setState({ kind: "loading" });
     try {
       const r = await api.downloadSealedFile(
@@ -983,6 +1010,15 @@ function SealedAttachmentDisplay({
       if (r.kind === "refused") {
         setState({ kind: "refused", reason: r.reason });
         return;
+      }
+      if (r.data_url) {
+        // Only inline media is cached: a non-inline open WROTE a file, and
+        // replaying that from cache would hide the second write.
+        sealedOpenCache.set(cacheKey, {
+          dataUrl: r.data_url,
+          fileName: r.file_name,
+          mimeType: r.mime_type,
+        });
       }
       setState({
         kind: "opened",
@@ -997,11 +1033,11 @@ function SealedAttachmentDisplay({
   }
 
   useEffect(() => {
-    if (claimsInlineMedia) void open();
+    if (claimsInlineMedia && !gated) void open();
     // One open per (blob, key): re-running would re-download and, for a
     // non-inline type, re-write the file.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attachment.file_id, sealedRef.keyHex]);
+  }, [attachment.file_id, sealedRef.keyHex, gated]);
 
   if (state.kind === "loading") {
     return <div className="attachment-loading">🔒 Opening encrypted file...</div>;
@@ -1013,7 +1049,9 @@ function SealedAttachmentDisplay({
     return (
       <div className="attachment-item">
         <button className="link-embed-chip" onClick={() => void open()}>
-          🔒 Open encrypted file ({formatSize(attachment.size)})
+          {gated
+            ? `🔒 Load encrypted image (${formatSize(attachment.size)})`
+            : `🔒 Open encrypted file (${formatSize(attachment.size)})`}
         </button>
       </div>
     );
