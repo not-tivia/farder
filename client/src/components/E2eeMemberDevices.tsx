@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
-import { E2eeConfirmDialog } from "./E2eeConfirmDialog";
+import { E2eeConfirmDialog } from "./ConfirmDialog";
 
 const overlay: CSSProperties = {
   position: "fixed",

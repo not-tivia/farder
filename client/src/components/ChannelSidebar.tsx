@@ -11,6 +11,7 @@ import ChannelSettingsDialog from "./ChannelSettingsDialog";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 import UserProfilePopup from "./UserProfilePopup";
 import SettingsModal from "./settings/SettingsModal";
+import { ConfirmDialog } from "./ConfirmDialog";
 import VoiceControlBar from "./VoiceControlBar";
 import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
 import { getLastChannel, setLastChannel } from "../lib/lastChannel";
@@ -116,6 +117,33 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
   const [showInvite, setShowInvite] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; channelId: number; type: "channel" | "category"; categoryId?: number } | null>(null);
+  /** A destructive action waiting on the user. Deleting a channel takes every
+   *  message in it and cannot be undone, so it goes through a dialog that says
+   *  so — and, unlike the old one-click path, reports failure instead of
+   *  swallowing it. */
+  const [pendingDelete, setPendingDelete] = useState<
+    { kind: "channel" | "category"; id: number; name: string } | null
+  >(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function runPendingDelete() {
+    if (!serverId || !pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      if (pendingDelete.kind === "channel") {
+        await api.deleteChannel(serverId, pendingDelete.id);
+      } else {
+        await api.deleteCategory(serverId, pendingDelete.id);
+      }
+      setPendingDelete(null);
+    } catch (e) {
+      setDeleteError(String(e));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
   const [voiceMenu, setVoiceMenu] = useState<{ x: number; y: number; pubkeyHex: string; displayName: string } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const contextMenuPos = useClickAnchoredPosition(contextMenuRef, contextMenu ?? { x: 0, y: 0 }, { anchor: "auto" });
@@ -566,6 +594,31 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
           <UserFooter members={members} roles={roles} />
         </div>
       </div>
+      {pendingDelete && (
+        <ConfirmDialog
+          title={pendingDelete.kind === "channel"
+            ? `Delete #${pendingDelete.name}?`
+            : `Delete the category "${pendingDelete.name}"?`}
+          consequence={pendingDelete.kind === "channel" ? (
+            <>
+              <strong>This cannot be undone.</strong> Every message, file and
+              thread in <strong>#{pendingDelete.name}</strong> goes with it, for
+              everyone on the server — not just for you.
+            </>
+          ) : (
+            <>
+              The category <strong>{pendingDelete.name}</strong> is removed.
+              Channels inside it are <em>not</em> deleted — they move out to the
+              top level, where you can sort them again.
+            </>
+          )}
+          confirmLabel={pendingDelete.kind === "channel" ? "Delete channel" : "Delete category"}
+          busy={deleteBusy}
+          error={deleteError}
+          onCancel={() => { setPendingDelete(null); setDeleteError(null); }}
+          onConfirm={() => { void runPendingDelete(); }}
+        />
+      )}
       {showInvite && <InviteDialog onClose={() => setShowInvite(false)} />}
       {showSettings && <ServerSettingsDialog onClose={() => setShowSettings(false)} />}
       {editChannel && <ChannelSettingsDialog channel={editChannel} onClose={() => setEditChannel(null)} />}
@@ -646,8 +699,8 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
                     </>
                   )}
                   <div className="context-menu-separator" />
-                  <div className="context-menu-item delete" onClick={async () => {
-                    if (serverId) try { await api.deleteChannel(serverId, contextMenu.channelId); } catch {}
+                  <div className="context-menu-item delete" onClick={() => {
+                    setPendingDelete({ kind: "channel", id: contextMenu.channelId, name: ch?.name ?? "this channel" });
                     setContextMenu(null);
                   }}>Delete Channel</div>
                 </>
@@ -693,8 +746,9 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
                     }}>Move Down</div>
                   )}
                   <div className="context-menu-separator" />
-                  <div className="context-menu-item delete" onClick={async () => {
-                    if (serverId) try { await api.deleteCategory(serverId, contextMenu.categoryId!); } catch {}
+                  <div className="context-menu-item delete" onClick={() => {
+                    const cat = sortedCategories.find(c => c.id === contextMenu.categoryId);
+                    setPendingDelete({ kind: "category", id: contextMenu.categoryId!, name: cat?.name ?? "this category" });
                     setContextMenu(null);
                   }}>Delete Category</div>
                 </>

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import * as api from "../lib/tauri-bridge";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
-import { E2eeConfirmDialog } from "./E2eeConfirmDialog";
+import { ConfirmDialog, E2eeConfirmDialog } from "./ConfirmDialog";
 import type { ChannelInfo } from "../lib/types";
 import BannedMembersTab from "./BannedMembersTab";
 import AuditLogTab from "./AuditLogTab";
@@ -19,6 +19,31 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   // Named in the title bar: "Server Settings" and "Your Settings" sitting behind
   // two near-identical gears is the confusion this is fixing.
   const serverName = activeServer?.serverName ?? null;
+
+  /** Destructive list actions, which all used to fire on one click with their
+   *  errors swallowed by `catch {}` — so a delete that the server refused looked
+   *  exactly like one that succeeded. */
+  const [pendingDelete, setPendingDelete] = useState<
+    { kind: "channel" | "category" | "role"; id: number; name: string } | null
+  >(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function runPendingDelete() {
+    if (!serverId || !pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      if (pendingDelete.kind === "channel") await api.deleteChannel(serverId, pendingDelete.id);
+      else if (pendingDelete.kind === "category") await api.deleteCategory(serverId, pendingDelete.id);
+      else await api.deleteRole(serverId, pendingDelete.id);
+      setPendingDelete(null);
+    } catch (e) {
+      setDeleteError(String(e));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
   const [newChName, setNewChName] = useState("");
   const [newChType, setNewChType] = useState("Text");
   const [newChCatId, setNewChCatId] = useState<number | undefined>(undefined);
@@ -185,8 +210,8 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
-          <button className="organizer-btn organizer-delete" onClick={async () => {
-            if (serverId) try { await api.deleteChannel(serverId, ch.id); } catch {}
+          <button className="organizer-btn organizer-delete" onClick={() => {
+            setPendingDelete({ kind: "channel", id: ch.id, name: ch.name });
           }} title="Delete">x</button>
         </div>
       </div>
@@ -196,6 +221,40 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-dialog" onClick={(e) => e.stopPropagation()} style={{ minWidth: 480, maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+        {pendingDelete && (
+          <ConfirmDialog
+            title={
+              pendingDelete.kind === "channel" ? `Delete #${pendingDelete.name}?`
+              : pendingDelete.kind === "category" ? `Delete the category "${pendingDelete.name}"?`
+              : `Delete the role "${pendingDelete.name}"?`
+            }
+            consequence={
+              pendingDelete.kind === "channel" ? (
+                <>
+                  <strong>This cannot be undone.</strong> Every message, file and
+                  thread in <strong>#{pendingDelete.name}</strong> goes with it,
+                  for everyone on the server.
+                </>
+              ) : pendingDelete.kind === "category" ? (
+                <>
+                  The category is removed. Channels inside it are <em>not</em>
+                  deleted — they move out to the top level.
+                </>
+              ) : (
+                <>
+                  Every member who has <strong>{pendingDelete.name}</strong>
+                  loses it, and any permissions it granted them go with it. The
+                  members themselves are not affected otherwise.
+                </>
+              )
+            }
+            confirmLabel="Delete"
+            busy={deleteBusy}
+            error={deleteError}
+            onCancel={() => { setPendingDelete(null); setDeleteError(null); }}
+            onConfirm={() => { void runPendingDelete(); }}
+          />
+        )}
         <div className="modal-titlebar">
           <span>Server Settings{serverName ? ` — ${serverName}` : ""}</span>
           <button className="modal-close" onClick={onClose}>X</button>
@@ -301,8 +360,8 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                     <div className="organizer-actions">
                       <button className="organizer-btn" disabled={catIdx === 0} onClick={() => swapCategories(catIdx, -1)} title="Move up">^</button>
                       <button className="organizer-btn" disabled={catIdx === sortedCategories.length - 1} onClick={() => swapCategories(catIdx, 1)} title="Move down">v</button>
-                      <button className="organizer-btn organizer-delete" onClick={async () => {
-                        if (serverId) try { await api.deleteCategory(serverId, cat.id); } catch {}
+                      <button className="organizer-btn organizer-delete" onClick={() => {
+                        setPendingDelete({ kind: "category", id: cat.id, name: cat.name });
                       }} title="Delete">x</button>
                     </div>
                   </div>
@@ -446,8 +505,8 @@ export default function ServerSettingsDialog({ onClose }: Props) {
                       }}
                       title="Move down"
                     >v</button>
-                    <button className="organizer-btn organizer-delete" onClick={async () => {
-                      if (serverId) try { await api.deleteRole(serverId, r.id); } catch {}
+                    <button className="organizer-btn organizer-delete" onClick={() => {
+                      setPendingDelete({ kind: "role", id: r.id, name: r.name });
                     }} title="Delete">x</button>
                   </div>
                 </div>

@@ -3,7 +3,7 @@ import * as api from "../lib/tauri-bridge";
 import type { ChannelInfo, RoleInfo, WebhookInfo, WebhookTokenResult } from "../lib/types";
 import { useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { isE2eeChannel } from "../lib/types";
-import { E2eeConfirmDialog } from "./E2eeConfirmDialog";
+import { E2eeConfirmDialog } from "./ConfirmDialog";
 
 interface Props {
   channel: ChannelInfo;

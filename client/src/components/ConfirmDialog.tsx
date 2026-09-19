@@ -20,15 +20,19 @@ const card: CSSProperties = {
 };
 
 /**
- * Confirmation for an irreversible encryption action (sub-5b G4).
+ * Confirmation for an irreversible action.
  *
- * Every action behind this one — retiring a device, revoking someone else's,
- * resetting a channel — writes a permanent record to the server's log and cannot
- * be undone. So the dialog's job is not "are you sure" (which people click
- * through) but **stating what is actually lost**, which is why `consequence` is a
- * required prop rather than an optional flourish.
+ * Its job is not "are you sure" — people click through that — but **stating what
+ * is actually lost**, which is why `consequence` is a required prop rather than
+ * an optional flourish.
+ *
+ * Built for the encryption actions (sub-5b G4) and always general: retiring a
+ * device, resetting a channel, deleting a channel and everything in it. The
+ * encryption side of the app used it from the start while the older UI deleted
+ * channels, roles and categories from a context menu on a single click, with the
+ * error swallowed — so a failed delete looked exactly like a successful one.
  */
-export function E2eeConfirmDialog({
+export function ConfirmDialog({
   title,
   consequence,
   confirmLabel,
@@ -68,3 +72,6 @@ export function E2eeConfirmDialog({
     </div>
   );
 }
+
+/** Previous name, kept so the encryption call sites read as they always did. */
+export const E2eeConfirmDialog = ConfirmDialog;
