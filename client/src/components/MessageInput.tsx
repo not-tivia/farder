@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, KeyboardEvent } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as api from "../lib/tauri-bridge";
 import type { AttachmentCapInput } from "../lib/tauri-bridge";
 import * as bookApi from "../lib/book/client";
@@ -97,6 +98,17 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setError(null);
     const path = await api.pickFile();
     if (!path) return;
+    await stageFile(path);
+  }
+
+  /** Upload one file and stage it on the composer.
+   *
+   *  Shared by the paperclip and by dropping a file on the window, so a dropped
+   *  file takes exactly the same path — including the sealed one, where the
+   *  policy refuses a bad file BEFORE anything is uploaded. A drop that behaved
+   *  differently from the picker would be a second upload path to keep in step,
+   *  which is how the sealed and plaintext paths drifted in the first place. */
+  async function stageFile(path: string) {
     const fileName = path.split(/[/\\]/).pop() ?? "file";
     setAttachedFileName(fileName);
     setUploading(true);
@@ -133,6 +145,47 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     setSealedAttachment(null);
     setError(null);
   }
+
+  /** A file is hovering over the window. Drives the drop overlay, which exists
+   *  mostly to answer "where is this about to go" — the window can show several
+   *  channels at once and a drop is otherwise a guess. */
+  const [dropActive, setDropActive] = useState(false);
+
+  // Dropping a file anywhere on the window attaches it to the channel you are
+  // looking at. The webview's own HTML drop is disabled by Tauri when
+  // dragDropEnabled is on (the default), so this event IS the mechanism, not a
+  // supplement to it.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let alive = true;
+
+    void getCurrentWindow()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "enter" || p.type === "over") {
+          setDropActive(true);
+          return;
+        }
+        setDropActive(false);
+        if (p.type !== "drop" || p.paths.length === 0) return;
+        // One at a time: the composer stages a single attachment, and silently
+        // dropping all but the first file would be worse than saying so.
+        if (p.paths.length > 1) {
+          setError(`Dropped ${p.paths.length} files — attaching the first. Send it, then drop the next.`);
+        }
+        void stageFile(p.paths[0]);
+      })
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {
+        // No Tauri window (a browser-hosted dev view): the paperclip still works.
+      });
+
+    return () => { alive = false; unlisten?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverId, channelId, isE2ee]);
 
   // A staged attachment belongs to the channel it was picked in. This component
   // is not keyed by channel, so without this the file follows you: stage one in
@@ -547,8 +600,48 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     }
   }
 
+  const channelName = activeServer?.channels.find((c) => c.id === channelId)?.name;
+
   return (
     <div className="message-input-area">
+      {/* Where the drop is going. The window shows several channels at once, so
+          without this a drop is a guess — and in an encrypted channel the answer
+          changes what happens to the file, which is worth saying out loud. */}
+      {dropActive && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 9000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.35)",
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              padding: "18px 26px",
+              textAlign: "center",
+              background: "var(--xp-window-bg, #ECE9D8)",
+              color: "var(--xp-text-normal, #000)",
+              border: "2px dashed var(--xp-blue, #0058E6)",
+              borderRadius: 6,
+              fontFamily: "var(--xp-font, Tahoma, sans-serif)",
+            }}
+          >
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
+              Drop to attach{channelName ? ` to #${channelName}` : ""}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              {isE2ee
+                ? "It is sealed on this machine before it is uploaded."
+                : "It uploads to this server, which can read it."}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="message-input-wrapper">
         {showMentions && filteredMembers.length > 0 && (
           <div className="mention-autocomplete">
