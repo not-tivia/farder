@@ -37,11 +37,9 @@ pub fn purge_expired_messages(conn: &Connection, storage_dir: &str) -> Result<(u
     Ok((total_purged, files_cleaned))
 }
 
-/// Executes all data deletion requests whose grace period has expired.
-/// For each expired request: removes attachments, anonymizes messages, deletes reactions,
-/// removes the member record, and deletes the deletion request.
-/// Returns the number of deletions executed.
-/// Execute every deletion request whose grace period has run out.
+/// Execute every deletion request whose grace period has run out: for each one,
+/// remove its attachments, anonymize its messages, delete its reactions, remove
+/// the member record, and drop the request.
 ///
 /// Returns the members actually deleted, so the caller can tell connected
 /// clients. It used to return a count, and the sweep announced nothing at all:
