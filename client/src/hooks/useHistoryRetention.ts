@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
+import { clearAll as clearTranslations } from "../lib/translation/store";
 
 // ---------------------------------------------------------------------------
 // Local retention sweep (sub-7a T4/T11, the half that was never wired).
@@ -54,7 +55,12 @@ export function useHistoryRetention(): void {
       // deserialize rather than do anything. Clamp instead: "before 0" purges
       // nothing, which is the right answer for a window that has not elapsed.
       const cutoff = Math.max(0, nowSecs - window);
-      void api.historyPurgeBefore(ch.id, cutoff).catch((e) => {
+      void api.historyPurgeBefore(ch.id, cutoff).then((purged) => {
+        // Only when something actually went: translations are keyed by message
+        // id with no channel or time index, so this is all-or-nothing and should
+        // not fire on every quiet tick.
+        if (purged > 0) clearTranslations();
+      }).catch((e) => {
         // A locked identity is the ordinary case here (the store cannot be
         // opened yet), not an error worth surfacing. The timestamp above is
         // recorded on the ATTEMPT, not on success, so a failure waits out the

@@ -30,6 +30,24 @@ export function dismiss(messageId: string): void {
   emit();
 }
 
+/** Forget every translation held in memory.
+ *
+ *  A translation is DECRYPTED CONTENT living outside the message it came from:
+ *  keyed by message id, in a module-level map, for the life of the process. That
+ *  is fine while the message is readable and a leak the moment it is not — a
+ *  sealed row rendering "Encrypted message" with the plaintext sitting under it
+ *  in the translation row (observed by the owner on a DM, 2026-09-19).
+ *
+ *  Called wherever local plaintext is purged in bulk: an author's data deleted,
+ *  a retention sweep. Those purges are keyed by author or by time, and
+ *  translations are keyed by neither, so forgetting all of them is the only
+ *  fail-closed answer available. Re-translating is a keystroke; a leak is not
+ *  retractable. */
+export function clearAll(): void {
+  state.clear();
+  emit();
+}
+
 export interface TranslateOptions {
   messageId: string;
   content: string;

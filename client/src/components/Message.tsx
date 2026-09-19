@@ -527,6 +527,18 @@ export default function Message({ message, memberNames, grouped = false, serverI
   // No decrypt result yet -> the 4b-1 placeholder (T5).
   const isSealed = isSealedRow && sealedDecrypt === undefined;
 
+  // A translation outlives the message it came from: it is decrypted text in a
+  // module-level map keyed by message id, and nothing was dropping it. So a DM
+  // that went back to being sealed on reopen kept its plaintext on screen, in
+  // the translation row, underneath the words "Encrypted message". Drop it the
+  // moment the row stops being readable — from the STORE, not just the view,
+  // because the leak is the memory, not the markup.
+  useEffect(() => {
+    if (deleted || isSealed || undecryptable) {
+      dismissTranslation(String(message.id));
+    }
+  }, [deleted, isSealed, undecryptable, message.id]);
+
   // Sealed attachments (sub-6). The envelope's refs pair with the row's
   // attachment records POSITIONALLY: the sender builds the caps and the envelope
   // arrays from one list, in order, and the server materializes caps in that same
@@ -830,6 +842,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
         ) : null;
       })()}
 
+      {/* Gated on the row being READABLE. A translation is the decrypted text
+          in another language: showing it next to "Encrypted message" (or a
+          deleted one) displays exactly the content the row is saying it cannot
+          show. The effect above drops it from the store too — hiding it in the
+          view while the plaintext sits in memory is not a fix. */}
+      {!deleted && !isSealed && !undecryptable && (
       <TranslatedRow
         messageId={String(message.id)}
         content={message.content}
@@ -841,6 +859,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
           })
         }
       />
+      )}
 
       <div className={`reaction-bar${message.reactions.length === 0 ? " hover-only" : ""}`}>
         {message.reactions.map((r) => (

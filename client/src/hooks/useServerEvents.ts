@@ -5,6 +5,7 @@ import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollIn
 import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { refreshServerClasses } from "../lib/refreshServerClasses";
+import { dismiss as dismissTranslation, clearAll as clearTranslations } from "../lib/translation/store";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 
 // Module-level cache for notification prefs and own public key
@@ -202,7 +203,10 @@ export function useServerEvents(): void {
       });
       // Compliant-client purge rule: server-side a delete only removes the
       // ciphertext, so end to end it means nothing unless this device also drops
-      // its own decrypted copy.
+      // its own decrypted copy. The TRANSLATION is a second decrypted copy,
+      // keyed by message id in memory, and the row unmounts on delete — so the
+      // component-level cleanup never runs and only this reaches it.
+      dismissTranslation(String(data.message_id));
       void api
         .historyPurgeMessage(data.channel_id, data.message_id)
         .catch((err) => console.warn("[history] purge failed:", err));
@@ -235,7 +239,10 @@ export function useServerEvents(): void {
       });
       // Compliant-client purge rule: server-side a delete only removes the
       // ciphertext, so end to end it means nothing unless this device also drops
-      // its own decrypted copy.
+      // its own decrypted copy. The TRANSLATION is a second decrypted copy,
+      // keyed by message id in memory, and the row unmounts on delete — so the
+      // component-level cleanup never runs and only this reaches it.
+      dismissTranslation(String(data.message_id));
       void api
         .historyPurgeMessage(data.channel_id, data.message_id)
         .catch((err) => console.warn("[history] purge failed:", err));
@@ -550,6 +557,10 @@ export function useServerEvents(): void {
       void api
         .historyPurgeAuthor(data.public_key_bytes)
         .catch((err) => console.warn("[history] purge author failed:", err));
+      // Translations are keyed by message id alone — there is no author index to
+      // purge by, so the fail-closed answer is to forget all of them. Cheap to
+      // redo, impossible to retract.
+      clearTranslations();
     }).then(safePush);
 
     listen("server:channel_created", (e) => {
