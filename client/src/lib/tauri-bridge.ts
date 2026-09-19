@@ -665,8 +665,17 @@ export async function cancelDeletion(serverId: string): Promise<void> {
   return invoke<void>("cancel_deletion", { serverId });
 }
 
-export async function getDeletionStatus(serverId: string): Promise<any> {
-  return invoke("get_deletion_status", { serverId });
+/** Whether this identity has a pending "delete my data" request on a server.
+ *  `expires_at` is when the server will actually execute it — until then the
+ *  request can be cancelled. Unix seconds. */
+export interface DeletionStatus {
+  pending: boolean;
+  requested_at: number | null;
+  expires_at: number | null;
+}
+
+export async function getDeletionStatus(serverId: string): Promise<DeletionStatus> {
+  return invoke<DeletionStatus>("get_deletion_status", { serverId });
 }
 
 export async function saveTempAudio(data: string): Promise<string> {

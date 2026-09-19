@@ -512,6 +512,23 @@ export function useServerEvents(): void {
       dispatch({ type: "MEMBER_LEFT", serverId, payload: { publicKey: data.public_key as string } });
     }).then(safePush);
 
+    // A member's data deletion was executed server-side: their messages were
+    // anonymized and their files removed. Two things follow from that here.
+    listen("server:member_data_deleted", (e) => {
+      const data = e.payload as { server_id: string; public_key: string; public_key_bytes: number[] };
+      const serverId = data.server_id;
+      if (serverId !== activeRef.current) return;
+      // 1. The roster. Without this the deleted member sits in the member list
+      //    until the next reconnect.
+      dispatch({ type: "MEMBER_LEFT", serverId, payload: { publicKey: data.public_key } });
+      // 2. The compliant-client purge. For an encrypted channel the server just
+      //    anonymized ciphertext; the readable copy is the one on this device,
+      //    so the deletion means nothing end to end unless it goes too.
+      void api
+        .historyPurgeAuthor(data.public_key_bytes)
+        .catch((err) => console.warn("[history] purge author failed:", err));
+    }).then(safePush);
+
     listen("server:channel_created", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;

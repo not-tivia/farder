@@ -2946,6 +2946,11 @@ its own store too.
 
 ### `history_purge_author(state, author) -> Result<usize, String>`
 
+**Called by:** `useServerEvents.ts` on `server:member_data_deleted` — the event
+the server's deletion sweep now broadcasts when it executes a request. It carries
+the raw key bytes alongside the string form precisely because this command
+matches on the blind index over those bytes.
+
 **What it does:** anonymize-on-leave — drops everything one author wrote, found
 through the HMAC blind index so the author is never stored or compared in the
 clear.

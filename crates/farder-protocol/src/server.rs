@@ -943,6 +943,13 @@ pub enum ServerEvent {
     /// A newly declared channel WITH its class. `ChannelCreated` announces only
     /// plaintext channels, for the reason given on `ChannelInfoV2`.
     ChannelCreatedV2 { channel: ChannelInfoV2 },
+    /// A member's data deletion was EXECUTED (the grace period ran out and the
+    /// sweep removed them). Distinct from `MemberLeft` on purpose: leaving is
+    /// reversible and leaves the member's messages standing, while this one
+    /// says their messages were anonymized and their files removed — which is
+    /// the only signal that tells a client to drop its own decrypted copies.
+    /// Appended at the end: the codec is positional over serde enums.
+    MemberDataDeleted { public_key: PublicKey },
 }
 
 /// Whether an event may only be delivered to a connection that negotiated
@@ -959,7 +966,11 @@ pub fn event_requires_v2(event: &ServerEvent) -> bool {
         | ServerEvent::SealedMessageEdited { .. }
         | ServerEvent::MessageTombstoned { .. }
         | ServerEvent::MlsControlEvent { .. }
-        | ServerEvent::ChannelCreatedV2 { .. } => true,
+        | ServerEvent::ChannelCreatedV2 { .. }
+        // A variant added after v1 shipped: an old client cannot decode it, so
+        // it must be v2-only whatever it carries. (Its effect on a v1 client is
+        // a stale roster entry until reconnect — the same as before it existed.)
+        | ServerEvent::MemberDataDeleted { .. } => true,
 
         // Every shipped (v1) variant, listed rather than wildcarded. v1 clients
         // keep receiving exactly what they received before.

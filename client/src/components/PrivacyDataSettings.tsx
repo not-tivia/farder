@@ -6,8 +6,11 @@ import {
   setPresenceMusic,
   listBlocked,
   unblockUser,
+  getDeletionStatus,
+  requestDeletion,
+  cancelDeletion,
 } from "../lib/tauri-bridge";
-import type { BlockedUserInfo } from "../lib/tauri-bridge";
+import type { BlockedUserInfo, DeletionStatus } from "../lib/tauri-bridge";
 import { useActiveServerId } from "../context/ServerContext";
 import { useDataSaver } from "../context/DataSaverContext";
 import { getEmbedConsent, setEmbedConsent } from "../lib/embedPlayer";
@@ -38,6 +41,59 @@ export default function PrivacyDataSettings() {
       .catch((e) => { if (!cancelled) setBlockedError(String(e)); });
     return () => { cancelled = true; };
   }, [activeServerId]);
+
+  // "Delete my data on this server": the server has had the whole flow --
+  // request, 72-hour grace period, cancel, and a sweep that anonymizes the
+  // messages and removes the membership -- with no way to reach any of it.
+  const [deletion, setDeletion] = useState<DeletionStatus | null>(null);
+  const [deletionError, setDeletionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeServerId) {
+      setDeletion(null);
+      return;
+    }
+    let cancelled = false;
+    getDeletionStatus(activeServerId)
+      .then((s) => { if (!cancelled) { setDeletion(s); setDeletionError(null); } })
+      .catch((e) => { if (!cancelled) setDeletionError(String(e)); });
+    return () => { cancelled = true; };
+  }, [activeServerId]);
+
+  async function refreshDeletion(serverId: string) {
+    setDeletion(await getDeletionStatus(serverId));
+  }
+
+  async function handleRequestDeletion() {
+    if (!activeServerId) return;
+    // A destructive, delayed action deserves a plain-language confirmation of
+    // what it actually does -- not "are you sure?".
+    const ok = window.confirm(
+      "Request deletion of your data on this server?\n\n" +
+      "After 72 hours the server removes your membership, anonymizes every message " +
+      "you posted and deletes the files you uploaded. Nothing happens before then, " +
+      "and you can cancel at any point during those 72 hours.",
+    );
+    if (!ok) return;
+    try {
+      await requestDeletion(activeServerId);
+      await refreshDeletion(activeServerId);
+      setDeletionError(null);
+    } catch (e) {
+      setDeletionError(String(e));
+    }
+  }
+
+  async function handleCancelDeletion() {
+    if (!activeServerId) return;
+    try {
+      await cancelDeletion(activeServerId);
+      await refreshDeletion(activeServerId);
+      setDeletionError(null);
+    } catch (e) {
+      setDeletionError(String(e));
+    }
+  }
 
   async function handleUnblock(publicKey: string) {
     if (!activeServerId) return;
@@ -224,6 +280,46 @@ export default function PrivacyDataSettings() {
           A blocked member cannot DM you and you cannot DM them. They are not told,
           and this list is only ever your own.
         </p>
+      </SettingsSection>
+
+      <div className="settings-divider" />
+      <SettingsSection label="Delete My Data">
+        {!activeServerId && (
+          <p className="settings-help">
+            Connect to a server to request deletion of your data there.
+          </p>
+        )}
+        {deletionError && <div className="error-text">{deletionError}</div>}
+        {activeServerId && deletion?.pending && (
+          <>
+            <p className="settings-help">
+              Deletion is scheduled for{" "}
+              <strong>
+                {deletion.expires_at
+                  ? new Date(deletion.expires_at * 1000).toLocaleString()
+                  : "soon"}
+              </strong>
+              . Until then nothing has been removed, and cancelling undoes it entirely.
+            </p>
+            <button className="xp-button" onClick={() => { void handleCancelDeletion(); }}>
+              Cancel deletion
+            </button>
+          </>
+        )}
+        {activeServerId && deletion && !deletion.pending && (
+          <>
+            <button className="xp-button" onClick={() => { void handleRequestDeletion(); }}>
+              Request deletion of my data
+            </button>
+            <p className="settings-help">
+              After a 72-hour grace period the server removes your membership,
+              anonymizes your messages and deletes your uploaded files. Other members'
+              copies of what you wrote are not affected -- nothing can reach those.
+              The server owner cannot request this; ownership has to be transferred
+              first.
+            </p>
+          </>
+        )}
       </SettingsSection>
     </div>
   );
