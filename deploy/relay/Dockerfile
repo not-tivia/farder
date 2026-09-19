@@ -11,4 +11,5 @@ COPY --from=builder /build/target/release/farder-relay /usr/local/bin/farder-rel
 USER relay
 VOLUME ["/data"]
 EXPOSE 4433/udp
+EXPOSE 8080/tcp
 ENTRYPOINT ["/usr/local/bin/farder-relay", "--bind", "0.0.0.0:4433", "--data-dir", "/data"]

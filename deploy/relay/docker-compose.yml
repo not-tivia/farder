@@ -7,7 +7,12 @@ services:
     image: farder-relay
     restart: unless-stopped
     ports:
+      # QUIC: every client and relayed server connects here.
       - "4433:4433/udp"
+      # Incoming-webhook HTTP ingress. Third parties POST to
+      # http://<relay>:8080/webhook/<server_id>/<token>, so this has to be
+      # published as well or webhooks silently never arrive.
+      - "8080:8080/tcp"
     volumes:
       - relay-data:/data
 volumes:
