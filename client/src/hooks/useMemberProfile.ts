@@ -4,9 +4,12 @@ import * as api from "../lib/tauri-bridge";
 export interface MemberProfile {
   avatarUrl: string | null;
   status: string | null;
+  /** Bundled effect id from their SIGNED profile — their choice, not the
+   *  server's. */
+  effect: string | null;
 }
 
-const EMPTY: MemberProfile = { avatarUrl: null, status: null };
+const EMPTY: MemberProfile = { avatarUrl: null, status: null, effect: null };
 
 // Keyed by pk:hash — hash alone would let a lying server repoint one member's
 // entry at another's cached profile (mirrors the Rust-side key-binding check).
@@ -34,7 +37,7 @@ export function useMemberProfile(
       p = api.getMemberProfile(serverId, publicKey, profileHash!)
         .then((v): MemberProfile => {
           const result: MemberProfile = v
-            ? { avatarUrl: v.avatar_data_url ?? null, status: v.status ?? null }
+            ? { avatarUrl: v.avatar_data_url ?? null, status: v.status ?? null, effect: v.effect ?? null }
             : EMPTY;
           cache.set(key, result);
           pending.delete(key);

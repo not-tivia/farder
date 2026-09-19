@@ -135,10 +135,23 @@ export async function getServerAvatar(serverId: string): Promise<string | null> 
 export interface MemberProfileView {
   avatar_data_url: string | null;
   status: string | null;
+  /** Bundled profile-effect id, carried on the signed profile. */
+  effect: string | null;
 }
 
 export async function getMemberProfile(serverId: string, publicKey: string, profileHash: string): Promise<MemberProfileView | null> {
   return invoke<MemberProfileView | null>("get_member_profile", { serverId, publicKey, profileHash });
+}
+
+/** The bundled profile-effect id this identity has chosen, or null. An id the
+ *  client renders from what it ships with — never an asset, so opening a profile
+ *  fetches nothing. */
+export async function getProfileEffect(): Promise<string | null> {
+  return invoke<string | null>("get_profile_effect");
+}
+
+export async function setProfileEffect(effect: string | null): Promise<void> {
+  return invoke("set_profile_effect", { effect });
 }
 
 export async function getProfileStatus(): Promise<string | null> {

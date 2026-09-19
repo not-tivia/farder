@@ -207,6 +207,25 @@ export default function PrivacyDataSettings() {
       </SettingsSection>
 
       <div className="settings-divider" />
+      <SettingsSection label="Profile Effects">
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={ds.profileEffects !== false}
+            onChange={(e) => updateDs({ profileEffects: e.target.checked })}
+          />
+          Show other people's profile effects
+        </label>
+        <p className="settings-help">
+          Effects are drawn by your own client from a fixed set &mdash; a profile
+          carries the NAME of one, never a file &mdash; so viewing someone's
+          profile downloads nothing and tells them nothing. This switch is about
+          motion and battery, not privacy. Your system's
+          &ldquo;reduce motion&rdquo; setting turns them off regardless.
+        </p>
+      </SettingsSection>
+
+      <div className="settings-divider" />
       <SettingsSection label="Large Files">
         <label className="settings-row">
           Always ask before downloading files over&nbsp;

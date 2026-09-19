@@ -134,6 +134,8 @@ fn main() {
             commands::set_bio,
             commands::get_bio,
             commands::set_profile_color,
+            commands::set_profile_effect,
+            commands::get_profile_effect,
             commands::get_profile_color,
             commands::save_last_server,
             commands::get_last_server,

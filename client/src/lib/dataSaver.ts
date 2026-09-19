@@ -14,6 +14,11 @@ export interface DataSaverSettings {
    *  letting someone else's 2 GB clip start arriving on your connection because
    *  you scrolled past it. */
   askAboveMB: number;
+  /** Draw other people's profile effects. Lives here because it is the same
+   *  question Data Saver already asks about animated avatars — someone else's
+   *  decoration spending your battery — and because the OS's reduced-motion
+   *  setting overrides it either way. */
+  profileEffects: boolean;
 }
 
 export const DATA_SAVER_DEFAULTS: DataSaverSettings = {
@@ -23,6 +28,7 @@ export const DATA_SAVER_DEFAULTS: DataSaverSettings = {
   freezeAvatars: true,
   thresholdMB: 1,
   askAboveMB: 8,
+  profileEffects: true,
 };
 
 /**

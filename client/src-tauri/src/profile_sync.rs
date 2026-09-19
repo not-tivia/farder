@@ -46,7 +46,17 @@ fn read_profile_field(field: &str) -> Option<String> {
 pub(crate) fn build_signed_profile(keypair: &Keypair, server_id: &str) -> SignedProfile {
     let display_name = read_profile_field("display_name").unwrap_or_else(|| "Anonymous".to_string());
     let status = read_profile_field("status").filter(|s| !s.is_empty());
-    SignedProfile::create(keypair, display_name, effective_avatar_bytes(server_id), status)
+    // The effect is an ID of something the CLIENT ships, never an asset — see
+    // `ProfileData::effect`. Carried in the signed profile so it is yours: a
+    // server can drop it, but it cannot put one on you.
+    let effect = read_profile_field("effect").filter(|s| !s.is_empty());
+    SignedProfile::create_with_effect(
+        keypair,
+        display_name,
+        effective_avatar_bytes(server_id),
+        status,
+        effect,
+    )
 }
 
 // --- last-pushed-hash tracking ---------------------------------------------

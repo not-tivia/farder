@@ -153,6 +153,34 @@ pub fn set_profile_color(color: String) -> Result<(), String> {
     std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())
 }
 
+/// The bundled profile-effect id this identity has chosen, if any.
+///
+/// An id like `"bats"`, not an asset: the client draws it from what it shipped
+/// with, so opening someone's profile fetches nothing from anywhere. That is
+/// what keeps a profile from being a way to make your client download a
+/// stranger's file — or to learn your IP by watching for the request.
+#[tauri::command]
+pub fn set_profile_effect(effect: Option<String>) -> Result<(), String> {
+    let path = profile_path();
+    let mut data: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    match effect {
+        Some(id) => data["effect"] = serde_json::json!(id),
+        None => { data["effect"] = serde_json::json!(""); }
+    }
+    std::fs::write(&path, data.to_string()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_profile_effect() -> Option<String> {
+    let path = profile_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v["effect"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string())
+}
+
 #[tauri::command]
 pub fn get_profile_color() -> Option<String> {
     let path = profile_path();
@@ -306,6 +334,9 @@ pub fn get_server_avatar_override(server_id: String) -> Option<String> {
 pub struct MemberProfileView {
     pub avatar_data_url: Option<String>,
     pub status: Option<String>,
+    /// Bundled effect id from the SIGNED profile, so it is the member's own
+    /// choice and not something the server can attach to them.
+    pub effect: Option<String>,
 }
 
 /// Resolve a member's profile by its hash: disk cache first, otherwise fetch
@@ -395,6 +426,7 @@ pub async fn get_member_profile(
     Ok(Some(MemberProfileView {
         avatar_data_url: signed.data.avatar.as_deref().map(image_data_url),
         status: signed.data.status,
+        effect: signed.data.effect,
     }))
 }
 

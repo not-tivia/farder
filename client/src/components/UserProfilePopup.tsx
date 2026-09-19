@@ -5,6 +5,8 @@ import { publicKeyToString, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { useApp, useActiveServer } from "../context/ServerContext";
 import { useMemberProfile } from "../hooks/useMemberProfile";
+import ProfileEffect, { PROFILE_EFFECTS } from "./ProfileEffect";
+import { useDataSaver } from "../context/DataSaverContext";
 import { toast } from "../lib/toast";
 import { formatPresence } from "../lib/presence";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
@@ -35,9 +37,33 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   const defaultHue = Math.abs(pkStr.split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % 360;
   const defaultBannerColor = `hsl(${defaultHue}, 50%, 40%)`;
 
-  const { avatarUrl: remoteAvatarUrl, status: remoteStatus } = useMemberProfile(serverId, pkStr, member.profile_hash);
+  const { avatarUrl: remoteAvatarUrl, status: remoteStatus, effect: remoteEffect } =
+    useMemberProfile(serverId, pkStr, member.profile_hash);
 
   const [bio, setBio] = useState<string | null>(null);
+  /** My own chosen effect. Other people's arrive on their signed profile. */
+  const [myEffect, setMyEffect] = useState<string | null>(null);
+  const [pickingEffect, setPickingEffect] = useState(false);
+  const { settings: ds } = useDataSaver();
+  // Someone else's decoration should never override this viewer's wishes, so
+  // both the app's own switch and the OS setting can turn it off.
+  const effectsAllowed =
+    ds.profileEffects !== false &&
+    !(typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+
+  // Mine comes from disk; everyone else's rides on their signed profile.
+  const shownEffect = isSelf ? myEffect : remoteEffect;
+
+  async function chooseEffect(id: string | null) {
+    setMyEffect(id);
+    setPickingEffect(false);
+    try {
+      await api.setProfileEffect(id);
+    } catch (err) {
+      toast.error(`Couldn't save your profile effect: ${err}`);
+    }
+  }
   const [bannerColor, setBannerColor] = useState(defaultBannerColor);
   const [editingBio, setEditingBio] = useState(false);
   const [bioInput, setBioInput] = useState("");
@@ -53,6 +79,7 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     if (isSelf) {
       api.getBio().then(b => { if (b) setBio(b); });
       api.getProfileColor().then(c => { if (c) setBannerColor(c); });
+      api.getProfileEffect().then(setMyEffect).catch(() => {});
       api.getAvatar().then(url => { if (url) setAvatarUrl(url); });
       api.getServerAvatarOverride(serverId).then(url => { if (url) setOverrideUrl(url); });
       api.getProfileStatus().then(s => { if (s) setStatus(s); });
@@ -117,7 +144,53 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
         {/* Banner. Your own is editable: `get_profile_color` has always been
             read here, but nothing ever called `set_profile_color`, so the colour
             could never be anything but the one derived from your key. */}
-        <div className="profile-card-banner" style={{ background: bannerColor, position: "relative" }}>
+        <div className="profile-card-banner" style={{ background: bannerColor, position: "relative", overflow: "hidden" }}>
+          <ProfileEffect effectId={shownEffect} enabled={effectsAllowed} />
+          {isSelf && (
+            <button
+              className="avatar-change-btn"
+              title="Change your profile effect"
+              onClick={() => setPickingEffect((v) => !v)}
+              style={{ position: "absolute", left: 6, bottom: 6, fontSize: 11 }}
+            >
+              ✨
+            </button>
+          )}
+          {isSelf && pickingEffect && (
+            <div
+              style={{
+                position: "absolute",
+                left: 6,
+                bottom: 30,
+                zIndex: 5,
+                width: 190,
+                padding: 8,
+                background: "var(--xp-panel-bg)",
+                border: "1px solid var(--xp-border)",
+                borderRadius: 4,
+                boxShadow: "2px 2px 8px rgba(0,0,0,.3)",
+              }}
+            >
+              <div style={{ fontSize: 11, marginBottom: 6, color: "var(--xp-text-muted)" }}>
+                Drawn by your client — nothing is downloaded to show it.
+              </div>
+              <button className="xp-button" style={{ width: "100%", marginBottom: 4 }}
+                onClick={() => { void chooseEffect(null); }}>
+                None
+              </button>
+              {PROFILE_EFFECTS.map((e) => (
+                <button
+                  key={e.id}
+                  className="xp-button"
+                  style={{ width: "100%", marginBottom: 4, fontWeight: myEffect === e.id ? 700 : 400 }}
+                  title={e.blurb}
+                  onClick={() => { void chooseEffect(e.id); }}
+                >
+                  {e.name}
+                </button>
+              ))}
+            </div>
+          )}
           {isSelf && (
             <label
               title="Change your profile colour"

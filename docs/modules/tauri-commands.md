@@ -856,6 +856,29 @@ than an address.
 
 ---
 
+### `set_profile_effect(effect)` / `get_profile_effect()`
+
+**What they do:** store and read the bundled profile-effect this identity has
+chosen, in `profile.json` beside the display name and banner colour.
+**It is an ID, never an asset** — `"bats"`, not a URL or a blob. The client draws
+every effect itself from shapes and keyframes (`ProfileEffect.tsx`), which is
+what makes opening someone's profile fetch NOTHING: a profile cannot make your
+client download a stranger's file, cannot learn who looked at it by watching for
+the request, costs the server no storage, and carries no moderation surface.
+**It rides on the SIGNED profile** (`ProfileData.effect`), so it is the member's
+own choice — a server can drop it but cannot attach one to somebody.
+**Compatibility, measured rather than assumed:** `ProfileData` serializes
+compactly, so a profile signed before this field existed is a shorter array. It
+decodes here with `effect: None`, and `SignedProfile::verify` retries against the
+legacy four-field form so those signatures still check out — without that,
+adding this field would have invalidated every profile anyone had ever pushed.
+That retry is attempted only when there is no effect, so it cannot smuggle an
+unsigned one past the check.
+**invoke names:** `"set_profile_effect"` → `setProfileEffect()`,
+`"get_profile_effect"` → `getProfileEffect()`.
+
+---
+
 ### `report_message(state, server_id, channel_id, message_id, event_hash, reason, evidence)`
 
 **What it does:** files a report with the server's moderators. Any member who can
