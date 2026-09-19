@@ -19,6 +19,9 @@ tls_codec = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Dev-only: hash a sealed blob to build an AttachmentCap in the sub-6 test.
+# Already in the tree at this exact version.
+sha2 = "0.10"
 # Dev-only: mint the impostor KeyPackage (cloned credential bytes over
 # attacker-owned keys) for the security-critical Gate-2 test. `openmls 0.8.1`
 # is the exact crate `farder-mls` already pins, so this promotes an existing

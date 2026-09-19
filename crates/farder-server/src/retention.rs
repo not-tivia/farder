@@ -1,6 +1,9 @@
 use crate::{attachments, channels, db, members, messages, reactions};
 use crate::state::ServerState;
 use anyhow::Result;
+use farder_crypto::identity::PublicKey;
+use farder_protocol::server::ServerEvent;
+use crate::events::EventTarget;
 use rusqlite::Connection;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,13 +37,19 @@ pub fn purge_expired_messages(conn: &Connection, storage_dir: &str) -> Result<(u
     Ok((total_purged, files_cleaned))
 }
 
-/// Executes all data deletion requests whose grace period has expired.
-/// For each expired request: removes attachments, anonymizes messages, deletes reactions,
-/// removes the member record, and deletes the deletion request.
-/// Returns the number of deletions executed.
-pub fn execute_pending_deletions(conn: &Connection, storage_dir: &str) -> Result<u64> {
+/// Execute every deletion request whose grace period has run out: for each one,
+/// remove its attachments, anonymize its messages, delete its reactions, remove
+/// the member record, and drop the request.
+///
+/// Returns the members actually deleted, so the caller can tell connected
+/// clients. It used to return a count, and the sweep announced nothing at all:
+/// every connected client kept the deleted member in its roster until reconnect,
+/// and — worse for an E2EE channel — kept its own decrypted copies of messages
+/// the server had just anonymized. The server's promise is only as good as the
+/// clients' compliance, and a client cannot comply with a message it never gets.
+pub fn execute_pending_deletions(conn: &Connection, storage_dir: &str) -> Result<Vec<PublicKey>> {
     let expired = members::list_expired_deletion_requests(conn)?;
-    let mut count = 0u64;
+    let mut deleted = Vec::new();
     for req in &expired {
         info!(member = %req.member_key, "executing data deletion");
         // 1. Remove attachments
@@ -58,9 +67,9 @@ pub fn execute_pending_deletions(conn: &Connection, storage_dir: &str) -> Result
         members::remove_member(conn, &req.member_key)?;
         // 5. Delete the deletion request
         members::delete_deletion_request(conn, &req.member_key)?;
-        count += 1;
+        deleted.push(req.member_key.clone());
     }
-    Ok(count)
+    Ok(deleted)
 }
 
 /// Spawns a background Tokio task that periodically runs `purge_expired_messages`.
@@ -87,12 +96,28 @@ pub fn spawn_retention_task(
             if messages_purged > 0 || files_cleaned > 0 {
                 info!(messages_purged, files_cleaned, "retention task completed");
             }
-            {
+            // The lock is released BEFORE the broadcast: `broadcast_event` is
+            // async, and holding a std Mutex across an await is how this
+            // codebase has deadlocked itself before.
+            let deleted = {
                 let conn = state.db.lock().unwrap();
                 match execute_pending_deletions(&conn, &state.storage_dir) {
-                    Ok(n) if n > 0 => info!(deletions = n, "executed pending data deletions"),
-                    Err(e) => tracing::warn!("data deletion error: {}", e),
-                    _ => {}
+                    Ok(members) => members,
+                    Err(e) => {
+                        tracing::warn!("data deletion error: {}", e);
+                        Vec::new()
+                    }
+                }
+            };
+            if !deleted.is_empty() {
+                info!(deletions = deleted.len(), "executed pending data deletions");
+                for public_key in deleted {
+                    crate::connection::broadcast_event(
+                        &state,
+                        EventTarget::All,
+                        ServerEvent::MemberDataDeleted { public_key },
+                    )
+                    .await;
                 }
             }
         }
@@ -171,8 +196,8 @@ mod tests {
         members::create_deletion_request_with_expires(&conn, &pk1, 1000, 2000).unwrap();
 
         // Execute pending deletions
-        let count = execute_pending_deletions(&conn, "/tmp").unwrap();
-        assert_eq!(count, 1, "should have executed 1 deletion");
+        let deleted = execute_pending_deletions(&conn, "/tmp").unwrap();
+        assert_eq!(deleted, vec![pk1.clone()], "the sweep names who it deleted");
 
         // Alice's messages should be anonymized (content = '[deleted]')
         let history = messages::fetch_history(&conn, ch_id, None, 10, &pk2).unwrap();

@@ -1916,6 +1916,13 @@ pub fn handle_request(
             ok(ServerResponse::Ok)
         }
 
+        ServerRequest::ListBlocked => {
+            // The caller's own list only. `member` is the authenticated
+            // connection's key, never a parameter, so there is no request shape
+            // that asks about somebody else.
+            ok(ServerResponse::BlockedList { blocked: members::list_blocked(conn, member)? })
+        }
+
         ServerRequest::TimeoutMember { member_key, until_ms, reason } => {
             if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::TIMEOUT_MEMBERS, "TIMEOUT_MEMBERS")? {
                 return Ok(denied);
@@ -4299,6 +4306,42 @@ mod tests {
                 assert_eq!(dms.len(), 2);
             }
             other => panic!("expected DmList, got {:?}", other),
+        }
+    }
+
+    #[test]
+    /// The request answers for the CALLER, and only the caller. There is no
+    /// field to point it at anyone else — that is the whole design — so this
+    /// pins that two members asking the same question get their own answers.
+    #[test]
+    fn list_blocked_answers_only_for_the_caller() {
+        let (conn, owner_pk) = setup();
+        let alice = add_member(&conn, "Alice");
+
+        handle_request(&conn, &owner_pk, true, ServerRequest::BlockUser { target_key: alice.clone() }, "", &fake_state()).unwrap();
+
+        let mine = handle_request(&conn, &owner_pk, true, ServerRequest::ListBlocked, "", &fake_state()).unwrap();
+        match mine.response {
+            ServerResponse::BlockedList { blocked } => {
+                assert_eq!(blocked.len(), 1);
+                assert_eq!(blocked[0].public_key, alice);
+                assert_eq!(blocked[0].display_name.as_deref(), Some("Alice"));
+            }
+            other => panic!("expected BlockedList, got {other:?}"),
+        }
+
+        // Alice asks the same question and learns nothing about being blocked.
+        let theirs = handle_request(&conn, &alice, false, ServerRequest::ListBlocked, "", &fake_state()).unwrap();
+        match theirs.response {
+            ServerResponse::BlockedList { blocked } => assert!(blocked.is_empty()),
+            other => panic!("expected BlockedList, got {other:?}"),
+        }
+
+        // And unblocking empties it.
+        handle_request(&conn, &owner_pk, true, ServerRequest::UnblockUser { target_key: alice }, "", &fake_state()).unwrap();
+        match handle_request(&conn, &owner_pk, true, ServerRequest::ListBlocked, "", &fake_state()).unwrap().response {
+            ServerResponse::BlockedList { blocked } => assert!(blocked.is_empty()),
+            other => panic!("expected BlockedList, got {other:?}"),
         }
     }
 
@@ -9456,6 +9499,7 @@ mod tests {
                 | ServerRequest::AssignRole { .. }
                 | ServerRequest::BanMember { .. }
                 | ServerRequest::BlockUser { .. }
+                | ServerRequest::ListBlocked
                 | ServerRequest::CancelDeletion
                 | ServerRequest::CancelEvent { .. }
                 | ServerRequest::CancelGiveaway { .. }

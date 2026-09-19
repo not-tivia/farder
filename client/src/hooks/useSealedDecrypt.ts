@@ -2,6 +2,31 @@ import { useEffect, useState } from "react";
 import { useApp } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
 import { publicKeyToString } from "../lib/types";
+import type { SealedAttachmentRef } from "../lib/types";
+
+/** The envelope's three parallel arrays, as one list of refs.
+ *
+ *  They are parallel by construction — the sender builds all three from the same
+ *  attachment list in order — so a length disagreement means something is wrong
+ *  with the envelope, and the safe reading of a malformed envelope is "no
+ *  attachments" rather than a guess at which key belongs to which name. */
+function envelopeAttachments(envelope: { attachment_keys: number[][]; filenames: string[]; mimes: string[] }): SealedAttachmentRef[] {
+  const { attachment_keys: keys, filenames, mimes } = envelope;
+  if (keys.length !== filenames.length || keys.length !== mimes.length) {
+    console.warn("[sealed] envelope attachment arrays disagree; ignoring attachments");
+    return [];
+  }
+  return keys.map((key, i) => ({
+    keyHex: Array.from(key, (b) => b.toString(16).padStart(2, "0")).join(""),
+    fileName: filenames[i],
+    mimeType: mimes[i],
+  }));
+}
+
+/** Refs as the local history store holds them (snake_case, mirroring Rust). */
+function toHistoryAttachment(a: SealedAttachmentRef): { key_hex: string; file_name: string; mime_type: string } {
+  return { key_hex: a.keyHex, file_name: a.fileName, mime_type: a.mimeType };
+}
 
 // ---------------------------------------------------------------------------
 // Decrypt-once guard (D2/D4): the ratchet is consumed on open, so a sealed
@@ -136,7 +161,7 @@ export function useSealedDecrypt(): void {
           dispatch({
             type: "SEALED_DECRYPTED",
             serverId: activeServerId,
-            payload: { messageId: msg.id, eventHash, content: own },
+            payload: { messageId: msg.id, eventHash, content: own.content, attachments: own.attachments },
           });
           void api
             .historyPut({
@@ -145,9 +170,9 @@ export function useSealedDecrypt(): void {
               event_hash: eventHash ?? "",
               timestamp: msg.timestamp ?? 0,
               author: msg.author?.bytes ?? [],
-              content: own,
+              content: own.content,
               reply_to: null,
-              attachments: [],
+              attachments: own.attachments.map(toHistoryAttachment),
             })
             .catch((e) => console.warn("[history] put (own send) failed:", e));
           continue;
@@ -165,10 +190,11 @@ export function useSealedDecrypt(): void {
           .decryptSealedMessage(activeServerId, logServerId, channelId, ciphertext)
           .then((result) => {
             if (result.kind === "decrypted") {
+              const attachments = envelopeAttachments(result.envelope);
               dispatch({
                 type: "SEALED_DECRYPTED",
                 serverId: activeServerId,
-                payload: { messageId: msg.id, eventHash, content: result.envelope.content },
+                payload: { messageId: msg.id, eventHash, content: result.envelope.content, attachments },
               });
               // Persist it (T9): this is the ONLY writer, and it runs only on a
               // SUCCESSFUL decrypt — a failure must never be cached as history.
@@ -184,7 +210,7 @@ export function useSealedDecrypt(): void {
                   author: msg.author?.bytes ?? [],
                   content: result.envelope.content,
                   reply_to: null,
-                  attachments: [],
+                  attachments: attachments.map(toHistoryAttachment),
                 })
                 .catch((e) => console.warn("[history] put failed:", e));
             } else {

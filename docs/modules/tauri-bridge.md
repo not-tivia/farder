@@ -60,7 +60,10 @@ a frontend listener. Public keys are emitted as their `.to_string()` form
 | `ReactionAdded` | `server:reaction_added` | `message_id, channel_id, emoji, public_key, file_id` | `REACTION_ADDED` |
 | `ReactionRemoved` | `server:reaction_removed` | (same) | `REACTION_REMOVED` |
 | `MemberJoined` | `server:member_joined` | `public_key, display_name` | `getMembers` refresh |
+| `MessagePinned` | `server:message_pinned` | `message_id`, `channel_id` | `MESSAGE_PIN_CHANGED` (`pinned: true`) |
+| `MessageUnpinned` | `server:message_unpinned` | `message_id`, `channel_id` | `MESSAGE_PIN_CHANGED` (`pinned: false`) |
 | `MemberLeft` | `server:member_left` | `public_key` | `MEMBER_LEFT` |
+| `MemberDataDeleted` | `server:member_data_deleted` | `public_key`, `public_key_bytes` | `MEMBER_LEFT` **plus** `historyPurgeAuthor(public_key_bytes)`. Distinct from `MemberLeft`: leaving is reversible and leaves the member's messages standing, while this says the sweep anonymized them — the only signal that tells a client to drop its own decrypted copies. The raw bytes ride along because the purge matches on the blind index over them. v2-only (a variant added after v1 shipped cannot be decoded by an old client). |
 | `MemberBanned` / `MemberUnbanned` | `server:member_banned` / `_unbanned` | `public_key[, reason]` | banned-list refresh |
 | `MemberTimeoutChanged` | `server:member_timeout_changed` | `public_key, until_ms, reason` | `MEMBER_TIMEOUT_CHANGED` |
 | `YouWereKicked` / `YouWereBanned` | `server:you_were_kicked` / `_banned` | `[reason]` | `YOU_WERE_KICKED` / `_BANNED` |

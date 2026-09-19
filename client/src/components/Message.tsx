@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import type { MessageInfo, AttachmentInfo, SealedDecryptEntry } from "../lib/types";
+import type { MessageInfo, AttachmentInfo, SealedDecryptEntry, SealedAttachmentRef } from "../lib/types";
 import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
@@ -89,6 +89,15 @@ function formatSize(bytes: number): string {
 
 // Module-level cache: file_id → data URL
 const imageCache = new Map<number, string>();
+
+/// Sealed opens, cached by (blob, key) — the SANITIZED name and the SNIFFED type
+/// alongside the bytes.
+///
+/// Caching the data URL alone would be a trap: re-rendering from the cache has
+/// to show the same name the policy produced, and the only other name available
+/// here is the sender's raw claim. Putting them in one entry makes it impossible
+/// to reuse the bytes while forgetting what the policy said about them.
+const sealedOpenCache = new Map<string, { dataUrl: string; fileName: string; mimeType: string }>();
 
 // Module-level cache for own public key
 let cachedOwnPk: string | null = null;
@@ -367,6 +376,16 @@ export default function Message({ message, memberNames, grouped = false, serverI
 
   const isOwnMessage = ownPk === pkStr;
 
+  // Computed BEFORE the action list, which needs MANAGE_MESSAGES for the pin
+  // entry. (It used to sit below; nothing above it depends on the actions.)
+  const { bits: viewerBits } = ownPk
+    ? getActorPermissions(activeServer?.members ?? [], roles, ownPk, activeServer?.ownerPublicKey ?? null)
+    : { bits: 0n };
+  const showModBadges = isModerator(viewerBits);
+  const canTakeDown = hasPermission(viewerBits, PERMISSIONS.KICK_MEMBERS);
+  const canManageMessages = hasPermission(viewerBits, PERMISSIONS.MANAGE_MESSAGES);
+  const logServerId = activeServer?.logServerId ?? null;
+
   // Build the list of message actions mirroring the context menu (same conditions),
   // so AttachmentDisplay can append them to the merged image right-click menu.
   // NOTE: these are intentionally plain onClick callbacks, not async -- the async
@@ -397,6 +416,27 @@ export default function Message({ message, memberNames, grouped = false, serverI
         void api.createThread(serverId, message.id).catch((e) => { toast.error(`Couldn't create thread: ${e}`); });
       },
     }] : []),
+    ...(canManageMessages ? [{
+      label: message.pinned ? "Unpin Message" : "Pin Message",
+      onClick: () => {
+        // The state comes back as a broadcast, so both this client and everyone
+        // else learn about it the same way -- no optimistic flip to undo.
+        //
+        // Called directly in each branch rather than through a variable holding
+        // the function: `reachability_audit.py` reported both commands as
+        // unreachable when it was `const call = ... ; call(...)`, and a person
+        // grepping for `pinMessage(` would have missed it too.
+        if (message.pinned) {
+          void api.unpinMessage(serverId, message.id).catch((e) => {
+            toast.error(`Couldn't unpin the message: ${e}`);
+          });
+        } else {
+          void api.pinMessage(serverId, message.id).catch((e) => {
+            toast.error(`Couldn't pin the message: ${e}`);
+          });
+        }
+      },
+    }] : []),
     ...(isOwnMessage ? [{
       label: "Delete Message",
       onClick: () => {
@@ -414,13 +454,6 @@ export default function Message({ message, memberNames, grouped = false, serverI
       },
     }] : []),
   ];
-
-  const { bits: viewerBits } = ownPk
-    ? getActorPermissions(activeServer?.members ?? [], roles, ownPk, activeServer?.ownerPublicKey ?? null)
-    : { bits: 0n };
-  const showModBadges = isModerator(viewerBits);
-  const canTakeDown = hasPermission(viewerBits, PERMISSIONS.KICK_MEMBERS);
-  const logServerId = activeServer?.logServerId ?? null;
 
   // Channel names for the farder://channel/<id> pill (the reminder DM's
   // link-back). An id we don't know renders the generic "Open channel".
@@ -493,6 +526,19 @@ export default function Message({ message, memberNames, grouped = false, serverI
   const undecryptable = isSealedRow && sealedDecrypt?.kind === "undecryptable";
   // No decrypt result yet -> the 4b-1 placeholder (T5).
   const isSealed = isSealedRow && sealedDecrypt === undefined;
+
+  // Sealed attachments (sub-6). The envelope's refs pair with the row's
+  // attachment records POSITIONALLY: the sender builds the caps and the envelope
+  // arrays from one list, in order, and the server materializes caps in that same
+  // order. A count disagreement means a cap was quarantined (or the envelope is
+  // malformed), and there is then no honest way to say which key belongs to which
+  // blob — so nothing is offered rather than the wrong file. A mis-pairing that
+  // slipped through would still fail closed at the AEAD, which is the backstop,
+  // not the plan.
+  const sealedRefs = sealedDecrypt?.kind === "decrypted" ? sealedDecrypt.attachments ?? [] : [];
+  const sealedAttachmentsPair = isSealedRow && sealedRefs.length === message.attachments.length;
+  const showSealedAttachments = sealedAttachmentsPair && sealedRefs.length > 0;
+  const sealedAttachmentsUnpairable = isSealedRow && sealedRefs.length > 0 && !sealedAttachmentsPair;
 
   // Strip image URLs from message text when there are image attachments
   const displayContent = deleted
@@ -605,6 +651,12 @@ export default function Message({ message, memberNames, grouped = false, serverI
           )}
           <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
           {message.edited_at && <span className="message-edited">(edited)</span>}
+          {/* `pinned` has always been on the row and never shown. Reusing
+              `.message-edited` keeps it styled in every theme; a new class with
+              no CSS would render raw. */}
+          {message.pinned && (
+            <span className="message-edited" title="Pinned message">📌 pinned</span>
+          )}
         </div>
       )}
       {profilePopup && member && (
@@ -661,7 +713,10 @@ export default function Message({ message, memberNames, grouped = false, serverI
           ) : (
             <RenderedMessageContent
               text={displayContent}
-              attachments={message.attachments}
+              // A sealed row's blobs are ciphertext under a neutral name: the
+              // plaintext renderer would show "attachment.bin" and try to
+              // download bytes it cannot read. They render below instead.
+              attachments={isSealedRow ? [] : message.attachments}
               bookIndex={bookIndex}
               serverId={serverId}
               renderTextSegment={(t) => renderContent(
@@ -690,6 +745,25 @@ export default function Message({ message, memberNames, grouped = false, serverI
                 ) : null
               }
             />
+          )}
+
+          {showSealedAttachments && (
+            <div className="message-attachments">
+              {message.attachments.map((att, i) => (
+                <SealedAttachmentDisplay
+                  key={att.id}
+                  serverId={serverId}
+                  attachment={att}
+                  sealedRef={sealedRefs[i]}
+                />
+              ))}
+            </div>
+          )}
+          {sealedAttachmentsUnpairable && (
+            <div className="error-text">
+              🔒 This message has a file, but its keys do not line up with what the server
+              stored — it cannot be opened safely.
+            </div>
           )}
         </div>
       )}
@@ -900,6 +974,143 @@ function DismissDialogWhenDone({ messageId, onDone }: { messageId: string; onDon
     return () => { active = false; unsub(); };
   }, [messageId, onDone]);
   return null;
+}
+
+/** One attachment of a SEALED message.
+ *
+ *  Everything this renders comes back from `download_sealed_file`, which opens
+ *  the blob, sanitizes the sender's claimed name, sniffs the bytes against the
+ *  claimed type and only then hands anything over. Nothing here renders the
+ *  sender's claims directly — the name shown is the SANITIZED one, and a file
+ *  that fails the policy renders its reason instead of the file.
+ *
+ *  Why images auto-open and other types need a click: a non-inline type is
+ *  WRITTEN TO DISK by the backend (to Downloads). Opening a picture on sight is
+ *  what a chat client does; writing a stranger's file to disk on sight is not.
+ *  A claimed image whose bytes are something else never reaches that branch —
+ *  the sniff refuses it first. */
+function SealedAttachmentDisplay({
+  serverId,
+  attachment,
+  sealedRef,
+}: {
+  serverId: string;
+  attachment: AttachmentInfo;
+  sealedRef: SealedAttachmentRef;
+}) {
+  type State =
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "opened"; dataUrl: string | null; fileName: string; mimeType: string; savedPath: string | null }
+    | { kind: "refused"; reason: string };
+
+  const [state, setState] = useState<State>({ kind: "idle" });
+  const { settings: ds } = useDataSaver();
+  const cacheKey = `${attachment.file_id}:${sealedRef.keyHex}`;
+  // The CLAIM, used only to decide whether opening is safe to do unprompted.
+  const claimsInlineMedia =
+    sealedRef.mimeType.startsWith("image/") || sealedRef.mimeType.startsWith("audio/");
+  // Data Saver applies here exactly as it does to a plaintext attachment. The
+  // size is the CIPHERTEXT's (a few bytes over the real one) and it is the only
+  // size anyone knows before opening — which is the right basis anyway, since
+  // that is what actually comes over the connection.
+  const gated =
+    sealedRef.mimeType.startsWith("image/") &&
+    !sealedOpenCache.has(cacheKey) &&
+    imageIsGated(ds, attachment.size);
+
+  async function open() {
+    // Already opened this session: reuse the bytes AND the name the policy
+    // produced for them. Re-downloading would cost bandwidth and a second
+    // decryption for an identical result.
+    const cached = sealedOpenCache.get(cacheKey);
+    if (cached) {
+      setState({ kind: "opened", ...cached, savedPath: null });
+      return;
+    }
+    setState({ kind: "loading" });
+    try {
+      const r = await api.downloadSealedFile(
+        serverId,
+        attachment.file_id,
+        sealedRef.keyHex,
+        sealedRef.fileName,
+        sealedRef.mimeType,
+      );
+      if (r.kind === "refused") {
+        setState({ kind: "refused", reason: r.reason });
+        return;
+      }
+      if (r.data_url) {
+        // Only inline media is cached: a non-inline open WROTE a file, and
+        // replaying that from cache would hide the second write.
+        sealedOpenCache.set(cacheKey, {
+          dataUrl: r.data_url,
+          fileName: r.file_name,
+          mimeType: r.mime_type,
+        });
+      }
+      setState({
+        kind: "opened",
+        dataUrl: r.data_url,
+        fileName: r.file_name,
+        mimeType: r.mime_type,
+        savedPath: r.saved_path,
+      });
+    } catch (e) {
+      setState({ kind: "refused", reason: String(e) });
+    }
+  }
+
+  useEffect(() => {
+    if (claimsInlineMedia && !gated) void open();
+    // One open per (blob, key): re-running would re-download and, for a
+    // non-inline type, re-write the file.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachment.file_id, sealedRef.keyHex, gated]);
+
+  if (state.kind === "loading") {
+    return <div className="attachment-loading">🔒 Opening encrypted file...</div>;
+  }
+  if (state.kind === "refused") {
+    return <div className="error-text">🔒 {state.reason}</div>;
+  }
+  if (state.kind === "idle") {
+    return (
+      <div className="attachment-item">
+        <button className="link-embed-chip" onClick={() => void open()}>
+          {gated
+            ? `🔒 Load encrypted image (${formatSize(attachment.size)})`
+            : `🔒 Open encrypted file (${formatSize(attachment.size)})`}
+        </button>
+      </div>
+    );
+  }
+
+  if (state.dataUrl && state.mimeType.startsWith("audio/")) {
+    return (
+      <div className="attachment-audio">
+        <audio controls src={state.dataUrl} />
+        <div className="attachment-name">🔒 {state.fileName}</div>
+      </div>
+    );
+  }
+  if (state.dataUrl) {
+    return (
+      <div className="attachment-image">
+        <img src={state.dataUrl} alt={state.fileName} />
+        <div className="attachment-name">🔒 {state.fileName}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="attachment-item">
+      <div className="attachment-name">
+        🔒 {state.fileName}
+        {state.savedPath ? ` — saved to ${state.savedPath}` : ""}
+      </div>
+    </div>
+  );
 }
 
 function AttachmentDisplay({

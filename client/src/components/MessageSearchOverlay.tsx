@@ -1,9 +1,9 @@
 // client/src/components/MessageSearchOverlay.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useActiveServer, useActiveServerId, useApp } from "../context/ServerContext";
-import { publicKeyToString } from "../lib/types";
+import { publicKeyToString, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
-import type { MessageInfo } from "../lib/types";
+import type { MessageInfo, ChannelInfo } from "../lib/types";
 import Message from "./Message";
 import { useMessageContext } from "../hooks/useMessageContext";
 
@@ -21,6 +21,67 @@ type SearchStatus =
   | { kind: "loading" }
   | { kind: "ready"; results: MessageInfo[] }
   | { kind: "error"; reason: string };
+
+/** How many hits to take from each encrypted channel's local store. */
+const LOCAL_LIMIT_PER_CHANNEL = 20;
+
+/** The combined cap, applied after merging so neither source can crowd the
+ *  other out. */
+const MERGED_LIMIT = 50;
+
+// ---------------------------------------------------------------------------
+// Searching encrypted channels (sub-7b)
+//
+// `search_messages` is the server's FTS index, and a sealed row is deliberately
+// never in it — the server holds ciphertext and could not index it if it wanted
+// to. So a server-only search silently answers "no matches" for every encrypted
+// channel, which reads as "you never said that" rather than "this search cannot
+// see there".
+//
+// The readable copy of an encrypted message lives in this device's history
+// store, so that is what gets searched for those channels, and the two result
+// sets are merged. The difference is surfaced per result rather than hidden: a
+// local hit is marked, because "found on this device only" is a different
+// statement from "found on the server".
+// ---------------------------------------------------------------------------
+
+/** Search this device's history store across the server's encrypted channels.
+ *
+ *  Failures are swallowed per channel on purpose. The usual cause is a locked
+ *  identity (the store cannot be opened yet), which is a state, not an error:
+ *  the plaintext channels' results are still worth showing, and a thrown search
+ *  would replace them with an error screen. */
+async function searchEncryptedChannels(
+  channels: ChannelInfo[],
+  query: string,
+): Promise<MessageInfo[]> {
+  const encrypted = channels.filter((c) => isE2eeChannel(c));
+  const pages = await Promise.all(
+    encrypted.map((ch) =>
+      api
+        .historySearch(ch.id, query, LOCAL_LIMIT_PER_CHANNEL)
+        .catch(() => []),
+    ),
+  );
+  return pages.flat().map((row) => ({
+    id: row.message_id,
+    channel_id: row.channel_id,
+    author: { bytes: row.author },
+    // The decrypted text, from our own store. The row keeps `is_e2ee` so the
+    // UI can say where it came from.
+    content: row.content,
+    timestamp: row.timestamp,
+    edited_at: null,
+    reply_to: null,
+    pinned: false,
+    attachments: [],
+    reactions: [],
+    thread_id: null,
+    thread_message_count: 0,
+    is_e2ee: true,
+    event_hash: row.event_hash === "" ? null : row.event_hash,
+  }));
+}
 
 export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) {
   const activeServer = useActiveServer();
@@ -87,8 +148,16 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
-        const results = await api.searchMessages(serverId, trimmed, undefined, 50);
+        // The server's index covers plaintext channels; this device's store
+        // covers the encrypted ones. Neither sees the other's messages.
+        const [remote, local] = await Promise.all([
+          api.searchMessages(serverId, trimmed, undefined, MERGED_LIMIT),
+          searchEncryptedChannels(activeServer?.channels ?? [], trimmed),
+        ]);
         if (cancelled) return;
+        const results = [...remote, ...local]
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .slice(0, MERGED_LIMIT);
         setStatus({ kind: "ready", results });
         setSelectedIndex(0);
         setStableIndex(0);
@@ -104,7 +173,7 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [query, open, serverId, retryTick]);
+  }, [query, open, serverId, retryTick, activeServer?.channels]);
 
   // Debounce stableIndex 200ms behind selectedIndex.
   useEffect(() => {
@@ -279,7 +348,7 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
               const isSelected = i === selectedIndex;
               return (
                 <div
-                  key={msg.id}
+                  key={`${msg.channel_id}:${msg.id}`}
                   onMouseEnter={() => setSelectedIndex(i)}
                   onClick={() => commit(msg.id, msg.channel_id)}
                   style={{
@@ -293,6 +362,12 @@ export function MessageSearchOverlay({ open, openTrigger = 0, onClose }: Props) 
                   <div style={{ fontWeight: 600 }}>{authorName}</div>
                   <div style={{ color: "var(--xp-text-muted, #888880)", fontSize: 11 }}>
                     in #{ch?.name ?? "unknown"}
+                    {msg.is_e2ee && (
+                      <span title="Found in this device's copy — the server cannot search encrypted channels">
+                        {" "}
+                        🔒 on this device
+                      </span>
+                    )}
                   </div>
                   <div
                     style={{

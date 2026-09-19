@@ -210,6 +210,7 @@ mod at_rest_tests {
     /// One combined test: `FARDER_DATA` is process-global, so split tests race.
     #[test]
     fn the_device_key_is_wrapped_at_rest_and_a_legacy_plaintext_file_migrates() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-devkey-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

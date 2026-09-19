@@ -529,14 +529,26 @@ pub fn apply_tombstone(conn: &Connection, event: &Event) -> Result<Option<Tombst
 /// materialized (and so not downloadable). Idempotent: a cap already materialized for
 /// this message is skipped, so reconcile can re-run safely. Returns the count newly
 /// created. Non-message payloads return `Ok(0)`.
+///
+/// **Sealed messages take the same path.** A `MessagePostedE2ee` carries caps of
+/// exactly the same shape, describing the CIPHERTEXT (hash, size,
+/// `application/octet-stream`), and every check here is over those fields — none
+/// of them reads the bytes. Skipping sealed caps did not make the server safer,
+/// it made the feature broken in two ways: the `message_attachments` row is what
+/// the download path checks permission against (so only the server owner could
+/// ever fetch a sealed attachment), and it is what holds the blob's ref count
+/// (so the orphan sweep would eventually delete a file the members could still
+/// see referenced in their messages).
 pub fn derive_attachments(
     conn: &Connection,
     message_id: u64,
     event: &Event,
     owner: &PublicKey,
 ) -> Result<usize> {
-    let EventPayload::MessagePosted { attachments, .. } = &event.core.payload else {
-        return Ok(0);
+    let attachments = match &event.core.payload {
+        EventPayload::MessagePosted { attachments, .. } => attachments,
+        EventPayload::MessagePostedE2ee { attachments, .. } => attachments,
+        _ => return Ok(0),
     };
     let author = &event.core.author;
     let mut created = 0usize;
@@ -1074,10 +1086,10 @@ pub fn fetch_device_certs(
     Ok(out)
 }
 
-/// Repair drift: for every stored `MessagePosted` event that already has a derived
-/// `messages` row, (re)materialize any missing VALID attachment rows. Idempotent
-/// (each cap is guarded inside `derive_attachments`). Returns the number of attachment
-/// rows created. No-op if there is no genesis (legacy server) — and legacy
+/// Repair drift: for every stored message event (sealed or not) that already has a
+/// derived `messages` row, (re)materialize any missing VALID attachment rows.
+/// Idempotent (each cap is guarded inside `derive_attachments`). Returns the number of
+/// attachment rows created. No-op if there is no genesis (legacy server) — and legacy
 /// `MessagePosted` events carry empty `attachments`, so this only does work for
 /// log-mode servers that crashed mid-derive or that replicate events (forward-compat).
 pub fn reconcile_attachments(conn: &Connection) -> Result<usize> {
@@ -1087,7 +1099,8 @@ pub fn reconcile_attachments(conn: &Connection) -> Result<usize> {
         let mut stmt = conn.prepare(
             "SELECT e.event_body, m.id FROM events e \
              JOIN messages m ON m.event_hash = e.event_hash \
-             WHERE e.payload_type = 'MessagePosted' ORDER BY e.accept_seq ASC",
+             WHERE e.payload_type IN ('MessagePosted', 'MessagePostedE2ee') \
+             ORDER BY e.accept_seq ASC",
         )?;
         let mapped = stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))?;
         let mut v = Vec::new();
@@ -2586,5 +2599,196 @@ mod tests {
             }
         }
         assert_eq!(seen, vec![(a, 7)], "the event behind the gap must be reachable");
+    }
+    /// F4 -- the server's attachment machinery works UNCHANGED on ciphertext.
+    ///
+    /// The spec's claim is that a sealed blob needs no server changes because cap
+    /// validation is hash + size + uploader, none of which look inside the bytes.
+    /// Claims like that are exactly how this project has shipped bugs, so this
+    /// drives the real path: a real sealed blob through the real `store_file`,
+    /// the real `derive_attachments`, and the real redaction.
+    #[test]
+    fn a_sealed_blob_validates_and_redacts_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+
+        let plaintext = b"a secret the server must never be able to read";
+        let (key, ciphertext) = farder_crypto::file_policy::seal_file(plaintext).unwrap();
+        let hash = crate::attachments::compute_sha256(&ciphertext);
+
+        // D3: the upload is uniform -- neutral name, octet-stream, and the hash
+        // is of the CIPHERTEXT.
+        let file_id = crate::attachments::store_file(
+            &conn, storage, &owner.public_key(), "attachment",
+            &ciphertext, &hash, "application/octet-stream", None, None, None,
+        ).unwrap();
+
+        let cap = AttachmentCap {
+            content_hash: hash.clone(),
+            declared_type: "application/octet-stream".into(),
+            size: ciphertext.len() as u64,
+            uploader: owner.public_key(),
+        };
+        let (mid, msg) = setup_message(&conn, &owner, &dev, &owner, vec![cap]);
+        assert_eq!(
+            derive_attachments(&conn, mid, &msg, &owner.public_key()).unwrap(), 1,
+            "cap validation is hash+size+uploader; sealing changes none of them",
+        );
+        assert_eq!(attachment_count(&conn, mid), 1);
+
+        // What actually landed on the server's disk is ciphertext, and only the
+        // key opens it.
+        let on_disk = std::fs::read(crate::attachments::content_path(storage, &hash)).unwrap();
+        assert_eq!(on_disk, ciphertext);
+        assert!(
+            !on_disk.windows(6).any(|w| w == b"secret"),
+            "plaintext must never reach the server's disk",
+        );
+        assert_eq!(
+            farder_crypto::file_policy::open_file(&key, &on_disk).unwrap(),
+            plaintext,
+        );
+
+        // Redaction is the only moderation a server has over bytes it cannot
+        // read, so it has to actually remove them.
+        assert!(crate::attachments::redact_blob(&conn, storage, &hash, &owner.public_key()).unwrap());
+        assert!(!crate::attachments::content_path(storage, &hash).exists());
+        let redacted_by: Option<Vec<u8>> = conn
+            .query_row("SELECT redacted_by FROM files WHERE id = ?1", params![file_id as i64], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            redacted_by.as_deref(),
+            Some(owner.public_key().as_bytes().as_slice()),
+            "redaction records who, so the tombstone is attributable",
+        );
+    }
+
+    /// A sealed message's caps must materialize exactly like a plaintext
+    /// message's. They did not, and the consequences were invisible from the
+    /// crypto side: `message_attachments` is what the download path checks
+    /// permission against, so only the server owner could fetch a sealed
+    /// attachment, and it is what holds the blob's ref count, so the orphan
+    /// sweep would eventually delete files members could still see referenced.
+    #[test]
+    fn a_sealed_messages_caps_materialize_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let mut f = SealedFix::new();
+
+        let (_key, ciphertext) = farder_crypto::file_policy::seal_file(b"sealed bytes").unwrap();
+        let hash = crate::attachments::compute_sha256(&ciphertext);
+        crate::attachments::store_file(
+            &f.conn, storage, &f.owner.public_key(), "attachment.bin",
+            &ciphertext, &hash, "application/octet-stream", None, None, None,
+        ).unwrap();
+
+        let epoch = f.epoch();
+        let cap = AttachmentCap {
+            content_hash: hash,
+            declared_type: "application/octet-stream".into(),
+            size: ciphertext.len() as u64,
+            uploader: f.owner.public_key(),
+        };
+        let owner_pk = f.owner.public_key();
+        let (event, id) = f.own(EP::MessagePostedE2ee {
+            channel_id: SEALED_CH, generation: 0, epoch,
+            ciphertext: vec![0xAA; 32], reply_to: None,
+            attachments: vec![cap],
+            authz_head: "a".repeat(64),
+        });
+        let mid = id.expect("a sealed post derives a row");
+
+        assert_eq!(derive_attachments(&f.conn, mid, &event, &owner_pk).unwrap(), 1);
+        assert_eq!(attachment_count(&f.conn, mid), 1);
+        // Re-running is a no-op, so reconcile can repeat it safely.
+        assert_eq!(derive_attachments(&f.conn, mid, &event, &owner_pk).unwrap(), 0);
+    }
+
+    /// The GC half of "the server keeps working on ciphertext": a sealed blob a
+    /// message references must survive the orphan sweep, and one nothing
+    /// references must not. The reference is the `message_attachments` row —
+    /// which is exactly what a sealed message was not getting.
+    #[test]
+    fn a_referenced_sealed_blob_survives_the_orphan_sweep_and_a_loose_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let mut f = SealedFix::new();
+
+        let (_k, referenced) = farder_crypto::file_policy::seal_file(b"kept").unwrap();
+        let (_k2, loose) = farder_crypto::file_policy::seal_file(b"swept").unwrap();
+        let kept_hash = crate::attachments::compute_sha256(&referenced);
+        let loose_hash = crate::attachments::compute_sha256(&loose);
+        for (bytes, hash) in [(&referenced, &kept_hash), (&loose, &loose_hash)] {
+            crate::attachments::store_file(
+                &f.conn, storage, &f.owner.public_key(), "attachment.bin",
+                bytes, hash, "application/octet-stream", None, None, None,
+            ).unwrap();
+        }
+        // Age both blobs so the sweep considers them at all.
+        f.conn.execute("UPDATE files SET uploaded_at = 1", []).unwrap();
+
+        let epoch = f.epoch();
+        let owner_pk = f.owner.public_key();
+        let (event, id) = f.own(EP::MessagePostedE2ee {
+            channel_id: SEALED_CH, generation: 0, epoch,
+            ciphertext: vec![0xAA; 32], reply_to: None,
+            attachments: vec![AttachmentCap {
+                content_hash: kept_hash.clone(),
+                declared_type: "application/octet-stream".into(),
+                size: referenced.len() as u64,
+                uploader: owner_pk.clone(),
+            }],
+            authz_head: "a".repeat(64),
+        });
+        derive_attachments(&f.conn, id.unwrap(), &event, &owner_pk).unwrap();
+
+        let swept = crate::attachments::cleanup_all_orphans(&f.conn, storage, 0).unwrap();
+        assert_eq!(swept, 1, "only the unreferenced blob is swept");
+        assert!(
+            crate::attachments::get_file_by_hash(&f.conn, &kept_hash).unwrap().is_some(),
+            "a blob a sealed message references must survive",
+        );
+        assert!(
+            crate::attachments::get_file_by_hash(&f.conn, &loose_hash).unwrap().is_none(),
+        );
+    }
+
+    /// F4 -- swapping the ciphertext under a cap is caught. Sealing the same
+    /// plaintext twice yields different bytes (fresh nonce), so a cap naming the
+    /// first blob cannot be satisfied by the second: the existence check is over
+    /// the ciphertext hash, which is what makes the cap binding at all.
+    #[test]
+    fn a_cap_cannot_be_satisfied_by_a_different_sealed_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let conn = crate::db::open_in_memory().unwrap();
+        let owner = Keypair::generate();
+        let dev = Keypair::generate();
+
+        let plaintext = b"same plaintext, two sealings";
+        let (_k1, c1) = farder_crypto::file_policy::seal_file(plaintext).unwrap();
+        let (_k2, c2) = farder_crypto::file_policy::seal_file(plaintext).unwrap();
+        assert_ne!(c1, c2, "each sealing uses a fresh nonce");
+        let h1 = crate::attachments::compute_sha256(&c1);
+        let h2 = crate::attachments::compute_sha256(&c2);
+        assert_ne!(h1, h2);
+
+        // Only the SECOND blob is stored; the cap names the first.
+        crate::attachments::store_file(
+            &conn, storage, &owner.public_key(), "attachment",
+            &c2, &h2, "application/octet-stream", None, None, None,
+        ).unwrap();
+        let cap = AttachmentCap {
+            content_hash: h1,
+            declared_type: "application/octet-stream".into(),
+            size: c1.len() as u64,
+            uploader: owner.public_key(),
+        };
+        let (mid, msg) = setup_message(&conn, &owner, &dev, &owner, vec![cap]);
+        assert_eq!(derive_attachments(&conn, mid, &msg, &owner.public_key()).unwrap(), 0);
+        assert_eq!(attachment_count(&conn, mid), 0, "an unmatched cap materializes nothing");
     }
 }

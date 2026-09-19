@@ -257,11 +257,59 @@ export async function processMlsControlEvents(serverId: string, logServerId: str
   return invoke("process_mls_control_events", { serverId, logServerId, channelId });
 }
 
-/** Seal + submit one E2EE channel message (T10). Returns the accepted event hash
- *  and the epoch the ciphertext was sealed in. `replyTo` is an event-hash ref;
- *  pass null for a top-level post (legacy numeric replies are not mapped yet). */
-export async function sendSealedMessage(serverId: string, logServerId: string, channelId: number, content: string, replyTo: string | null): Promise<{ event_hash: string; epoch: number }> {
-  return invoke("send_sealed_message", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null });
+/** One sealed, uploaded attachment, exactly as `uploadSealedFile` returned it.
+ *  The key, real name and real MIME travel INSIDE the message ciphertext; only
+ *  the ciphertext's hash and size are visible to the server. */
+export interface SealedAttachmentInput {
+  content_hash: string;
+  size: number;
+  key_hex: string;
+  file_name: string;
+  mime_type: string;
+}
+
+/** Seal + submit one E2EE channel message (T10, attachments sub-6). Returns the
+ *  accepted event hash and the epoch the ciphertext was sealed in. `replyTo` is an
+ *  event-hash ref; pass null for a top-level post (legacy numeric replies are not
+ *  mapped yet). `content` may be empty ONLY when there is an attachment (a voice
+ *  message is exactly that case). */
+export async function sendSealedMessage(serverId: string, logServerId: string, channelId: number, content: string, replyTo: string | null, attachments?: SealedAttachmentInput[]): Promise<{ event_hash: string; epoch: number }> {
+  return invoke("send_sealed_message", { serverId, logServerId, channelId, content, replyTo: replyTo ?? null, attachments: attachments ?? [] });
+}
+
+/** The outcome of sealing + uploading one file for an E2EE channel (sub-6 W1).
+ *  What reached the server is a uniform `attachment.bin` of
+ *  `application/octet-stream`; everything identifying rides back here to be
+ *  sealed into the message. */
+export interface SealedUploadOutcome {
+  file_id: number;
+  content_hash: string;
+  size: number;
+  key_hex: string;
+  file_name: string;
+  mime_type: string;
+}
+
+/** Seal a local file and upload the ciphertext (sub-6 W1). Refuses before any
+ *  upload if the file fails the client-side policy (bad name, or bytes that do
+ *  not match the extension's type) — the point being that the user can still
+ *  pick a different file. */
+export async function uploadSealedFile(serverId: string, channelId: number, filePath: string): Promise<SealedUploadOutcome> {
+  return invoke<SealedUploadOutcome>("upload_sealed_file", { serverId, channelId, filePath });
+}
+
+/** The result of opening a sealed attachment: tag-discriminated so a refusal
+ *  cannot be mistaken for a file. */
+export type SealedDownloadResult =
+  | { kind: "opened"; data_url: string | null; file_name: string; mime_type: string; saved_path: string | null }
+  | { kind: "refused"; reason: string };
+
+/** Fetch, open and policy-check one sealed attachment (sub-6 W3). `claimedName`
+ *  and `claimedMime` come from inside the message ciphertext and are untrusted:
+ *  the backend sanitizes the name and sniffs the bytes BEFORE anything is written
+ *  or rendered, and returns `refused` rather than a file when either fails. */
+export async function downloadSealedFile(serverId: string, fileId: number, keyHex: string, claimedName: string, claimedMime: string): Promise<SealedDownloadResult> {
+  return invoke<SealedDownloadResult>("download_sealed_file", { serverId, fileId, keyHex, claimedName, claimedMime });
 }
 
 /** The wire shape of `decrypt_sealed_message`: a tag-discriminated result.
@@ -329,7 +377,11 @@ export interface HistoryRow {
   author: number[];
   content: string;
   reply_to: string | null;
-  attachments: string[];
+  /** Sealed attachment refs (sub-6): the per-file key plus the sender's claimed
+   *  name and type. Stored because a sealed message opens only once — a key lost
+   *  at restart is a file nobody can open again. Claims stay untrusted; the
+   *  sanitizing happens in `downloadSealedFile`. */
+  attachments: { key_hex: string; file_name: string; mime_type: string }[];
 }
 
 /** One in-channel transparency notice: a device gained or lost the ability to
@@ -439,6 +491,22 @@ export async function blockUser(serverId: string, targetKey: string): Promise<vo
   return invoke("block_user", { serverId, targetKey });
 }
 
+/** One entry of your own block list on a server. `display_name` is null when the
+ *  blocked member has since left — a blocked key must stay listable (and
+ *  unblockable) after they are gone. */
+export interface BlockedUserInfo {
+  public_key: string;
+  display_name: string | null;
+  blocked_at: number;
+}
+
+/** Who YOU have blocked on this server, newest first. Never who blocked you:
+ *  a block the blocked party could enumerate would be a notification, not a
+ *  block. */
+export async function listBlocked(serverId: string): Promise<BlockedUserInfo[]> {
+  return invoke<BlockedUserInfo[]>("list_blocked", { serverId });
+}
+
 export async function unblockUser(serverId: string, targetKey: string): Promise<void> {
   return invoke("unblock_user", { serverId, targetKey });
 }
@@ -492,6 +560,17 @@ export async function sendTyping(serverId: string, channelId: number): Promise<v
 
 export async function editMessage(serverId: string, messageId: number, newContent: string): Promise<void> {
   return invoke<void>("edit_message", { serverId, messageId, newContent });
+}
+
+/** Pin a message. MANAGE_MESSAGES, enforced server-side — the UI hides the
+ *  action without it, but the refusal is the server's. */
+export async function pinMessage(serverId: string, messageId: number): Promise<void> {
+  return invoke("pin_message", { serverId, messageId });
+}
+
+/** Unpin a message. Same gate. */
+export async function unpinMessage(serverId: string, messageId: number): Promise<void> {
+  return invoke("unpin_message", { serverId, messageId });
 }
 
 export async function deleteMessage(serverId: string, messageId: number): Promise<void> {
@@ -597,8 +676,17 @@ export async function cancelDeletion(serverId: string): Promise<void> {
   return invoke<void>("cancel_deletion", { serverId });
 }
 
-export async function getDeletionStatus(serverId: string): Promise<any> {
-  return invoke("get_deletion_status", { serverId });
+/** Whether this identity has a pending "delete my data" request on a server.
+ *  `expires_at` is when the server will actually execute it — until then the
+ *  request can be cancelled. Unix seconds. */
+export interface DeletionStatus {
+  pending: boolean;
+  requested_at: number | null;
+  expires_at: number | null;
+}
+
+export async function getDeletionStatus(serverId: string): Promise<DeletionStatus> {
+  return invoke<DeletionStatus>("get_deletion_status", { serverId });
 }
 
 export async function saveTempAudio(data: string): Promise<string> {
@@ -858,6 +946,9 @@ export interface ManagedServer {
   data_dir: string;
   template: string;
   privacy: string;
+  /** Relayed servers dial out and bind no local port, so `port` is a handle for
+   *  stopping the process rather than an address anyone connects to. */
+  relayed: boolean;
 }
 
 export async function createLocalServer(

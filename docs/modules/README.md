@@ -25,4 +25,5 @@ module relevant to what you're touching. New docs use
 ## Frontend (`client/src/`)
 - [`frontend-bridge.md`](frontend-bridge.md) — the typed `invoke()` wrappers (`tauri-bridge.ts`) + shared TS types.
 - [`frontend-state.md`](frontend-state.md) — `ServerContext` reducer, `useServerEvents`, `useVoice`.
+- [`frontend-hooks.md`](frontend-hooks.md) — the hooks: the five mounted in `App.tsx` (and why their ORDER matters), plus the per-component data-fetching ones.
 - [`frontend-toast.md`](frontend-toast.md) — app-wide toast notifications (`toast.error/success/info`).

@@ -271,9 +271,30 @@ export function isE2eeChannel(channel: ChannelInfo | null | undefined): boolean 
  *  is the log event hash of the ciphertext that was opened, so a sealed edit
  *  (same id, new ciphertext) triggers a fresh decrypt rather than re-using a
  *  stale plaintext. */
+/** One attachment of a sealed message, as the envelope carried it.
+ *
+ *  `keyHex` opens the blob; `fileName` and `mimeType` are the sender's CLAIMS.
+ *  Both claims are attacker-controlled -- no server sanitizer has ever seen
+ *  them -- so nothing renders or writes from these directly: `downloadSealedFile`
+ *  sanitizes the name and sniffs the bytes first, and refuses rather than
+ *  cleaning. Keep them untrusted all the way to that call. */
+export interface SealedAttachmentRef {
+  keyHex: string;
+  fileName: string;
+  mimeType: string;
+}
+
 export type SealedDecryptEntry =
-  | { kind: "decrypted"; content: string; eventHash: string | null }
+  | { kind: "decrypted"; content: string; eventHash: string | null; attachments?: SealedAttachmentRef[] }
   | { kind: "undecryptable"; reason: string; eventHash: string | null };
+
+/** What we recorded locally for one of OUR OWN sealed sends: the text we typed
+ *  plus any attachments we sealed. A sender cannot decrypt its own message, so
+ *  this is the only source for rendering it -- including its files. */
+export interface OwnSealedSend {
+  content: string;
+  attachments: SealedAttachmentRef[];
+}
 
 /** An MLS control event pointer as broadcast by the server
  *  (`MlsControlEvent`). Carries only a pointer - the client fetches and

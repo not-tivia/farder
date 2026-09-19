@@ -31,7 +31,32 @@ pub struct HistoryRow {
     pub author: Vec<u8>,
     pub content: String,
     pub reply_to: Option<String>,
-    pub attachments: Vec<String>,
+    /// Sealed attachments as the envelope carried them (sub-6). Stored because a
+    /// sealed message can be opened only once: a key that does not survive the
+    /// restart is a file nobody can open again.
+    pub attachments: Vec<HistoryAttachmentRow>,
+}
+
+/// One sealed attachment of a stored message. The name and MIME are the
+/// SENDER'S CLAIMS, kept as received — `download_sealed_file` sanitizes and
+/// sniffs on the way out, which is the only place it is safe to do.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HistoryAttachmentRow {
+    pub key_hex: String,
+    pub file_name: String,
+    pub mime_type: String,
+}
+
+impl From<farder_history::HistoryAttachment> for HistoryAttachmentRow {
+    fn from(a: farder_history::HistoryAttachment) -> Self {
+        Self { key_hex: a.key_hex, file_name: a.file_name, mime_type: a.mime_type }
+    }
+}
+
+impl From<HistoryAttachmentRow> for farder_history::HistoryAttachment {
+    fn from(a: HistoryAttachmentRow) -> Self {
+        Self { key_hex: a.key_hex, file_name: a.file_name, mime_type: a.mime_type }
+    }
 }
 
 impl From<HistoryRecord> for HistoryRow {
@@ -44,7 +69,7 @@ impl From<HistoryRecord> for HistoryRow {
             author: r.author,
             content: r.content,
             reply_to: r.reply_to,
-            attachments: r.attachments,
+            attachments: r.attachments.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -59,7 +84,7 @@ impl From<HistoryRow> for HistoryRecord {
             author: r.author,
             content: r.content,
             reply_to: r.reply_to,
-            attachments: r.attachments,
+            attachments: r.attachments.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -178,6 +203,7 @@ mod tests {
     /// cannot cover is the untyped `invoke()` seam; that needs the app running.
     #[test]
     fn history_commands_derive_a_key_round_trip_and_refuse_while_locked() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-history-cmd-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

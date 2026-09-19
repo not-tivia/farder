@@ -1,5 +1,6 @@
 pub mod identity;
 pub mod key_exchange;
+pub mod file_policy;
 pub mod media;
 pub mod encryption;
 pub mod event_log;

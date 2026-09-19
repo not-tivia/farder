@@ -130,7 +130,31 @@ pub struct HistoryRecord {
     pub author: Vec<u8>,
     pub content: String,
     pub reply_to: Option<String>,
-    pub attachments: Vec<String>,
+    pub attachments: Vec<HistoryAttachment>,
+}
+
+/// What a stored row remembers about one sealed attachment.
+///
+/// The ciphertext of a message can be opened exactly once — the ratchet is
+/// consumed — so anything not written here is gone after a restart. Without it a
+/// restored message shows an attachment nobody can ever open again.
+///
+/// The blob's file id is deliberately NOT stored: the server still serves the
+/// message row, which carries the attachment's `file_id`. What the server can
+/// never supply is the key, the real name and the real type — those are exactly
+/// these fields, and they are sealed at rest like the rest of the row.
+///
+/// `file_name` and `mime_type` stay the SENDER'S CLAIMS here. They are stored as
+/// received and sanitized on the way out, at the download, never on the way in
+/// (a name cleaned before storage is a name something later trusts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryAttachment {
+    /// Hex per-file key that opens the blob.
+    pub key_hex: String,
+    /// The sender's claimed filename — untrusted.
+    pub file_name: String,
+    /// The sender's claimed MIME — untrusted.
+    pub mime_type: String,
 }
 
 /// Exactly the fields that get sealed. Split from [`HistoryRecord`] so the
@@ -141,7 +165,7 @@ struct SealedPayload {
     author: Vec<u8>,
     content: String,
     reply_to: Option<String>,
-    attachments: Vec<String>,
+    attachments: Vec<HistoryAttachment>,
 }
 
 /// One in-channel transparency notice: a device gained or lost the ability to
@@ -440,12 +464,16 @@ impl HistoryStore {
 
     /// Attachment redaction: re-seal the row without that attachment ref. The
     /// only purge that needs the key, because attachments live inside the blob.
-    pub fn redact_attachment(&self, channel_id: u64, message_id: u64, attachment: &str) -> Result<bool> {
+    ///
+    /// The attachment is named by its per-file `key_hex`, because forgetting the
+    /// key is precisely what makes the blob unopenable — the bytes may still sit
+    /// on a server, and after this they are noise to us forever.
+    pub fn redact_attachment(&self, channel_id: u64, message_id: u64, key_hex: &str) -> Result<bool> {
         let Some(mut rec) = self.get(channel_id, message_id)? else {
             return Ok(false);
         };
         let before = rec.attachments.len();
-        rec.attachments.retain(|a| a != attachment);
+        rec.attachments.retain(|a| a.key_hex != key_hex);
         if rec.attachments.len() == before {
             return Ok(false);
         }
@@ -680,16 +708,52 @@ mod tests {
         );
     }
 
+    fn att(key: &str, name: &str) -> HistoryAttachment {
+        HistoryAttachment {
+            key_hex: key.into(),
+            file_name: name.into(),
+            mime_type: "image/png".into(),
+        }
+    }
+
     #[test]
     fn redacting_an_attachment_reseals_without_it() {
         let s = HistoryStore::open_in_memory(keys(1)).unwrap();
         let mut r = rec(9, 1, "with files");
-        r.attachments = vec!["a.png".into(), "b.png".into()];
+        r.attachments = vec![att("aa", "a.png"), att("bb", "b.png")];
         s.put(&r).unwrap();
 
-        assert!(s.redact_attachment(9, 1, "a.png").unwrap());
-        assert_eq!(s.get(9, 1).unwrap().unwrap().attachments, vec!["b.png".to_string()]);
-        assert!(!s.redact_attachment(9, 1, "a.png").unwrap(), "already gone");
+        assert!(s.redact_attachment(9, 1, "aa").unwrap());
+        assert_eq!(s.get(9, 1).unwrap().unwrap().attachments, vec![att("bb", "b.png")]);
+        assert!(!s.redact_attachment(9, 1, "aa").unwrap(), "already gone");
+    }
+
+    /// The whole reason attachments are stored at all: a sealed message can be
+    /// opened exactly once, so a key that does not survive the restart is a file
+    /// nobody can ever open again.
+    #[test]
+    fn attachment_refs_survive_the_seal_round_trip() {
+        let s = HistoryStore::open_in_memory(keys(1)).unwrap();
+        let mut r = rec(4, 2, "photo");
+        r.attachments = vec![att(&"ab".repeat(32), "holiday.png")];
+        s.put(&r).unwrap();
+
+        let back = s.get(4, 2).unwrap().unwrap();
+        assert_eq!(back.attachments, r.attachments);
+        // And they are sealed at rest like the rest of the row: the claimed name
+        // must not be readable in the stored bytes.
+        let raw: Vec<u8> = s
+            .conn
+            .query_row(
+                "SELECT sealed FROM messages WHERE channel_id = 4 AND message_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !raw.windows(11).any(|w| w == b"holiday.png"),
+            "the claimed filename must not sit in the clear on disk",
+        );
     }
 
     fn notice(id: &str, kind: &str) -> NoticeRecord {

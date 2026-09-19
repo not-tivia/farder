@@ -41,6 +41,22 @@ When adding or touching a Tauri command:
   `generate_handler!` all agree.
 - The frontend↔backend command seam can be audited mechanically: every
   `invoke("...")` name must appear in the handler list. Keep it at zero drift.
+  `python3 scripts/seam_audit.py`.
+
+**The seam lining up is not the same as the feature being reachable.** A command
+can be written, registered, documented and wrapped in `tauri-bridge.ts` while
+nothing in the app ever calls the wrapper — blocking shipped with no way to
+unblock, "delete my data" shipped with no UI, encrypted-channel search shipped
+with nothing to search from. `python3 scripts/reachability_audit.py` asks whether
+a path exists from the UI to each command, and fails on any unreachable command
+not recorded in `scripts/dormant_allowlist.txt` with a reason. Run it alongside
+the seam audit; if something is meant to be dormant, say so in the allowlist
+rather than leaving it to be rediscovered.
+
+`python3 scripts/doc_audit.py` is the same idea for the documentation rule
+below: every registered command must appear in `docs/modules/tauri-commands.md`.
+An undocumented command is invisible — it works, so nothing complains, and the
+next person reads the implementation instead.
 
 ## Scope of trust
 
@@ -105,7 +121,7 @@ any feature complete, run this checklist:
 - [ ] New Tauri event in `bridge.rs`? → `docs/modules/tauri-bridge.md` lists the
       event name, payload, and the `useServerEvents.ts` listener that consumes it.
 - [ ] New public Rust fn in a crate? → the relevant `docs/modules/*.md` has an entry.
-- [ ] New React hook / context action? → `frontend-hooks.md` / `frontend-context.md`.
+- [ ] New React hook / context action? → `frontend-hooks.md` / `frontend-state.md`.
 - [ ] New crate, layer, or data-flow path? → `ARCHITECTURE.md` reflects it.
 
 When auditing or onboarding, prefer reading these docs first; if a doc is

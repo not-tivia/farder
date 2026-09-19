@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from "react";
-import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, MlsChannelStateInfo, SealedDecryptEntry } from "../lib/types";
+import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, MlsChannelStateInfo, SealedDecryptEntry, SealedAttachmentRef, OwnSealedSend } from "../lib/types";
 import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 import type { NoticeRow } from "../lib/tauri-bridge";
 
@@ -72,7 +72,7 @@ export interface PerServerState {
    *  So the author's own messages MUST render from what they typed; handing the
    *  echo to `decrypt_sealed_message` shows the author their own words as
    *  "couldn't decrypt". Entries are consumed when the echo arrives. */
-  ownSealedSends: Record<string, string>;
+  ownSealedSends: Record<string, OwnSealedSend>;
 }
 
 export interface AppState {
@@ -157,6 +157,7 @@ export type AppAction =
   | { type: "NEW_MESSAGE"; serverId: string; payload: MessageInfo }
   | { type: "MESSAGE_EDITED"; serverId: string; payload: { channelId: number; messageId: number; newContent: string; editedAt: number } }
   | { type: "MESSAGE_DELETED"; serverId: string; payload: { channelId: number; messageId: number } }
+  | { type: "MESSAGE_PIN_CHANGED"; serverId: string; payload: { channelId: number; messageId: number; pinned: boolean } }
   | { type: "ATTACHMENT_REDACTED"; serverId: string; payload: { contentHash: string; byModerator: boolean } }
   | { type: "REACTION_ADDED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; me: boolean; fileId?: number } }
   | { type: "REACTION_REMOVED"; serverId: string; payload: { channelId: number; messageId: number; emoji: string; fileId?: number } }
@@ -204,12 +205,12 @@ export type AppAction =
   | { type: "ACTIVE_WIDGETS"; serverId: string; payload: { channelId: number; polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] } }
   | { type: "ADD_OR_UPDATE_MESSAGE"; serverId: string; payload: MessageInfo }
   | { type: "MLS_CONTROL_EVENT"; serverId: string; payload: MlsControlEventInfo }
-  | { type: "SEALED_DECRYPTED"; serverId: string; payload: { messageId: number; eventHash: string | null; content: string } }
+  | { type: "SEALED_DECRYPTED"; serverId: string; payload: { messageId: number; eventHash: string | null; content: string; attachments?: SealedAttachmentRef[] } }
   | { type: "SEALED_UNDECRYPTABLE"; serverId: string; payload: { messageId: number; eventHash: string | null; reason: string } }
   | { type: "MLS_STATE"; serverId: string; payload: { channelId: number; confirmed: boolean; outcome: "advanced" | "equivocation"; reason: string | null } }
   | { type: "HISTORY_HYDRATED"; serverId: string; payload: { channelId: number } }
   | { type: "SET_NOTICES"; serverId: string; payload: { channelId: number; notices: NoticeRow[] } }
-  | { type: "OWN_SEALED_SENT"; serverId: string; payload: { eventHash: string; content: string } };
+  | { type: "OWN_SEALED_SENT"; serverId: string; payload: { eventHash: string; content: string; attachments?: SealedAttachmentRef[] } };
 
 // Keep old ServerAction as alias
 export type ServerAction = AppAction;
@@ -325,6 +326,19 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         messages: { ...state.messages, [channelId]: msgs.filter((m) => m.id !== messageId) },
       };
     }
+    case "MESSAGE_PIN_CHANGED": {
+      const { channelId, messageId, pinned } = action.payload;
+      const msgs = state.messages[channelId] ?? [];
+      // A pin from another client arrives as an event; without this the row
+      // kept whatever `pinned` it was fetched with until the next refetch.
+      return {
+        ...state,
+        messages: {
+          ...state.messages,
+          [channelId]: msgs.map((m) => (m.id === messageId ? { ...m, pinned } : m)),
+        },
+      };
+    }
     case "ATTACHMENT_REDACTED": {
       const { contentHash, byModerator } = action.payload;
       const messages: typeof state.messages = {};
@@ -405,7 +419,10 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ...state,
         ownSealedSends: {
           ...state.ownSealedSends,
-          [action.payload.eventHash]: action.payload.content,
+          [action.payload.eventHash]: {
+            content: action.payload.content,
+            attachments: action.payload.attachments ?? [],
+          },
         },
       };
     case "SET_NOTICES":
@@ -432,6 +449,7 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
             kind: "decrypted",
             content: action.payload.content,
             eventHash: action.payload.eventHash,
+            attachments: action.payload.attachments ?? [],
           },
         },
       };

@@ -476,14 +476,16 @@ Welcome also advances + persists the device chain (`device_state.json`).
 
 ---
 
-### `send_sealed_message(state, server_id, log_server_id, channel_id, content, reply_to) -> Result<SendSealedMessageResult, String>`
+### `send_sealed_message(state, server_id, log_server_id, channel_id, content, reply_to, attachments) -> Result<SendSealedMessageResult, String>`
 
 **What it does:** seals + submits one E2EE channel message (T10). Runs under
 `run_e2ee` (spawn_blocking + nested runtime) because the vertical holds
 `&FarderMlsStore` across awaits. Resumes the on-disk store + group, refuses a
 poisoned group (F4), then calls the crate's proven `send_sealed` (build the
-`MessageEnvelope` with empty attachment vecs, enforce the client-side caps,
-seal against the current epoch, submit `MessagePostedE2ee`). On a bare
+`MessageEnvelope` — carrying any attachments' keys, real names and real MIMEs
+INSIDE the ciphertext — enforce the client-side caps, seal against the current
+epoch, submit `MessagePostedE2ee` with the caps describing the uploaded
+ciphertext). On a bare
 `"stale-epoch"` rejection it runs the crate's bounded `send_sealed_resync`
 (fetch winning commits → apply through the two gates with a roster-built
 `VerifiedCertResolver` → re-seal → resubmit) and persists the advanced
@@ -492,7 +494,16 @@ control-plane cursor. Never hand-rolls an MLS path.
 request; `log_server_id` — the genesis hash that stamps the events and keys the
 device chain; `channel_id` — the E2EE channel id; `content` — the message text;
 `reply_to` — an optional event-hash ref (`null` for a top-level post; legacy
-numeric replies are not mapped yet).
+numeric replies are not mapped yet); `attachments` — zero or more
+`SealedAttachmentInput { content_hash, size, key_hex, file_name, mime_type }`
+exactly as `upload_sealed_file` returned them (omit or pass `[]` for text-only).
+The cap's uploader is filled in from this identity rather than taken from the
+caller: the server validates a cap against the blob's `uploaded_by`, so any other
+value could only build an event that never materializes an attachment. A key that
+is not 32 bytes of hex is refused rather than resized — a wrong-length key would
+seal a message whose file nobody, including the sender, could ever open.
+**Empty `content` is allowed only when there is an attachment** (a voice message
+is exactly that case).
 **Returns:** `SendSealedMessageResult { event_hash, epoch }`.
 **Side effects:** advances + persists the device chain (`device_state.json`) on
 acceptance; on resync persists the advanced epoch/cursor to
@@ -826,6 +837,100 @@ returns the path in `saved_path`.
 **Side effects:** opens a new QUIC bi-stream; may write a file to the OS downloads
 directory.
 **invoke name:** `"download_file"` → `downloadFile()`.
+
+---
+
+### `get_local_servers(procs) -> Vec<ManagedServer>` / `stop_local_server(procs, port)`
+
+**What they do:** list the `farder-server` processes this client supervises, and
+stop one by its port handle. Both were registered with no caller: nothing showed
+a hosted server and nothing could stop one short of quitting the app (they ARE
+killed on exit — `main.rs`'s `ExitRequested` handler calls `stop_all`).
+**Called by:** the "Hosted Servers" settings section, which confirms before
+stopping (members lose their connection) and re-reads the list afterwards.
+**Note:** `ManagedServer.relayed` had drifted out of the TypeScript shape; a
+relayed server binds no local port, so `port` there is a process handle rather
+than an address.
+**invoke names:** `"get_local_servers"` → `getLocalServers()`,
+`"stop_local_server"` → `stopLocalServer(port)`.
+
+---
+
+### `pin_message(state, server_id, message_id)` / `unpin_message(...)`
+
+**What they do:** pin or unpin a message. MANAGE_MESSAGES, enforced server-side;
+the UI hides the action without the permission, but the refusal is the server's.
+**Why they are new:** pinning was fully implemented server-side when it shipped —
+the permission check, the `messages.pinned` column, the `MessagePinned` /
+`MessageUnpinned` broadcasts — and completely unreachable. No command, no bridge
+wrapper, no UI, and `bridge.rs` dropped both events on the floor.
+**Called by:** the message context menu in `Message.tsx`. The new state arrives
+as a broadcast rather than being applied optimistically, so this client and
+everyone else learn it the same way.
+**invoke names:** `"pin_message"` → `pinMessage()`, `"unpin_message"` → `unpinMessage()`.
+
+---
+
+### `list_blocked(state, server_id) -> Result<Vec<BlockedUserInfo>, String>`
+
+**What it does:** returns who THIS identity has blocked on that server, newest
+first. `ServerRequest::ListBlocked` takes no target: the server answers for the
+authenticated connection's key, so there is no request shape that asks about
+somebody else. A member never learns who blocked them — a block they could
+enumerate would be a notification.
+**Why it exists:** two places in the UI could block a member (the profile popup
+and the member context menu) and nothing could list or undo it. `unblock_user`
+had shipped with no caller at all.
+**Returns:** `BlockedUserInfo { public_key, display_name, blocked_at }` per entry.
+`display_name` is `null` once that member has left — the block outlives the
+membership, or it would become invisible and unrevocable the moment they walked
+out.
+**Called by:** `PrivacyDataSettings.tsx` ("Blocked Members"), which pairs each
+row with `unblock_user` and re-reads the list afterwards rather than splicing
+locally.
+**invoke name:** `"list_blocked"` → `listBlocked(serverId)`.
+
+---
+
+### `upload_sealed_file(state, server_id, channel_id, file_path) -> Result<SealedUploadOutcome, String>`
+
+**What it does:** the E2EE channel's upload (sub-6 W1). Reads the file, runs the
+client-side policy over it (`file_policy::safe_filename` on the name, then
+`check_contents` of the bytes against the type the extension claims), seals it
+under a fresh random key, and uploads the **ciphertext** through the same stream
+path as `upload_file`. A file that fails the policy is refused HERE, before any
+upload, so the user can still choose a different one.
+**What the server receives is deliberately uniform:** a blob named
+`attachment.bin` of type `application/octet-stream`, whose content hash is the
+hash of the ciphertext. The real name, the real MIME and the key go back to the
+caller to be sealed INSIDE the message by `send_sealed_message`.
+**Returns:** `SealedUploadOutcome { file_id, content_hash, size, key_hex, file_name, mime_type }` — `file_name` is the SANITIZED name.
+**Side effects:** opens a new QUIC bi-stream; network I/O. No plaintext leaves the
+machine.
+**invoke name:** `"upload_sealed_file"` → `uploadSealedFile()`.
+
+---
+
+### `download_sealed_file(state, server_id, file_id, key_hex, claimed_name, claimed_mime) -> Result<SealedDownloadResult, String>`
+
+**What it does:** fetches, opens and policy-checks one sealed attachment (sub-6
+W3). **The ordering is the whole point:** fetch ciphertext → open with the
+per-file key → sanitize the name → sniff the bytes against the claimed type →
+*only then* render or write. The server applied no file hardening to these bytes
+and could not have — it never saw them — so everything protecting the recipient
+happens here, in this order.
+**`claimed_name` and `claimed_mime` come from inside the message ciphertext and
+are attacker-controlled.** No server sanitizer has ever seen them. The name that
+comes back is the sanitized one; the MIME that comes back is the SNIFFED one, so
+a sender does not get to choose how their bytes are interpreted.
+**Returns:** `SealedDownloadResult` — tag-discriminated, so a refusal cannot be
+mistaken for a file: `{ kind: "opened", data_url, file_name, mime_type, saved_path }`
+or `{ kind: "refused", reason }`. A wrong key, a tampered blob, an unsafe name or
+bytes that contradict the claim all return `refused`.
+**Side effects:** opens a new QUIC bi-stream; for a non-inline type, writes the
+file to the OS downloads directory under the sanitized name (which by
+construction cannot escape that directory).
+**invoke name:** `"download_sealed_file"` → `downloadSealedFile()`.
 
 ---
 
@@ -2857,6 +2962,11 @@ consumed on first read), so rows are rendered from here instead.
 **What it does:** case-insensitive substring search over one channel's stored
 history. Sealed rows never enter the server's FTS index, so this is the ONLY way
 to search an E2EE channel.
+**Called by:** `MessageSearchOverlay.tsx` (sub-7b), once per encrypted channel of
+the active server, merged with the server's FTS results. A per-channel failure is
+swallowed — a locked identity is a state, not an error, and the plaintext
+channels' results are still worth showing. Local hits are marked in the list, so
+"found on this device" never reads as "found on the server".
 **invoke name:** `"history_search"` → `historySearch(channelId, query, limit)`.
 
 ### `history_purge_message(state, channel_id, message_id) -> Result<usize, String>`
@@ -2871,9 +2981,20 @@ nothing unless this device drops its decrypted copy too.
 ### `history_purge_before(state, channel_id, before_ts) -> Result<usize, String>`
 
 **What it does:** retention expiry for one channel.
+**Called by:** `useHistoryRetention.ts`, at most once per channel per 5 minutes,
+for every channel with a `retention_secs` window. It has to be client-driven: the
+server's retention task is a silent background sweep that broadcasts nothing, and
+for an E2EE channel the server is purging ciphertext while the readable copy sits
+here — so a retention window means nothing end to end unless this device sweeps
+its own store too.
 **invoke name:** `"history_purge_before"` → `historyPurgeBefore(channelId, beforeTs)`.
 
 ### `history_purge_author(state, author) -> Result<usize, String>`
+
+**Called by:** `useServerEvents.ts` on `server:member_data_deleted` — the event
+the server's deletion sweep now broadcasts when it executes a request. It carries
+the raw key bytes alongside the string form precisely because this command
+matches on the blind index over those bytes.
 
 **What it does:** anonymize-on-leave — drops everything one author wrote, found
 through the HMAC blind index so the author is never stored or compared in the
@@ -2933,3 +3054,63 @@ is entitled to a leaf.
 **Side effects:** moves the local state to the new generation and **clears the
 cursor and rekey cadence**, which described a group that no longer exists.
 **invoke name:** `"reset_e2ee_channel"` → `resetE2eeChannel(...)`.
+
+---
+
+## Group 28 — the six that had escaped this document
+
+Added 2026-09-19 after `scripts/doc_audit.py` compared the handler list against
+this file. Six registered commands had no entry; they are as real as the rest.
+
+### `submit_message_deleted(state, server_id, log_server_id, channel_id, target, own_message) -> Result<EventAcceptedResult, String>`
+
+**What it does:** deletes a log-sourced message by writing a `MessageDeleted`
+**event**, rather than only asking the server to drop the derived row. On a mesh
+server the visible row is DERIVED from the log; the legacy `delete_message`
+removes only that row, so `reconcile_messages` re-derives it at the next start
+and **the message comes back**. Everything server-side was already correct —
+`apply_tombstone` hard-deletes the row and reconcile consults the tombstone set
+at every boot — nothing was writing the event.
+**Parameters:** `target` is the target message's event hash; `own_message`
+selects the reason the fold checks (`Author` for your own, `Moderation`
+otherwise — sending the wrong one is refused, not downgraded).
+**Side effects:** advances and persists the device chain.
+**invoke name:** `"submit_message_deleted"` → `submitMessageDeleted(...)`, via
+`deleteMessageAnywhere()`, which picks this path when the row has an event hash
+and the legacy one when it does not.
+
+### `e2ee_channel_leaves(state, log_server_id, channel_id) -> Result<Vec<ChannelLeafInfo>, String>`
+
+**What it does:** the MLS group's current leaves for one channel — who can read
+it, right now, as the local group state sees it. `is_own` marks this device.
+Read-only; opens no ciphertext and advances nothing.
+**invoke name:** `"e2ee_channel_leaves"` → `e2eeChannelLeaves(...)`.
+
+### `get_server_info_v2(state, server_id) -> Result<ServerInfoV2Result, String>`
+
+**What it does:** the v2 connect surface: the same server info as
+`get_server_info` plus each channel's **class**, which is what tells the client
+a channel is encrypted. Supersedes `get_server_info` (kept registered, now
+unused — see `scripts/dormant_allowlist.txt`).
+**invoke name:** `"get_server_info_v2"` → `getServerInfoV2()`, used by
+`refreshServerClasses`.
+
+### `history_put_notice(state, notice)` / `history_notices(state, channel_id, limit)`
+
+**What they do:** store and read the in-channel transparency notices — a device
+gained or lost the ability to read this channel. They live in the local history
+store, sealed like everything else in it, because a notice you can miss by being
+offline is not transparency. `history_notices` returns them oldest-first, the
+order they render in the timeline.
+**Called by:** `useMlsSteward.ts`, which records a notice for each leaf change it
+observes.
+**invoke names:** `"history_put_notice"` → `historyPutNotice(notice)`,
+`"history_notices"` → `historyNotices(channelId, limit)`.
+
+### `save_recovery_image(png_base64) -> Result<bool, String>`
+
+**What it does:** offers a Save-as dialog for the recovery-phrase image the
+frontend rendered, defaulting to `farder-recovery-phrase.png`. Returns whether a
+file was written (`false` = the user cancelled, which is not an error).
+**Side effects:** writes the PNG the caller passed, wherever the user chose.
+**invoke name:** `"save_recovery_image"` → `saveRecoveryImage(pngBase64)`.

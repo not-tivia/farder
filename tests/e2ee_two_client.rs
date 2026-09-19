@@ -511,6 +511,93 @@ struct DriveResult {
     owner_pk: PublicKey,
     owner_ciphertext: Vec<u8>,
     joiner_ciphertext: Vec<u8>,
+    /// Present when the drive was given a file to send (sub-6 W5).
+    attachment: Option<DrivenAttachment>,
+}
+
+/// A file the owner sealed and sent, plus what the joiner made of it.
+struct DrivenAttachment {
+    /// The blob id the server assigned to the CIPHERTEXT.
+    file_id: u64,
+    /// The per-file key. Kept so the observation can look for it: a key that
+    /// reached the server would undo the whole exercise.
+    key: [u8; 32],
+    /// What the joiner actually got back after opening the blob and running the
+    /// client-side policy over it.
+    joiner_opened: Vec<u8>,
+    /// The name the joiner's policy produced from the sender's claim.
+    joiner_safe_name: String,
+}
+
+/// A file for the drive to send: plaintext bytes and the name to claim.
+struct AttachmentFixture<'a> {
+    bytes: &'a [u8],
+    file_name: &'a str,
+    mime_type: &'a str,
+}
+
+/// Upload bytes over the REAL file protocol (UploadRequest -> Ready -> bytes ->
+/// Complete), the same wire path `upload_bytes_with_channel` drives. Returns the
+/// server-assigned file id.
+///
+/// Driven over the wire rather than inserted into the database, because the
+/// claim being tested is about what the SERVER ends up holding.
+async fn upload_blob(
+    conn: &Connection,
+    channel_id: u64,
+    data: &[u8],
+    file_name: &str,
+    mime_type: &str,
+) -> u64 {
+    use farder_protocol::server::{UploadRequest, UploadResponse};
+
+    let (mut send, mut recv) = conn.open_bi().await.expect("open upload stream");
+    let req = UploadRequest {
+        channel_id,
+        file_name: file_name.to_string(),
+        file_size: data.len() as u64,
+        hash: farder_server::attachments::compute_sha256(data),
+        mime_type: mime_type.to_string(),
+        width: None,
+        height: None,
+        duration_secs: None,
+    };
+    write_frame(&mut send, &codec::encode(&req).unwrap()).await.unwrap();
+    match codec::decode::<UploadResponse>(&read_frame(&mut recv).await.unwrap()).unwrap() {
+        UploadResponse::Ready => {}
+        other => panic!("expected Ready, got {other:?}"),
+    }
+    send.write_all(data).await.unwrap();
+    send.finish().unwrap();
+    match codec::decode::<UploadResponse>(&read_frame(&mut recv).await.unwrap()).unwrap() {
+        UploadResponse::Complete { file_id } => file_id,
+        other => panic!("expected Complete, got {other:?}"),
+    }
+}
+
+/// Download a blob over the real protocol. Returns (bytes, the name the SERVER
+/// holds, the type the SERVER holds) -- all three are part of what the
+/// observation checks.
+async fn download_blob(conn: &Connection, file_id: u64) -> (Vec<u8>, String, String) {
+    use farder_protocol::server::{DownloadRequest, DownloadResponse};
+
+    let (mut send, mut recv) = conn.open_bi().await.expect("open download stream");
+    let req = DownloadRequest { file_id };
+    write_frame(&mut send, &codec::encode(&req).unwrap()).await.unwrap();
+    match codec::decode::<DownloadResponse>(&read_frame(&mut recv).await.unwrap()).unwrap() {
+        DownloadResponse::Start { file_name, file_size, mime_type, .. } => {
+            let mut data = Vec::with_capacity(file_size as usize);
+            while (data.len() as u64) < file_size {
+                let mut buf = vec![0u8; 65536];
+                match recv.read(&mut buf).await {
+                    Ok(Some(n)) if n > 0 => data.extend_from_slice(&buf[..n]),
+                    _ => break,
+                }
+            }
+            (data, file_name, mime_type)
+        }
+        DownloadResponse::Error { reason } => panic!("download refused: {reason}"),
+    }
 }
 
 async fn fetch_ciphertext_by_author(
@@ -536,10 +623,24 @@ async fn drive_full_path(
     owner_plaintext: &str,
     joiner_plaintext: &str,
 ) -> DriveResult {
+    drive_full_path_with(endpoint, addr, _state, setup_hex, owner_plaintext, joiner_plaintext, None)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_full_path_with(
+    endpoint: &Endpoint,
+    addr: SocketAddr,
+    _state: &Arc<farder_server::state::ServerState>,
+    setup_hex: &str,
+    owner_plaintext: &str,
+    joiner_plaintext: &str,
+    attachment: Option<AttachmentFixture<'_>>,
+) -> DriveResult {
     // ---- Owner connects with the setup token ----
     let owner_kp = Keypair::generate();
     let owner_dev = Keypair::generate();
-    let (owner_transport, _owner_conn) =
+    let (owner_transport, owner_conn) =
         connect_identity(endpoint, addr, &owner_kp, None, Some(setup_hex)).await;
 
     // Owner creates an invite (legacy) + learns the log server id.
@@ -598,7 +699,7 @@ async fn drive_full_path(
     // ---- Joiner connects with the invite ----
     let joiner_kp = Keypair::generate();
     let joiner_dev = Keypair::generate();
-    let (joiner_transport, _joiner_conn) =
+    let (joiner_transport, joiner_conn) =
         connect_identity(endpoint, addr, &joiner_kp, Some(&invite_code), None).await;
 
     // ---- Joiner mesh-log join (DeviceAuthorized -> ResolveInvite -> MemberJoined) ----
@@ -741,12 +842,47 @@ async fn drive_full_path(
 
     // 6. Owner sends a sealed message; the joiner fetches the ciphertext and
     //    decrypts it, asserting the EXACT plaintext.
+    let mut uploaded_file_id: Option<u64> = None;
+    // 6a (sub-6 W5). Seal the file FIRST, upload the ciphertext over the real
+    // upload protocol, and describe that ciphertext in the cap. What the server
+    // is handed is a neutral `attachment.bin` of octet-stream; the key, the real
+    // name and the real type go inside the message.
+    let sealed_attachments: Vec<farder_e2ee_client::SealedAttachment> = match &attachment {
+        None => Vec::new(),
+        Some(fx) => {
+            let (file_key, ciphertext) =
+                farder_crypto::file_policy::seal_file(fx.bytes).expect("seal file");
+            let content_hash = farder_server::attachments::compute_sha256(&ciphertext);
+            let file_id = upload_blob(
+                &owner_conn,
+                CHANNEL_ID,
+                &ciphertext,
+                "attachment.bin",
+                "application/octet-stream",
+            )
+            .await;
+            uploaded_file_id = Some(file_id);
+            vec![farder_e2ee_client::SealedAttachment {
+                cap: farder_crypto::event_log::AttachmentCap {
+                    content_hash,
+                    declared_type: "application/octet-stream".to_string(),
+                    size: ciphertext.len() as u64,
+                    uploader: owner_kp.public_key(),
+                },
+                key: file_key,
+                filename: fx.file_name.to_string(),
+                mime: fx.mime_type.to_string(),
+            }]
+        }
+    };
+
     let owner_seal = SealContext {
         key: &key,
         generation: 0,
         store: &created.store,
         content: owner_plaintext,
         reply_to: None,
+        attachments: &sealed_attachments,
     };
     send_sealed(
         &owner_transport,
@@ -761,12 +897,50 @@ async fn drive_full_path(
 
     let owner_ciphertext =
         fetch_ciphertext_by_author(&joiner_transport, CHANNEL_ID, &owner_kp.public_key()).await;
-    match receive_sealed(&joiner_store, &mut joiner_group, owner_ciphertext.clone()) {
-        SealedOutcome::Decrypted(env) => assert_eq!(env.content, owner_plaintext),
+    let owner_envelope = match receive_sealed(&joiner_store, &mut joiner_group, owner_ciphertext.clone()) {
+        SealedOutcome::Decrypted(env) => {
+            assert_eq!(env.content, owner_plaintext);
+            env
+        }
         SealedOutcome::Undecryptable { reason } => {
             panic!("joiner could not decrypt the owner's sealed message: {reason}")
         }
-    }
+    };
+
+    // 6b. The joiner opens the file the way the client does: fetch the blob,
+    // open it with the key that came out of the ciphertext, then run the policy
+    // BEFORE treating the result as a file at all.
+    let driven_attachment = match (&attachment, uploaded_file_id) {
+        (Some(fx), Some(file_id)) => {
+            assert_eq!(owner_envelope.attachment_keys.len(), 1, "one key rode inside the message");
+            assert_eq!(owner_envelope.filenames, vec![fx.file_name.to_string()]);
+            assert_eq!(owner_envelope.mimes, vec![fx.mime_type.to_string()]);
+
+            let (blob, server_name, server_mime) = download_blob(&joiner_conn, file_id).await;
+            // What the server serves is the ciphertext under the neutral name.
+            assert_eq!(server_name, "attachment.bin");
+            assert_eq!(server_mime, "application/octet-stream");
+            assert_ne!(blob.as_slice(), fx.bytes, "the server must not hold the file's bytes");
+
+            let opened = farder_crypto::file_policy::open_file(
+                &owner_envelope.attachment_keys[0],
+                &blob,
+            )
+            .expect("the joiner's key opens the blob");
+            let safe_name = farder_crypto::file_policy::safe_filename(&owner_envelope.filenames[0])
+                .expect("the claimed name survives sanitization");
+            farder_crypto::file_policy::check_contents(&opened, &owner_envelope.mimes[0])
+                .expect("the opened bytes match the claimed type");
+
+            Some(DrivenAttachment {
+                file_id,
+                key: owner_envelope.attachment_keys[0],
+                joiner_opened: opened,
+                joiner_safe_name: safe_name,
+            })
+        }
+        _ => None,
+    };
 
     // 7. Joiner replies sealed; the owner fetches and decrypts that.
     let joiner_seal = SealContext {
@@ -775,6 +949,7 @@ async fn drive_full_path(
         store: &joiner_store,
         content: joiner_plaintext,
         reply_to: None,
+        attachments: &[],
     };
     send_sealed(
         &joiner_transport,
@@ -803,6 +978,7 @@ async fn drive_full_path(
         owner_pk: owner_kp.public_key(),
         owner_ciphertext,
         joiner_ciphertext,
+        attachment: driven_attachment,
     }
 }
 
@@ -846,6 +1022,96 @@ async fn no_plaintext_reaches_any_table() {
     let guard = state.db.lock().unwrap();
     common::assert_no_plaintext_anywhere(&guard, OWNER_PLAINTEXT);
     common::assert_no_plaintext_anywhere(&guard, JOINER_PLAINTEXT);
+}
+
+// ---------------------------------------------------------------------------
+// Test 3b — sub-6 W5: a sealed FILE crosses two clients, and the server learns
+// neither its bytes nor its name
+// ---------------------------------------------------------------------------
+
+/// Distinctive enough that finding it anywhere is unambiguous.
+const FILE_PLAINTEXT: &[u8] = b"PAYROLL 2026: everyone's salary, in a file nobody else may read.";
+/// The name is a leak of its own — "salaries.txt" tells you plenty without the
+/// bytes — so the observation covers it too.
+const FILE_CLAIMED_NAME: &str = "salaries-and-severance.txt";
+
+#[tokio::test]
+async fn a_sealed_file_crosses_two_clients_and_the_server_learns_nothing() {
+    let (addr, state, endpoint, setup_hex) = spawn_server().await;
+    let result = drive_full_path_with(
+        &endpoint,
+        addr,
+        &state,
+        &setup_hex,
+        OWNER_PLAINTEXT,
+        JOINER_PLAINTEXT,
+        Some(AttachmentFixture {
+            bytes: FILE_PLAINTEXT,
+            file_name: FILE_CLAIMED_NAME,
+            mime_type: "text/plain",
+        }),
+    )
+    .await;
+
+    // 1. The joiner really did get the file back, byte for byte, through the
+    //    policy — not merely "a download succeeded".
+    let att = result.attachment.expect("the drive was given a file to send");
+    assert_eq!(att.joiner_opened, FILE_PLAINTEXT, "the joiner opened the sender's exact bytes");
+    assert_eq!(att.joiner_safe_name, FILE_CLAIMED_NAME);
+
+    // 2. The observation. None of the three things that matter — the bytes, the
+    //    name, or the key — reached any table, at the byte level.
+    {
+        let guard = state.db.lock().unwrap();
+        common::assert_no_plaintext_anywhere(
+            &guard,
+            std::str::from_utf8(FILE_PLAINTEXT).unwrap(),
+        );
+        common::assert_no_plaintext_anywhere(&guard, FILE_CLAIMED_NAME);
+        common::assert_no_bytes_anywhere(&guard, &att.key, "the per-file key");
+    }
+
+    // 3. And not to the blob store either. The server holds a file; what it
+    //    holds must be ciphertext.
+    let storage_dir = state.storage_dir.clone();
+    let mut blobs_scanned = 0usize;
+    for entry in walk_files(std::path::Path::new(&storage_dir)) {
+        let bytes = std::fs::read(&entry).unwrap();
+        blobs_scanned += 1;
+        assert!(
+            !contains(&bytes, FILE_PLAINTEXT),
+            "the file's bytes are sitting in the clear at {}",
+            entry.display(),
+        );
+        assert!(
+            !contains(&bytes, FILE_CLAIMED_NAME.as_bytes()),
+            "the file's name is sitting in the clear at {}",
+            entry.display(),
+        );
+    }
+    assert!(blobs_scanned > 0, "the upload must have produced a stored blob to scan");
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

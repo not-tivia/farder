@@ -817,6 +817,7 @@ dependencies = [
  "openmls",
  "rmp-serde",
  "serde",
+ "sha2",
  "tls_codec",
  "tokio",
 ]

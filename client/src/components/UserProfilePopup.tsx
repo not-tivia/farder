@@ -32,7 +32,8 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
   });
   const initial = memberDisplayName(member.display_name).charAt(0).toUpperCase();
 
-  const defaultBannerColor = `hsl(${Math.abs(pkStr.split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % 360}, 50%, 40%)`;
+  const defaultHue = Math.abs(pkStr.split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % 360;
+  const defaultBannerColor = `hsl(${defaultHue}, 50%, 40%)`;
 
   const { avatarUrl: remoteAvatarUrl, status: remoteStatus } = useMemberProfile(serverId, pkStr, member.profile_hash);
 
@@ -60,6 +61,35 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
 
   const shownAvatar = isSelf ? (overrideUrl ?? avatarUrl) : remoteAvatarUrl;
 
+  // `<input type="color">` only speaks hex, and the default banner is an hsl()
+  // string derived from the key, so the picker needs the same colour in the form
+  // it understands -- otherwise opening it shows black and "cancel" silently
+  // becomes "set it to black".
+  function hslToHex(h: number, s: number, l: number): string {
+    const a = (s / 100) * Math.min(l / 100, 1 - l / 100);
+    const channel = (n: number) => {
+      const k = (n + h / 30) % 12;
+      const v = l / 100 - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+      return Math.round(255 * v).toString(16).padStart(2, "0");
+    };
+    return `#${channel(0)}${channel(8)}${channel(4)}`;
+  }
+
+  const pickerValue = /^#[0-9a-fA-F]{6}$/.test(bannerColor)
+    ? bannerColor
+    : hslToHex(defaultHue, 50, 40);
+
+  async function chooseBannerColor(color: string) {
+    // Optimistic: the write is a local file, and reverting a banner colour on a
+    // failed write would be more confusing than leaving it.
+    setBannerColor(color);
+    try {
+      await api.setProfileColor(color);
+    } catch (err) {
+      toast.error(`Couldn't save your profile colour: ${err}`);
+    }
+  }
+
   async function saveBio() {
     const trimmed = bioInput.trim();
     await api.setBio(trimmed);
@@ -84,8 +114,32 @@ export default function UserProfilePopup({ member: initialMember, roles: initial
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={onClose} />
       <div ref={cardRef} className="profile-card" style={style}>
-        {/* Banner */}
-        <div className="profile-card-banner" style={{ background: bannerColor }} />
+        {/* Banner. Your own is editable: `get_profile_color` has always been
+            read here, but nothing ever called `set_profile_color`, so the colour
+            could never be anything but the one derived from your key. */}
+        <div className="profile-card-banner" style={{ background: bannerColor, position: "relative" }}>
+          {isSelf && (
+            <label
+              title="Change your profile colour"
+              style={{
+                position: "absolute",
+                right: 6,
+                bottom: 6,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="color"
+                value={pickerValue}
+                onChange={(e) => { void chooseBannerColor(e.target.value); }}
+                style={{ width: 22, height: 18, padding: 0, border: "none", background: "none", cursor: "pointer" }}
+              />
+            </label>
+          )}
+        </div>
 
         {/* Avatar */}
         <div className="profile-card-avatar-row">

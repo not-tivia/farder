@@ -27,7 +27,7 @@
 //! contract (`LeafBindingFailure` ⇒ terminal for the group instance) does not
 //! arise here; it remains Task 6's (resync/abort) to own.
 
-use farder_crypto::event_log::{EventPayload, EventRef, MAX_E2EE_CIPHERTEXT_BYTES};
+use farder_crypto::event_log::{AttachmentCap, EventPayload, EventRef, MAX_E2EE_CIPHERTEXT_BYTES};
 use farder_mls::credential::DeviceSigner;
 use farder_mls::envelope::{check_preseal_limits, MessageEnvelope};
 use farder_mls::group::MlsChannelGroup;
@@ -67,6 +67,37 @@ pub struct SealContext<'a> {
     pub store: &'a FarderMlsStore,
     pub content: &'a str,
     pub reply_to: Option<EventRef>,
+    /// Attachments already sealed and uploaded (sub-6). Empty for a text-only
+    /// message. See [`SealedAttachment`] for why the split is what it is.
+    pub attachments: &'a [SealedAttachment],
+}
+
+/// One attachment of a sealed message, already sealed and uploaded.
+///
+/// The split between what goes in the PAYLOAD and what goes in the ENVELOPE is
+/// the whole design, so it is spelled out here rather than left to the caller:
+///
+/// - `cap` rides in the event payload, in the clear. It describes the CIPHERTEXT
+///   — its hash, its size, and `application/octet-stream` — which is exactly
+///   what the server needs to validate the blob it stores, and reveals nothing
+///   about the file.
+/// - `key`, `filename` and `mime` ride INSIDE the message ciphertext, so only
+///   members learn what the file actually is or can open it.
+///
+/// Getting that backwards would hand the host the filename, which is often the
+/// most revealing part of a file.
+pub struct SealedAttachment {
+    /// Describes the uploaded CIPHERTEXT (hash, size, octet-stream).
+    pub cap: AttachmentCap,
+    /// The random per-file key. Travels inside the message ciphertext only.
+    pub key: [u8; 32],
+    /// The real filename, attacker-controlled on receipt — the recipient MUST
+    /// run `farder_crypto::file_policy::safe_filename` before any write or
+    /// render, never trusting this value as given.
+    pub filename: String,
+    /// The real MIME, likewise unverified until the recipient sniffs the opened
+    /// bytes against it.
+    pub mime: String,
 }
 
 /// The result of a successful [`send_sealed`].
@@ -125,12 +156,14 @@ pub async fn send_sealed<T: E2eeTransport + Sync>(
         E2eeError::chain("sealed send needs a prior event to attest its folded head")
     })?;
 
-    // 3. Build the envelope. Attachments are sub-6: empty in-band vecs.
+    // 3. Build the envelope. The per-file keys, real filenames and real MIME
+    //    types go INSIDE the ciphertext (sub-6): only members may learn what a
+    //    file is or open it. The caps stay outside, describing the ciphertext.
     let envelope = MessageEnvelope {
         content: ctx.content.to_string(),
-        attachment_keys: vec![],
-        filenames: vec![],
-        mimes: vec![],
+        attachment_keys: ctx.attachments.iter().map(|a| a.key).collect(),
+        filenames: ctx.attachments.iter().map(|a| a.filename.clone()).collect(),
+        mimes: ctx.attachments.iter().map(|a| a.mime.clone()).collect(),
     };
 
     // 4. Enforce the client-side caps BEFORE sealing, so an over-cap message
@@ -177,7 +210,7 @@ pub async fn send_sealed<T: E2eeTransport + Sync>(
             epoch,
             ciphertext,
             reply_to: ctx.reply_to.clone(),
-            attachments: vec![],
+            attachments: ctx.attachments.iter().map(|a| a.cap.clone()).collect(),
             authz_head,
         },
     );
@@ -345,7 +378,6 @@ mod tests {
                 attachments,
                 authz_head,
             } => {
-                assert!(attachments.is_empty(), "attachments are empty in Task 5");
                 (
                     ciphertext,
                     reply_to,
@@ -384,6 +416,7 @@ mod tests {
             store: &f.alice_store,
             content: "hello over the sealed channel",
             reply_to: None,
+            attachments: &[],
         };
         let sent = send_sealed(
             &transport,
@@ -417,6 +450,7 @@ mod tests {
             store: &f.bob_store,
             content: "roger that",
             reply_to: None,
+            attachments: &[],
         };
         send_sealed(
             &transport,
@@ -456,6 +490,7 @@ mod tests {
             store: &f.alice_store,
             content: "history probe",
             reply_to: None,
+            attachments: &[],
         };
         send_sealed(
             &transport,
@@ -507,6 +542,7 @@ mod tests {
             store: &f.alice_store,
             content: "can i read myself",
             reply_to: None,
+            attachments: &[],
         };
         send_sealed(&transport, &alice_actor, &mut alice_chain, &ctx, &mut f.alice_group,
                     &SendEligibility::confirmed()).await.unwrap();
@@ -524,6 +560,110 @@ mod tests {
             receive_sealed(&f.bob_store, &mut f.bob_group, ciphertext),
             "can i read myself",
         );
+    }
+
+    /// The sub-6 split, stated as a test because getting it backwards would hand
+    /// the host the filename — often the most revealing part of a file.
+    ///
+    /// The CAP goes in the event payload in the clear and describes only the
+    /// ciphertext. The KEY, real filename and real MIME go inside the message
+    /// ciphertext, where only members can reach them.
+    #[tokio::test]
+    async fn an_attachment_puts_its_cap_outside_and_its_key_and_name_inside() {
+        let mut f = two_member(1 << 63);
+        let k = key(1 << 63);
+        let transport = FakeTransport::new();
+        let alice_actor = actor(&f.alice_id, &f.alice_dev);
+        let mut alice_chain = mid_chain();
+
+        let file_bytes = b"\x89PNG\r\n\x1a\n pretend picture";
+        let (file_key, blob) = farder_crypto::file_policy::seal_file(file_bytes).unwrap();
+        let cap = farder_crypto::event_log::AttachmentCap {
+            content_hash: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&blob)),
+            declared_type: "application/octet-stream".to_string(),
+            size: blob.len() as u64,
+            uploader: f.alice_id.public_key(),
+        };
+        let attachments = vec![SealedAttachment {
+            cap: cap.clone(),
+            key: file_key,
+            filename: "holiday-photo.png".to_string(),
+            mime: "image/png".to_string(),
+        }];
+
+        let ctx = SealContext {
+            key: &k,
+            generation: 0,
+            store: &f.alice_store,
+            content: "look at this",
+            reply_to: None,
+            attachments: &attachments,
+        };
+        send_sealed(&transport, &alice_actor, &mut alice_chain, &ctx, &mut f.alice_group,
+                    &SendEligibility::confirmed()).await.unwrap();
+
+        let (ciphertext, _reply, caps, ..) = last_sealed_payload(&transport);
+
+        // Outside: the cap must describe the CIPHERTEXT and nothing else.
+        // Read the SUBMITTED EVENT rather than the lossy helper — an earlier
+        // version of this test asserted only on content hashes, and a mutation
+        // that leaked the real MIME into the public cap passed it happily.
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0], cap.content_hash);
+        assert_ne!(
+            caps[0],
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(file_bytes)),
+            "the cap must hash the ciphertext, never the file itself"
+        );
+        let submitted = transport.submitted();
+        let sealed_event = submitted
+            .iter()
+            .rev()
+            .find(|e| matches!(e.core.payload, EventPayload::MessagePostedE2ee { .. }))
+            .expect("a sealed send was submitted");
+        let EventPayload::MessagePostedE2ee { attachments: sent_caps, .. } =
+            &sealed_event.core.payload
+        else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(sent_caps.len(), 1);
+        assert_eq!(
+            sent_caps[0].declared_type, "application/octet-stream",
+            "the public cap must stay neutral — the real MIME belongs inside the ciphertext"
+        );
+        assert_eq!(sent_caps[0].size, blob.len() as u64, "the cap sizes the blob");
+
+        // And nothing identifying may appear in the event's bytes at all.
+        let event_bytes = sealed_event.to_bytes();
+        for needle in ["holiday-photo.png", "image/png"] {
+            assert!(
+                !event_bytes
+                    .windows(needle.len())
+                    .any(|w| w == needle.as_bytes()),
+                "{needle:?} leaked into the event the server stores"
+            );
+        }
+
+        // The filename must NOT appear anywhere in what the server holds.
+        assert!(
+            !ciphertext.windows(17).any(|w| w == b"holiday-photo.png"),
+            "the real filename leaked into the sealed payload the server stores"
+        );
+
+        // Inside: the recipient opens the message and gets the key + real name.
+        match receive_sealed(&f.bob_store, &mut f.bob_group, ciphertext) {
+            SealedOutcome::Decrypted(env) => {
+                assert_eq!(env.content, "look at this");
+                assert_eq!(env.filenames, vec!["holiday-photo.png".to_string()]);
+                assert_eq!(env.mimes, vec!["image/png".to_string()]);
+                assert_eq!(env.attachment_keys, vec![file_key]);
+                // ...and that key opens the blob the server was storing.
+                let opened =
+                    farder_crypto::file_policy::open_file(&env.attachment_keys[0], &blob).unwrap();
+                assert_eq!(opened, file_bytes);
+            }
+            SealedOutcome::Undecryptable { reason } => panic!("recipient could not open it: {reason}"),
+        }
     }
 
     #[test]
@@ -585,6 +725,7 @@ mod tests {
             store: &f.alice_store,
             content: &too_long,
             reply_to: None,
+            attachments: &[],
         };
         let err = send_sealed(
             &transport,
@@ -618,6 +759,7 @@ mod tests {
             store: &f.alice_store,
             content: "this must not go out",
             reply_to: None,
+            attachments: &[],
         };
         let err = send_sealed(
             &transport,
@@ -649,6 +791,7 @@ mod tests {
             store: &f.alice_store,
             content: "replying",
             reply_to: Some(target.clone()),
+            attachments: &[],
         };
         send_sealed(
             &transport,
@@ -672,6 +815,7 @@ mod tests {
             store: &f.alice_store,
             content: "no reply target",
             reply_to: None,
+            attachments: &[],
         };
         send_sealed(
             &transport,

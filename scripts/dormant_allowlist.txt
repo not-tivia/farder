@@ -1,0 +1,48 @@
+# Tauri commands that are registered but deliberately unreachable from the UI.
+#
+# `scripts/reachability_audit.py` fails on any unreachable command NOT listed
+# here. The point of the file is that "nothing calls this" should be a decision
+# someone wrote down, not a thing nobody noticed: every gap the audit has found
+# so far (unblock, the delete-my-data flow, encrypted-channel search, the
+# retention sweep) looked finished from both ends.
+#
+# Format: command_name: why it is dormant.
+
+# --- Superseded by the local voice pipeline (voice_*) -----------------------
+# The server-coordinated media-session surface from before screenshare landed.
+# The shipped path uses join_voice/leave_voice plus the voice_* commands
+# (voice_set_deafen, voice_start_screen_share, ...). Kept because the protocol
+# variants behind them are still part of the wire format; UNVERIFIED as to
+# whether they can be removed -- check with a working two-client voice run
+# before deleting any of them.
+join_channel_media: superseded by the voice_* pipeline (verify before removing)
+leave_channel_media: superseded by the voice_* pipeline (verify before removing)
+get_media_state: superseded by the voice_* pipeline (verify before removing)
+join_stream: superseded by the voice_* pipeline (verify before removing)
+leave_stream: superseded by the voice_* pipeline (verify before removing)
+enable_track: superseded by the voice_* pipeline (verify before removing)
+disable_track: superseded by the voice_* pipeline (verify before removing)
+set_deafen: superseded by voice_set_deafen, which is what the UI calls
+offer_stream_key: superseded by the voice_* screenshare path
+get_peer_volumes: per-peer volume is read through the voice state instead
+
+# --- Vestigial ---------------------------------------------------------------
+# "Favorite" wrote ~/.farder/favorites/ and nothing ever read it; the write path
+# is gone from the UI too. Candidate for removal, not for wiring.
+add_favorite: vestigial feature, nothing reads what it writes
+list_favorites: vestigial feature, nothing reads what it writes
+remove_favorite: vestigial feature, nothing reads what it writes
+
+# --- Superseded by a v2 surface ---------------------------------------------
+get_server_info: superseded by get_server_info_v2 (carries the channel classes)
+
+# --- Dormant by design -------------------------------------------------------
+# Data Saver is a client-side store now; the Rust setting is read ONCE by the
+# migration that seeds it (get_data_saver_embeds) and never written again.
+set_data_saver_embeds: legacy setting, kept readable for the migration only
+
+# --- Real gaps, recorded rather than hidden ----------------------------------
+# These are features with no way in. They are listed so the audit stays green
+# and useful, NOT because the gap is fine.
+list_servers: redundant -- it returns the CONNECTED servers, which the frontend already holds in its own state
+save_temp_audio: no caller since the voice-message recorder saves its own file
