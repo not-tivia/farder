@@ -17,6 +17,14 @@
 # issued).
 set -euo pipefail
 
+# When invoked as `curl ... | bash`, THIS SCRIPT IS STDIN. Any command that
+# attaches stdin then eats the rest of it, bash reaches EOF and exits silently
+# with a zero status and no error — which is exactly what happened on the first
+# real deploy: the log stopped mid-run at the `docker compose exec` in the wait
+# loop, the relay was fine, and the script simply vanished. Detaching stdin once,
+# here, closes the whole class of it.
+exec < /dev/null
+
 FARDER_REPO="${FARDER_REPO:-https://github.com/not-tivia/farder.git}"
 FARDER_DIR="${FARDER_DIR:-$HOME/farder}"
 COMPOSE=(docker compose -f deploy/relay/docker-compose.yml)
