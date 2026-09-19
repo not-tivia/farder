@@ -18,10 +18,21 @@ pub struct DefaultRelay {
 }
 
 /// The configured default relay, or `None` until one is deployed and filled in.
-/// Deployed 2026-06-10 on a Vultr VPS (Docker, see docs/deploy/relay.md).
+///
+/// Deployed 2026-09-19 on a Vultr VPS (Ubuntu 24.04, Docker — see
+/// `docs/deploy/relay.md`). This REPLACES the 2026-06-10 relay, whose host
+/// lapsed; that machine's identity was never backed up, which is why this entry
+/// changed at all and why every client built before today cannot talk to this
+/// relay. The identity of THIS one is backed up off the box, so a future move
+/// can restore it and leave this constant alone.
+///
+/// A literal `IP:port`. `parse_relay_config` below parses it as a `SocketAddr`,
+/// so a hostname here (`relay.farder.xyz:4433`) silently yields NO default
+/// relay. `relay.farder.xyz` exists in DNS and points at this same address, for
+/// humans and for the day the client learns to resolve names.
 pub const DEFAULT_RELAY: Option<DefaultRelay> = Some(DefaultRelay {
-    addr: "45.77.70.199:4433",
-    cert_fp_hex: "7e3ed9b35aedcf3b42c30500720ca12cb1385ad0a74207b3f977167f1ab48459",
+    addr: "45.61.136.29:4433",
+    cert_fp_hex: "cbe837a3b1858c7f2246d290761101aa3e53157ca52c3cfb6128a010bd1d9bf0",
 });
 
 /// The TCP port the relay serves incoming-webhook HTTP on -- farder-relay's

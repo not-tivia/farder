@@ -7,3 +7,19 @@ client/dist/
 *.db
 *.db-shm
 *.db-wal
+
+# ── Keep the relay's build context to what the relay actually compiles ───────
+# The relay image builds `-p farder-relay`, which needs Cargo.{toml,lock}, the
+# workspace crates, and the root package's own `tests/` + `src/` (the workspace
+# root is itself a package, so removing those breaks `cargo build`).
+#
+# Everything below is context that only ever invalidates the COPY layer. It
+# cost a full ~20-minute Rust rebuild after a website copy edit, which is how it
+# was noticed: `compose up --build` re-ran the whole compile because a paragraph
+# on the landing page changed.
+website/
+docs/
+client/
+nvenc-probe/
+scripts/
+*.md

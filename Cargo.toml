@@ -42,6 +42,10 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[test]]
+name = "relay_live"
+path = "tests/relay_live.rs"
+
+[[test]]
 name = "e2e_dm"
 path = "tests/e2e_dm.rs"
 
