@@ -53,6 +53,11 @@ not recorded in `scripts/dormant_allowlist.txt` with a reason. Run it alongside
 the seam audit; if something is meant to be dormant, say so in the allowlist
 rather than leaving it to be rediscovered.
 
+`python3 scripts/doc_audit.py` is the same idea for the documentation rule
+below: every registered command must appear in `docs/modules/tauri-commands.md`.
+An undocumented command is invisible — it works, so nothing complains, and the
+next person reads the implementation instead.
+
 ## Scope of trust
 
 - **Higher trust:** logic that lives entirely inside Rust (crypto in

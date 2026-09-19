@@ -3040,3 +3040,63 @@ is entitled to a leaf.
 **Side effects:** moves the local state to the new generation and **clears the
 cursor and rekey cadence**, which described a group that no longer exists.
 **invoke name:** `"reset_e2ee_channel"` → `resetE2eeChannel(...)`.
+
+---
+
+## Group 28 — the six that had escaped this document
+
+Added 2026-09-19 after `scripts/doc_audit.py` compared the handler list against
+this file. Six registered commands had no entry; they are as real as the rest.
+
+### `submit_message_deleted(state, server_id, log_server_id, channel_id, target, own_message) -> Result<EventAcceptedResult, String>`
+
+**What it does:** deletes a log-sourced message by writing a `MessageDeleted`
+**event**, rather than only asking the server to drop the derived row. On a mesh
+server the visible row is DERIVED from the log; the legacy `delete_message`
+removes only that row, so `reconcile_messages` re-derives it at the next start
+and **the message comes back**. Everything server-side was already correct —
+`apply_tombstone` hard-deletes the row and reconcile consults the tombstone set
+at every boot — nothing was writing the event.
+**Parameters:** `target` is the target message's event hash; `own_message`
+selects the reason the fold checks (`Author` for your own, `Moderation`
+otherwise — sending the wrong one is refused, not downgraded).
+**Side effects:** advances and persists the device chain.
+**invoke name:** `"submit_message_deleted"` → `submitMessageDeleted(...)`, via
+`deleteMessageAnywhere()`, which picks this path when the row has an event hash
+and the legacy one when it does not.
+
+### `e2ee_channel_leaves(state, log_server_id, channel_id) -> Result<Vec<ChannelLeafInfo>, String>`
+
+**What it does:** the MLS group's current leaves for one channel — who can read
+it, right now, as the local group state sees it. `is_own` marks this device.
+Read-only; opens no ciphertext and advances nothing.
+**invoke name:** `"e2ee_channel_leaves"` → `e2eeChannelLeaves(...)`.
+
+### `get_server_info_v2(state, server_id) -> Result<ServerInfoV2Result, String>`
+
+**What it does:** the v2 connect surface: the same server info as
+`get_server_info` plus each channel's **class**, which is what tells the client
+a channel is encrypted. Supersedes `get_server_info` (kept registered, now
+unused — see `scripts/dormant_allowlist.txt`).
+**invoke name:** `"get_server_info_v2"` → `getServerInfoV2()`, used by
+`refreshServerClasses`.
+
+### `history_put_notice(state, notice)` / `history_notices(state, channel_id, limit)`
+
+**What they do:** store and read the in-channel transparency notices — a device
+gained or lost the ability to read this channel. They live in the local history
+store, sealed like everything else in it, because a notice you can miss by being
+offline is not transparency. `history_notices` returns them oldest-first, the
+order they render in the timeline.
+**Called by:** `useMlsSteward.ts`, which records a notice for each leaf change it
+observes.
+**invoke names:** `"history_put_notice"` → `historyPutNotice(notice)`,
+`"history_notices"` → `historyNotices(channelId, limit)`.
+
+### `save_recovery_image(png_base64) -> Result<bool, String>`
+
+**What it does:** offers a Save-as dialog for the recovery-phrase image the
+frontend rendered, defaulting to `farder-recovery-phrase.png`. Returns whether a
+file was written (`false` = the user cancelled, which is not an error).
+**Side effects:** writes the PNG the caller passed, wherever the user chose.
+**invoke name:** `"save_recovery_image"` → `saveRecoveryImage(pngBase64)`.
