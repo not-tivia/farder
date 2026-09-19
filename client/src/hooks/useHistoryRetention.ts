@@ -49,7 +49,11 @@ export function useHistoryRetention(): void {
       if (nowMs - last < SWEEP_INTERVAL_MS) continue;
       lastSweep.set(key, nowMs);
 
-      const cutoff = nowSecs - window;
+      // A window longer than the epoch would make the cutoff negative, and the
+      // command takes an unsigned timestamp — the call would fail to
+      // deserialize rather than do anything. Clamp instead: "before 0" purges
+      // nothing, which is the right answer for a window that has not elapsed.
+      const cutoff = Math.max(0, nowSecs - window);
       void api.historyPurgeBefore(ch.id, cutoff).catch((e) => {
         // A locked identity is the ordinary case here (the store cannot be
         // opened yet), not an error worth surfacing: the sweep retries on the

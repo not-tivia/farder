@@ -2707,6 +2707,55 @@ mod tests {
         assert_eq!(derive_attachments(&f.conn, mid, &event, &owner_pk).unwrap(), 0);
     }
 
+    /// The GC half of "the server keeps working on ciphertext": a sealed blob a
+    /// message references must survive the orphan sweep, and one nothing
+    /// references must not. The reference is the `message_attachments` row —
+    /// which is exactly what a sealed message was not getting.
+    #[test]
+    fn a_referenced_sealed_blob_survives_the_orphan_sweep_and_a_loose_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().to_str().unwrap();
+        let mut f = SealedFix::new();
+
+        let (_k, referenced) = farder_crypto::file_policy::seal_file(b"kept").unwrap();
+        let (_k2, loose) = farder_crypto::file_policy::seal_file(b"swept").unwrap();
+        let kept_hash = crate::attachments::compute_sha256(&referenced);
+        let loose_hash = crate::attachments::compute_sha256(&loose);
+        for (bytes, hash) in [(&referenced, &kept_hash), (&loose, &loose_hash)] {
+            crate::attachments::store_file(
+                &f.conn, storage, &f.owner.public_key(), "attachment.bin",
+                bytes, hash, "application/octet-stream", None, None, None,
+            ).unwrap();
+        }
+        // Age both blobs so the sweep considers them at all.
+        f.conn.execute("UPDATE files SET uploaded_at = 1", []).unwrap();
+
+        let epoch = f.epoch();
+        let owner_pk = f.owner.public_key();
+        let (event, id) = f.own(EP::MessagePostedE2ee {
+            channel_id: SEALED_CH, generation: 0, epoch,
+            ciphertext: vec![0xAA; 32], reply_to: None,
+            attachments: vec![AttachmentCap {
+                content_hash: kept_hash.clone(),
+                declared_type: "application/octet-stream".into(),
+                size: referenced.len() as u64,
+                uploader: owner_pk.clone(),
+            }],
+            authz_head: "a".repeat(64),
+        });
+        derive_attachments(&f.conn, id.unwrap(), &event, &owner_pk).unwrap();
+
+        let swept = crate::attachments::cleanup_all_orphans(&f.conn, storage, 0).unwrap();
+        assert_eq!(swept, 1, "only the unreferenced blob is swept");
+        assert!(
+            crate::attachments::get_file_by_hash(&f.conn, &kept_hash).unwrap().is_some(),
+            "a blob a sealed message references must survive",
+        );
+        assert!(
+            crate::attachments::get_file_by_hash(&f.conn, &loose_hash).unwrap().is_none(),
+        );
+    }
+
     /// F4 -- swapping the ciphertext under a cap is caught. Sealing the same
     /// plaintext twice yields different bytes (fresh nonce), so a cap naming the
     /// first blob cannot be satisfied by the second: the existence check is over
