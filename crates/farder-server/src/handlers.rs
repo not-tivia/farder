@@ -352,6 +352,42 @@ fn audit_emit(
     }
 }
 
+/// Record a join or a leave, if this server records them at all.
+///
+/// Deliberately returns nothing and swallows its own errors. Two reasons:
+///
+///  - **It is not broadcast.** `AuditEventCreated` goes to every MANAGE_SERVER
+///    holder, and these are the noisiest events in the system — a second copy of
+///    every voice join on the wire buys an admin nothing, because `MediaJoined`
+///    already told their client. The activity tab reads the log instead.
+///  - **It must never fail the thing it describes.** A full disk should not stop
+///    someone joining a voice channel because the server could not write down
+///    that they did.
+fn log_activity(conn: &Connection, actor: &PublicKey, action: &str, metadata: serde_json::Value) {
+    if !audit::logging_enabled(conn) {
+        return;
+    }
+    if let Err(e) = audit::insert_activity(conn, actor, action, metadata) {
+        eprintln!("[activity] insert failed: {e}");
+    }
+}
+
+/// A voice join/leave in a DM is never the server's business.
+///
+/// A server channel is a public place and its name is already server-visible;
+/// recording that someone spoke in one tells an admin nothing they could not
+/// see by looking. A DM call is the opposite — logging it would hand whoever
+/// runs the server a permanent record of who called whom and for how long,
+/// which is a call-detail record, and building one of those into a privacy
+/// product by accident is exactly how this feature goes wrong.
+fn voice_activity_is_loggable(channel: Option<&farder_protocol::server::ChannelInfo>) -> bool {
+    match channel {
+        Some(ch) => ch.channel_type != ChannelType::Dm,
+        // Unknown channel: say nothing rather than guess. Fail closed.
+        None => false,
+    }
+}
+
 fn require_not_timed_out(conn: &Connection, member: &PublicKey) -> Result<Option<HandleResult>> {
     if let Some((until_ms, reason)) = members::is_timed_out(conn, member, current_unix_ms())? {
         let reason_part = reason.map(|r| format!(": {r}")).unwrap_or_default();
@@ -2041,6 +2077,42 @@ pub fn handle_request(
             ok(ServerResponse::AuditEventsList { events })
         }
 
+        ServerRequest::ListActivityEvents { before_id, limit } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            let events = audit::list_activity(conn, before_id, limit)?;
+            ok(ServerResponse::AuditEventsList { events })
+        }
+
+        ServerRequest::GetActivityLogging => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            ok(ServerResponse::ActivityLogging {
+                enabled: audit::logging_enabled(conn),
+                retention_days: audit::retention_days(conn),
+            })
+        }
+
+        ServerRequest::SetActivityLogging { enabled, retention_days } => {
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::MANAGE_SERVER, "MANAGE_SERVER")? {
+                return Ok(denied);
+            }
+            audit::set_logging(conn, enabled, retention_days)?;
+            // Changing who is being recorded is itself an act of authority, and
+            // it belongs in the half of the log that is never pruned — otherwise
+            // "logging was off that week" is a claim with nothing behind it.
+            let mut events = Vec::new();
+            if let Some(evt) = audit_emit(conn, member, None, "activity_logging_changed", json!({
+                "enabled": enabled,
+                "retention_days": audit::clamp_retention_days(retention_days),
+            })) {
+                events.push(evt);
+            }
+            ok_with(ServerResponse::Ok, events)
+        }
+
         // Lobby-presence arms: join/leave/query the media channel participant list.
         ServerRequest::JoinChannelMedia { channel_id } => {
             if let Some(denied) = require_not_timed_out(conn, member)? {
@@ -2062,10 +2134,36 @@ pub fn handle_request(
                     target: EventTarget::All,
                     event: ServerEvent::MediaLeft { channel_id: left_ch, public_key: member.clone() },
                 });
+                // Joining one voice channel leaves the other. Without this the
+                // activity log shows a member joining three channels and never
+                // leaving any of them, which reads as three people present.
+                //
+                // Except when it IS the same channel: re-joining one you are
+                // already in (a double-click) would otherwise record a leave
+                // the person never made.
+                //
+                // `.ok().flatten()` and not `?`: a failed lookup here must not
+                // fail the join. The log describes the action; it does not get
+                // to veto it.
+                if left_ch != channel_id {
+                    let left_info = channels::get_channel(conn, left_ch).ok().flatten();
+                    if voice_activity_is_loggable(left_info.as_ref()) {
+                        log_activity(conn, member, "voice_left", json!({
+                            "channel_id": left_ch,
+                            "channel_name": left_info.map(|c| c.name),
+                        }));
+                    }
+                }
             }
             channels::join_voice(conn, channel_id, member)?;
             let display_name = members::get_member(conn, member)?
                 .map(|m| m.display_name).unwrap_or_default();
+            if voice_activity_is_loggable(Some(&channel)) {
+                log_activity(conn, member, "voice_joined", json!({
+                    "channel_id": channel_id,
+                    "channel_name": channel.name.clone(),
+                }));
+            }
             events.push(BroadcastEvent {
                 target: EventTarget::All,
                 event: ServerEvent::MediaJoined { channel_id, public_key: member.clone(), display_name },
@@ -2075,7 +2173,16 @@ pub fn handle_request(
 
         ServerRequest::LeaveChannelMedia { channel_id } => {
             let channel = channels::get_channel(conn, channel_id)?;
-            channels::leave_voice(conn, channel_id, member)?;
+            // `was_in` gates the log row: the client calls leave defensively
+            // (cleanup after a failed join), and a "left voice" for a channel
+            // nobody was in is an event that did not happen.
+            let was_in = channels::leave_voice(conn, channel_id, member)?;
+            if was_in && voice_activity_is_loggable(channel.as_ref()) {
+                log_activity(conn, member, "voice_left", json!({
+                    "channel_id": channel_id,
+                    "channel_name": channel.as_ref().map(|c| c.name.clone()),
+                }));
+            }
             let mut events = vec![
                 BroadcastEvent {
                     target: EventTarget::All,
@@ -5291,6 +5398,191 @@ mod tests {
                 assert_eq!(events.len(), 2);
             }
             other => panic!("expected AuditEventsList, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Activity log
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn joining_and_leaving_a_voice_channel_is_recorded() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let vc = channels::create_channel(&conn, "General VC", ChannelType::Voice, None, 0).unwrap();
+
+        handle_request(&conn, &owner, true, ServerRequest::JoinChannelMedia { channel_id: vc }, "", &state).unwrap();
+        handle_request(&conn, &owner, true, ServerRequest::LeaveChannelMedia { channel_id: vc }, "", &state).unwrap();
+
+        let rows = audit::list_activity(&conn, None, 10).unwrap();
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["voice_left", "voice_joined"], "newest first");
+        assert_eq!(rows[0].metadata["channel_name"], "General VC");
+        assert_eq!(rows[0].metadata["channel_id"], vc);
+    }
+
+    #[test]
+    fn moving_between_voice_channels_records_the_leave_too() {
+        // `JoinChannelMedia` silently leaves whatever you were in. If only the
+        // join is recorded, the log shows one member present in three channels
+        // at once, which reads as three people.
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let a = channels::create_channel(&conn, "Alpha", ChannelType::Voice, None, 0).unwrap();
+        let b = channels::create_channel(&conn, "Bravo", ChannelType::Voice, None, 1).unwrap();
+
+        handle_request(&conn, &owner, true, ServerRequest::JoinChannelMedia { channel_id: a }, "", &state).unwrap();
+        handle_request(&conn, &owner, true, ServerRequest::JoinChannelMedia { channel_id: b }, "", &state).unwrap();
+
+        let rows = audit::list_activity(&conn, None, 10).unwrap();
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["voice_joined", "voice_left", "voice_joined"]);
+        assert_eq!(rows[0].metadata["channel_name"], "Bravo", "the new channel");
+        assert_eq!(rows[1].metadata["channel_name"], "Alpha", "the one vacated");
+    }
+
+    #[test]
+    fn leaving_a_voice_channel_you_were_never_in_records_nothing() {
+        // The client calls leave defensively — as cleanup after a failed join —
+        // so this is a normal, successful request. A "left voice" row for it
+        // would be an event that never happened.
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let vc = channels::create_channel(&conn, "VC", ChannelType::Voice, None, 0).unwrap();
+
+        let res = handle_request(&conn, &owner, true,
+            ServerRequest::LeaveChannelMedia { channel_id: vc }, "", &state).unwrap();
+        assert!(matches!(res.response, ServerResponse::Ok), "leaving is idempotent");
+
+        assert!(audit::list_activity(&conn, None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejoining_the_channel_you_are_already_in_records_no_leave() {
+        // A double-click on a voice channel. The member never left, so the log
+        // must not say they did.
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let vc = channels::create_channel(&conn, "VC", ChannelType::Voice, None, 0).unwrap();
+
+        handle_request(&conn, &owner, true, ServerRequest::JoinChannelMedia { channel_id: vc }, "", &state).unwrap();
+        handle_request(&conn, &owner, true, ServerRequest::JoinChannelMedia { channel_id: vc }, "", &state).unwrap();
+
+        let actions: Vec<String> = audit::list_activity(&conn, None, 10)
+            .unwrap().into_iter().map(|r| r.action).collect();
+        assert_eq!(actions, vec!["voice_joined", "voice_joined"], "two joins, no phantom leave");
+    }
+
+    #[test]
+    fn a_dm_call_is_never_written_to_the_activity_log() {
+        // The sharp edge of this whole feature. A server voice channel is a
+        // public place and its name is already server-visible, so logging who
+        // was in it tells an admin nothing they could not see by looking. A DM
+        // call is the opposite: a log of who called whom and for how long is a
+        // call-detail record, and building one into a privacy product by
+        // accident is exactly how this feature goes wrong.
+        //
+        // `JoinChannelMedia` refuses a DM outright today (voice channels only),
+        // so the join half is asserted rather than assumed — if that check is
+        // ever relaxed to enable DM calling, this test says so by failing here
+        // instead of quietly starting to write rows.
+        let (conn, owner) = setup();
+        let other = add_member(&conn, "Other");
+        let state = fake_state();
+        let dm = channels::create_dm_channel(&conn, &owner, &other).unwrap();
+
+        let joined = handle_request(&conn, &owner, true,
+            ServerRequest::JoinChannelMedia { channel_id: dm }, "", &state).unwrap();
+        assert!(
+            matches!(joined.response, ServerResponse::Error { .. }),
+            "a DM is not a voice channel; if this now succeeds, re-check the guard"
+        );
+
+        // The leave arm DOES accept a DM channel — it is where the half-built
+        // DM-call teardown lives — so this half exercises the guard for real.
+        let left = handle_request(&conn, &owner, true,
+            ServerRequest::LeaveChannelMedia { channel_id: dm }, "", &state).unwrap();
+        assert!(matches!(left.response, ServerResponse::Ok));
+
+        assert!(
+            audit::list_activity(&conn, None, 10).unwrap().is_empty(),
+            "a DM call must leave no trace in the activity log"
+        );
+    }
+
+    #[test]
+    fn turning_activity_logging_off_stops_the_rows() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let vc = channels::create_channel(&conn, "VC", ChannelType::Voice, None, 0).unwrap();
+
+        handle_request(&conn, &owner, true,
+            ServerRequest::SetActivityLogging { enabled: false, retention_days: 30 }, "", &state).unwrap();
+        handle_request(&conn, &owner, true, ServerRequest::JoinChannelMedia { channel_id: vc }, "", &state).unwrap();
+
+        assert!(audit::list_activity(&conn, None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn flipping_the_switch_is_itself_a_moderation_row() {
+        // Otherwise "the log was off that week" is a claim with nothing behind
+        // it, and the gap in the activity log is indistinguishable from nobody
+        // having used the server.
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let res = handle_request(&conn, &owner, true,
+            ServerRequest::SetActivityLogging { enabled: false, retention_days: 9999 }, "", &state).unwrap();
+
+        assert_eq!(res.events.len(), 1, "the change is broadcast to MANAGE_SERVER");
+        let rows = audit::list(&conn, None, 10).unwrap();
+        assert_eq!(rows[0].action, "activity_logging_changed");
+        assert_eq!(rows[0].metadata["enabled"], false);
+        assert_eq!(
+            rows[0].metadata["retention_days"], audit::MAX_RETENTION_DAYS,
+            "the recorded window is the clamped one, not what was asked for"
+        );
+    }
+
+    #[test]
+    fn a_plain_member_cannot_read_or_change_the_activity_log() {
+        let (conn, _owner) = setup();
+        let nobody = add_member(&conn, "Nobody");
+        let state = fake_state();
+
+        for req in [
+            ServerRequest::ListActivityEvents { before_id: None, limit: 50 },
+            ServerRequest::GetActivityLogging,
+            ServerRequest::SetActivityLogging { enabled: false, retention_days: 1 },
+        ] {
+            let res = handle_request(&conn, &nobody, false, req, "", &state).unwrap();
+            assert!(
+                matches!(res.response, ServerResponse::Error { .. }),
+                "MANAGE_SERVER must gate every activity-log request"
+            );
+        }
+    }
+
+    #[test]
+    fn the_activity_log_does_not_appear_in_the_moderation_log() {
+        let (conn, owner) = setup();
+        let state = fake_state();
+        let vc = channels::create_channel(&conn, "VC", ChannelType::Voice, None, 0).unwrap();
+        let victim = add_member(&conn, "Victim");
+
+        handle_request(&conn, &owner, true, ServerRequest::JoinChannelMedia { channel_id: vc }, "", &state).unwrap();
+        handle_request(&conn, &owner, true, ServerRequest::KickMember { member_key: victim }, "", &state).unwrap();
+
+        let moderation = handle_request(&conn, &owner, true,
+            ServerRequest::ListAuditEvents { before_id: None, limit: 50 }, "", &state).unwrap();
+        match moderation.response {
+            ServerResponse::AuditEventsList { events } => {
+                assert!(
+                    events.iter().all(|e| e.action != "voice_joined"),
+                    "voice joins must not reach the moderation log"
+                );
+                assert!(events.iter().any(|e| e.action == "kick"));
+            }
+            o => panic!("expected AuditEventsList, got {:?}", o),
         }
     }
 
@@ -9660,6 +9952,7 @@ mod tests {
                 | ServerRequest::EnterGiveaway { .. }
                 | ServerRequest::FetchHistory { .. }
                 | ServerRequest::FetchUrl { .. }
+                | ServerRequest::GetActivityLogging
                 | ServerRequest::GetBotPollInterval
                 | ServerRequest::GetDeletionStatus
                 | ServerRequest::GetEvent { .. }
@@ -9676,6 +9969,7 @@ mod tests {
                 | ServerRequest::LeaveGiveaway { .. }
                 | ServerRequest::LeaveStream
                 | ServerRequest::ListActiveWidgets { .. }
+                | ServerRequest::ListActivityEvents { .. }
                 | ServerRequest::ListAuditEvents { .. }
                 | ServerRequest::ListBanned
                 | ServerRequest::ListBotAlerts { .. }
@@ -9700,6 +9994,7 @@ mod tests {
                 | ServerRequest::RunCommand { .. }
                 | ServerRequest::Search { .. }
                 | ServerRequest::SendMessage { .. }
+                | ServerRequest::SetActivityLogging { .. }
                 | ServerRequest::SetBotPollInterval { .. }
                 | ServerRequest::SetCategoryOverride { .. }
                 | ServerRequest::SetChannelOverride { .. }

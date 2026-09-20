@@ -553,6 +553,10 @@ pub(crate) async fn authenticate(
     let pk_bytes = *public_key.as_bytes();
     let mut setup_token_used = false;
     let mut auto_claimed = false;
+    // Whether THIS handshake created the member row. `MemberJoined` is
+    // broadcast on every connection (it doubles as "came online"), so it is not
+    // a usable signal for "someone new is here" — this is.
+    let mut is_new_member = false;
     let auth_result: Result<(), String> = {
         let conn_db = state.db.lock().unwrap();
         let existing = members::get_member(&conn_db, &public_key)?;
@@ -562,6 +566,7 @@ pub(crate) async fn authenticate(
                 Err(reason) => Err(reason),
             }
         } else {
+            is_new_member = true;
             let display_name = format!("vk_{}", hex::encode(&pk_bytes[..4]));
             let active_setup_token = *state.setup_token.lock().unwrap();
             match auth::authenticate_new_member(
@@ -668,6 +673,49 @@ pub(crate) async fn authenticate(
             .unwrap_or_else(|| format!("vk_{}", hex::encode(&pk_bytes[..4])))
     };
 
+    // Write the log rows. Scoped so the db lock is released before the async
+    // broadcast below — holding a std Mutex across an await is how this file
+    // has deadlocked itself before.
+    {
+        let conn_db = state.db.lock().unwrap();
+        if is_new_member {
+            // A MODERATION row, not an activity one: it is never pruned. "Who
+            // let this account in, and on whose invite" is a question that can
+            // be asked a year later, and it is usually asked precisely when the
+            // account has turned out to be a problem.
+            let via = if auto_claimed {
+                "first_member"
+            } else if setup_token_used {
+                "setup_token"
+            } else {
+                "invite"
+            };
+            if let Err(e) = crate::audit::insert(
+                &conn_db,
+                &public_key,
+                None,
+                "member_joined",
+                serde_json::json!({
+                    "via": via,
+                    "invite_code": invite_code.as_deref(),
+                    "display_name": display_name.clone(),
+                }),
+            ) {
+                tracing::warn!(error = %e, "could not record member_joined");
+            }
+        }
+        if crate::audit::logging_enabled(&conn_db) {
+            if let Err(e) = crate::audit::insert_activity(
+                &conn_db,
+                &public_key,
+                "session_started",
+                serde_json::json!({ "display_name": display_name.clone() }),
+            ) {
+                tracing::warn!(error = %e, "could not record session_started");
+            }
+        }
+    }
+
     broadcast_event(
         state,
         EventTarget::All,
@@ -732,6 +780,19 @@ pub(crate) async fn cleanup_session(
         }
     }
     { state.presences.write().unwrap().remove(&pk_bytes); }
+    {
+        let conn_db = state.db.lock().unwrap();
+        if crate::audit::logging_enabled(&conn_db) {
+            if let Err(e) = crate::audit::insert_activity(
+                &conn_db,
+                public_key,
+                "session_ended",
+                serde_json::json!({}),
+            ) {
+                tracing::warn!(error = %e, "could not record session_ended");
+            }
+        }
+    }
     broadcast_event(
         state,
         EventTarget::All,

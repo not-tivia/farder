@@ -54,6 +54,12 @@ After auth the server:
 - Creates an `mpsc::channel::<ServerEvent>(64)` for the client. The sender half (`event_tx`) is inserted into `state.clients` keyed by the client's public-key bytes; the receiver half is held by the event branch of the main loop.
 - Registers the `quinn::Connection` in `state.voice_connections` (same key) so the datagram fan-out loop can write back to this connection.
 - Broadcasts `ServerEvent::MemberJoined` to all connected clients.
+- Writes a `session_started` activity row (if activity logging is on), and —
+  only when this handshake actually created the member row — a `member_joined`
+  MODERATION row recording `via` (`invite` / `setup_token` / `first_member`) and
+  the invite code. Note that `ServerEvent::MemberJoined` is broadcast on EVERY
+  connection, so it doubles as "came online" and is not a usable signal for
+  "someone new is here"; the `is_new_member` flag is.
 - Spawns two background tasks (next section).
 
 ### Phase 4: background tasks
@@ -88,7 +94,8 @@ When the main loop exits (clean EOF or error), `handle_connection`:
 2. Removes the client from `state.clients` only if the registered sender is still ours (guards against a reconnect from the same identity having already replaced it).
 3. Removes the connection from `state.voice_connections`.
 4. Removes the client from all channel subscription sets.
-5. Broadcasts `ServerEvent::MemberLeft` to all remaining clients.
+5. Writes a `session_ended` activity row (if activity logging is on).
+6. Broadcasts `ServerEvent::MemberLeft` to all remaining clients.
 
 ---
 
@@ -201,7 +208,7 @@ Called by a 5 Hz tick loop (outside this file). Compares each session's last-fra
 | `dm_participants` | Maps DM channel IDs to their two participant public keys. |
 | `blocked_users` | Per-user block list. |
 | `deletion_requests` | Scheduled account-deletion requests with an expiry. |
-| `audit_events` | Append-only moderator action log (`actor_pk`, `target_pk`, `action`, `metadata`, `timestamp_ms`). Indexed by timestamp and actor. |
+| `audit_events` | Append-only log (`actor_pk`, `target_pk`, `action`, `metadata`, `timestamp_ms`, `category`). Two halves: `category = 'moderation'` (acts of authority, kept forever) and `category = 'activity'` (joins, leaves, voice; swept on a window by `retention::prune_activity_log`). Indexed by timestamp, actor, and `(category, id DESC)`. |
 
 Schema migrations are applied inline in `init_schema` using `PRAGMA table_info` checks before `ALTER TABLE`, because SQLite does not support `IF NOT EXISTS` for column additions.
 

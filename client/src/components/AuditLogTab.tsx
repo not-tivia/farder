@@ -3,6 +3,7 @@ import * as api from "../lib/tauri-bridge";
 import type { AuditEvent } from "../lib/tauri-bridge";
 import { useActiveServer } from "../context/ServerContext";
 import { publicKeyToString } from "../lib/types";
+import ActivityLogView from "./ActivityLogView";
 
 interface Props {
   serverId: string;
@@ -26,6 +27,17 @@ const ACTION_VERBS: Record<string, (target: string | null, meta: Record<string, 
   role_deleted: (_t, m) => `deleted role "${m["role_name"] ?? "?"}"`,
   role_perms_changed: (_t, m) => `changed permissions for role id ${m["role_id"] ?? "?"}`,
   channel_overrides_changed: (_t, m) => `changed channel overrides on channel ${m["channel_id"] ?? "?"} for role ${m["role_id"] ?? "?"}`,
+  member_joined: (_t, m) => {
+    const via = m["via"];
+    if (via === "first_member") return "claimed the server as its first member";
+    if (via === "setup_token") return "joined with the setup token";
+    const code = m["invite_code"];
+    return code ? `joined on invite ${code}` : "joined the server";
+  },
+  activity_logging_changed: (_t, m) =>
+    m["enabled"]
+      ? `turned join/leave recording ON (kept ${m["retention_days"] ?? "?"} days)`
+      : "turned join/leave recording OFF",
 };
 
 function relativeTime(ms: number): string {
@@ -52,7 +64,47 @@ const detail: CSSProperties = {
   whiteSpace: "pre-wrap",
 };
 
+/**
+ * The audit log, in two halves.
+ *
+ * They are separate lists on the server and separate views here for one
+ * reason: volume. A moderation row is a deliberate act by someone with power
+ * and there are a handful a week. An activity row is written by ordinary use
+ * and an active server produces hundreds a day. Merged, the joins bury the bans
+ * inside an hour — which is the same as not having a moderation log.
+ *
+ * Moderation is the default view because it is the one an admin opens under
+ * pressure.
+ */
 export default function AuditLogTab({ serverId }: Props) {
+  const [view, setView] = useState<"moderation" | "activity">("moderation");
+
+  return (
+    <div style={{ padding: 8 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <button
+          className="xp-button"
+          disabled={view === "moderation"}
+          onClick={() => setView("moderation")}
+        >
+          Moderation
+        </button>
+        <button
+          className="xp-button"
+          disabled={view === "activity"}
+          onClick={() => setView("activity")}
+        >
+          Joins &amp; voice
+        </button>
+      </div>
+      {view === "moderation"
+        ? <ModerationLogView serverId={serverId} />
+        : <ActivityLogView serverId={serverId} />}
+    </div>
+  );
+}
+
+function ModerationLogView({ serverId }: Props) {
   const activeServer = useActiveServer();
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -114,13 +166,13 @@ export default function AuditLogTab({ serverId }: Props) {
   }
 
   if (loading) return <div style={{ padding: 16 }}>Loading audit log…</div>;
-  if (error) return <div style={{ padding: 16, color: "#a00" }}>{error}</div>;
+  if (error) return <div className="error-text" style={{ padding: 16 }}>{error}</div>;
   if (events.length === 0) {
     return <div style={{ padding: 16, color: "var(--xp-text-muted, #666)" }}>No moderation actions recorded yet.</div>;
   }
 
   return (
-    <div style={{ padding: 8 }}>
+    <div>
       {events.map((evt) => {
         const actorName = nameFor(publicKeyToString(evt.actor)) ?? "?";
         const targetName = evt.target ? nameFor(publicKeyToString(evt.target)) : null;
@@ -143,7 +195,7 @@ export default function AuditLogTab({ serverId }: Props) {
         );
       })}
       {hasMore && (
-        <button onClick={loadOlder} style={{ marginTop: 8, font: "inherit", padding: "4px 12px" }}>
+        <button className="xp-button" onClick={loadOlder} style={{ marginTop: 8 }}>
           Load older
         </button>
       )}

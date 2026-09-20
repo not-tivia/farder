@@ -690,12 +690,18 @@ pub fn join_voice(conn: &Connection, channel_id: u64, user_key: &farder_crypto::
     Ok(())
 }
 
-pub fn leave_voice(conn: &Connection, channel_id: u64, user_key: &farder_crypto::identity::PublicKey) -> Result<()> {
-    conn.execute(
+/// Returns whether the user was actually in that channel.
+///
+/// The client calls this defensively — as cleanup after a failed join, for
+/// instance — so "leave a channel you were never in" is a normal, successful
+/// request. The caller needs to tell the two apart, because writing "left
+/// voice" to the activity log for a channel nobody was in invents an event.
+pub fn leave_voice(conn: &Connection, channel_id: u64, user_key: &farder_crypto::identity::PublicKey) -> Result<bool> {
+    let removed = conn.execute(
         "DELETE FROM voice_state WHERE channel_id = ?1 AND user_key = ?2",
         params![channel_id as i64, user_key.as_bytes().as_slice()],
     )?;
-    Ok(())
+    Ok(removed > 0)
 }
 
 pub fn leave_all_voice(conn: &Connection, user_key: &farder_crypto::identity::PublicKey) -> Result<Vec<u64>> {

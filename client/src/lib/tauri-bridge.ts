@@ -1154,6 +1154,37 @@ export async function listAuditEvents(
   return invoke<AuditEvent[]>("list_audit_events", { serverId, beforeId, limit });
 }
 
+/** Settings for the activity half of the audit log. */
+export interface ActivityLogSettings {
+  enabled: boolean;
+  retention_days: number;
+}
+
+/**
+ * Joins, leaves and voice, newest first. A separate call from
+ * `listAuditEvents` because it is a separate list on the server: activity rows
+ * arrive in volume and would bury the moderation log if they shared a page.
+ */
+export async function listActivityEvents(
+  serverId: string,
+  beforeId: number | null,
+  limit: number,
+): Promise<AuditEvent[]> {
+  return invoke<AuditEvent[]>("list_activity_events", { serverId, beforeId, limit });
+}
+
+export async function getActivityLogging(serverId: string): Promise<ActivityLogSettings> {
+  return invoke<ActivityLogSettings>("get_activity_logging", { serverId });
+}
+
+export async function setActivityLogging(
+  serverId: string,
+  enabled: boolean,
+  retentionDays: number,
+): Promise<void> {
+  return invoke<void>("set_activity_logging", { serverId, enabled, retentionDays });
+}
+
 // ── Invite previews ───────────────────────────────────────────────────────────
 
 export interface InvitePreviewResult {

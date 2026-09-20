@@ -726,9 +726,57 @@ Public-key parameters accept either `"vk_<hex>"` or bare hex; the internal
 
 ### `list_audit_events(state, server_id, before_id, limit) -> Result<Vec<AuditEvent>, String>`
 
-**What it does:** fetches the server audit log, cursor-paged by `before_id`.
+**What it does:** fetches the MODERATION half of the audit log, cursor-paged by
+`before_id`. Activity rows (joins, leaves, voice) are excluded — see
+`list_activity_events`.
 **ServerRequest:** `ListAuditEvents { before_id, limit }`.
 **invoke name:** `"list_audit_events"` → `listAuditEvents()`.
+
+---
+
+### `list_activity_events(state, server_id, before_id, limit) -> Result<Vec<AuditEvent>, String>`
+
+**What it does:** fetches the ACTIVITY half of the audit log — `member_joined`,
+`session_started`, `session_ended`, `voice_joined`, `voice_left` — newest first,
+same cursor contract as `list_audit_events`. MANAGE_SERVER.
+
+A separate list rather than a filter on one list, because the two differ by
+orders of magnitude in volume: merged at 50 rows a page, the joins bury every
+moderation row within the hour. Activity rows are also the only ones the
+retention sweep can delete (`audit::prune_activity`).
+
+**Never includes DM calls.** A server voice channel's name is already
+server-visible, but a record of who called whom is a call-detail record; the
+server refuses to write one (`voice_activity_is_loggable`).
+
+**ServerRequest:** `ListActivityEvents { before_id, limit }`.
+**invoke name:** `"list_activity_events"` → `listActivityEvents()`.
+
+---
+
+### `get_activity_logging(state, server_id) -> Result<ActivityLogSettings, String>`
+
+**What it does:** reads whether activity rows are being written and for how long
+they are kept. Returns `{ enabled, retention_days }`. MANAGE_SERVER.
+Defaults are ON and 30 days; the window is clamped to 1–730.
+**ServerRequest:** `GetActivityLogging`.
+**invoke name:** `"get_activity_logging"` → `getActivityLogging()`.
+
+---
+
+### `set_activity_logging(state, server_id, enabled, retention_days) -> Result<(), String>`
+
+**What it does:** turns activity recording on/off and sets the retention window
+(server-clamped). MANAGE_SERVER. Turning it off stops new rows but does not
+delete existing ones — the sweep does that as they age out.
+
+**Side effect:** writes an `activity_logging_changed` row to the MODERATION log
+and broadcasts `AuditEventCreated` to MANAGE_SERVER holders. Deliberate: without
+it, "recording was off that week" is a claim with nothing behind it, and a gap
+in the activity log is indistinguishable from nobody using the server.
+
+**ServerRequest:** `SetActivityLogging { enabled, retention_days }`.
+**invoke name:** `"set_activity_logging"` → `setActivityLogging()`.
 
 ---
 

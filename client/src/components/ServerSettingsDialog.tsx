@@ -263,17 +263,20 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           <span>Server Settings{serverName ? ` — ${serverName}` : ""}</span>
           <button className="modal-close" onClick={onClose}>X</button>
         </div>
-        {/* Tab bar */}
-        <div style={{ display: "flex", borderBottom: "1px solid var(--xp-border)", padding: "0 12px", gap: 4 }}>
+        {/* Tab bar. `settings-tab` / `.active`, NOT the class these used to
+            carry: that one has no CSS in any theme, so every tab here was
+            rendering as a bare browser button while an identical, themed tab
+            style already existed a few lines away in every theme file. */}
+        <div className="settings-tabs" style={{ padding: "0 12px" }}>
           <button
-            className={`tab-btn${activeTab === "general" ? " tab-btn--active" : ""}`}
+            className={`settings-tab${activeTab === "general" ? " active" : ""}`}
             onClick={() => setActiveTab("general")}
           >
             General
           </button>
           {canBan && (
             <button
-              className={`tab-btn${activeTab === "banned" ? " tab-btn--active" : ""}`}
+              className={`settings-tab${activeTab === "banned" ? " active" : ""}`}
               onClick={() => setActiveTab("banned")}
             >
               Banned Members
@@ -281,7 +284,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           )}
           {canManageMessages && (
             <button
-              className={`tab-btn${activeTab === "reports" ? " tab-btn--active" : ""}`}
+              className={`settings-tab${activeTab === "reports" ? " active" : ""}`}
               onClick={() => setActiveTab("reports")}
             >
               Reports
@@ -289,7 +292,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           )}
           {canManageServer && (
             <button
-              className={`tab-btn${activeTab === "audit" ? " tab-btn--active" : ""}`}
+              className={`settings-tab${activeTab === "audit" ? " active" : ""}`}
               onClick={() => setActiveTab("audit")}
             >
               Audit Log
@@ -297,7 +300,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           )}
           {canManageServer && (
             <button
-              className={`tab-btn${activeTab === "bots" ? " tab-btn--active" : ""}`}
+              className={`settings-tab${activeTab === "bots" ? " active" : ""}`}
               onClick={() => setActiveTab("bots")}
             >
               Bots

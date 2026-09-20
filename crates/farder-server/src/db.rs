@@ -402,6 +402,37 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events(timestamp_ms DESC)",
         [],
     )?;
+
+    // Audit events: split the log in two by volume.
+    //
+    // `moderation` rows are rare, deliberate acts by a person with power — a
+    // kick, a ban, a role change — and they are kept forever. `activity` rows
+    // are the new join/leave records, and an active server writes hundreds a
+    // day. Mixed into one list at LIMIT 100, the activity rows would push every
+    // moderation row off the first page within an hour, which is the same thing
+    // as not having a moderation log. They are separate queries on purpose, and
+    // only the activity half is ever pruned (see `audit::prune_activity`).
+    let has_audit_category: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(audit_events)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "category")
+    };
+    if !has_audit_category {
+        // Existing rows are all moderation actions — the activity log did not
+        // exist before this column did — so the default backfills correctly.
+        conn.execute(
+            "ALTER TABLE audit_events ADD COLUMN category TEXT NOT NULL DEFAULT 'moderation'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_category_id
+         ON audit_events(category, id DESC)",
+        [],
+    )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(actor_pk)",
         [],

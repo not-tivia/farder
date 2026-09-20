@@ -37,6 +37,22 @@ pub fn purge_expired_messages(conn: &Connection, storage_dir: &str) -> Result<(u
     Ok((total_purged, files_cleaned))
 }
 
+/// Age out the activity half of the audit log.
+///
+/// Runs on the same sweep as message retention, and for the same reason: the
+/// window is a promise, and a promise nothing enforces is decoration. Without
+/// this the "kept for 30 days" line in server settings would be a label on a
+/// table that grows forever.
+///
+/// Moderation rows are out of reach by construction — see
+/// [`crate::audit::prune_activity`].
+pub fn prune_activity_log(conn: &Connection) -> Result<u64> {
+    let days = crate::audit::retention_days(conn) as u64;
+    let now_ms = db::now() * 1000;
+    let cutoff_ms = now_ms.saturating_sub(days * 86_400 * 1000);
+    crate::audit::prune_activity(conn, cutoff_ms)
+}
+
 /// Execute every deletion request whose grace period has run out: for each one,
 /// remove its attachments, anonymize its messages, delete its reactions, remove
 /// the member record, and drop the request.
@@ -96,6 +112,19 @@ pub fn spawn_retention_task(
             if messages_purged > 0 || files_cleaned > 0 {
                 info!(messages_purged, files_cleaned, "retention task completed");
             }
+            let activity_pruned = {
+                let conn = state.db.lock().unwrap();
+                match prune_activity_log(&conn) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "activity log prune error");
+                        0
+                    }
+                }
+            };
+            if activity_pruned > 0 {
+                info!(activity_pruned, "pruned expired activity log rows");
+            }
             // The lock is released BEFORE the broadcast: `broadcast_event` is
             // async, and holding a std Mutex across an await is how this
             // codebase has deadlocked itself before.
@@ -138,6 +167,45 @@ mod tests {
     use crate::reactions;
     use farder_crypto::identity::Keypair;
     use farder_protocol::server::ChannelType;
+
+    #[test]
+    fn the_sweep_ages_out_activity_and_never_moderation() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = Keypair::generate().public_key();
+
+        // 1 day window, then rows dated a week ago.
+        crate::audit::set_logging(&conn, true, 1).unwrap();
+        let week_ago_ms = (db::now() - 7 * 86_400) * 1000;
+        conn.execute(
+            "INSERT INTO audit_events (actor_pk, action, metadata, timestamp_ms, category)
+             VALUES (?1, 'session_started', '{}', ?2, 'activity')",
+            rusqlite::params![pk.as_bytes().as_slice(), week_ago_ms as i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audit_events (actor_pk, action, metadata, timestamp_ms, category)
+             VALUES (?1, 'ban', '{}', ?2, 'moderation')",
+            rusqlite::params![pk.as_bytes().as_slice(), week_ago_ms as i64],
+        )
+        .unwrap();
+
+        assert_eq!(prune_activity_log(&conn).unwrap(), 1);
+        assert!(crate::audit::list_activity(&conn, None, 10).unwrap().is_empty());
+        assert_eq!(
+            crate::audit::list(&conn, None, 10).unwrap().len(),
+            1,
+            "a ban from a week ago outlives any activity window"
+        );
+    }
+
+    #[test]
+    fn a_fresh_activity_row_survives_the_sweep() {
+        let conn = db::open_in_memory().unwrap();
+        let pk = Keypair::generate().public_key();
+        crate::audit::insert_activity(&conn, &pk, "voice_joined", serde_json::json!({})).unwrap();
+        assert_eq!(prune_activity_log(&conn).unwrap(), 0);
+        assert_eq!(crate::audit::list_activity(&conn, None, 10).unwrap().len(), 1);
+    }
 
     #[test]
     fn test_purge_expired_messages() {

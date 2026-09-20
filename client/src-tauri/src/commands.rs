@@ -3307,6 +3307,72 @@ pub async fn list_audit_events(
     }
 }
 
+/// The activity half of the audit log: joins, leaves, voice.
+///
+/// A separate command from `list_audit_events` because it is a separate list on
+/// the server — activity rows are written by ordinary use and would bury the
+/// moderation log if the two shared a page.
+#[tauri::command]
+pub async fn list_activity_events(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    before_id: Option<u64>,
+    limit: u32,
+) -> Result<Vec<farder_protocol::server::AuditEvent>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::ListActivityEvents { before_id, limit })
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::AuditEventsList { events } => Ok(events),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct ActivityLogSettings {
+    pub enabled: bool,
+    pub retention_days: u32,
+}
+
+#[tauri::command]
+pub async fn get_activity_logging(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<ActivityLogSettings, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetActivityLogging)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::ActivityLogging { enabled, retention_days } => {
+            Ok(ActivityLogSettings { enabled, retention_days })
+        }
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+#[tauri::command]
+pub async fn set_activity_logging(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    enabled: bool,
+    retention_days: u32,
+) -> Result<(), String> {
+    let response = bridge::send_request(
+        &state,
+        &server_id,
+        ServerRequest::SetActivityLogging { enabled, retention_days },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Ok => Ok(()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Voice message helper
 // ---------------------------------------------------------------------------

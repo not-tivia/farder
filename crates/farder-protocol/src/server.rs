@@ -725,6 +725,18 @@ pub enum ServerRequest {
     /// than the row being deleted: "we looked and did nothing" is an answer a
     /// moderation log has to be able to show.
     ResolveReport { id: u64, outcome: String },
+    /// The activity half of the audit log: who joined, who left, who was in
+    /// which voice channel. Same cursor contract as [`ServerRequest::ListAuditEvents`]
+    /// and the same MANAGE_SERVER gate, but a separate request because the two
+    /// lists must not share a page — see `audit::list`.
+    ListActivityEvents { before_id: Option<u64>, limit: u32 },
+    /// Read the activity log's settings. MANAGE_SERVER.
+    GetActivityLogging,
+    /// Turn activity logging on or off and set how long rows are kept.
+    /// MANAGE_SERVER. `retention_days` is clamped server-side; turning it off
+    /// stops new rows but does not delete the ones already written (the sweep
+    /// does that as they age out).
+    SetActivityLogging { enabled: bool, retention_days: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -856,6 +868,8 @@ pub enum ServerResponse {
     BlockedList { blocked: Vec<BlockedEntry> },
     /// Answer to [`ServerRequest::ListReports`].
     ReportList { reports: Vec<ReportInfo> },
+    /// Answer to [`ServerRequest::GetActivityLogging`].
+    ActivityLogging { enabled: bool, retention_days: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

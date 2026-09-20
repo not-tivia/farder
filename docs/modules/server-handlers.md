@@ -125,6 +125,24 @@ model** section). They are inserted via `audit_emit`, which also creates an
 `audit_emit` is non-fatal: if the insert fails it logs and returns `None`, so
 the primary mutation still completes.
 
+**The log has two halves, and they are separate lists.** `audit_emit` writes the
+`moderation` category: deliberate acts by someone with power, kept forever.
+`log_activity` writes the `activity` category: joins, leaves and voice, written
+by ordinary use. The split exists because the volumes differ by orders of
+magnitude — an active server produces hundreds of activity rows a day, and
+merged into one list at 50 rows a page they would push every moderation row off
+the first page within the hour. `audit::list` and `audit::list_activity` are
+separate queries; only the activity half is ever pruned.
+
+`log_activity` differs from `audit_emit` in two further ways, both deliberate:
+it broadcasts **nothing** (`MediaJoined` already told every admin's client, so a
+second copy of every voice join on the wire buys nothing), and it is gated on
+the per-server `activity_log_enabled` setting.
+
+Two rows are never written: a voice join/leave in a **DM channel**
+(`voice_activity_is_loggable` fails closed on an unknown channel), because a
+record of who called whom is a call-detail record and not the server's business.
+
 ---
 
 ## Request table
@@ -222,7 +240,10 @@ WebRTC session.
 
 | `ServerRequest` variant | What it does | Permission checked | DB effect | Events broadcast (target) |
 |---|---|---|---|---|
-| `ListAuditEvents` | Paginated read of the audit log (cursor by `before_id`) | `MANAGE_SERVER` (base) | Read only | None |
+| `ListAuditEvents` | Paginated read of the MODERATION half of the audit log (cursor by `before_id`) | `MANAGE_SERVER` (base) | Read only | None |
+| `ListActivityEvents` | Paginated read of the ACTIVITY half (joins, leaves, voice); same cursor contract | `MANAGE_SERVER` (base) | Read only | None |
+| `GetActivityLogging` | Reads `{ enabled, retention_days }` for the activity log | `MANAGE_SERVER` (base) | Read only | None |
+| `SetActivityLogging` | Turns activity recording on/off and sets the retention window (clamped 1–730 days) | `MANAGE_SERVER` (base) | Writes `server_settings`; writes an `activity_logging_changed` MODERATION row | `AuditEventCreated` (PermissionHolders(MANAGE_SERVER)) |
 
 ### Data deletion
 
@@ -1161,7 +1182,9 @@ SQLite (via the module helpers). The only in-memory state it touches is:
 - **`polls.rs` / `giveaways.rs` / `widgets.rs`** — interactive widget storage, state transitions, and the shared 15 s sweeper. See `docs/modules/server-widgets.md`.
 - **`reactions.rs`** — reaction add/remove.
 - **`invites.rs`** — invite code creation.
-- **`audit.rs`** — audit row insert and paginated list.
+- **`audit.rs`** — audit row insert and paginated list, split by `category`
+  (`moderation` / `activity`); the activity log's enable + retention settings;
+  `prune_activity`, which by construction can never reach a moderation row.
 - **`permissions`** — `resolve`, `has`, and all permission bit constants.
 - **`state::ServerState`** — in-memory media session map (`state.media`).
 - **`farder_protocol::server`** — `ServerRequest`, `ServerResponse`, `ServerEvent`, `ChannelType`, `TrackKind` types.

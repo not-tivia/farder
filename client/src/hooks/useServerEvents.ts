@@ -682,6 +682,10 @@ export function useServerEvents(): void {
         publicKey: data.public_key as string,
         displayName: data.display_name as string,
       }});
+      // The activity log's live refresh. This event already crossed the wire
+      // for the voice roster, so the log view rides on it rather than the
+      // server broadcasting a second copy of every join to every admin.
+      window.dispatchEvent(new CustomEvent("farder:voice-activity"));
     }).then(safePush);
 
     listen("server:voice_left", (e) => {
@@ -691,6 +695,7 @@ export function useServerEvents(): void {
         channelId: data.channel_id as number,
         publicKey: data.public_key as string,
       }});
+      window.dispatchEvent(new CustomEvent("farder:voice-activity"));
     }).then(safePush);
 
     return () => {
