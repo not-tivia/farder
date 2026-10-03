@@ -756,12 +756,14 @@ ol.flow-steps { list-style: none; }
 
 .sim-controls { display: grid; gap: 10px; margin-bottom: 18px; }
 .sim-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* The label sits on its own line, so when the buttons wrap they wrap under
+   each other instead of under the label. */
 .sim-group-label {
+  width: 100%;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: .06em;
   color: var(--text-muted);
-  min-width: 110px;
 }
 .sim-controls .btn[aria-pressed="true"] {
   background: linear-gradient(var(--accent-light), var(--accent));
@@ -881,6 +883,14 @@ ol.flow-steps { list-style: none; }
   .sim-flow { animation: none; }
 }
 
+/* Side by side, the diagram gets too small to read below this width, so the
+   explanation moves underneath it. */
+@media (max-width: 980px) {
+  .sim-stage { grid-template-columns: 1fr; }
+  .sim-svg { max-width: 560px; margin: 0 auto; }
+  .sim-explain { min-height: 0; }
+}
+
 /* ── Small screens ───────────────────────────────────────────────────────── */
 @media (max-width: 720px) {
   /* Six links wrapped onto three rows and ate a third of the screen, on a
@@ -925,7 +935,6 @@ ol.flow-steps { list-style: none; }
   .sim-node .sim-status { font-size: 15px; }
   .sim-icon { font-size: 20px; }
   .sim-explain { min-height: 0; }
-  .sim-group-label { min-width: 0; width: 100%; }
   .spec-table-3 .spec-row { grid-template-columns: 1fr 1fr; }
   .spec-table-3 .spec-row > span:first-child { grid-column: 1 / -1; font-weight: 700; }
 }

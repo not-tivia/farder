@@ -25,6 +25,11 @@
 	# static files. These are the headers that cost nothing and close the
 	# obvious gaps.
 	header {
+		# Check back with the server on every visit. Without this, a browser
+		# that saw an older stylesheet keeps using it after a deploy and a new
+		# page renders half-styled. The site is a handful of small files, so
+		# a revalidation (usually a "304 not modified") costs next to nothing.
+		Cache-Control no-cache
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		-Server
