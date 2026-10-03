@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="xp">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How Farder Works</title>
+  <meta name="description" content="How Farder servers, relays and encryption fit together: who connects to whom, what a relay can and cannot see, what happens when one goes down, and why Farder uses QUIC rather than SSH.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../css/style.css">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("farder.theme");
+        if (t) document.documentElement.setAttribute("data-theme", t);
+      } catch (e) { /* private mode: the default is a fine answer */ }
+    })();
+  </script>
+</head>
+<body>
+
+  <!-- ── Navigation ──────────────────────────────────────── -->
+  <nav class="site-nav">
+    <a href="../index.html" class="nav-logo">
+      <span class="nav-logo-icon">F</span>
+      Farder
+    </a>
+    <ul class="nav-links">
+      <li><a href="#pieces">The pieces</a></li>
+      <li><a href="#p2p">Peer-to-peer?</a></li>
+      <li><a href="#relay">Relays</a></li>
+      <li><a href="#down">When it breaks</a></li>
+      <li><a href="#crypto">Encryption</a></li>
+      <li><a href="#faq">Quick answers</a></li>
+    </ul>
+  </nav>
+
+  <!-- ── Hero ────────────────────────────────────────────── -->
+  <header class="hero hero-compact">
+    <div class="site-content">
+      <h1 class="hero-tagline">How Farder works</h1>
+      <p class="hero-subtitle">
+        Who connects to whom, what a relay actually does, what happens when a
+        piece goes offline, and which encryption sits where &mdash; in plain
+        English first, with the technical names alongside for anyone who wants
+        to check.
+      </p>
+    </div>
+  </header>
+
+  <!-- ── The three pieces ────────────────────────────────── -->
+  <section id="pieces">
+    <div class="site-content">
+      <h2 class="section-title reveal"><span>&#x1F9E9;</span> The three pieces</h2>
+      <p class="section-lead reveal">
+        Everything in Farder is one of three programs. Once you know which is
+        which, the rest of this page is about how they talk to each other.
+      </p>
+
+      <div class="feature-grid">
+        <article class="feature-card reveal">
+          <div class="feature-card-icon">&#x1F4BB;</div>
+          <h3 class="feature-card-title">The app</h3>
+          <p class="feature-card-desc">
+            What you run. It holds your identity &mdash; a private key that never
+            leaves your machine &mdash; and does all the encrypting and
+            decrypting. Anything sealed is sealed here, before it goes anywhere.
+          </p>
+        </article>
+
+        <article class="feature-card reveal">
+          <div class="feature-card-icon">&#x1F3E0;</div>
+          <h3 class="feature-card-title">The server</h3>
+          <p class="feature-card-desc">
+            Where a community lives: its channels, roles, history and files. It
+            runs on <em>somebody's</em> machine &mdash; usually the owner's own
+            PC, sometimes a mini PC or a rented VPS. There is no central Farder
+            server; every community is its own.
+          </p>
+        </article>
+
+        <article class="feature-card reveal">
+          <div class="feature-card-icon">&#x1F4EE;</div>
+          <h3 class="feature-card-title">The relay</h3>
+          <p class="feature-card-desc">
+            A forwarding post office. It stores nothing &mdash; no messages, no
+            history, no accounts. It exists so that the app and the server can
+            reach each other <em>without either one learning the other's home
+            address</em> (its IP).
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Is it peer-to-peer? ─────────────────────────────── -->
+  <section id="p2p" class="section-alt">
+    <div class="site-content">
+      <h2 class="section-title reveal"><span>&#x1F91D;</span> Is it peer-to-peer?</h2>
+      <p class="section-lead reveal">
+        Not today, and that is partly on purpose. In a truly peer-to-peer chat
+        your computer connects straight to every other member's computer
+        &mdash; which means every member learns your IP address, and from it
+        roughly where you live. Farder's members never connect to each other.
+        They all connect to the <strong>server</strong>, which passes things
+        along. A server can be reached in one of two ways.
+      </p>
+
+      <div class="xp-panel reveal">
+        <div class="xp-panel-title">Direct server &mdash; simple, but not private about addresses</div>
+        <div class="xp-panel-body">
+          <div class="net-diagram" role="img" aria-label="You and a friend each connect straight to the host's computer.">
+            <div class="net-col">
+              <div class="net-node"><span class="net-icon">&#x1F4BB;</span><b>You</b></div>
+              <div class="net-node"><span class="net-icon">&#x1F4BB;</span><b>A friend</b></div>
+            </div>
+            <div class="net-link"><span>straight to the host's IP</span></div>
+            <div class="net-node net-node-main"><span class="net-icon">&#x1F3E0;</span><b>Host's computer</b><small>runs the server</small></div>
+          </div>
+          <p class="diagram-caption">
+            The host sees every member's real IP, and every member needs the
+            host's IP to connect. Fine on a home network or between people who
+            already trust each other. The app labels these servers
+            <strong>DIRECT</strong> before you join.
+          </p>
+        </div>
+      </div>
+
+      <div class="xp-panel reveal panel-gap">
+        <div class="xp-panel-title">Relayed server &mdash; the default</div>
+        <div class="xp-panel-body">
+          <div class="net-diagram" role="img" aria-label="You and a friend connect to the relay; the host's computer also connects out to the relay; the relay joins them up.">
+            <div class="net-col">
+              <div class="net-node"><span class="net-icon">&#x1F4BB;</span><b>You</b></div>
+              <div class="net-node"><span class="net-icon">&#x1F4BB;</span><b>A friend</b></div>
+            </div>
+            <div class="net-link"><span>you call the relay</span></div>
+            <div class="net-node net-node-relay"><span class="net-icon">&#x1F4EE;</span><b>Relay</b><small>forwards, stores nothing</small></div>
+            <div class="net-link net-link-back"><span>the host calls the relay too</span></div>
+            <div class="net-node net-node-main"><span class="net-icon">&#x1F3E0;</span><b>Host's computer</b><small>no open ports</small></div>
+          </div>
+          <p class="diagram-caption">
+            Both sides dial <em>out</em> to the relay and it joins the two calls
+            together. The server only ever sees the relay's address; so do you.
+            A side benefit: the host never has to open a port on their router,
+            because nothing ever connects <em>in</em> to them.
+          </p>
+        </div>
+      </div>
+
+      <div class="info-box reveal panel-gap">
+        <strong>Where this is heading.</strong> Today a server lives on one
+        machine, so when that machine is off, the server is off. The plan is
+        <em>mesh hosting</em>: the members' own apps share the job of hosting,
+        so a community stays up while anyone is online. The groundwork &mdash;
+        a signed, tamper-evident history that any member could hold a copy of,
+        and encrypted channels that copy can't read &mdash; is built. Copying
+        it between members is not, yet.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── How a relay works ───────────────────────────────── -->
+  <section id="relay">
+    <div class="site-content">
+      <h2 class="section-title reveal"><span>&#x1F4EE;</span> How a relay works, step by step</h2>
+      <p class="section-lead reveal">
+        Here is everything that happens between clicking an invite link and
+        seeing the channel list.
+      </p>
+
+      <div class="xp-panel reveal">
+        <div class="xp-panel-title">From invite link to connected</div>
+        <div class="xp-panel-body">
+          <ol class="invite-steps flow-steps">
+            <li class="invite-step">
+              <span class="step-number">1</span>
+              <span class="step-text">
+                <strong>The server checks in.</strong> When the host starts their
+                server, it calls the relay and says <em>"I'm server
+                <code>7f3a&hellip;</code>, send my visitors here."</em> That
+                number is a random 32-byte ID made when the server was created.
+                The server keeps that call open for as long as it runs.
+              </span>
+            </li>
+            <li class="invite-step">
+              <span class="step-number">2</span>
+              <span class="step-text">
+                <strong>You get an invite.</strong> A Farder invite carries three
+                things: which relay to call, the server's ID, and the relay's
+                <em>fingerprint</em> &mdash; a short code that only the genuine
+                relay can prove it owns. (For the default relay the app already
+                knows the last two, so those links are shorter.)
+              </span>
+            </li>
+            <li class="invite-step">
+              <span class="step-number">3</span>
+              <span class="step-text">
+                <strong>Your app calls the relay and checks its ID.</strong> The
+                connection is encrypted from the first packet. Before sending a
+                byte of yours, the app checks that the relay's fingerprint
+                matches the one in the invite. If it doesn't &mdash; someone
+                impersonating the relay, or sitting in the middle &mdash; the
+                app hangs up.
+              </span>
+            </li>
+            <li class="invite-step">
+              <span class="step-number">4</span>
+              <span class="step-text">
+                <strong>"Put me through to server 7f3a."</strong> The relay
+                looks the ID up, gives your connection a ticket number, and
+                starts passing your traffic down the server's open line, stamped
+                with that number so the server can tell members apart. If the
+                server isn't checked in, you get "destination not connected".
+              </span>
+            </li>
+            <li class="invite-step">
+              <span class="step-number">5</span>
+              <span class="step-text">
+                <strong>You prove who you are &mdash; to the server, not the
+                relay.</strong> The server sends a random challenge; your app
+                signs it with your private key; the server checks the signature
+                against your public key. No password crosses the wire and there
+                is nothing for anyone to steal and replay.
+              </span>
+            </li>
+            <li class="invite-step">
+              <span class="step-number">6</span>
+              <span class="step-text">
+                <strong>Voice takes the fast lane.</strong> Voice and screen
+                sharing travel as small stand-alone packets rather than one
+                continuous stream, so a lost packet is simply skipped instead of
+                stalling the call. The relay forwards them by ticket number
+                without being able to open them: each call's audio and video are
+                sealed with keys only the people in the call hold.
+              </span>
+            </li>
+          </ol>
+        </div>
+      </div>
+
+      <h3 class="sub-title reveal">What the relay can and cannot see</h3>
+      <div class="xp-panel reveal">
+        <div class="xp-panel-title">From where the relay sits</div>
+        <div class="xp-panel-body">
+          <div class="spec-table">
+            <div class="spec-row">
+              <span>Your IP address, and the host's</span>
+              <span class="spec-verdict spec-yes">can see</span>
+            </div>
+            <div class="spec-row">
+              <span>Which server ID you connected to, when, and how much traffic passed</span>
+              <span class="spec-verdict spec-yes">can see</span>
+            </div>
+            <div class="spec-row">
+              <span>Messages in <em>normal</em> channels &mdash; it is a middle stop, and today the server&rarr;relay&rarr;you hop is not sealed end to end for these</span>
+              <span class="spec-verdict spec-yes">can see</span>
+            </div>
+            <div class="spec-row">
+              <span>Messages and files in <em>encrypted</em> channels</span>
+              <span class="spec-verdict spec-no">cannot read</span>
+            </div>
+            <div class="spec-row">
+              <span>Direct messages</span>
+              <span class="spec-verdict spec-no">cannot read</span>
+            </div>
+            <div class="spec-row">
+              <span>Voice, video and screen-share audio</span>
+              <span class="spec-verdict spec-no">cannot read</span>
+            </div>
+            <div class="spec-row">
+              <span>Your private key, your PIN, your history</span>
+              <span class="spec-verdict spec-no">never has them</span>
+            </div>
+          </div>
+          <p class="download-note">
+            In short: a relay moves <strong>who can see your address</strong>
+            from "every server you join" to "the relay operator". That is only
+            an improvement if you trust the relay operator more than the server
+            &mdash; which is why anyone can run their own. It is one hop, not
+            Tor: it hides your address from the server, not from the relay.
+          </p>
+        </div>
+      </div>
+
+      <div class="info-box reveal panel-gap">
+        <strong>The relay also fetches things for you.</strong> When someone
+        posts a YouTube or X link, the preview card is fetched by the relay,
+        not by your app, so those sites see the relay's address instead of
+        yours. Invite previews work the same way.
+      </div>
+    </div>
+  </section>
+
+  <!-- ── When things go down ─────────────────────────────── -->
+  <section id="down" class="section-alt">
+    <div class="site-content">
+      <h2 class="section-title reveal"><span>&#x26A1;</span> What happens when something goes down</h2>
+      <p class="section-lead reveal">
+        Because the relay stores nothing, losing it loses nothing. It only
+        interrupts the conversation until the line comes back.
+      </p>
+
+      <div class="honesty-list">
+        <div class="honesty-item reveal">
+          <strong>The relay goes offline for a while.</strong>
+          <span>
+            Your app shows <em>"Connection lost. Reconnecting&hellip;"</em> and
+            tries again every few seconds. Any voice call is ended cleanly so
+            your mic doesn't stay live into nothing. Meanwhile the server is
+            still running on the host's machine with every message intact, and
+            it keeps calling the relay too, backing off from half a second up to
+            thirty seconds between tries. The moment the relay is back, both
+            sides reconnect on their own and you carry on. Nobody has to do
+            anything.
+          </span>
+        </div>
+
+        <div class="honesty-item reveal">
+          <strong>The relay is gone for good.</strong>
+          <span>
+            The communities behind it are fine &mdash; their data was never on
+            the relay &mdash; but they need a new meeting point. A relay's
+            identity is a small file, and if it was backed up, a replacement
+            relay on a new machine can wear the same fingerprint, so apps trust
+            it straight away and only the address changes. Today that move is a
+            manual step for the operator: <b>there is no automatic
+            switch-over to a backup relay yet.</b>
+          </span>
+        </div>
+
+        <div class="honesty-item reveal">
+          <strong>The host's computer goes off.</strong>
+          <span>
+            Then the server is off, relay or no relay, until it comes back. This
+            is the real single point of failure today, and the reason mesh
+            hosting is the long-term plan (see <a href="#p2p">above</a>).
+          </span>
+        </div>
+
+        <div class="honesty-item reveal">
+          <strong>Someone sets up a fake relay.</strong>
+          <span>
+            It can't pass the fingerprint check in step 3, so the app refuses to
+            talk to it. Pretending to be a relay requires the relay's private
+            key, which never leaves the relay's machine.
+          </span>
+        </div>
+
+        <div class="honesty-item reveal">
+          <strong>A direct server.</strong>
+          <span>
+            Relays don't come into it at all. Only the host's machine and their
+            internet connection matter.
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Encryption ──────────────────────────────────────── -->
+  <section id="crypto">
+    <div class="site-content">
+      <h2 class="section-title reveal"><span>&#x1F510;</span> The encryption, layer by layer</h2>
+      <p class="section-lead reveal">
+        There isn't one "Farder encryption". There are several, each doing a
+        different job, stacked like envelopes inside envelopes.
+      </p>
+
+      <div class="layer-stack">
+        <div class="layer reveal">
+          <div class="layer-head">
+            <strong>The wire</strong>
+            <code>QUIC + TLS 1.3</code>
+          </div>
+          <p>
+            Every connection &mdash; app to relay, relay to server, app to a
+            direct server &mdash; is encrypted in transit. Someone on your Wi-Fi
+            or at your internet provider sees scrambled packets going to an
+            address, and that's all. This is the outer envelope: it protects
+            each hop, and each hop opens it.
+          </p>
+        </div>
+
+        <div class="layer reveal">
+          <div class="layer-head">
+            <strong>Is this really the relay?</strong>
+            <code>SHA-256 fingerprint pinning</code>
+          </div>
+          <p>
+            The app doesn't trust a relay because a company vouched for it. It
+            trusts it because the relay proved it holds the key matching the
+            exact fingerprint the app expected. Nobody can issue a "valid"
+            impostor.
+          </p>
+        </div>
+
+        <div class="layer reveal">
+          <div class="layer-head">
+            <strong>Is this really you?</strong>
+            <code>Ed25519 signatures</code>
+          </div>
+          <p>
+            Your identity is a keypair. You log in by signing a one-time
+            challenge, so the server learns your public key and nothing it
+            could log in as you with. The private half is stored encrypted on
+            your machine behind your PIN, and a 24-word phrase can restore it.
+          </p>
+        </div>
+
+        <div class="layer reveal">
+          <div class="layer-head">
+            <strong>Direct messages</strong>
+            <code>X25519 + AES-256-GCM</code>
+          </div>
+          <p>
+            The two of you agree on a shared secret that never travels over the
+            network, and every DM is sealed with it on your machine. Server and
+            relay carry ciphertext they have no key for.
+          </p>
+        </div>
+
+        <div class="layer reveal">
+          <div class="layer-head">
+            <strong>Encrypted channels</strong>
+            <code>MLS (OpenMLS)</code>
+          </div>
+          <p>
+            Group encryption built for chats whose members come and go: keys
+            are refreshed as people join and leave, so a removed member can't
+            read what comes after, and a new one can't read what came before.
+          </p>
+        </div>
+
+        <div class="layer reveal">
+          <div class="layer-head">
+            <strong>Voice, video, screen sharing</strong>
+            <code>ChaCha20-Poly1305, per-call keys</code>
+          </div>
+          <p>
+            Each call gets fresh keys, handed only to the people in it. Every
+            packet is sealed on the sender's machine, and the server and relay
+            route packets they can't open.
+          </p>
+        </div>
+      </div>
+
+      <h3 class="sub-title reveal" id="ssh">"Why SSH?" &mdash; it isn't SSH, but it's a fair guess</h3>
+      <div class="xp-panel reveal">
+        <div class="xp-panel-title">QUIC, not SSH &mdash; and what we borrowed from SSH anyway</div>
+        <div class="xp-panel-body prose">
+          <p>
+            Farder doesn't use SSH to carry chat. People often think it does,
+            because it borrows SSH's two best ideas:
+          </p>
+          <ul>
+            <li>
+              <strong>The same kind of key.</strong> Your Farder identity is an
+              Ed25519 keypair &mdash; the same type modern SSH keys are.
+            </li>
+            <li>
+              <strong>Trust by fingerprint.</strong> The first time SSH meets a
+              server it remembers that server's fingerprint and warns you loudly
+              if it ever changes. Farder checks relays the same way: against a
+              known fingerprint, with no certificate authority in the middle.
+            </li>
+          </ul>
+          <p>
+            What it doesn't borrow is SSH's <em>transport</em>, because SSH was
+            built to log into a remote computer and type commands, and a chat
+            app needs things SSH doesn't do well:
+          </p>
+          <ul>
+            <li>
+              <strong>Voice needs to be allowed to lose packets.</strong> SSH
+              runs over one strictly ordered stream: if a single packet goes
+              missing, everything behind it waits until it is re-sent. For audio
+              that is a stutter every time the network hiccups. A voice packet
+              that arrives late is useless anyway, so it is better skipped.
+              QUIC can send packets that are allowed to drop.
+            </li>
+            <li>
+              <strong>Many things at once.</strong> Messages, a big file upload
+              and a voice call all share one connection. On one ordered stream,
+              the upload would hold up your messages. QUIC carries many
+              independent streams over one encrypted connection, so they don't
+              queue behind each other.
+            </li>
+            <li>
+              <strong>No certificate authority needed.</strong> A relay can run
+              on a bare IP address with a key it made itself, because the app
+              checks the fingerprint directly. Nobody has to buy a certificate
+              or ask anyone's permission to run one.
+            </li>
+          </ul>
+          <p>
+            QUIC is also not exotic: it is the protocol underneath HTTP/3, and
+            a large share of web traffic already uses it.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Quick answers ───────────────────────────────────── -->
+  <section id="faq" class="section-alt">
+    <div class="site-content">
+      <h2 class="section-title reveal"><span>&#x2753;</span> Quick answers</h2>
+      <p class="section-lead reveal">The questions people ask after reading the above.</p>
+
+      <div class="faq">
+        <details class="faq-item reveal">
+          <summary>Can the relay read my messages?</summary>
+          <p>
+            Your DMs, encrypted channels and voice: no. Normal channels: today,
+            yes &mdash; the relay is a stop in the middle of that conversation,
+            the same way the server is. An inner tunnel that closes this is
+            designed and not yet built. If that matters for a conversation, use
+            an encrypted channel.
+          </p>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>Who runs the relay?</summary>
+          <p>
+            The app comes with a default relay run by the Farder project. You
+            don't have to use it: when creating a server you can point it at a
+            relay you run yourself (one setup script on any small Linux VPS),
+            or skip relays and go direct.
+          </p>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>Can the server owner see my IP?</summary>
+          <p>
+            On a relayed server, no &mdash; they see the relay's address. On a
+            direct server, yes. The app tells you which kind it is before you
+            join.
+          </p>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>Do my messages live on the relay?</summary>
+          <p>
+            No. The relay keeps a list of which servers are currently checked
+            in and which connections are live, in memory. History, files and
+            members live on the server. Restart a relay and nothing is lost.
+          </p>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>If the relay is hacked, what does the attacker get?</summary>
+          <p>
+            What the relay can see (the table above): addresses, who connects to
+            which server, and normal-channel traffic passing through while
+            they're in. Not your encrypted channels, DMs or calls, not your key,
+            and not anything from before they got in &mdash; the relay keeps no
+            history to steal.
+          </p>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>Is this anonymous, like Tor?</summary>
+          <p>
+            No. A relay is one hop and it knows your address. It protects you
+            from the servers you join and the people in them, not from the
+            relay operator or anyone watching the whole internet at once.
+          </p>
+        </details>
+      </div>
+
+      <p class="download-note reveal">
+        Everything on this page can be checked against the source on
+        <a href="https://github.com/not-tivia/farder" target="_blank" rel="noopener">GitHub</a>.
+        Back to the <a href="../index.html">main page</a>.
+      </p>
+    </div>
+  </section>
+
+  <!-- ── Footer ──────────────────────────────────────────── -->
+  <footer class="site-footer">
+    <ul class="footer-links">
+      <li><a href="../index.html">Home</a></li>
+      <li><a href="#relay">Relays</a></li>
+      <li><a href="#crypto">Encryption</a></li>
+      <li><a href="https://github.com/not-tivia/farder" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+    <p class="footer-copy">
+      Farder &mdash; privacy-first chat with a retro soul. This page loads no
+      fonts, scripts or trackers from anywhere but this server.
+    </p>
+  </footer>
+
+  <script src="../js/theme.js"></script>
+</body>
+</html>

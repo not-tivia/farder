@@ -612,6 +612,136 @@ section { padding: 72px 0; }
   .btn:hover, .feature-card:hover, .theme-swatch:hover { transform: none; }
 }
 
+/* ── How it works page ───────────────────────────────────────────────────── */
+.hero-compact { padding: 64px 0 40px; }
+
+.sub-title {
+  font-size: 19px;
+  margin: 44px 0 14px;
+}
+
+.panel-gap { margin-top: 18px; }
+
+code {
+  font-family: var(--font-mono);
+  font-size: .9em;
+  padding: 1px 5px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+/* The network diagrams are HTML boxes rather than an SVG so the labels stay
+   readable on a phone: the row folds into a column instead of shrinking. */
+.net-diagram {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.net-col { display: grid; gap: 10px; flex: 0 0 auto; }
+
+.net-node {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  min-width: 120px;
+  padding: 12px 14px;
+  text-align: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.net-node small { font-size: 12px; color: var(--text-muted); }
+.net-icon { font-size: 22px; line-height: 1.2; }
+.net-node-relay { border: 2px solid var(--accent); }
+.net-node-main { border-left: 3px solid var(--accent); }
+
+.net-link {
+  flex: 1 1 0;
+  min-width: 70px;
+  position: relative;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding-bottom: 12px;
+}
+/* The line, and an arrowhead pointing at whoever is being called. */
+.net-link::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 8px;
+  bottom: 4px;
+  border-top: 2px dashed var(--accent);
+}
+.net-link::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  border: 5px solid transparent;
+  border-left: 8px solid var(--accent);
+}
+.net-link-back::before { left: 8px; right: 0; }
+.net-link-back::after { right: auto; left: 0; border-left: 5px solid transparent; border-right: 8px solid var(--accent); }
+
+.diagram-caption {
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+ol.flow-steps { list-style: none; }
+.flow-steps .step-text strong { color: var(--text); }
+.flow-steps .step-text { color: var(--text-muted); }
+
+/* Envelopes inside envelopes: each layer is indented a little further. */
+.layer-stack { display: grid; gap: 10px; }
+.layer {
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.layer p { color: var(--text-muted); margin-top: 4px; }
+.layer-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.layer-head strong { font-size: 15px; }
+.layer:nth-child(2) { margin-left: 12px; }
+.layer:nth-child(3) { margin-left: 24px; }
+.layer:nth-child(n+4) { margin-left: 36px; }
+
+.prose { font-size: 14px; }
+.prose p + p, .prose ul + p, .prose p + ul { margin-top: 12px; }
+.prose ul { padding-left: 20px; display: grid; gap: 8px; }
+.prose li { color: var(--text-muted); }
+.prose li strong { color: var(--text); }
+
+.faq { display: grid; gap: 10px; }
+.faq-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.faq-item summary {
+  cursor: pointer;
+  padding: 14px 18px;
+  font-weight: 700;
+  font-size: 15px;
+}
+.faq-item summary:hover { color: var(--accent); }
+.faq-item p { padding: 0 18px 16px; color: var(--text-muted); }
+
 /* ── Small screens ───────────────────────────────────────────────────────── */
 @media (max-width: 720px) {
   /* Six links wrapped onto three rows and ate a third of the screen, on a
@@ -637,4 +767,16 @@ section { padding: 72px 0; }
   .nav-links a { padding: 6px 8px; }
   .spec-row { grid-template-columns: 1fr; gap: 6px; }
   .spec-verdict { justify-self: start; }
+
+  /* Diagrams fold into a column; arrows turn to point down (or up, for the
+     host calling the relay from below). */
+  .net-diagram { flex-direction: column; align-items: stretch; }
+  .net-col { grid-template-columns: 1fr 1fr; }
+  .net-node { min-width: 0; }
+  .net-link { min-height: 44px; padding: 0 0 0 18px; text-align: left; display: flex; align-items: center; }
+  .net-link::before { left: 4px; right: auto; top: 0; bottom: 8px; border-top: 0; border-left: 2px dashed var(--accent); }
+  .net-link::after { left: 0; right: auto; bottom: 0; border: 5px solid transparent; border-top: 8px solid var(--accent); border-bottom: 0; }
+  .net-link-back::before { top: 8px; bottom: 0; }
+  .net-link-back::after { top: 0; bottom: auto; border: 5px solid transparent; border-bottom: 8px solid var(--accent); border-top: 0; }
+  .layer:nth-child(n) { margin-left: 0; }
 }
