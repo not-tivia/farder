@@ -151,11 +151,13 @@
       <div class="info-box reveal panel-gap">
         <strong>Where this is heading.</strong> Today a server lives on one
         machine, so when that machine is off, the server is off. The plan is
-        <em>mesh hosting</em>: the members' own apps share the job of hosting,
-        so a community stays up while anyone is online. The groundwork &mdash;
-        a signed, tamper-evident history that any member could hold a copy of,
-        and encrypted channels that copy can't read &mdash; is built. Copying
-        it between members is not, yet.
+        <em>mesh hosting</em>: every member's app holds a copy of the server,
+        so a community stays up while anyone is online. The groundwork is
+        built. Every event in a server's history is signed by whoever made it
+        and chained to the one before by a hash, a little like a blockchain
+        without the mining, so any copy can prove it hasn't been tampered with,
+        even one whose encrypted channels it can't open. Copying that history
+        between members is the part not built yet.
       </div>
     </div>
   </section>
@@ -298,8 +300,118 @@
       <h2 class="section-title reveal"><span>&#x26A1;</span> What happens when something goes down</h2>
       <p class="section-lead reveal">
         Because the relay stores nothing, losing it loses nothing. It only
-        interrupts the conversation until the line comes back.
+        interrupts the conversation until the line comes back. Pick what goes
+        wrong, then step through what each piece does about it.
       </p>
+
+      <div class="net-sim reveal" id="net-sim">
+        <div class="xp-panel">
+          <div class="xp-panel-title">What happens if&hellip;</div>
+          <div class="xp-panel-body">
+            <div class="sim-controls">
+              <div class="sim-group" role="group" aria-label="Kind of server">
+                <span class="sim-group-label">Server type</span>
+                <button type="button" class="btn btn-sm" data-sim-mode="relayed" aria-pressed="true">Relayed</button>
+                <button type="button" class="btn btn-sm" data-sim-mode="direct" aria-pressed="false">Direct</button>
+              </div>
+              <div class="sim-group" role="group" aria-label="What goes wrong">
+                <span class="sim-group-label">What happens</span>
+                <button type="button" class="btn btn-sm" data-sim-scenario="normal" aria-pressed="true">All good</button>
+                <button type="button" class="btn btn-sm" data-sim-scenario="you" aria-pressed="false">You lose internet</button>
+                <button type="button" class="btn btn-sm" data-sim-scenario="relay" aria-pressed="false">Relay goes down</button>
+                <button type="button" class="btn btn-sm" data-sim-scenario="host" aria-pressed="false">Host's PC turns off</button>
+                <button type="button" class="btn btn-sm" data-sim-scenario="fake" aria-pressed="false">A fake relay</button>
+              </div>
+            </div>
+
+            <div class="sim-stage">
+              <svg class="sim-svg" viewBox="0 0 480 290" role="img" aria-label="Diagram of who is connected to whom. The explanation next to it describes the same thing in words.">
+            <g class="sim-link" data-link="yh">
+              <line class="sim-line" x1="130" y1="58" x2="350" y2="140"/>
+              <line class="sim-flow" x1="130" y1="58" x2="350" y2="140"/>
+              <g class="sim-x" transform="translate(240 99)"><circle r="9"/><path d="M-3.5 -3.5L3.5 3.5M3.5 -3.5L-3.5 3.5"/></g>
+            </g>
+            <g class="sim-link" data-link="fh">
+              <line class="sim-line" x1="130" y1="242" x2="350" y2="160"/>
+              <line class="sim-flow" x1="130" y1="242" x2="350" y2="160"/>
+              <g class="sim-x" transform="translate(240 201)"><circle r="9"/><path d="M-3.5 -3.5L3.5 3.5M3.5 -3.5L-3.5 3.5"/></g>
+            </g>
+            <g class="sim-link" data-link="yr">
+              <line class="sim-line" x1="130" y1="64" x2="170" y2="140"/>
+              <line class="sim-flow" x1="130" y1="64" x2="170" y2="140"/>
+              <g class="sim-x" transform="translate(150 102)"><circle r="9"/><path d="M-3.5 -3.5L3.5 3.5M3.5 -3.5L-3.5 3.5"/></g>
+            </g>
+            <g class="sim-link" data-link="fr">
+              <line class="sim-line" x1="130" y1="236" x2="170" y2="160"/>
+              <line class="sim-flow" x1="130" y1="236" x2="170" y2="160"/>
+              <g class="sim-x" transform="translate(150 198)"><circle r="9"/><path d="M-3.5 -3.5L3.5 3.5M3.5 -3.5L-3.5 3.5"/></g>
+            </g>
+            <g class="sim-link" data-link="hr">
+              <line class="sim-line" x1="290" y1="150" x2="350" y2="150"/>
+              <line class="sim-flow" x1="290" y1="150" x2="350" y2="150"/>
+              <g class="sim-x" transform="translate(320 150)"><circle r="9"/><path d="M-3.5 -3.5L3.5 3.5M3.5 -3.5L-3.5 3.5"/></g>
+            </g>
+            <g class="sim-link" data-link="yf">
+              <line class="sim-line" x1="130" y1="44" x2="170" y2="40"/>
+              <line class="sim-flow" x1="130" y1="44" x2="170" y2="40"/>
+              <g class="sim-x" transform="translate(150 42)"><circle r="9"/><path d="M-3.5 -3.5L3.5 3.5M3.5 -3.5L-3.5 3.5"/></g>
+            </g>
+            <g class="sim-node" data-node="you">
+              <rect x="10" y="20" width="120" height="64" rx="4"/>
+              <text class="sim-icon" x="70" y="42">&#x1F4BB;</text>
+              <text class="sim-label" x="70" y="60">You</text>
+              <text class="sim-status" x="70" y="76"></text>
+            </g>
+            <g class="sim-node" data-node="friend">
+              <rect x="10" y="216" width="120" height="64" rx="4"/>
+              <text class="sim-icon" x="70" y="238">&#x1F4BB;</text>
+              <text class="sim-label" x="70" y="256">A friend</text>
+              <text class="sim-status" x="70" y="272"></text>
+            </g>
+            <g class="sim-node" data-node="relay">
+              <rect x="170" y="118" width="120" height="64" rx="4"/>
+              <text class="sim-icon" x="230" y="140">&#x1F4EE;</text>
+              <text class="sim-label" x="230" y="158">Relay</text>
+              <text class="sim-status" x="230" y="174"></text>
+            </g>
+            <g class="sim-node" data-node="host">
+              <rect x="350" y="118" width="120" height="64" rx="4"/>
+              <text class="sim-icon" x="410" y="140">&#x1F3E0;</text>
+              <text class="sim-label" x="410" y="158">Host's server</text>
+              <text class="sim-status" x="410" y="174"></text>
+            </g>
+            <g class="sim-node" data-node="fake">
+              <rect x="170" y="8" width="120" height="64" rx="4"/>
+              <text class="sim-icon" x="230" y="30">&#x1F3AD;</text>
+              <text class="sim-label" x="230" y="48">Fake relay</text>
+              <text class="sim-status" x="230" y="64"></text>
+            </g>
+              </svg>
+
+              <div class="sim-explain" aria-live="polite">
+                <div class="sim-counter" data-sim-counter></div>
+                <div class="sim-cause-label">What happens</div>
+                <p class="sim-cause" data-sim-cause></p>
+                <div class="sim-cause-label">So&hellip;</div>
+                <p class="sim-effect" data-sim-effect></p>
+                <div class="sim-nav">
+                  <button type="button" class="btn btn-sm" data-sim-back>&larr; Back</button>
+                  <span class="sim-dots" data-sim-dots></span>
+                  <button type="button" class="btn btn-sm btn-primary" data-sim-next>Next &rarr;</button>
+                </div>
+              </div>
+            </div>
+
+            <ul class="sim-legend" aria-hidden="true">
+              <li><span class="sim-key sim-key-up"></span>connected</li>
+              <li><span class="sim-key sim-key-blocked"></span>reaches it, but turned away</li>
+              <li><span class="sim-key sim-key-down"></span>broken</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <h3 class="sub-title reveal">The same, in words</h3>
 
       <div class="honesty-list">
         <div class="honesty-item reveal">
@@ -441,6 +553,44 @@
             Each call gets fresh keys, handed only to the people in it. Every
             packet is sealed on the sender's machine, and the server and relay
             route packets they can't open.
+          </p>
+        </div>
+      </div>
+
+      <h3 class="sub-title reveal" id="private">Private is not the same as encrypted</h3>
+      <div class="xp-panel reveal">
+        <div class="xp-panel-title">Two different settings, two different protections</div>
+        <div class="xp-panel-body">
+          <div class="spec-table spec-table-3">
+            <div class="spec-row spec-head">
+              <span></span>
+              <span>Private channel</span>
+              <span>Encrypted channel</span>
+            </div>
+            <div class="spec-row">
+              <span>Other members can read it</span>
+              <span>Only with permission</span>
+              <span>Only if they're in it</span>
+            </div>
+            <div class="spec-row">
+              <span>Can whoever runs the server read it?</span>
+              <span class="spec-verdict spec-yes">yes</span>
+              <span class="spec-verdict spec-no">no</span>
+            </div>
+            <div class="spec-row">
+              <span>Slash commands, polls, link previews, search</span>
+              <span>All work</span>
+              <span>Switched off</span>
+            </div>
+          </div>
+          <p class="download-note">
+            A <strong>private</strong> channel is a door with a lock in the app:
+            permissions decide who can see it, but it is stored as readable text
+            on the server, like any normal channel. An <strong>encrypted</strong>
+            channel is sealed on the members' own machines, so the server holds
+            only ciphertext. If the host shouldn't read it, it needs to be
+            encrypted, not just private. The difference matters even more for
+            mesh hosting, where many members would be holding copies.
           </p>
         </div>
       </div>
@@ -592,5 +742,6 @@
   </footer>
 
   <script src="../js/theme.js"></script>
+  <script src="../js/network-sim.js"></script>
 </body>
 </html>

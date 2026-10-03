@@ -742,6 +742,145 @@ ol.flow-steps { list-style: none; }
 .faq-item summary:hover { color: var(--accent); }
 .faq-item p { padding: 0 18px 16px; color: var(--text-muted); }
 
+/* ── The "what happens if" chart ─────────────────────────────────────────── */
+/* Without JavaScript the chart can't do anything, so it doesn't appear; the
+   same story is told in words directly underneath it. */
+.net-sim:not(.sim-ready) { display: none; }
+
+.net-sim {
+  --sim-bad:  #c0392b;
+  --sim-warn: #c27c0e;
+  margin-bottom: 8px;
+}
+[data-theme="discord"] .net-sim { --sim-bad: #F23F43; --sim-warn: #F0B232; }
+
+.sim-controls { display: grid; gap: 10px; margin-bottom: 18px; }
+.sim-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sim-group-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+  min-width: 110px;
+}
+.sim-controls .btn[aria-pressed="true"] {
+  background: linear-gradient(var(--accent-light), var(--accent));
+  border-color: var(--accent-dark);
+  color: #fff;
+}
+
+.sim-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 22px;
+  align-items: center;
+}
+
+.sim-svg { width: 100%; height: auto; display: block; overflow: visible; }
+
+.sim-node rect {
+  fill: var(--surface-2);
+  stroke: var(--border);
+  stroke-width: 1.5;
+  transition: stroke .3s ease, opacity .3s ease;
+}
+.sim-node text { text-anchor: middle; fill: var(--text); font-family: var(--font); }
+.sim-icon { font-size: 17px; }
+.sim-label { font-size: 14px; font-weight: 700; }
+.sim-node .sim-status { font-size: 12px; fill: var(--text-muted); }
+.sim-node { transition: opacity .3s ease; }
+.sim-node.sim-off { display: none; }
+.sim-node.sim-ok rect { stroke: var(--accent); stroke-width: 2; }
+.sim-node.sim-warn rect { stroke: var(--sim-warn); stroke-width: 2.5; }
+.sim-node.sim-warn .sim-status { fill: var(--sim-warn); font-weight: 700; }
+.sim-node.sim-down rect { stroke: var(--sim-bad); stroke-width: 2.5; stroke-dasharray: 6 4; }
+.sim-node.sim-down { opacity: .7; }
+.sim-node.sim-down .sim-status { fill: var(--sim-bad); font-weight: 700; }
+
+.sim-link.sim-off { display: none; }
+.sim-line {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke .3s ease;
+}
+/* Traffic moving along a live line: small bright dashes that travel. */
+.sim-flow {
+  stroke: var(--surface-2);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 2 12;
+  animation: sim-flow 1.1s linear infinite;
+}
+@keyframes sim-flow { to { stroke-dashoffset: -28; } }
+.sim-x { display: none; }
+.sim-x circle { fill: var(--sim-bad); }
+.sim-x path { stroke: #fff; stroke-width: 2; stroke-linecap: round; }
+
+.sim-down .sim-line { stroke: var(--sim-bad); stroke-dasharray: 6 6; opacity: .75; }
+.sim-down .sim-flow { display: none; }
+.sim-down .sim-x { display: inline; }
+.sim-blocked .sim-line { stroke: var(--sim-warn); stroke-dasharray: 3 6; }
+.sim-blocked .sim-flow { display: none; }
+
+.sim-explain {
+  padding: 16px 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  min-height: 250px;
+  display: flex;
+  flex-direction: column;
+}
+.sim-counter { font-size: 12px; color: var(--text-muted); min-height: 18px; }
+.sim-cause-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+.sim-cause { font-weight: 700; font-size: 16px; margin-bottom: 6px; }
+.sim-effect { font-size: 14px; flex: 1; }
+.sim-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 14px; }
+.sim-nav .btn[disabled] { opacity: .45; cursor: default; transform: none; }
+.sim-nav .btn[hidden] { display: none; }
+.sim-dots { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.sim-dot {
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  cursor: pointer;
+}
+.sim-dot[aria-current="step"] { background: var(--accent); }
+
+.sim-legend {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.sim-legend li { display: inline-flex; align-items: center; gap: 8px; }
+.sim-key { display: inline-block; width: 26px; border-top: 3px solid var(--accent); }
+.sim-key-blocked { border-top: 3px dashed var(--sim-warn); }
+.sim-key-down { border-top: 3px dashed var(--sim-bad); }
+
+/* Three-column variant of the spec table, for side-by-side comparisons. */
+.spec-table-3 .spec-row { grid-template-columns: 1.3fr 1fr 1fr; }
+.spec-head { font-weight: 700; font-size: 13px; }
+.spec-table-3 .spec-verdict { justify-self: start; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sim-flow { animation: none; }
+}
+
 /* ── Small screens ───────────────────────────────────────────────────────── */
 @media (max-width: 720px) {
   /* Six links wrapped onto three rows and ate a third of the screen, on a
@@ -779,4 +918,14 @@ ol.flow-steps { list-style: none; }
   .net-link-back::before { top: 8px; bottom: 0; }
   .net-link-back::after { top: 0; bottom: auto; border: 5px solid transparent; border-bottom: 8px solid var(--accent); border-top: 0; }
   .layer:nth-child(n) { margin-left: 0; }
+
+  .sim-stage { grid-template-columns: 1fr; }
+  /* The diagram scales down to fit a phone, so its text has to start bigger. */
+  .sim-label { font-size: 17px; }
+  .sim-node .sim-status { font-size: 15px; }
+  .sim-icon { font-size: 20px; }
+  .sim-explain { min-height: 0; }
+  .sim-group-label { min-width: 0; width: 100%; }
+  .spec-table-3 .spec-row { grid-template-columns: 1fr 1fr; }
+  .spec-table-3 .spec-row > span:first-child { grid-column: 1 / -1; font-weight: 700; }
 }
