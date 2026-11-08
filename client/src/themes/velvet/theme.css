@@ -3598,3 +3598,21 @@ body {
   from { opacity: 0; transform: translateY(-10px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* Quick reply inside the notification pop-up (NotifyPopup.tsx). */
+.notify-popup-reply-btn {
+  align-self: flex-start; background: transparent; color: var(--xp-blue);
+  border: 1px solid var(--xp-border); border-radius: 6px; padding: 2px 10px;
+  cursor: pointer; font-family: var(--xp-font); font-size: var(--xp-font-size-small);
+}
+.notify-popup-reply-btn:hover { border-color: var(--xp-blue); }
+.notify-popup-reply { width: 100%; }
+.notify-popup-reply-input {
+  width: 100%; box-sizing: border-box; padding: 5px 8px; user-select: text;
+  background: var(--xp-window-bg); color: var(--xp-text-normal);
+  border: 1px solid var(--xp-input-border); border-radius: 6px;
+  font-family: var(--xp-font); font-size: var(--xp-font-size);
+}
+.notify-popup-reply-input:focus { outline: none; border-color: var(--xp-blue); }
+.notify-popup-reply-status { margin-top: 4px; font-size: var(--xp-font-size-small); color: var(--xp-text-muted); }
+.notify-popup-reply-error { color: var(--xp-e2ee-error); }

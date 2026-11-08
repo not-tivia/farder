@@ -3878,6 +3878,7 @@ pub fn show_notification(
     title: String,
     body: String,
     media_url: Option<String>,
+    reply: Option<crate::notify_popup::ReplyTarget>,
 ) -> Result<(), String> {
     // "off": no pop-ups of any kind. Nothing is built, spawned or sent.
     if notification_popup_style() == "off" {
@@ -3887,7 +3888,7 @@ pub fn show_notification(
     // copied into the OS notification history). `popupStyle: "system"` in the
     // notification prefs opts back into the OS toast below.
     if notification_popup_style() != "system" {
-        match crate::notify_popup::push(&app, title.clone(), body.clone(), media_url) {
+        match crate::notify_popup::push(&app, title.clone(), body.clone(), media_url, reply) {
             Ok(()) => return Ok(()),
             Err(e) => eprintln!("[notify] pop-up window unavailable, using the OS toast: {e}"),
         }

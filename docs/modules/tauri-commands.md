@@ -1875,7 +1875,7 @@ unchanged.
 
 ---
 
-### `show_notification(title, body, media_url) -> Result<(), String>`
+### `show_notification(title, body, media_url, reply) -> Result<(), String>`
 
 **What it does:** raises a notification. With `popupStyle: "off"` it does nothing
 at all. By default (`popupStyle` absent or `"skinned"` in `notifications.json`) it hands the text to Farder's own
@@ -1885,7 +1885,10 @@ native OS notification instead: `notify-send` on Linux, a PowerShell toast on
 Windows, `osascript` on macOS (fire-and-forget; spawn errors discarded). The OS
 route copies the text into the OS notification history, which is why the skinned
 window is the default.
-`media_url` (optional) is a direct video/image link the pop-up may preview; the
+`reply` (optional `{server_id, channel_id}`) gives the card a Reply button: the
+client sets it only with the themed pop-up, when the pop-up shows who it is from
+and replying is not turned off. `media_url` (optional) is a direct video/image
+link the pop-up may preview; the
 client only passes one for a sender the person trusts (see Autoplay) and the OS
 toast route ignores it.
 **Side effects:** emits an event to the `notify` window, or spawns a child process.
@@ -1902,6 +1905,16 @@ clamped to 76+16 .. 900), centred at the top of the PRIMARY monitor, and shown
 without taking focus. The geometry is the pure, unit-tested `notify_popup::layout_for`.
 **Errors:** the window is not running, or there is no primary monitor.
 **invoke name:** `"notify_layout"` -> `notifyLayout()`.
+
+---
+
+### `notify_focus(focusable) -> Result<(), String>`
+
+**What it does:** makes the pop-up window focusable (and focuses it) or not. It is
+unfocusable by design so it can never steal your typing; the page asks for focus
+only while a reply box is open and gives it up when it closes. `notify_layout(0,..)`
+also resets it to unfocusable when the window hides.
+**invoke name:** `"notify_focus"` -> `notifyFocus()`.
 
 ---
 

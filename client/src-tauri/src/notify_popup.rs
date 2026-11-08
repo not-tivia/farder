@@ -17,7 +17,7 @@
 //! which also means the empty transparent area never sits over other programs
 //! and eats their clicks.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 pub const LABEL: &str = "notify";
@@ -60,6 +60,15 @@ pub fn layout_for(content_h: f64, monitor_x: i32, monitor_y: i32, monitor_w: u32
     Layout { x, y, width, height }
 }
 
+/// Where a reply typed into the pop-up should go. Set by the client ONLY when the
+/// person allows replying from pop-ups and the pop-up is showing who it is from.
+/// The pop-up merely carries it back; the main window re-checks it before sending.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ReplyTarget {
+    pub server_id: String,
+    pub channel_id: u64,
+}
+
 #[derive(Serialize, Clone)]
 struct PushPayload {
     title: String,
@@ -67,6 +76,7 @@ struct PushPayload {
     /// A direct video/image link the page may preview (only ever set for a
     /// sender the person trusts -- decided in the client, not here).
     media_url: Option<String>,
+    reply: Option<ReplyTarget>,
 }
 
 /// Build the window if it does not exist. Hidden and unfocusable from birth so
@@ -100,10 +110,16 @@ pub fn close_window(app: &AppHandle) {
 }
 
 /// Hand a notification to the pop-up window.
-pub fn push(app: &AppHandle, title: String, body: String, media_url: Option<String>) -> Result<(), String> {
+pub fn push(
+    app: &AppHandle,
+    title: String,
+    body: String,
+    media_url: Option<String>,
+    reply: Option<ReplyTarget>,
+) -> Result<(), String> {
     let freshly_built = ensure_window(app)?;
     let app = app.clone();
-    let payload = PushPayload { title, body, media_url };
+    let payload = PushPayload { title, body, media_url, reply };
     if freshly_built {
         // Its page has not loaded yet; an event sent now would be lost. Only
         // happens if startup creation failed, so a short wait is enough.
@@ -125,6 +141,9 @@ pub fn notify_layout(app: AppHandle, count: u32, height: f64) -> Result<(), Stri
         .get_webview_window(LABEL)
         .ok_or_else(|| "notification window is not running".to_string())?;
     if count == 0 {
+        // Nothing left to show: also drop back to never taking focus, so a reply
+        // box that was open cannot leave the window grabbing keystrokes later.
+        let _ = win.set_focusable(false);
         return win.hide().map_err(|e| e.to_string());
     }
     let monitor = app
@@ -145,6 +164,22 @@ pub fn notify_layout(app: AppHandle, count: u32, height: f64) -> Result<(), Stri
     win.show().map_err(|e| e.to_string())
 }
 
+/// The pop-up normally NEVER takes focus (it must not steal keystrokes from
+/// whatever you are typing into). Typing a reply is the one time it must: the
+/// page asks for focus when a reply box opens and gives it up again when it
+/// closes, so the window is focusable only for as long as you are writing.
+#[tauri::command]
+pub fn notify_focus(app: AppHandle, focusable: bool) -> Result<(), String> {
+    let win = app
+        .get_webview_window(LABEL)
+        .ok_or_else(|| "notification window is not running".to_string())?;
+    win.set_focusable(focusable).map_err(|e| e.to_string())?;
+    if focusable {
+        win.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// A card was clicked: bring the real app forward.
 #[tauri::command]
 pub fn notify_activate(app: AppHandle) -> Result<(), String> {
@@ -161,6 +196,18 @@ mod tests {
     use super::*;
 
     const ONE: f64 = CARD_H + 2.0 * GAP;
+
+    #[test]
+    fn a_reply_target_round_trips_the_shape_the_page_sends() {
+        // The client sends snake_case keys; a rename on either side would silently
+        // drop the Reply button, so pin the wire shape.
+        let t: ReplyTarget = serde_json::from_str(r#"{"server_id":"s1","channel_id":7}"#).unwrap();
+        assert_eq!(t, ReplyTarget { server_id: "s1".into(), channel_id: 7 });
+        assert_eq!(serde_json::to_value(&t).unwrap(), serde_json::json!({"server_id":"s1","channel_id":7}));
+        // A channel id cannot be negative or fractional.
+        assert!(serde_json::from_str::<ReplyTarget>(r#"{"server_id":"s","channel_id":-1}"#).is_err());
+        assert!(serde_json::from_str::<ReplyTarget>(r#"{"server_id":"s","channel_id":1.5}"#).is_err());
+    }
 
     #[test]
     fn centres_on_the_monitor_at_scale_one() {

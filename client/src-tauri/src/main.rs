@@ -282,6 +282,7 @@ fn main() {
             commands::show_notification,
             notify_popup::notify_layout,
             notify_popup::notify_activate,
+            notify_popup::notify_focus,
             commands::get_notification_prefs,
             commands::save_notification_prefs,
             commands::dm_encrypt,

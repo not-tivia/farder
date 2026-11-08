@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useApp, type PerServerState } from "../context/ServerContext";
 import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo, MessageInfoV2, ChannelInfoV2 } from "../lib/types";
 import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2, isE2eeChannel } from "../lib/types";
@@ -10,6 +10,12 @@ import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 import { getAutoplay, shouldAutoplay, firstDirectMediaUrl, prefersReducedMotion } from "../lib/autoplay";
 import { getDataSaver } from "../lib/dataSaver";
 import { buildNotificationText, normalizePopupContent } from "../lib/notificationText";
+import {
+  MIN_REPLY_GAP_MS, REPLY_EVENT, REPLY_RESULT_EVENT, executeReply, planReply,
+  type ReplyRequest, type ReplyResult, type ReplyServerView,
+} from "../lib/quickReply";
+import { getGarble } from "../lib/garbleSettings";
+import { garbleText, makeTransform } from "../lib/garble";
 
 // Module-level cache for notification prefs and own public key
 let notifPrefs: NotificationPrefs | null = null;
@@ -108,7 +114,14 @@ function notifyIfWanted(serverId: string, message: MessageInfo, text: string): v
       { dataSaverOn: getDataSaver().enabled, reducedMotion: prefersReducedMotion() },
       "popup",
     ) ? firstDirectMediaUrl(text) : null;
-    api.showNotification(shown.title, shown.body, media).catch(() => {});
+    // Replying from the pop-up: only with the themed pop-up, only when it shows
+    // who the message is from, and only if the person has not turned it off.
+    const canReply =
+      (notifPrefs?.popupStyle ?? "skinned") === "skinned" &&
+      normalizePopupContent(notifPrefs?.popupContent) !== "hidden" &&
+      notifPrefs?.popupReply !== false;
+    const reply = canReply ? { server_id: serverId, channel_id: message.channel_id } : null;
+    api.showNotification(shown.title, shown.body, media, reply).catch(() => {});
   });
 }
 
@@ -586,6 +599,41 @@ export function useServerEvents(): void {
         serverId: data.server_id,
         payload: { channelId: data.channel_id, messageId: data.message_id, pinned: false },
       });
+    }).then(safePush);
+
+    // A reply typed into the notification pop-up. The pop-up only ASKS; this checks
+    // the request against what really exists and sends it the way the message box
+    // does (a DM is encrypted first). The answer goes back so the pop-up can say
+    // "Sent" or show the error.
+    let lastReplyAt = 0;
+    listen(REPLY_EVENT, async (e) => {
+      const req = e.payload as ReplyRequest;
+      const respond = (r: Omit<ReplyResult, "id">) =>
+        emit(REPLY_RESULT_EVENT, { id: typeof req?.id === "string" ? req.id : "", ...r }).catch(() => {});
+      const now = Date.now();
+      if (now - lastReplyAt < MIN_REPLY_GAP_MS) { void respond({ ok: false, error: "Slow down." }); return; }
+      lastReplyAt = now;
+      const server = typeof req?.serverId === "string" ? stateRef.current.servers[req.serverId] : undefined;
+      const view: ReplyServerView | undefined = server && {
+        channels: server.channels.map((c) => ({ id: c.id, class: c.class })),
+        dms: server.dms.map((d) => ({ channel: { id: d.channel.id }, peerKey: publicKeyToString(d.participant.public_key) })),
+        logServerId: server.logServerId,
+      };
+      const planned = planReply(req, view);
+      if (!planned.ok) { void respond({ ok: false, error: planned.error }); return; }
+      // Your own "speak as" setting applies here exactly as it does in the message box.
+      const g = getGarble();
+      const text = g.enabled ? garbleText(planned.text, makeTransform(g.mode, g.phrase)) : planned.text;
+      try {
+        await executeReply(planned.plan, req, text, {
+          sendMessage: (s, c, t) => api.sendMessage(s, c, t),
+          submitEvent: (s, l, c, t, r, caps) => api.submitEvent(s, l, c, t, r, caps),
+          dmEncrypt: (peer, t) => api.dmEncrypt(peer, t),
+        });
+        void respond({ ok: true });
+      } catch (err) {
+        void respond({ ok: false, error: String(err) });
+      }
     }).then(safePush);
 
     // A garble rule or consent changed somewhere on this server: tell whoever is

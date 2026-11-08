@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import * as api from "../lib/tauri-bridge";
 import { useLinkEmbed } from "../hooks/useLinkEmbed";
 import { useProxiedMedia } from "../hooks/useProxiedMedia";
+import {
+  MAX_REPLY_CHARS, REPLY_EVENT, REPLY_RESULT_EVENT,
+  type ReplyRequest, type ReplyResult, type ReplyTarget,
+} from "../lib/quickReply";
 
 // The view rendered inside the detached, always-on-top "notify" window (see
 // src-tauri/src/notify_popup.rs). It shows the ACTIVE THEME's look, holds the
@@ -15,6 +19,8 @@ interface Card {
   body: string;
   /** A direct video/image link to preview (only sent for a trusted sender). */
   mediaUrl: string | null;
+  /** Where a typed reply goes; absent when replying is not allowed for this card. */
+  reply: ReplyTarget | null;
 }
 
 // Most cards on screen: 4 plain ones, but 3 when any carries a media preview, so
@@ -29,6 +35,11 @@ export default function NotifyPopup() {
   const [cards, setCards] = useState<Card[]>([]);
   const timers = useRef<Map<number, number>>(new Map());
   const stackRef = useRef<HTMLDivElement>(null);
+  // The card whose reply box is open. While one is open its card must not
+  // time out from under the person's fingers.
+  const [replyingId, setReplyingId] = useState<number | null>(null);
+  const replyingRef = useRef<number | null>(null);
+  replyingRef.current = replyingId;
 
   function remove(id: number) {
     const t = timers.current.get(id);
@@ -40,7 +51,17 @@ export default function NotifyPopup() {
   function arm(id: number) {
     const old = timers.current.get(id);
     if (old !== undefined) window.clearTimeout(old);
-    timers.current.set(id, window.setTimeout(() => remove(id), SHOW_MS));
+    timers.current.set(id, window.setTimeout(() => {
+      if (replyingRef.current === id) return; // being replied to: stays until done
+      remove(id);
+    }, SHOW_MS));
+  }
+
+  /** Close the reply box and give keyboard focus back (the pop-up never keeps it). */
+  function endReply(id: number, rearm: boolean) {
+    setReplyingId((cur) => (cur === id ? null : cur));
+    api.notifyFocus(false).catch(() => {});
+    if (rearm) arm(id);
   }
 
   // Receive pushes. A fresh theme fetch per push keeps the pop-up in step with
@@ -48,7 +69,7 @@ export default function NotifyPopup() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
-    listen<{ title: string; body: string; media_url?: string | null }>("notify:push", async (e) => {
+    listen<{ title: string; body: string; media_url?: string | null; reply?: ReplyTarget | null }>("notify:push", async (e) => {
       try {
         const { id: themeId, css } = await api.getActiveTheme();
         const style = document.getElementById("active-theme");
@@ -57,7 +78,7 @@ export default function NotifyPopup() {
           document.documentElement.dataset.theme = themeId;
         }
       } catch { /* keep the current look */ }
-      const card: Card = { id: nextId++, title: e.payload.title, body: e.payload.body, mediaUrl: e.payload.media_url ?? null };
+      const card: Card = { id: nextId++, title: e.payload.title, body: e.payload.body, mediaUrl: e.payload.media_url ?? null, reply: e.payload.reply ?? null };
       setCards((cs) => {
         const next = [...cs, card];
         // Drop the oldest beyond the cap so the window never outgrows itself.
@@ -108,7 +129,7 @@ export default function NotifyPopup() {
             const t = timers.current.get(c.id);
             if (t !== undefined) window.clearTimeout(t); // reading it: hold it
           }}
-          onMouseLeave={() => arm(c.id)}
+          onMouseLeave={() => { if (replyingId !== c.id) arm(c.id); }}
           onClick={() => {
             api.notifyActivate().catch(() => {});
             remove(c.id);
@@ -131,6 +152,28 @@ export default function NotifyPopup() {
             </button>
           </div>
           {c.mediaUrl && <PopupMedia url={c.mediaUrl} />}
+          {c.reply && replyingId !== c.id && (
+            <button
+              className="notify-popup-reply-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                const t = timers.current.get(c.id);
+                if (t !== undefined) window.clearTimeout(t);
+                setReplyingId(c.id);
+                // The window is unfocusable until now: make it focusable, then focus it.
+                api.notifyFocus(true).catch(() => {});
+              }}
+            >
+              Reply
+            </button>
+          )}
+          {c.reply && replyingId === c.id && (
+            <ReplyBox
+              target={c.reply}
+              onSent={() => { endReply(c.id, false); remove(c.id); }}
+              onCancel={() => endReply(c.id, true)}
+            />
+          )}
         </div>
       ))}
     </div>
@@ -152,4 +195,72 @@ function PopupMedia({ url }: { url: string }) {
   return isVideo
     ? <video className="notify-popup-media" src={blob} autoPlay muted loop playsInline />
     : <img className="notify-popup-media" src={blob} alt="" />;
+}
+
+/**
+ * One-line reply box. It does NOT send anything itself: it asks the main window
+ * (`notify:reply`), which checks the request and sends it the way the message box
+ * does (encrypting a DM first), then answers with `notify:reply-result`.
+ */
+function ReplyBox({ target, onSent, onCancel }: { target: ReplyTarget; onSent: () => void; onCancel: () => void }) {
+  const [text, setText] = useState("");
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const pending = useRef<{ timer: number; unlisten: () => void } | null>(null);
+
+  useEffect(() => () => {
+    if (pending.current) { pending.current.unlisten(); window.clearTimeout(pending.current.timer); }
+  }, []);
+
+  async function send() {
+    const body = text.trim();
+    if (!body || state === "sending" || state === "sent") return;
+    setState("sending");
+    setError(null);
+    const id = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const finish = () => {
+      if (pending.current) { pending.current.unlisten(); window.clearTimeout(pending.current.timer); pending.current = null; }
+    };
+    const unlisten = await listen<ReplyResult>(REPLY_RESULT_EVENT, (e) => {
+      if (e.payload.id !== id) return;
+      finish();
+      if (e.payload.ok) {
+        setState("sent");
+        window.setTimeout(onSent, 900);
+      } else {
+        setState("error");
+        setError(e.payload.error ?? "Could not send.");
+      }
+    });
+    const timer = window.setTimeout(() => {
+      finish();
+      setState("error");
+      setError("Farder did not answer. Open the app and try again.");
+    }, 10_000);
+    pending.current = { timer, unlisten };
+    const req: ReplyRequest = { id, serverId: target.server_id, channelId: target.channel_id, text: body };
+    await emit(REPLY_EVENT, req);
+  }
+
+  return (
+    <div className="notify-popup-reply" onClick={(e) => e.stopPropagation()}>
+      <input
+        className="notify-popup-reply-input"
+        autoFocus
+        maxLength={MAX_REPLY_CHARS}
+        value={text}
+        disabled={state === "sending" || state === "sent"}
+        placeholder="Reply... (Enter to send, Esc to cancel)"
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); void send(); }
+          else if (e.key === "Escape") { e.preventDefault(); onCancel(); }
+        }}
+        onBlur={() => { if (state !== "sending" && state !== "sent") onCancel(); }}
+      />
+      {state === "sending" && <div className="notify-popup-reply-status">Sending...</div>}
+      {state === "sent" && <div className="notify-popup-reply-status">Sent</div>}
+      {state === "error" && <div className="notify-popup-reply-status notify-popup-reply-error">{error}</div>}
+    </div>
+  );
 }

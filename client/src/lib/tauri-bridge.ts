@@ -724,8 +724,10 @@ export async function playAudioFile(path: string): Promise<void> {
   return invoke<void>("play_audio_file", { path });
 }
 
-export async function showNotification(title: string, body: string, mediaUrl?: string | null): Promise<void> {
-  return invoke<void>("show_notification", { title, body, mediaUrl: mediaUrl ?? null });
+export async function showNotification(
+  title: string, body: string, mediaUrl?: string | null, reply?: { server_id: string; channel_id: number } | null,
+): Promise<void> {
+  return invoke<void>("show_notification", { title, body, mediaUrl: mediaUrl ?? null, reply: reply ?? null });
 }
 
 /**
@@ -735,6 +737,15 @@ export async function showNotification(title: string, body: string, mediaUrl?: s
  */
 export async function notifyLayout(count: number, height: number): Promise<void> {
   return invoke<void>("notify_layout", { count, height });
+}
+
+/**
+ * The pop-up never takes focus, except while you are typing a reply in it. The
+ * pop-up page asks for focus when a reply box opens and gives it up when it
+ * closes. Only that window calls this.
+ */
+export async function notifyFocus(focusable: boolean): Promise<void> {
+  return invoke<void>("notify_focus", { focusable });
 }
 
 /** A notification card was clicked: bring the main Farder window forward. */
@@ -760,6 +771,9 @@ export interface NotificationPrefs {
   /** What a pop-up may say: "full" (default), "sender" (only who), "hidden"
    *  (just "New message"). Applies to both pop-up styles. */
   popupContent?: "full" | "sender" | "hidden";
+  /** Allow replying by typing into the pop-up (default on). Only offered when the
+   *  pop-up shows who it is from. */
+  popupReply?: boolean;
 }
 
 export async function getNotificationPrefs(): Promise<NotificationPrefs> {

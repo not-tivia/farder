@@ -26,6 +26,25 @@ keeps it in memory only, and makes no network request.
    sender on the person's Autoplay list with pop-up previews on (`lib/autoplay.ts`).
 4. Clicking a card calls `notify_activate`, which focuses the `main` window.
 
+## Replying from the pop-up
+
+A card with a `reply` target shows a **Reply** button. Clicking it makes the window
+focusable for as long as the box is open (`notify_focus`), lets you type one line,
+and on Enter emits `notify:reply` `{id, serverId, channelId, text}`. The pop-up
+**sends nothing itself**: the main window (`useServerEvents`) re-checks the request
+against real state (`lib/quickReply.ts#planReply`: server connected, channel exists,
+not an encrypted channel, 1..2000 printable characters, rate-limited) and sends it
+down the same path as the message box (`executeReply`: a DM is encrypted first and
+never falls back to plaintext; mesh servers use `submitEvent`; others `sendMessage`).
+Your own "Speak as" garbler setting applies. It answers `notify:reply-result`
+`{id, ok, error?}`, shown as "Sent" or the error; no answer in 10 s is an error.
+While a reply box is open its card does not time out. Esc, clicking elsewhere, or
+sending closes it and returns the window to never taking focus.
+
+Replying is offered only with the themed pop-up, only when the pop-up shows who it
+is from (not in "nothing" mode), and unless turned off (`popupReply`). Encrypted
+channels never raise pop-ups, and a reply to one is refused anyway.
+
 ## Contracts to keep in step
 
 - `CARD_H`, `GAP`, `CARD_W` in `notify_popup.rs` must match the `.notify-popup-*`

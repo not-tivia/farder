@@ -71,6 +71,16 @@ export default function NotificationSettings() {
                             notification is kept by Windows in its notification history. Choosing
                             &ldquo;No pop-ups&rdquo; also stops Farder from keeping the pop-up window in memory.
                         </div>
+                        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+                            <input type="checkbox" checked={prefs.popupReply !== false}
+                                disabled={(prefs.popupStyle ?? "skinned") !== "skinned"}
+                                onChange={e => save({ ...prefs, popupReply: e.target.checked })} />
+                            <span>Let me reply by typing into a pop-up</span>
+                        </label>
+                        <div style={{ fontSize: 11, marginTop: 4, color: "var(--xp-text-muted)" }}>
+                            Adds a Reply button to pop-ups. Only available with the Farder pop-up, and not
+                            when pop-ups show nothing about who sent the message.
+                        </div>
                         <div style={{ marginTop: 10, fontWeight: "bold" }}>What a pop-up may show</div>
                         <select className="connect-input" disabled={(prefs.popupStyle ?? "skinned") === "off"}
                             value={prefs.popupContent ?? "full"}
