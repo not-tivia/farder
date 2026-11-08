@@ -11,13 +11,18 @@ $client = Join-Path $root "client"
 Write-Host "Starting identity A (this can take a while on the first build)..."
 Start-Process powershell -WorkingDirectory $client -ArgumentList "-NoExit", "-Command", "npm run tauri dev"
 
-# Wait for A's program to be running, then give it a moment to open its window.
-$deadline = (Get-Date).AddMinutes(15)
-while (-not (Get-Process farder-client -ErrorAction SilentlyContinue)) {
+# Wait for A: its dev server must be listening AND a Farder started after we began.
+# (A Farder left hidden in the tray from earlier must not count as "A is up".)
+$began = Get-Date
+$deadline = $began.AddMinutes(15)
+while ($true) {
+    $up = Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue
+    $fresh = Get-Process farder-client -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt $began }
+    if ($up -and $fresh) { break }
     if ((Get-Date) -gt $deadline) { Write-Host "A never started; check its window for errors."; exit 1 }
     Start-Sleep -Seconds 2
 }
-Start-Sleep -Seconds 8
+Start-Sleep -Seconds 6
 
 Write-Host "Starting identity B..."
 & (Join-Path $PSScriptRoot "second-identity.ps1")

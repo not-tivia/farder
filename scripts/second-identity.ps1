@@ -20,5 +20,8 @@ if (-not (Test-Path $exe)) {
 $dir = Join-Path $env:USERPROFILE ".farder-$Name"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $env:FARDER_DATA = $dir
+# Its own browser profile too, so nothing the page stores (localStorage, caches)
+# is shared with identity A.
+$env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $dir "webview"
 Write-Host "Starting identity '$Name' with data in $dir"
 Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe)
