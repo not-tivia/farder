@@ -24,6 +24,18 @@ const BUILTIN_THEMES: &[BuiltinTheme] = &[
         css: include_str!("../../src/themes/hello-kitty/theme.css"),
         meta_json: include_str!("../../src/themes/hello-kitty/theme.json"),
     },
+    BuiltinTheme {
+        css: include_str!("../../src/themes/velvet/theme.css"),
+        meta_json: include_str!("../../src/themes/velvet/theme.json"),
+    },
+    BuiltinTheme {
+        css: include_str!("../../src/themes/nocturne/theme.css"),
+        meta_json: include_str!("../../src/themes/nocturne/theme.json"),
+    },
+    BuiltinTheme {
+        css: include_str!("../../src/themes/candy/theme.css"),
+        meta_json: include_str!("../../src/themes/candy/theme.json"),
+    },
 ];
 
 #[derive(Serialize, Deserialize, Clone)]
