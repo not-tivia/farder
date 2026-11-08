@@ -265,6 +265,28 @@ powershell -ExecutionPolicy Bypass -File C:\Users\Deez\farder\scripts\measure_id
 
 ---
 
+## Part 8 - Message density
+
+Settings -> **Message density**. Open a busy channel (or have the second identity post
+ten or so messages, including one long one, one with an image and one with a link).
+
+- [ ] **Normal** looks exactly like it did before (nothing moved).
+- [ ] **Roomy**: bigger pictures, more space, nothing overlapping.
+- [ ] **Compact**: each message is ONE line: small picture, name, then the text beside
+      it. Point at a message: the time appears at the right edge and the list does
+      **not jump**. Two messages in a row from one person each show the name.
+- [ ] **IRC**: no pictures, `[14:05] <name> text` in a monospace font. A link shows as text
+      with **no big preview** under it.
+- [ ] **Tiny**: `name: text` in small type, no pictures, no clock.
+- [ ] In every mode: a long message wraps instead of running off the edge; an image
+      or voice message sits on its own line under the name; reactions still show;
+      replying and the right-click menu still work.
+- [ ] Try each mode in **two different themes** (e.g. Velvet and Candy): text readable,
+      no colour clashes.
+- [ ] Close and reopen Farder: the mode you chose is still selected.
+
+---
+
 ## Leftovers from earlier work (still unseen)
 
 - [ ] **Plaintext delete stays deleted:** delete a message in a normal channel, quit

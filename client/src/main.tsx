@@ -1,4 +1,5 @@
 import React from "react";
+import { initDensity } from "./lib/density";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import ScreenSharePopout from "./components/ScreenSharePopout";
@@ -57,6 +58,8 @@ async function bootstrap() {
 
   // Loudness limiter for videos and voice messages in chat (a no-op at defaults).
   void initAudioLimits();
+  // Message density (roomy ... tiny): stylesheet + the saved choice.
+  initDensity();
 
   // One-time migration of legacy ~/.farder/favorites.json into the new book.
   // No-op after the first successful run (server renames favorites.json → .bak).

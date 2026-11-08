@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useDensity } from "../hooks/useDensity";
+import { foldsRepeatedAuthors, shortClock } from "../lib/density";
 import type { MessageInfo, AttachmentInfo, SealedDecryptEntry, SealedAttachmentRef } from "../lib/types";
 import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
@@ -288,7 +290,10 @@ function renderContent(
   });
 }
 
-export default function Message({ message, memberNames, grouped = false, serverId, highlighted = false, onReply, sealedDecrypt }: MessageProps) {
+export default function Message({ message, memberNames, grouped: groupedProp = false, serverId, highlighted = false, onReply, sealedDecrypt }: MessageProps) {
+  // The dense layouts show the name on every line instead of folding repeats.
+  const density = useDensity();
+  const grouped = groupedProp && foldsRepeatedAuthors(density);
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const [showPicker, setShowPicker] = useState(false);
@@ -679,7 +684,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
           {showModBadges && member && (
             <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
           )}
-          <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
+          <span className="message-timestamp">{density === "irc" ? shortClock(message.timestamp) : formatTimestamp(message.timestamp)}</span>
           {message.edited_at && <span className="message-edited">(edited)</span>}
           {/* `pinned` has always been on the row and never shown. Reusing
               `.message-edited` keeps it styled in every theme; a new class with
