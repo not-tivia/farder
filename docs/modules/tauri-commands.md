@@ -3216,6 +3216,31 @@ cursor and rekey cadence**, which described a group that no longer exists.
 Added 2026-09-19 after `scripts/doc_audit.py` compared the handler list against
 this file. Six registered commands had no entry; they are as real as the rest.
 
+### `get_window_behavior() -> WindowBehavior` / `set_window_behavior(close_to_tray, start_minimized) -> Result<(), String>`
+
+**What they do:** read / set how the main window behaves. `close_to_tray` (default
+ON): closing the window hides it and Farder keeps running from the tray; off, closing
+quits (stopping hosted servers). `start_minimized` (default off): start in the tray
+instead of opening the window. `get_window_behavior` also reports `autostart` (asked
+of Windows, never cached), `autostart_unavailable` (the reason, or null) and
+`tray_available`. Neither setting does anything without a tray: closing then quits and
+the window always shows. Stored as `close_to_tray` / `start_minimized` in the
+settings file. See `window-behavior.md`.
+**invoke names:** `"get_window_behavior"` / `"set_window_behavior"` ->
+`getWindowBehavior()` / `setWindowBehavior()`.
+
+---
+
+### `set_autostart(enabled) -> Result<bool, String>`
+
+**What it does:** adds or removes ONE value (`Farder`) in the current user's own
+`HKCU\...\Run` key, whose data is `"<exe>" --minimized`. No admin rights, nothing
+system-wide. Refused (with the reason) in a development build or off Windows. Returns
+the state Windows now reports.
+**invoke name:** `"set_autostart"` -> `setAutostart()`.
+
+---
+
 ### `get_audio_limits() -> AudioLimits` / `set_audio_limits(master, max_db) -> Result<AudioLimits, String>`
 
 **What they do:** read / set the universal volume control: `master` (0.0 to 1.5,

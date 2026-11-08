@@ -815,6 +815,46 @@ pub fn set_presence_music(enabled: bool) -> Result<(), String> {
     r
 }
 
+/// How the window behaves when closed / started, as the settings screen sees it.
+#[derive(serde::Serialize)]
+pub struct WindowBehavior {
+    /// Closing the window keeps Farder running in the tray (default on).
+    pub close_to_tray: bool,
+    /// Start in the tray instead of showing the window (default off).
+    pub start_minimized: bool,
+    /// Start when I sign in to Windows. Read from Windows itself, never cached.
+    pub autostart: bool,
+    /// Why the sign-in option cannot be used here, if it cannot.
+    pub autostart_unavailable: Option<String>,
+    /// Whether the system tray exists (without it, closing quits).
+    pub tray_available: bool,
+}
+
+#[tauri::command]
+pub fn get_window_behavior() -> WindowBehavior {
+    WindowBehavior {
+        close_to_tray: crate::window_behavior::close_to_tray_setting(),
+        start_minimized: crate::window_behavior::start_minimized_setting(),
+        autostart: crate::autostart::is_enabled(),
+        autostart_unavailable: crate::autostart::unavailable_reason().map(str::to_string),
+        tray_available: crate::window_behavior::tray_available(),
+    }
+}
+
+#[tauri::command]
+pub fn set_window_behavior(close_to_tray: bool, start_minimized: bool) -> Result<(), String> {
+    settings_set("close_to_tray", serde_json::json!(close_to_tray))?;
+    settings_set("start_minimized", serde_json::json!(start_minimized))
+}
+
+/// Turn "start when I sign in to Windows" on or off (an entry in the user's own
+/// `Run` key; installed builds only). Returns the state Windows now reports.
+#[tauri::command]
+pub fn set_autostart(enabled: bool) -> Result<bool, String> {
+    crate::autostart::set_enabled(enabled)?;
+    Ok(crate::autostart::is_enabled())
+}
+
 /// The universal volume control, as the settings screen sees it.
 #[derive(serde::Serialize)]
 pub struct AudioLimits {

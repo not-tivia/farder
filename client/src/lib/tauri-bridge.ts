@@ -1595,3 +1595,31 @@ export async function getAudioLimits(): Promise<AudioLimitsView> {
 export async function setAudioLimits(master: number, maxDb: number): Promise<AudioLimitsView> {
   return invoke<AudioLimitsView>("set_audio_limits", { master, maxDb });
 }
+
+// ── Tray, start-up ───────────────────────────────────────────────────────────
+
+export interface WindowBehavior {
+  /** Closing the window keeps Farder running in the tray. */
+  close_to_tray: boolean;
+  /** Start in the tray instead of showing the window. */
+  start_minimized: boolean;
+  /** Start when I sign in to Windows (read from Windows, not cached). */
+  autostart: boolean;
+  /** Why the sign-in option cannot be used here, if it cannot. */
+  autostart_unavailable: string | null;
+  /** Whether the system tray exists (without it, closing quits). */
+  tray_available: boolean;
+}
+
+export async function getWindowBehavior(): Promise<WindowBehavior> {
+  return invoke<WindowBehavior>("get_window_behavior");
+}
+
+export async function setWindowBehavior(closeToTray: boolean, startMinimized: boolean): Promise<void> {
+  await invoke("set_window_behavior", { closeToTray, startMinimized });
+}
+
+/** Returns the state Windows now reports. Rejects with the reason if it cannot be set. */
+export async function setAutostart(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_autostart", { enabled });
+}

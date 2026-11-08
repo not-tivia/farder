@@ -53,11 +53,13 @@ mod screen_audio;
 #[cfg(windows)]
 mod screen_audio_wasapi;
 mod audio_limit;
+mod autostart;
 mod notify_popup;
 mod screenshare;
 mod video_encoder;
 mod voice;
 mod voice_bridge;
+mod window_behavior;
 
 use state::AppState;
 use std::sync::Arc;
@@ -79,6 +81,15 @@ fn main() {
         .manage(Arc::new(AppState::new()))
         .manage(server_manager::ServerProcesses::new())
         .plugin(tauri_plugin_shell::init())
+        // Closing the main window hides it to the tray (or quits, per the setting);
+        // see window_behavior.rs.
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    window_behavior::handle_main_close(window, api);
+                }
+            }
+        })
         .setup(move |app| {
             // Voice controller is a single global (one active call at a time).
             // Constructed here because it needs an AppHandle for event emission.
@@ -129,8 +140,20 @@ fn main() {
                     eprintln!("[notify] could not create the pop-up window: {e}");
                 }
             }
-            if let Err(e) = tray::setup_tray(&app.handle()) {
-                eprintln!("Failed to setup tray: {}", e);
+            let tray_ok = match tray::setup_tray(&app.handle()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("Failed to setup tray: {}", e);
+                    false
+                }
+            };
+            window_behavior::set_tray_available(tray_ok);
+            // The main window is created hidden (tauri.conf.json) so a start-minimised
+            // launch never flashes it. Show it unless we are starting in the tray --
+            // which we only do when the tray really exists.
+            let args: Vec<String> = std::env::args().collect();
+            if !window_behavior::should_start_hidden(window_behavior::start_minimized_setting(), &args, tray_ok) {
+                window_behavior::show_main(&app.handle());
             }
             Ok(())
         })
@@ -367,6 +390,9 @@ fn main() {
             screenshare::stop_screenshare_preview,
             commands::get_presence_enabled,
             commands::get_audio_limits,
+            commands::get_window_behavior,
+            commands::set_window_behavior,
+            commands::set_autostart,
             commands::set_audio_limits,
             commands::set_presence_enabled,
             commands::get_presence_music,
