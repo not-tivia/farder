@@ -82,10 +82,17 @@ fn main() {
     // (hidden) when the shortcut is clicked again; a second copy must hand over to
     // the first, not start beside it. This must be registered BEFORE every other
     // plugin so a second launch exits before it opens anything.
+    // Exception: a copy started with FARDER_DATA set is a deliberately separate
+    // identity (the way to test with two people on one PC), so it must not be
+    // folded into the first.
     #[cfg(windows)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-        window_behavior::on_second_launch(app, &args);
-    }));
+    let builder = if std::env::var_os("FARDER_DATA").is_some() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            window_behavior::on_second_launch(app, &args);
+        }))
+    };
     builder
         .manage(Arc::new(AppState::new()))
         .manage(server_manager::ServerProcesses::new())

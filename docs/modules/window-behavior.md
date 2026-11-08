@@ -31,6 +31,8 @@ pop-up shows, you reply from it -- so closing the window must not mean "stop".
 first). Launching Farder again while it is running -- typically from the shortcut while
 it sits in the tray -- starts a process that exits at once and hands over to the first:
 
+A copy started with the `FARDER_DATA` environment variable set is NOT folded into the first: that variable gives it a separate data folder, i.e. a separate identity, and `scripts/second-identity.ps1` uses it to run a second identity beside the first.
+
 - the running window is shown (`plan_second_launch` / `on_second_launch`);
 - a launch from the sign-in entry (`--minimized`) does NOT throw the window open;
 - a `farder://` link the second launch was started with is forwarded to the running

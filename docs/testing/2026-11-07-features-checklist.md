@@ -9,6 +9,11 @@ code is covered by tests (Rust, plus a Node runner for the frontend logic) but
 you messages (the same way you did for the earlier attachments runbook). A second
 identity is needed for Parts 3, 4, 5 and 6.
 
+**Second identity, the easy way:** with `npm run tauri dev` running, open another
+PowerShell in the repo and run `.\scripts\second-identity.ps1`. A second Farder
+opens with its own identity (data in `~\.farder-b`); your real one is untouched.
+Create a fresh identity in it, then invite it to your server like any other member.
+
 **How to report:** for anything that is not as described, send me (1) what you
 clicked, (2) what you expected (copy the "should" line), (3) what happened, (4) a
 screenshot, and (5) the last ~30 lines of the `npm run tauri dev` console. Lines
