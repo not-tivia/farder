@@ -22,14 +22,16 @@ come first.
 
 ## Part 0 - Get the branch and rebuild
 
-The branch is local to the WSL repo and **not pushed** (it has 12 commits over `main`). Either:
+The branch is **pushed** to GitHub (it has 13 commits over `main`; `main` is untouched).
+In PowerShell, in `C:\Users\Deez\farder`:
 
-- **A.** Tell me "push it" and I push it as a branch (not `main`), then in PowerShell:
-  `git fetch` then `git checkout features-skins-notify-garble`.
-- **B.** Without pushing, in `C:\Users\Deez\farder`:
-  `git fetch \\wsl.localhost\Ubuntu\home\deez\farder features-skins-notify-garble:features-skins-notify-garble`
-  then `git checkout features-skins-notify-garble`. (If Git complains about
-  "dubious ownership", it is the WSL path; tell me the message.)
+```powershell
+git fetch
+git checkout features-skins-notify-garble
+git pull
+```
+
+To go back to normal afterwards: `git checkout main`.
 
 Then, **after closing every Farder window and quitting it from the tray**:
 
