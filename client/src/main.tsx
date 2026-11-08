@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import ScreenSharePopout from "./components/ScreenSharePopout";
+import NotifyPopup from "./components/NotifyPopup";
 import { getActiveTheme } from "./lib/tauri-bridge";
 import { bookMigrateLegacyFavorites } from "./lib/book/client";
 
@@ -43,6 +44,15 @@ async function bootstrap() {
     }
   `;
   document.head.appendChild(searchHighlight);
+
+  // The skinned notification window: JUST the pop-up view, on a transparent
+  // page so only the cards are visible. It takes the active theme injected above.
+  if (new URLSearchParams(window.location.search).get("notify") === "1") {
+    document.documentElement.style.setProperty("background", "transparent", "important");
+    document.body.style.setProperty("background", "transparent", "important");
+    ReactDOM.createRoot(document.getElementById("root")!).render(<NotifyPopup />);
+    return;
+  }
 
   // One-time migration of legacy ~/.farder/favorites.json into the new book.
   // No-op after the first successful run (server renames favorites.json → .bak).

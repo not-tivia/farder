@@ -1877,11 +1877,35 @@ unchanged.
 
 ### `show_notification(title, body) -> Result<(), String>`
 
-**What it does:** spawns a native OS desktop notification. Uses `notify-send`
-on Linux, a PowerShell toast on Windows, and `osascript` on macOS. Fully
-fire-and-forget — subprocess spawn errors are silently discarded.
-**Side effects:** spawns a child process.
-**invoke name:** `"show_notification"` → `showNotification()`.
+**What it does:** raises a notification. By default (`popupStyle` absent or
+`"skinned"` in `notifications.json`) it hands the text to Farder's own
+notification window (`notify_popup.rs`, see below) and emits `notify:push` to it.
+With `popupStyle: "system"`, or if the window cannot be reached, it spawns a
+native OS notification instead: `notify-send` on Linux, a PowerShell toast on
+Windows, `osascript` on macOS (fire-and-forget; spawn errors discarded). The OS
+route copies the text into the OS notification history, which is why the skinned
+window is the default.
+**Side effects:** emits an event to the `notify` window, or spawns a child process.
+**invoke name:** `"show_notification"` -> `showNotification()`.
+
+---
+
+### `notify_layout(count) -> Result<(), String>`
+
+**What it does:** called by the notification window (`NotifyPopup.tsx`) whenever
+its card count changes. `0` hides the window; otherwise it is sized for `count`
+cards (capped at 4), centred at the top of the PRIMARY monitor, and shown without
+taking focus. The geometry is the pure, unit-tested `notify_popup::layout_for`.
+**Errors:** the window is not running, or there is no primary monitor.
+**invoke name:** `"notify_layout"` -> `notifyLayout()`.
+
+---
+
+### `notify_activate() -> Result<(), String>`
+
+**What it does:** a notification card was clicked: un-minimises, shows and
+focuses the `main` window.
+**invoke name:** `"notify_activate"` -> `notifyActivate()`.
 
 ---
 

@@ -57,6 +57,21 @@ export default function NotificationSettings() {
             <h2 className="settings-panel-title">Notifications</h2>
             <div>
 
+                    {/* How a notification looks */}
+                    <div className="connect-section">
+                        <div className="connect-section-title">Pop-up style</div>
+                        <select className="connect-input" value={prefs.popupStyle ?? "skinned"}
+                            onChange={e => save({ ...prefs, popupStyle: e.target.value as NonNullable<NotificationPrefs["popupStyle"]> })}>
+                            <option value="skinned">Farder pop-up (themed, top of the screen)</option>
+                            <option value="system">System notification</option>
+                        </select>
+                        <div style={{ fontSize: 11, marginTop: 6, color: "var(--xp-text-muted)" }}>
+                            The Farder pop-up is drawn on your screen and never stored anywhere. A system
+                            notification is kept by Windows in its notification history, including the
+                            text of messages that were end-to-end encrypted.
+                        </div>
+                    </div>
+
                     {/* DM Notifications */}
                     <div className="connect-section">
                         <div className="connect-section-title">Direct Messages</div>

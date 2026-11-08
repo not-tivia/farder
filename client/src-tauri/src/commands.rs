@@ -3835,7 +3835,16 @@ pub async fn play_audio_file(path: String) -> Result<(), String> {
 /// Show a desktop notification using notify-send (Linux) or equivalent.
 /// Falls back silently on unsupported platforms or when notify-send is absent.
 #[tauri::command]
-pub fn show_notification(title: String, body: String) -> Result<(), String> {
+pub fn show_notification(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    // Default: Farder's own skinned pop-up window (drawn locally, themed, never
+    // copied into the OS notification history). `popupStyle: "system"` in the
+    // notification prefs opts back into the OS toast below.
+    if notification_popup_style() != "system" {
+        match crate::notify_popup::push(&app, title.clone(), body.clone()) {
+            Ok(()) => return Ok(()),
+            Err(e) => eprintln!("[notify] pop-up window unavailable, using the OS toast: {e}"),
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         let _ = std::process::Command::new("notify-send")
@@ -3876,6 +3885,16 @@ pub fn show_notification(title: String, body: String) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Notification preferences commands
 // ---------------------------------------------------------------------------
+
+/// `"skinned"` (default) or `"system"`, from `popupStyle` in notifications.json.
+/// Anything unreadable or unrecognised is the default.
+fn notification_popup_style() -> String {
+    std::fs::read_to_string(farder_data_dir().join("notifications.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("popupStyle").and_then(|p| p.as_str().map(str::to_owned)))
+        .unwrap_or_else(|| "skinned".to_string())
+}
 
 #[tauri::command]
 pub fn get_notification_prefs() -> Result<serde_json::Value, String> {

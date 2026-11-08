@@ -728,6 +728,20 @@ export async function showNotification(title: string, body: string): Promise<voi
   return invoke<void>("show_notification", { title, body });
 }
 
+/**
+ * The skinned notification window reports how many cards it is showing so the
+ * native window can be sized, positioned and shown (or hidden at 0). Only that
+ * window calls this.
+ */
+export async function notifyLayout(count: number): Promise<void> {
+  return invoke<void>("notify_layout", { count });
+}
+
+/** A notification card was clicked: bring the main Farder window forward. */
+export async function notifyActivate(): Promise<void> {
+  return invoke<void>("notify_activate");
+}
+
 export interface NotificationPrefs {
   dmNotifications: "all" | "specific" | "none";
   dmAllowedUsers: string[];
@@ -740,6 +754,8 @@ export interface NotificationPrefs {
   notifyOnMemberLeave?: boolean;
   notifyOnReaction?: boolean;
   notifyOnThreadReply?: boolean;
+  /** "skinned" (default): Farder's own themed pop-up. "system": the OS toast. */
+  popupStyle?: "skinned" | "system";
 }
 
 export async function getNotificationPrefs(): Promise<NotificationPrefs> {

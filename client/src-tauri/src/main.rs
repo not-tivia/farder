@@ -52,6 +52,7 @@ mod profile_sync;
 mod screen_audio;
 #[cfg(windows)]
 mod screen_audio_wasapi;
+mod notify_popup;
 mod screenshare;
 mod video_encoder;
 mod voice;
@@ -107,6 +108,11 @@ fn main() {
                         presence::push_presence_everywhere(&state, current).await;
                     }
                 });
+            }
+            // The skinned notification window, built hidden so its page is loaded
+            // before the first message arrives.
+            if let Err(e) = notify_popup::ensure_window(&app.handle()) {
+                eprintln!("[notify] could not create the pop-up window: {e}");
             }
             if let Err(e) = tray::setup_tray(&app.handle()) {
                 eprintln!("Failed to setup tray: {}", e);
@@ -252,6 +258,8 @@ fn main() {
             commands::stop_recording,
             commands::play_audio_file,
             commands::show_notification,
+            notify_popup::notify_layout,
+            notify_popup::notify_activate,
             commands::get_notification_prefs,
             commands::save_notification_prefs,
             commands::dm_encrypt,

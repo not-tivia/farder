@@ -73,6 +73,25 @@ function shouldNotify(serverId: string, message: MessageInfo, prefs: Notificatio
   return true; // default: notify
 }
 
+/**
+ * Raise a pop-up for a message if the person's preferences want one. Never for
+ * our own messages (another device of ours can echo one back). Prefs not loaded
+ * yet fall back to notifying, as before.
+ */
+function notifyIfWanted(serverId: string, message: MessageInfo, text: string): void {
+  if (!text) return;
+  if (notifPrefs && !shouldNotify(serverId, message, notifPrefs)) return;
+  void getOwnPk().then((own) => {
+    if (own && publicKeyToString(message.author) === own) return;
+    api.showNotification("Farder", text.slice(0, 120)).catch(() => {});
+  });
+}
+
+/** True when Farder is minimised, behind another program, or on another desktop. */
+function appIsInBackground(): boolean {
+  return typeof document !== "undefined" && !document.hasFocus();
+}
+
 export function refreshNotifPrefsCache(): void {
   api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
 }
@@ -146,13 +165,12 @@ export function useServerEvents(): void {
             const decryptedMsg = { ...message, content: plaintext };
             if (serverId === activeRef.current) {
               dispatch({ type: "NEW_MESSAGE", serverId, payload: decryptedMsg });
+              // Reading it right now needs no pop-up; reading it from behind
+              // another program does.
+              if (appIsInBackground()) notifyIfWanted(serverId, decryptedMsg, plaintext);
             } else {
               dispatch({ type: "INCREMENT_UNREAD", serverId });
-              if (notifPrefs && shouldNotify(serverId, decryptedMsg, notifPrefs)) {
-                api.showNotification("Farder", plaintext.slice(0, 120)).catch(() => {});
-              } else if (!notifPrefs) {
-                api.showNotification("Farder", plaintext.slice(0, 120)).catch(() => {});
-              }
+              notifyIfWanted(serverId, decryptedMsg, plaintext);
             }
           })
           .catch(() => {
@@ -168,15 +186,10 @@ export function useServerEvents(): void {
 
       if (serverId === activeRef.current) {
         dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
+        if (appIsInBackground()) notifyIfWanted(serverId, message, message.content);
       } else {
         dispatch({ type: "INCREMENT_UNREAD", serverId });
-
-        if (message.content && notifPrefs && shouldNotify(serverId, message, notifPrefs)) {
-          api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
-        } else if (message.content && !notifPrefs) {
-          // Prefs not yet loaded — fall back to always notify
-          api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
-        }
+        notifyIfWanted(serverId, message, message.content);
       }
     }).then(safePush);
 

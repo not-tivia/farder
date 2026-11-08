@@ -3561,3 +3561,43 @@ body {
   display: inline-block;
   margin-top: 2px;
 }
+
+
+/* ── Skinned notification window ──────────────────────────────
+   Rendered in the always-on-top "notify" window (NotifyPopup.tsx). Card height
+   and gap MUST match CARD_H / GAP in src-tauri/src/notify_popup.rs, which sizes
+   the native window from them. All colour comes from the theme variables. */
+.notify-popup-stack {
+  display: flex; flex-direction: column; gap: 8px; padding: 8px;
+  width: 100%; box-sizing: border-box; user-select: none;
+}
+.notify-popup-card {
+  height: 76px; box-sizing: border-box; display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; cursor: pointer; overflow: hidden;
+  background: var(--xp-panel-bg); color: var(--xp-text-normal);
+  border: 1px solid var(--xp-border); border-left: 4px solid var(--xp-blue);
+  border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+  font-family: var(--xp-font); font-size: var(--xp-font-size);
+  animation: notify-popup-in 0.18s ease-out;
+}
+.notify-popup-card:hover { border-color: var(--xp-blue); }
+.notify-popup-text { flex: 1; min-width: 0; }
+.notify-popup-title {
+  font-weight: bold; color: var(--xp-blue);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.notify-popup-body {
+  color: var(--xp-text-normal); line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  word-break: break-word;
+}
+.notify-popup-close {
+  flex: 0 0 auto; width: 22px; height: 22px; line-height: 20px; text-align: center;
+  background: transparent; color: var(--xp-text-muted); border: 1px solid transparent;
+  border-radius: 50%; cursor: pointer; font-size: 16px; padding: 0;
+}
+.notify-popup-close:hover { color: var(--xp-text-normal); border-color: var(--xp-border); }
+@keyframes notify-popup-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
