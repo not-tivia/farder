@@ -2004,6 +2004,23 @@ pub fn handle_request(
             ok(ServerResponse::Ok)
         }
 
+        ServerRequest::GetCapabilities => {
+            let guard = state.log_state.lock().unwrap();
+            let Some(ls) = guard.as_ref() else {
+                return err("server is not running the event log (no genesis yet)");
+            };
+            // The owner manages these, so sees all of them. Anyone else sees only
+            // their own, which is what their own menus need.
+            let see_all = ls.is_owner(member);
+            let holders = ls
+                .all_capabilities()
+                .into_iter()
+                .filter(|(pk, _)| see_all || pk == member)
+                .map(|(member, capabilities)| farder_protocol::server::CapabilityHolder { member, capabilities })
+                .collect();
+            ok(ServerResponse::Capabilities { holders })
+        }
+
         ServerRequest::GetGarbleState => {
             // What garbling touches the CALLER. A rule is visible to its target,
             // to whoever set it, and to a holder of "garble" (a moderator needs
@@ -2601,6 +2618,16 @@ pub fn handle_request(
                 }
                 _ => None,
             };
+            // Granting or taking away a power is an act of authority: audit it.
+            let capability_audit: Option<(&'static str, PublicKey, serde_json::Value)> = match &event.core.payload {
+                EventPayload::PermissionGranted { member, capability } => Some((
+                    "capability_granted", member.clone(), serde_json::json!({ "capability": capability }),
+                )),
+                EventPayload::PermissionRevoked { member, capability } => Some((
+                    "capability_revoked", member.clone(), serde_json::json!({ "capability": capability }),
+                )),
+                _ => None,
+            };
             // Whose garble state changed, so every client can re-ask for it.
             let garble_changed: Option<PublicKey> = match &event.core.payload {
                 EventPayload::GarbleSet { target, .. } | EventPayload::GarbleCleared { target } => Some(target.clone()),
@@ -2812,7 +2839,11 @@ pub fn handle_request(
                 EventPayload::MemberJoined { member, .. }
                 | EventPayload::MemberApproved { member }
                 | EventPayload::MemberRemoved { member }
-                | EventPayload::MemberBanned { member } => Some(member.clone()),
+                | EventPayload::MemberBanned { member }
+                // A power granted or taken away changes what that member may
+                // do; clients re-ask (the capability screen, the garble menu).
+                | EventPayload::PermissionGranted { member, .. }
+                | EventPayload::PermissionRevoked { member, .. } => Some(member.clone()),
                 _ => None,
             };
             if let Some(pk) = membership_pk {
@@ -2823,6 +2854,11 @@ pub fn handle_request(
             }
 
             if let Some((action, target, meta)) = garble_audit {
+                if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
+                    events.push(ev);
+                }
+            }
+            if let Some((action, target, meta)) = capability_audit {
                 if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
                     events.push(ev);
                 }
@@ -6889,6 +6925,105 @@ mod tests {
 
     }
 
+    /// Delegating a power end to end: the owner grants "garble", the grant is
+    /// audited and announced, the grantee can then use it, who may see the list
+    /// is limited, and revoking really takes it away.
+    #[test]
+    fn granting_and_revoking_a_capability_is_audited_visible_to_the_right_people_and_real() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone_id = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let g = Genesis { version: 1, name: "caps".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        *state.genesis.lock().unwrap() = Some(g.clone());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner.public_key(), everyone_id).unwrap();
+
+        let submit = |who: &Keypair, is_owner: bool, ev: &Event| {
+            handle_request(&conn, &who.public_key(), is_owner, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap()
+        };
+        let accepted = |r: &HandleResult| matches!(r.response, ServerResponse::EventAccepted { .. });
+
+        let cert = DeviceCert::create(&owner, &owner_dev.public_key(), 1);
+        let da = Event::next(&owner_dev, owner.public_key(), g.server_id(), None, 0, 1, EP::DeviceAuthorized { cert });
+        assert!(accepted(&submit(&owner, true, &da)));
+        let inv = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&da), 1, 2,
+            EP::InviteCreated { code_hash: "h".into(), max_uses: 10, expires_at: 9_999_999_999, requires_approval: false });
+        assert!(accepted(&submit(&owner, true, &inv)));
+        let mut owner_prev = inv.clone();
+
+        let mut join = |name: &str| -> (Keypair, Keypair, Event) {
+            let kp = Keypair::generate();
+            let dev = Keypair::generate();
+            members::register_member(&conn, &kp.public_key(), name).unwrap();
+            members::assign_role(&conn, &kp.public_key(), everyone_id).unwrap();
+            let cert = DeviceCert::create(&kp, &dev.public_key(), 1);
+            let da = Event::next(&dev, kp.public_key(), g.server_id(), None, 0, 3, EP::DeviceAuthorized { cert });
+            assert!(accepted(&submit(&kp, false, &da)));
+            let j = Event::next(&dev, kp.public_key(), g.server_id(), Some(&da), 1, 4,
+                EP::MemberJoined { member: kp.public_key(), invite: inv.hash() });
+            assert!(accepted(&submit(&kp, false, &j)));
+            (kp, dev, j)
+        };
+        let (alice, alice_dev, mut alice_prev) = join("Alice");
+        let (bob, _, _) = join("Bob");
+
+        let holders_seen_by = |who: &Keypair, is_owner: bool| -> Vec<(PublicKey, Vec<String>)> {
+            match handle_request(&conn, &who.public_key(), is_owner, ServerRequest::GetCapabilities, "", &state).unwrap().response {
+                ServerResponse::Capabilities { holders } => holders.into_iter().map(|h| (h.member, h.capabilities)).collect(),
+                other => panic!("expected Capabilities, got {other:?}"),
+            }
+        };
+        assert!(holders_seen_by(&owner, true).is_empty());
+
+        // Owner grants Alice "garble": audited, announced, and listed.
+        let grant = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 2, 5,
+            EP::PermissionGranted { member: alice.public_key(), capability: "garble".into() });
+        let r = submit(&owner, true, &grant);
+        assert!(accepted(&r), "{:?}", r.response);
+        owner_prev = grant;
+        let audited = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::AuditEventCreated { event } => Some(event.action.clone()),
+            _ => None,
+        });
+        assert_eq!(audited.as_deref(), Some("capability_granted"));
+        assert!(r.events.iter().any(|e| matches!(&e.event, ServerEvent::MembershipChanged { public_key } if *public_key == alice.public_key())),
+            "clients are told to re-ask");
+        assert_eq!(holders_seen_by(&owner, true), vec![(alice.public_key(), vec!["garble".to_string()])]);
+        assert_eq!(holders_seen_by(&alice, false).len(), 1, "a holder sees their own powers");
+        assert!(holders_seen_by(&bob, false).is_empty(), "a bystander sees nobody's");
+
+        // The grantee can now garble Bob...
+        let garble = Event::next(&alice_dev, alice.public_key(), g.server_id(), Some(&alice_prev), 10, 20,
+            EP::GarbleSet { target: bob.public_key(), mode: "bark".into(), phrase: "".into(), messages: 1, consensual: false });
+        let r = submit(&alice, false, &garble);
+        assert!(accepted(&r), "{:?}", r.response);
+        alice_prev = garble;
+
+        // ...until the owner revokes it. The revoke is audited and really removes it.
+        let revoke = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 3, 6,
+            EP::PermissionRevoked { member: alice.public_key(), capability: "garble".into() });
+        let r = submit(&owner, true, &revoke);
+        assert!(accepted(&r), "{:?}", r.response);
+        let audited = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::AuditEventCreated { event } => Some(event.action.clone()),
+            _ => None,
+        });
+        assert_eq!(audited.as_deref(), Some("capability_revoked"));
+        assert!(holders_seen_by(&owner, true).is_empty());
+        let again = Event::next(&alice_dev, alice.public_key(), g.server_id(), Some(&alice_prev), 11, 21,
+            EP::GarbleSet { target: bob.public_key(), mode: "bark".into(), phrase: "".into(), messages: 1, consensual: false });
+        let r = submit(&alice, false, &again);
+        assert!(matches!(r.response, ServerResponse::Error { .. }), "a revoked power is refused: {:?}", r.response);
+    }
+
     #[test]
     fn get_members_hides_non_log_members_on_mesh() {
         use crate::event_ingest;
@@ -10127,6 +10262,7 @@ mod tests {
                 | ServerRequest::BlockUser { .. }
                 | ServerRequest::ListBlocked
                 | ServerRequest::GetGarbleState
+                | ServerRequest::GetCapabilities
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }

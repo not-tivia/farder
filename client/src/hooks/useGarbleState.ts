@@ -27,7 +27,12 @@ export function useGarbleState(serverId: string | null): { state: GarbleState; o
       if (!id || id === serverId) refresh();
     };
     window.addEventListener("farder:garble-changed", onChange);
-    return () => window.removeEventListener("farder:garble-changed", onChange);
+    // `can_moderate` depends on the powers I hold, so a grant/revoke refreshes it too.
+    window.addEventListener("farder:capabilities-changed", onChange);
+    return () => {
+      window.removeEventListener("farder:garble-changed", onChange);
+      window.removeEventListener("farder:capabilities-changed", onChange);
+    };
   }, [serverId, refresh]);
 
   useEffect(() => {

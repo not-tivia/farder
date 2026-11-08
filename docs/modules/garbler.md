@@ -62,8 +62,7 @@ who set it, moderation or not). The server stores that mark with the message row
 **It is a display effect, not a security control.** The original text is still in
 the log and on the server for plaintext channels; a modified client could show it.
 
-**Not built:** a UI for the owner to grant the `garble` capability to another
-member (the fold supports `PermissionGranted { capability: "garble" }`; no screen
-sends it yet, so today only the owner can start a moderation garble). Edits to a
-garbled message are not re-garbled. Sealed (encrypted-channel) messages ARE marked
+**Granting the power:** Server Settings -> Powers (owner only) ticks `garble` (and
+`invite` / `kick` / `ban`) on or off per member; see `PermissionRevoked` for the
+take-back. **Not built:** edits to a garbled message are not re-garbled. Sealed (encrypted-channel) messages ARE marked
 and drawn garbled once decrypted.

@@ -315,6 +315,13 @@ pub enum EventPayload {
     /// up to `max_messages` at a time. `0` revokes the consent and ends any rule
     /// that controller has running on the author.
     GarbleConsent { controller: PublicKey, max_messages: u32 },
+
+    /// Take a capability away from `member` (the other half of
+    /// `PermissionGranted`). The server owner may revoke any capability from
+    /// anyone; a member may renounce their own. Holding it is required, so a
+    /// revoke is never a silent no-op. Delegation does NOT cascade: revoking a
+    /// holder does not revoke what they granted onward.
+    PermissionRevoked { member: PublicKey, capability: String },
 }
 
 /// The words a garbled message was drawn with, and why. Computed by the log fold

@@ -3200,6 +3200,36 @@ cursor and rekey cadence**, which described a group that no longer exists.
 Added 2026-09-19 after `scripts/doc_audit.py` compared the handler list against
 this file. Six registered commands had no entry; they are as real as the rest.
 
+### `grant_capability(state, server_id, log_server_id, member, capability) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `PermissionGranted`: give `member` a power. `capability`
+must be one of `invite`, `kick`, `ban`, `garble` (`GRANTABLE_CAPABILITIES`; anything
+else is refused here because an unknown power would look real and do nothing). The
+fold refuses unless this identity is the owner or holds the power itself. Recorded
+in the audit log as `capability_granted`.
+**invoke name:** `"grant_capability"` -> `grantCapability()`.
+
+---
+
+### `revoke_capability(state, server_id, log_server_id, member, capability) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `PermissionRevoked`. Only the owner may revoke from
+someone else; a member may give up their own. The member must currently hold it
+(a no-op revoke is refused). Does NOT cascade to what that member granted onward.
+Audited as `capability_revoked`.
+**invoke name:** `"revoke_capability"` -> `revokeCapability()`.
+
+---
+
+### `get_capabilities(state, server_id) -> Result<Vec<CapabilityHolderView>, String>`
+
+**What it does:** `ServerRequest::GetCapabilities`. The owner is told everyone's
+explicit grants; anyone else only their own. The owner's implicit powers are not
+listed. Keys are `vk_<hex>`.
+**invoke name:** `"get_capabilities"` -> `getCapabilities()`.
+
+---
+
 ### `garble_set(state, server_id, log_server_id, target, mode, phrase, messages, consensual) -> Result<EventAcceptedResult, String>`
 
 **What it does:** signs and submits an `EventPayload::GarbleSet` as this device:

@@ -477,6 +477,27 @@ impl LogState {
             moderation: r.moderation,
         })
     }
+    /// The capabilities explicitly granted to `pk` (the owner's implicit ones are
+    /// not listed), sorted.
+    pub fn capabilities_of(&self, pk: &PublicKey) -> Vec<String> {
+        let mut v: Vec<String> = self.capabilities.get(pk).map(|c| c.iter().cloned().collect()).unwrap_or_default();
+        v.sort();
+        v
+    }
+    /// Everyone holding at least one explicit capability, sorted by key.
+    pub fn all_capabilities(&self) -> Vec<(PublicKey, Vec<String>)> {
+        let mut out: Vec<_> = self
+            .capabilities
+            .iter()
+            .map(|(pk, c)| {
+                let mut v: Vec<String> = c.iter().cloned().collect();
+                v.sort();
+                (pk.clone(), v)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        out
+    }
     /// Every running garble rule, sorted by target key for a stable order.
     pub fn garble_rules(&self) -> Vec<(PublicKey, GarbleRuleView)> {
         let mut out: Vec<_> = self
@@ -1135,6 +1156,17 @@ impl LogState {
                 Ok(Authorized::Apply)
             }
 
+            EventPayload::PermissionRevoked { member, capability } => {
+                ensure!(
+                    self.capabilities.get(member).is_some_and(|c| c.contains(capability)),
+                    "that member does not hold that capability"
+                );
+                ensure!(
+                    self.is_owner(author) || author == member,
+                    "only the owner may revoke a capability (or you may renounce your own)"
+                );
+                Ok(Authorized::Apply)
+            }
             EventPayload::GarbleSet { target, mode, phrase, messages, consensual } => {
                 ensure!(self.is_member(target), "garble target is not a member");
                 ensure!(author != target, "you cannot garble yourself over the log (use your own setting)");
@@ -1753,6 +1785,14 @@ impl LogState {
                 self.revoked_devices.insert(device.clone());
             }
 
+            EventPayload::PermissionRevoked { member, capability } => {
+                if let Some(set) = self.capabilities.get_mut(member) {
+                    set.remove(capability);
+                    if set.is_empty() {
+                        self.capabilities.remove(member);
+                    }
+                }
+            }
             EventPayload::GarbleSet { target, mode, phrase, messages, consensual } => {
                 self.garble_rules.insert(
                     target.clone(),
@@ -5646,6 +5686,54 @@ mod tests {
         let m2 = sealed_post(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, CH, 0, 2, vec![]);
         f.st.apply(&m2).expect("second sealed post folds");
         assert!(f.st.garble_mark(&m2.hash()).is_none(), "the one-message rule is spent");
+    }
+
+    #[test]
+    fn a_revoked_capability_stops_working_and_only_the_owner_or_the_holder_may_revoke() {
+        let mut w = garble_world();
+        let mod_pk = w.moderator.pk();
+        assert_eq!(w.st.capabilities_of(&mod_pk), vec!["garble".to_string()]);
+        // A bystander cannot revoke it; the grantee-to-be cannot revoke from others.
+        let revoke = EP::PermissionRevoked { member: mod_pk.clone(), capability: "garble".into() };
+        let e = act(&mut w.st, &mut w.alice, revoke.clone()).unwrap_err();
+        assert!(e.to_string().contains("only the owner may revoke"), "{e}");
+        // Revoking something nobody holds is refused, not silently accepted.
+        let e = act(&mut w.st, &mut w.owner, EP::PermissionRevoked { member: w.alice.pk(), capability: "garble".into() }).unwrap_err();
+        assert!(e.to_string().contains("does not hold"), "{e}");
+        // The owner revokes: the moderator can no longer garble.
+        act(&mut w.st, &mut w.owner, revoke).expect("owner may revoke");
+        assert!(w.st.capabilities_of(&mod_pk).is_empty());
+        assert!(!w.st.has_capability(&mod_pk, "garble"));
+        let e = act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "", 1, false)).unwrap_err();
+        assert!(e.to_string().contains("'garble' capability"), "{e}");
+        // Revoking twice is refused (it is already gone).
+        assert!(act(&mut w.st, &mut w.owner, EP::PermissionRevoked { member: mod_pk, capability: "garble".into() }).is_err());
+    }
+
+    #[test]
+    fn a_member_may_renounce_their_own_capability_and_regrant_works() {
+        let mut w = garble_world();
+        let mod_pk = w.moderator.pk();
+        act(&mut w.st, &mut w.moderator, EP::PermissionRevoked { member: mod_pk.clone(), capability: "garble".into() })
+            .expect("renouncing your own is allowed");
+        assert!(!w.st.has_capability(&mod_pk, "garble"));
+        act(&mut w.st, &mut w.owner, EP::PermissionGranted { member: mod_pk.clone(), capability: "garble".into() })
+            .expect("and the owner can grant it again");
+        assert!(w.st.has_capability(&mod_pk, "garble"));
+        // Alice listed only if she holds something.
+        let all: Vec<_> = w.st.all_capabilities().into_iter().map(|(p, _)| p).collect();
+        assert_eq!(all, vec![mod_pk]);
+    }
+
+    #[test]
+    fn revoking_one_capability_leaves_the_others() {
+        let mut w = garble_world();
+        let a = w.alice.pk();
+        for cap in ["ban", "invite"] {
+            act(&mut w.st, &mut w.owner, EP::PermissionGranted { member: a.clone(), capability: cap.into() }).unwrap();
+        }
+        act(&mut w.st, &mut w.owner, EP::PermissionRevoked { member: a.clone(), capability: "ban".into() }).unwrap();
+        assert_eq!(w.st.capabilities_of(&a), vec!["invite".to_string()]);
     }
 
     #[test]

@@ -185,6 +185,13 @@ pub struct MessageInfo {
     pub garble: Option<farder_crypto::event_log::GarbleMark>,
 }
 
+/// One member and the log capabilities explicitly granted to them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CapabilityHolder {
+    pub member: PublicKey,
+    pub capabilities: Vec<String>,
+}
+
 /// A garble rule that is running right now (see `EventPayload::GarbleSet`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GarbleRuleInfo {
@@ -770,6 +777,10 @@ pub enum ServerRequest {
     /// or hold. Answered with [`ServerResponse::GarbleState`]. Appended last
     /// (positional codec).
     GetGarbleState,
+    /// Who holds which log capability. The owner is told everyone's; anyone else
+    /// is told only their own. Answered with [`ServerResponse::Capabilities`].
+    /// Appended last (positional codec).
+    GetCapabilities,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -908,6 +919,9 @@ pub enum ServerResponse {
     /// `consents` holds consents the caller gave or was given. `can_moderate` says
     /// whether the caller may start a moderation garble (holds "garble").
     GarbleState { rules: Vec<GarbleRuleInfo>, consents: Vec<GarbleConsentInfo>, can_moderate: bool },
+    /// Answer to [`ServerRequest::GetCapabilities`]: explicit grants only (the
+    /// owner holds everything implicitly and is not listed).
+    Capabilities { holders: Vec<CapabilityHolder> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

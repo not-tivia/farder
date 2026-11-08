@@ -1535,3 +1535,26 @@ export async function garbleConsent(serverId: string, logServerId: string, contr
 export async function getGarbleState(serverId: string): Promise<GarbleState> {
   return invoke<GarbleState>("get_garble_state", { serverId });
 }
+
+// ── Delegating powers ────────────────────────────────────────────────────────
+
+/** The powers a screen may hand out (mirrors GRANTABLE_CAPABILITIES in Rust). */
+export const GRANTABLE_POWERS = ["invite", "kick", "ban", "garble"] as const;
+export type Power = (typeof GRANTABLE_POWERS)[number];
+
+export interface CapabilityHolder {
+  member: string;
+  capabilities: string[];
+}
+
+export async function grantCapability(serverId: string, logServerId: string, member: string, capability: Power): Promise<void> {
+  await invoke("grant_capability", { serverId, logServerId, member, capability });
+}
+
+export async function revokeCapability(serverId: string, logServerId: string, member: string, capability: Power): Promise<void> {
+  await invoke("revoke_capability", { serverId, logServerId, member, capability });
+}
+
+export async function getCapabilities(serverId: string): Promise<CapabilityHolder[]> {
+  return invoke<CapabilityHolder[]>("get_capabilities", { serverId });
+}

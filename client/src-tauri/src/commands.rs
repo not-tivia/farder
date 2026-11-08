@@ -8046,6 +8046,89 @@ pub async fn garble_consent(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Delegating powers (log capabilities)
+// ---------------------------------------------------------------------------
+
+/// The log capabilities a screen may hand out. The fold would accept any string,
+/// but an unknown one is a dead power that looks real, so the app only ever sends
+/// these.
+pub const GRANTABLE_CAPABILITIES: &[&str] = &["invite", "kick", "ban", "garble"];
+
+fn check_grantable(capability: &str) -> Result<(), String> {
+    if GRANTABLE_CAPABILITIES.contains(&capability) {
+        Ok(())
+    } else {
+        Err(format!("unknown power {capability:?}"))
+    }
+}
+
+/// Give `member` a power (`invite`, `kick`, `ban` or `garble`). The fold refuses
+/// unless this identity is the owner or holds the power itself.
+#[tauri::command]
+pub async fn grant_capability(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    member: String,
+    capability: String,
+) -> Result<EventAcceptedResult, String> {
+    check_grantable(&capability)?;
+    let member = parse_public_key(&member)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::PermissionGranted { member, capability },
+    )
+    .await
+}
+
+/// Take a power away from `member` (the owner may; a member may give up their own).
+#[tauri::command]
+pub async fn revoke_capability(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    member: String,
+    capability: String,
+) -> Result<EventAcceptedResult, String> {
+    check_grantable(&capability)?;
+    let member = parse_public_key(&member)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::PermissionRevoked { member, capability },
+    )
+    .await
+}
+
+#[derive(serde::Serialize)]
+pub struct CapabilityHolderView {
+    pub member: String,
+    pub capabilities: Vec<String>,
+}
+
+/// Who holds which power. The owner is told everyone's; anyone else only their own.
+#[tauri::command]
+pub async fn get_capabilities(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<CapabilityHolderView>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetCapabilities)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Capabilities { holders } => Ok(holders
+            .into_iter()
+            .map(|h| CapabilityHolderView { member: h.member.to_string(), capabilities: h.capabilities })
+            .collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 /// A garble rule as the frontend sees it (keys as `vk_<hex>` strings).
 #[derive(serde::Serialize)]
 pub struct GarbleRuleView {
@@ -8322,5 +8405,20 @@ pub async fn download_sealed_file(
             mime_type,
             saved_path: Some(save_path.to_string_lossy().to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_known_powers_can_be_handed_out() {
+        for c in ["invite", "kick", "ban", "garble"] {
+            assert!(check_grantable(c).is_ok(), "{c}");
+        }
+        for c in ["", "Garble", "admin", "anything", "garble ", "ban,kick"] {
+            assert!(check_grantable(c).is_err(), "{c:?} must be refused");
+        }
     }
 }

@@ -63,6 +63,7 @@ pub(crate) fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::GarbleSet { .. } => "GarbleSet",
         EventPayload::GarbleCleared { .. } => "GarbleCleared",
         EventPayload::GarbleConsent { .. } => "GarbleConsent",
+        EventPayload::PermissionRevoked { .. } => "PermissionRevoked",
     }
 }
 

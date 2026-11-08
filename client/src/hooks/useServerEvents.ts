@@ -469,6 +469,8 @@ export function useServerEvents(): void {
     listen("server:membership_changed", (e) => {
       const data = e.payload as { server_id: string; public_key: string };
       const serverId = data.server_id;
+      // A power may have been granted or taken away: screens that show powers re-ask.
+      window.dispatchEvent(new CustomEvent("farder:capabilities-changed", { detail: { serverId } }));
       // Re-fetch my own status (I may have just been approved/denied), the member
       // list, and the pending queue — all derive from the changed log membership.
       api.getMembershipStatus(serverId).then(status => {
