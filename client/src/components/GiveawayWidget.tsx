@@ -4,6 +4,7 @@ import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
 import { publicKeyToString } from "../lib/types";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
+import { visibleInterval } from "../lib/visibleInterval";
 
 interface GiveawayWidgetProps {
   serverId: string;
@@ -89,8 +90,7 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable, re
   // (they receive no GiveawayUpdated events); cleared on unmount.
   useEffect(() => {
     if (refetch !== "interval") return;
-    const t = window.setInterval(fetchGiveaway, 20_000);
-    return () => window.clearInterval(t);
+    return visibleInterval(fetchGiveaway, 20_000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refetch, serverId, giveawayId]);
 
@@ -98,8 +98,7 @@ export default function GiveawayWidget({ serverId, giveawayId, onUnavailable, re
   useEffect(() => {
     if (!giveaway || giveaway.status !== "open") return;
     setNowSecs(Math.floor(Date.now() / 1000));
-    const t = window.setInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 1_000);
-    return () => window.clearInterval(t);
+    return visibleInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 1_000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [giveaway?.status]);
 

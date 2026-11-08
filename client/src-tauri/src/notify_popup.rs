@@ -92,6 +92,13 @@ pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Destroy the pop-up window, freeing its browser process. Safe if it is not there.
+pub fn close_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(LABEL) {
+        let _ = w.destroy();
+    }
+}
+
 /// Hand a notification to the pop-up window.
 pub fn push(app: &AppHandle, title: String, body: String, media_url: Option<String>) -> Result<(), String> {
     let freshly_built = ensure_window(app)?;

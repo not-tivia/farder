@@ -1877,8 +1877,8 @@ unchanged.
 
 ### `show_notification(title, body, media_url) -> Result<(), String>`
 
-**What it does:** raises a notification. By default (`popupStyle` absent or
-`"skinned"` in `notifications.json`) it hands the text to Farder's own
+**What it does:** raises a notification. With `popupStyle: "off"` it does nothing
+at all. By default (`popupStyle` absent or `"skinned"` in `notifications.json`) it hands the text to Farder's own
 notification window (`notify_popup.rs`, see below) and emits `notify:push` to it.
 With `popupStyle: "system"`, or if the window cannot be reached, it spawns a
 native OS notification instead: `notify-send` on Linux, a PowerShell toast on
@@ -1916,7 +1916,10 @@ focuses the `main` window.
 ### `get_notification_prefs() -> Result<Value, String>` / `save_notification_prefs(prefs) -> Result<(), String>`
 
 **What it does:** reads/writes `~/.farder/notifications.json`. Default prefs
-are inline (DM notifications: `"all"`, mentions: `true`, etc.).
+are inline (DM notifications: `"all"`, mentions: `true`, etc.). Saving also
+manages the pop-up window's lifetime: `popupStyle: "skinned"` builds it, any other
+style destroys it (it is a whole extra browser process). `popupContent`
+(`full` / `sender` / `hidden`) is read by the client, not here.
 **invoke names:** `"get_notification_prefs"` / `"save_notification_prefs"` →
 `getNotificationPrefs()` / `saveNotificationPrefs()`.
 

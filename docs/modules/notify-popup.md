@@ -36,10 +36,15 @@ keeps it in memory only, and makes no network request.
   as a fallback.
 - The `notify` label must stay in `capabilities/default.json`'s `windows` list.
 
-## Settings
+## Settings (Settings -> Notifications -> Pop-ups)
 
-`popupStyle` in `notifications.json`: `"skinned"` (default) or `"system"` (the OS
-toast). Chosen in Settings -> Notifications -> Pop-up style.
+- `popupStyle` in `notifications.json`: `"skinned"` (default), `"system"` (the OS
+  toast) or `"off"` (nothing is raised and the pop-up window is not kept: it is
+  built only for `"skinned"`, at startup and when the setting is saved).
+- `popupContent`: `"full"` (sender, channel, words), `"sender"` (only who) or
+  `"hidden"` (just "New message"). Decided in `lib/notificationText.ts`
+  (`buildNotificationText`) BEFORE the text reaches either style, so no path can
+  say more than the person chose. Media previews exist only with `"full"`.
 
 ## Verification status
 

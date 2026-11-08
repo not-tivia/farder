@@ -28,6 +28,21 @@ pub trait PresenceSource: Send + Sync {
 // Manager
 // ---------------------------------------------------------------------------
 
+/// Wakes the presence poller when a presence setting changes.
+///
+/// The poller used to wake every 5 s forever, re-reading the settings file each
+/// time, even with the feature off (its default). A messenger left open all day
+/// should cost nothing while idle, so with presence off the poller now PARKS on
+/// this and wakes only when someone flips a switch.
+pub static PRESENCE_WAKE: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+/// Whether the poller has anything to do: presence on AND the music source on
+/// (the only source that exists today; a game source will add its own gate).
+pub fn polling_wanted() -> bool {
+    crate::commands::read_presence_enabled() && crate::commands::read_presence_music()
+}
+
 /// Holds all registered sources and computes the presence that should be sent
 /// to servers, honoring the two settings gates (presence_enabled, presence_music).
 pub struct PresenceManager {
@@ -268,5 +283,33 @@ mod tests {
         assert!(!is_suppressed(sid));
         suppress(sid);
         assert!(is_suppressed(sid));
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_parked_poller_stays_asleep_until_a_setting_changes() {
+        let wake = tokio::sync::Notify::new();
+        // Nothing changed: it must NOT wake by itself (that is the whole point).
+        let idle = tokio::time::timeout(Duration::from_millis(150), wake.notified()).await;
+        assert!(idle.is_err(), "a parked poller must not wake on its own");
+        // A switch is flipped: it wakes at once.
+        wake.notify_one();
+        let woken = tokio::time::timeout(Duration::from_millis(500), wake.notified()).await;
+        assert!(woken.is_ok(), "flipping a setting wakes it");
+    }
+
+    #[tokio::test]
+    async fn a_change_made_just_before_parking_is_not_lost() {
+        // notify_one stores a permit, so flipping the switch between "decided to
+        // park" and "started waiting" cannot strand the poller asleep.
+        let wake = tokio::sync::Notify::new();
+        wake.notify_one();
+        let woken = tokio::time::timeout(Duration::from_millis(500), wake.notified()).await;
+        assert!(woken.is_ok());
     }
 }

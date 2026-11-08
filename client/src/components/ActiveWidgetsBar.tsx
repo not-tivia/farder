@@ -5,6 +5,7 @@ import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 import PollWidget from "./PollWidget";
 import GiveawayWidget from "./GiveawayWidget";
 import EventWidget from "./EventWidget";
+import { visibleInterval } from "../lib/visibleInterval";
 
 interface ActiveWidgetsBarProps {
   serverId: string;
@@ -134,8 +135,7 @@ export default function ActiveWidgetsBar({ serverId, channelId }: ActiveWidgetsB
   useEffect(() => {
     if (!hasChips) return;
     setNowSecs(Math.floor(Date.now() / 1000));
-    const t = window.setInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 30_000);
-    return () => window.clearInterval(t);
+    return visibleInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 30_000);
   }, [hasChips]);
 
   // Zero layout cost for widget-free channels — but keep an open dropdown

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { useApp } from "../context/ServerContext";
+import { useApp, type PerServerState } from "../context/ServerContext";
 import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo, MessageInfoV2, ChannelInfoV2 } from "../lib/types";
 import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
@@ -9,9 +9,13 @@ import { dismiss as dismissTranslation, clearAll as clearTranslations } from "..
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
 import { getAutoplay, shouldAutoplay, firstDirectMediaUrl, prefersReducedMotion } from "../lib/autoplay";
 import { getDataSaver } from "../lib/dataSaver";
+import { buildNotificationText, normalizePopupContent } from "../lib/notificationText";
 
 // Module-level cache for notification prefs and own public key
 let notifPrefs: NotificationPrefs | null = null;
+// How the module-level notification code looks up a server's members/channels
+// (set by the hook below, which owns the app state).
+let serverLookup: ((serverId: string) => PerServerState | undefined) | null = null;
 api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
 // Own public key, fetched LAZILY: at module load the identity is still
 // PIN-locked, so an eager getPublicKey() fails and would leave this null for
@@ -83,17 +87,28 @@ function shouldNotify(serverId: string, message: MessageInfo, prefs: Notificatio
 function notifyIfWanted(serverId: string, message: MessageInfo, text: string): void {
   if (!text) return;
   if (notifPrefs && !shouldNotify(serverId, message, notifPrefs)) return;
+  // "Off" means off: do not even build the text.
+  if (notifPrefs?.popupStyle === "off") return;
   void getOwnPk().then((own) => {
     const author = publicKeyToString(message.author);
     if (own && author === own) return;
+
+    // What the pop-up may say is the person's choice (full / sender only / nothing).
+    // Decided here, before the text reaches either pop-up style.
+    const server = serverLookup?.(serverId);
+    const sender = server?.members.find((m) => publicKeyToString(m.public_key) === author)?.display_name ?? null;
+    const channel = server?.channels.find((c) => c.id === message.channel_id)?.name ?? null;
+    const shown = buildNotificationText(normalizePopupContent(notifPrefs?.popupContent), { sender, channel, text });
+
     // A muted preview of a direct video/image link, but only from someone the
-    // person has chosen to trust (and never under Data Saver / reduced motion).
-    const media = shouldAutoplay(
+    // person has chosen to trust (never under Data Saver / reduced motion) and
+    // only when the pop-up is allowed to show the message at all.
+    const media = shown.allowMedia && shouldAutoplay(
       getAutoplay(), author,
       { dataSaverOn: getDataSaver().enabled, reducedMotion: prefersReducedMotion() },
       "popup",
     ) ? firstDirectMediaUrl(text) : null;
-    api.showNotification("Farder", text.slice(0, 120), media).catch(() => {});
+    api.showNotification(shown.title, shown.body, media).catch(() => {});
   });
 }
 
@@ -144,6 +159,10 @@ export function useServerEvents(): void {
   // Keep a live reference to per-server state for use inside event callbacks
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => {
+    serverLookup = (id) => stateRef.current.servers[id];
+    return () => { serverLookup = null; };
+  }, []);
 
   useEffect(() => {
     // Each listen() returns a Promise<UnlistenFn>. Cleanup runs synchronously

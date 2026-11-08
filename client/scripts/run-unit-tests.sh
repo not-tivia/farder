@@ -8,4 +8,6 @@ trap 'rm -rf "$out"' EXIT
 npx esbuild src/lib/garble.ts --bundle --platform=node --format=esm --outfile="$out/garble.mjs" --log-level=error
 npx esbuild src/lib/autoplay.ts --bundle --platform=node --format=esm --outfile="$out/autoplay.mjs" --log-level=error
 npx esbuild src/context/MediaPlayersContext.tsx --bundle --platform=node --format=esm --outfile="$out/players.mjs" --log-level=error
-GARBLE_JS="$out/garble.mjs" AUTOPLAY_JS="$out/autoplay.mjs" PLAYERS_JS="$out/players.mjs" node --test tests/*.test.mjs
+npx esbuild src/lib/visibleInterval.ts --bundle --platform=node --format=esm --outfile="$out/visible.mjs" --log-level=error
+npx esbuild src/lib/notificationText.ts --bundle --platform=node --format=esm --outfile="$out/notiftext.mjs" --log-level=error
+NOTIFTEXT_JS="$out/notiftext.mjs" GARBLE_JS="$out/garble.mjs" VISIBLE_JS="$out/visible.mjs" AUTOPLAY_JS="$out/autoplay.mjs" PLAYERS_JS="$out/players.mjs" node --test tests/*.test.mjs

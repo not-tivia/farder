@@ -103,6 +103,14 @@ fn main() {
                 tauri::async_runtime::spawn(async move {
                     let mgr = presence::PresenceManager::new(presence::default_sources());
                     loop {
+                        if !presence::polling_wanted() {
+                            // Presence is off (the default). Clear anything we had
+                            // published, once, then SLEEP until a setting changes:
+                            // no 5-second wakeups for a feature nobody turned on.
+                            presence::push_presence_everywhere(&state, None).await;
+                            presence::PRESENCE_WAKE.notified().await;
+                            continue;
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         let current = mgr.compute();
                         presence::push_presence_everywhere(&state, current).await;
@@ -111,8 +119,12 @@ fn main() {
             }
             // The skinned notification window, built hidden so its page is loaded
             // before the first message arrives.
-            if let Err(e) = notify_popup::ensure_window(&app.handle()) {
-                eprintln!("[notify] could not create the pop-up window: {e}");
+            // Only when the person wants the themed pop-up: the window is a whole
+            // extra browser process, so "system" and "off" never pay for it.
+            if commands::notification_popup_style() == "skinned" {
+                if let Err(e) = notify_popup::ensure_window(&app.handle()) {
+                    eprintln!("[notify] could not create the pop-up window: {e}");
+                }
             }
             if let Err(e) = tray::setup_tray(&app.handle()) {
                 eprintln!("Failed to setup tray: {}", e);

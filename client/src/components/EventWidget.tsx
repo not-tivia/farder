@@ -5,6 +5,7 @@ import { toast } from "../lib/toast";
 import { publicKeyToString } from "../lib/types";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 import EventBuilderModal from "./EventBuilderModal";
+import { visibleInterval } from "../lib/visibleInterval";
 
 interface EventWidgetProps {
   serverId: string;
@@ -90,8 +91,7 @@ export default function EventWidget({ serverId, eventId, onUnavailable, refetch 
   // (they receive no EventUpdated events); cleared on unmount.
   useEffect(() => {
     if (refetch !== "interval") return;
-    const t = window.setInterval(fetchEvent, 20_000);
-    return () => window.clearInterval(t);
+    return visibleInterval(fetchEvent, 20_000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refetch, serverId, eventId]);
 
@@ -100,8 +100,7 @@ export default function EventWidget({ serverId, eventId, onUnavailable, refetch 
   useEffect(() => {
     if (!event || event.status === "cancelled") return;
     setNowSecs(Math.floor(Date.now() / 1000));
-    const t = window.setInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 30_000);
-    return () => window.clearInterval(t);
+    return visibleInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 30_000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [event?.status]);
 

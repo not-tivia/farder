@@ -754,8 +754,12 @@ export interface NotificationPrefs {
   notifyOnMemberLeave?: boolean;
   notifyOnReaction?: boolean;
   notifyOnThreadReply?: boolean;
-  /** "skinned" (default): Farder's own themed pop-up. "system": the OS toast. */
-  popupStyle?: "skinned" | "system";
+  /** "skinned" (default): Farder's own themed pop-up. "system": the OS toast.
+   *  "off": no pop-ups at all (and the pop-up window is never created). */
+  popupStyle?: "skinned" | "system" | "off";
+  /** What a pop-up may say: "full" (default), "sender" (only who), "hidden"
+   *  (just "New message"). Applies to both pop-up styles. */
+  popupContent?: "full" | "sender" | "hidden";
 }
 
 export async function getNotificationPrefs(): Promise<NotificationPrefs> {

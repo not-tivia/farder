@@ -798,7 +798,9 @@ pub fn get_presence_enabled() -> bool {
 
 #[tauri::command]
 pub fn set_presence_enabled(enabled: bool) -> Result<(), String> {
-    settings_set("presence_enabled", serde_json::json!(enabled))
+    let r = settings_set("presence_enabled", serde_json::json!(enabled));
+    crate::presence::PRESENCE_WAKE.notify_one(); // un-park (or let it clear and re-park)
+    r
 }
 
 #[tauri::command]
@@ -808,7 +810,9 @@ pub fn get_presence_music() -> bool {
 
 #[tauri::command]
 pub fn set_presence_music(enabled: bool) -> Result<(), String> {
-    settings_set("presence_music", serde_json::json!(enabled))
+    let r = settings_set("presence_music", serde_json::json!(enabled));
+    crate::presence::PRESENCE_WAKE.notify_one();
+    r
 }
 
 #[tauri::command]
@@ -3841,6 +3845,10 @@ pub fn show_notification(
     body: String,
     media_url: Option<String>,
 ) -> Result<(), String> {
+    // "off": no pop-ups of any kind. Nothing is built, spawned or sent.
+    if notification_popup_style() == "off" {
+        return Ok(());
+    }
     // Default: Farder's own skinned pop-up window (drawn locally, themed, never
     // copied into the OS notification history). `popupStyle: "system"` in the
     // notification prefs opts back into the OS toast below.
@@ -3891,14 +3899,24 @@ pub fn show_notification(
 // Notification preferences commands
 // ---------------------------------------------------------------------------
 
-/// `"skinned"` (default) or `"system"`, from `popupStyle` in notifications.json.
-/// Anything unreadable or unrecognised is the default.
-fn notification_popup_style() -> String {
-    std::fs::read_to_string(farder_data_dir().join("notifications.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("popupStyle").and_then(|p| p.as_str().map(str::to_owned)))
-        .unwrap_or_else(|| "skinned".to_string())
+/// `"skinned"` (default), `"system"` or `"off"`, from `popupStyle` in
+/// notifications.json. Anything unreadable or unrecognised is the default.
+pub(crate) fn notification_popup_style() -> String {
+    popup_style_from(
+        std::fs::read_to_string(farder_data_dir().join("notifications.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .as_ref(),
+    )
+}
+
+/// The decision, separated from the file read so it can be tested.
+pub(crate) fn popup_style_from(prefs: Option<&serde_json::Value>) -> String {
+    match prefs.and_then(|v| v.get("popupStyle")).and_then(|p| p.as_str()) {
+        Some("system") => "system".to_string(),
+        Some("off") => "off".to_string(),
+        _ => "skinned".to_string(),
+    }
 }
 
 #[tauri::command]
@@ -3920,9 +3938,17 @@ pub fn get_notification_prefs() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn save_notification_prefs(prefs: serde_json::Value) -> Result<(), String> {
+pub fn save_notification_prefs(app: tauri::AppHandle, prefs: serde_json::Value) -> Result<(), String> {
     let path = farder_data_dir().join("notifications.json");
-    std::fs::write(&path, prefs.to_string()).map_err(|e| e.to_string())
+    std::fs::write(&path, prefs.to_string()).map_err(|e| e.to_string())?;
+    // The pop-up window is a whole extra browser process. Keep it only while the
+    // chosen style needs it: leaving "skinned" frees it now, returning builds it.
+    if popup_style_from(Some(&prefs)) == "skinned" {
+        let _ = crate::notify_popup::ensure_window(&app);
+    } else {
+        crate::notify_popup::close_window(&app);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -8420,5 +8446,27 @@ mod capability_tests {
         for c in ["", "Garble", "admin", "anything", "garble ", "ban,kick"] {
             assert!(check_grantable(c).is_err(), "{c:?} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod popup_style_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_default_is_the_themed_popup() {
+        assert_eq!(popup_style_from(None), "skinned");
+        assert_eq!(popup_style_from(Some(&json!({}))), "skinned");
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": 5 }))), "skinned");
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "nonsense" }))), "skinned");
+    }
+
+    #[test]
+    fn system_and_off_are_recognised_exactly() {
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "system" }))), "system");
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "off" }))), "off");
+        // Not case-folded or trimmed: only the exact words the settings screen writes.
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "OFF" }))), "skinned");
     }
 }
