@@ -3586,7 +3586,7 @@ body {
   padding: 10px 12px; cursor: pointer; overflow: hidden;
   background: var(--xp-panel-bg); color: var(--xp-text-normal);
   border: 1px solid var(--xp-border); border-left: 4px solid var(--xp-blue);
-  border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+  border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.35);
   font-family: var(--xp-font); font-size: var(--xp-font-size);
   animation: notify-popup-in 0.18s ease-out;
 }
