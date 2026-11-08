@@ -85,7 +85,7 @@ pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
     if app.get_webview_window(LABEL).is_some() {
         return Ok(false);
     }
-    WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html?notify=1".into()))
+    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html?notify=1".into()))
         .title("Farder notification")
         .inner_size(CARD_W + 2.0 * GAP, CARD_H + 2.0 * GAP)
         .decorations(false)
@@ -99,7 +99,31 @@ pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    hide_system_border(&win);
+    let _ = &win;
     Ok(true)
+}
+
+/// Windows 11 draws a 1px accent-coloured line around even a borderless window,
+/// which showed up as a pink rectangle 8px outside the card (the window is the
+/// card plus transparent padding). Ask DWM for "no border". Best-effort: Windows
+/// 10 does not know the setting and ignores it, which is fine.
+#[cfg(windows)]
+fn hide_system_border(win: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+    let Ok(h) = win.hwnd() else { return };
+    // DWMWA_COLOR_NONE
+    let none: u32 = 0xFFFF_FFFE;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            HWND(h.0 as _),
+            DWMWA_BORDER_COLOR,
+            &none as *const u32 as *const core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
 }
 
 /// Destroy the pop-up window, freeing its browser process. Safe if it is not there.

@@ -50,7 +50,7 @@ windows-capture = "2.0.0"
 wasapi = "0.23.0"
 # GSMTC (Global System Media Transport Controls) — Windows "now playing" source
 # for rich presence.  Cfg-gated; not compiled on Linux/macOS.
-windows = { version = "0.58", features = ["Media_Control", "Foundation"] }
+windows = { version = "0.58", features = ["Media_Control", "Foundation", "Win32_Foundation", "Win32_Graphics_Dwm"] }
 tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
