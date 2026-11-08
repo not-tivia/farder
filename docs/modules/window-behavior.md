@@ -26,10 +26,20 @@ pop-up shows, you reply from it -- so closing the window must not mean "stop".
   quoted so spaces cannot split it (the stored command was round-tripped through
   Windows on a throwaway key).
 
-## Known gap
-There is no single-instance guard: launching Farder again while it sits in the tray
-starts a second process instead of showing the first. (Adding the standard plugin is
-a new dependency; deliberately not done without a decision.)
+## One copy only (Windows)
+`tauri-plugin-single-instance` (Tauri's own plugin, Windows builds only, registered
+first). Launching Farder again while it is running -- typically from the shortcut while
+it sits in the tray -- starts a process that exits at once and hands over to the first:
+
+- the running window is shown (`plan_second_launch` / `on_second_launch`);
+- a launch from the sign-in entry (`--minimized`) does NOT throw the window open;
+- a `farder://` link the second launch was started with is forwarded to the running
+  copy as the `deep-link` event (a link click starts a new process with the URL as an
+  argument, so without this it would be silently dropped). Only `farder://` links are
+  forwarded.
+
+The dependency adds one crate (`tauri-plugin-single-instance` 2.4.5, tauri-apps,
+Apache-2.0/MIT); everything it needs was already in the build. Not enabled off Windows.
 
 ## Verification status
 Unit-tested: the close/start decisions, the registry argument shapes. UNVERIFIED until

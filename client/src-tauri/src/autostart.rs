@@ -14,6 +14,7 @@ pub const VALUE_NAME: &str = "Farder";
 
 /// Arguments for `reg add`. The command stored is `"<exe>" --minimized`, with the
 /// path quoted so a space in it ("C:\Program Files\...") cannot split it.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn reg_add_args(exe: &str) -> Vec<String> {
     vec![
         "add".into(), RUN_KEY.into(),
@@ -24,10 +25,12 @@ pub fn reg_add_args(exe: &str) -> Vec<String> {
     ]
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn reg_delete_args() -> Vec<String> {
     vec!["delete".into(), RUN_KEY.into(), "/v".into(), VALUE_NAME.into(), "/f".into()]
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn reg_query_args() -> Vec<String> {
     vec!["query".into(), RUN_KEY.into(), "/v".into(), VALUE_NAME.into()]
 }

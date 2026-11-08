@@ -92,9 +92,13 @@ client).
 - [ ] "Start Farder when I sign in to Windows" should be **greyed out with an
       explanation** in `tauri dev` (it only works in an installed build). That is
       expected.
-- [ ] **Known gap, just observe:** with Farder sitting in the tray, launch it again.
-      A second copy will start. Tell me what you see (this is the single-instance
-      problem; do not treat it as a new bug).
+- [ ] **Only one Farder.** This needs a *built* Farder (`npm run tauri build`, or an
+      installed copy): two `tauri dev` runs cannot be started because the dev server
+      port clashes first. With that Farder sitting in the tray (window hidden), launch
+      it again. *Should:* the existing window comes to the front, and there is no second
+      tray icon and no second `farder-client` in Task Manager.
+- [ ] A `farder://` link opened while Farder is in the tray (e.g. paste one into
+      Win+R) shows the window and acts on the link, instead of starting a second copy.
 
 ## Part 3 - Pop-ups (the riskiest part)
 
@@ -268,7 +272,8 @@ powershell -ExecutionPolicy Bypass -File C:\Users\Deez\farder\scripts\measure_id
 
 ## Known gaps - do not report these as new bugs
 
-- No **single-instance** guard (a second launch starts a second copy).
+- The single-instance guard needs a **built/installed** Farder to test; `tauri dev`
+  cannot be launched twice.
 - **Start with Windows** only works in an installed build, not `tauri dev`.
 - **YouTube/Spotify** iframes can't be volume-limited or autoplayed.
 - **Encrypted channels** raise no pop-ups, so there is nothing to reply to from them.

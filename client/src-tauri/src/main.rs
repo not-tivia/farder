@@ -77,7 +77,16 @@ fn main() {
         .skip(1)
         .find(|a| a.starts_with("farder://"));
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // ONE Farder per person. With close-to-tray the app is usually already running
+    // (hidden) when the shortcut is clicked again; a second copy must hand over to
+    // the first, not start beside it. This must be registered BEFORE every other
+    // plugin so a second launch exits before it opens anything.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        window_behavior::on_second_launch(app, &args);
+    }));
+    builder
         .manage(Arc::new(AppState::new()))
         .manage(server_manager::ServerProcesses::new())
         .plugin(tauri_plugin_shell::init())

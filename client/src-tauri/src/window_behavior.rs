@@ -39,6 +39,40 @@ pub fn should_start_hidden(setting: bool, args: &[String], tray_available: bool)
     tray_available && (setting || args.iter().any(|a| a == "--minimized"))
 }
 
+/// What to do when Farder is started a second time while it is already running.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SecondLaunch {
+    /// Bring the running window forward.
+    pub show_window: bool,
+    /// A `farder://` link the second launch was started with, to hand to the
+    /// running copy (a link click starts a new process with the URL as an argument,
+    /// so without forwarding it would be thrown away).
+    pub deep_link: Option<String>,
+}
+
+/// Decide what a second launch does. Pure so it can be tested.
+///
+/// A launch from the sign-in entry passes `--minimized`; if Farder is already
+/// running it must NOT throw the window open (the person did nothing). Anything
+/// else -- the shortcut, or a link -- shows it.
+pub fn plan_second_launch(args: &[String]) -> SecondLaunch {
+    let deep_link = args.iter().skip(1).find(|a| a.starts_with("farder://")).cloned();
+    let only_minimized = args.iter().skip(1).any(|a| a == "--minimized");
+    SecondLaunch { show_window: deep_link.is_some() || !only_minimized, deep_link }
+}
+
+/// Run in the FIRST copy when a second one is started (and exits).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn on_second_launch(app: &AppHandle, args: &[String]) {
+    let plan = plan_second_launch(args);
+    if plan.show_window {
+        show_main(app);
+    }
+    if let Some(url) = plan.deep_link {
+        let _ = tauri::Emitter::emit(app, "deep-link", url);
+    }
+}
+
 static TRAY_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_tray_available(ok: bool) {
@@ -126,6 +160,39 @@ mod tests {
         assert_eq!(decide_close(false, false, true), CloseAction::Quit, "setting off: closing quits");
         assert_eq!(decide_close(true, true, true), CloseAction::Quit, "a real quit is never blocked");
         assert_eq!(decide_close(true, false, false), CloseAction::Quit, "no tray: never strand the app");
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_second_launch_shows_the_running_window() {
+        let p = plan_second_launch(&args(&["farder-client.exe"]));
+        assert_eq!(p, SecondLaunch { show_window: true, deep_link: None });
+    }
+
+    #[test]
+    fn a_second_launch_from_the_sign_in_entry_does_not_throw_the_window_open() {
+        let p = plan_second_launch(&args(&["farder-client.exe", "--minimized"]));
+        assert_eq!(p, SecondLaunch { show_window: false, deep_link: None });
+    }
+
+    #[test]
+    fn a_link_is_forwarded_to_the_running_copy_and_shows_it_even_if_minimized() {
+        let p = plan_second_launch(&args(&["farder-client.exe", "--minimized", "farder://join/abc"]));
+        assert_eq!(p.deep_link.as_deref(), Some("farder://join/abc"));
+        assert!(p.show_window, "someone clicked a link: they want to see it");
+        // The program name (argv[0]) is never mistaken for a flag or a link.
+        let q = plan_second_launch(&args(&["farder://not-a-link-it-is-argv0"]));
+        assert_eq!(q.deep_link, None);
+    }
+
+    #[test]
+    fn only_farder_links_are_forwarded() {
+        for bad in ["https://evil.example/", "file:///etc/passwd", "farder:/x", "FARDER://x"] {
+            assert_eq!(plan_second_launch(&args(&["f.exe", bad])).deep_link, None, "{bad}");
+        }
     }
 
     #[test]
