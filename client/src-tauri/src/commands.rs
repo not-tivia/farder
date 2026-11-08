@@ -815,6 +815,40 @@ pub fn set_presence_music(enabled: bool) -> Result<(), String> {
     r
 }
 
+/// The universal volume control, as the settings screen sees it.
+#[derive(serde::Serialize)]
+pub struct AudioLimits {
+    /// Master volume, 0.0 (silent) to 1.5 (150%); 1.0 = unchanged.
+    pub master: f32,
+    /// Loudness ceiling in dB (-40 to -3); 0 = no ceiling.
+    pub max_db: f32,
+}
+
+/// Apply the saved volume + ceiling to the audio path. Called at startup.
+pub(crate) fn apply_saved_audio_limits() {
+    let master = settings_get("audio_master_volume").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    let max_db = settings_get("audio_max_db").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    crate::audio_limit::set(master, max_db);
+}
+
+#[tauri::command]
+pub fn get_audio_limits() -> AudioLimits {
+    let (master, max_db) = crate::audio_limit::current_settings();
+    AudioLimits { master, max_db }
+}
+
+/// Set the master volume and the loudness ceiling (`max_db` 0 = off). Both are
+/// clamped to safe ranges, applied to the running audio immediately, and saved.
+#[tauri::command]
+pub fn set_audio_limits(master: f32, max_db: f32) -> Result<AudioLimits, String> {
+    let master = crate::audio_limit::clamp_master(master);
+    let max_db = crate::audio_limit::clamp_ceiling_db(max_db);
+    crate::audio_limit::set(master, max_db);
+    settings_set("audio_master_volume", serde_json::json!(master))?;
+    settings_set("audio_max_db", serde_json::json!(max_db))?;
+    Ok(AudioLimits { master, max_db })
+}
+
 #[tauri::command]
 pub fn get_voice_mode() -> String {
     read_voice_mode()

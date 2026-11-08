@@ -7,6 +7,7 @@ import PrivacyDataSettings from "../PrivacyDataSettings";
 import NotificationSettings from "../NotificationSettings";
 import GarbleSettings from "./GarbleSettings";
 import AutoplaySettings from "./AutoplaySettings";
+import SoundSettings from "./SoundSettings";
 import AlertSubscriptions from "./AlertSubscriptions";
 import MyReminders from "./MyReminders";
 import HostedServers from "./HostedServers";
@@ -15,13 +16,14 @@ interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "gif" | "translation" | "voice" | "notifications" | "garble" | "autoplay" | "privacy" | "hosted" | "alerts" | "reminders";
+type SectionId = "appearance" | "gif" | "translation" | "voice" | "notifications" | "garble" | "autoplay" | "sound" | "privacy" | "hosted" | "alerts" | "reminders";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "gif", label: "GIF Search" },
   { id: "translation", label: "Translation" },
   { id: "voice", label: "Voice" },
+  { id: "sound", label: "Sound" },
   { id: "notifications", label: "Notifications" },
   { id: "garble", label: "Speech Garbler" },
   { id: "autoplay", label: "Autoplay" },
@@ -72,6 +74,7 @@ export default function SettingsModal({ onClose }: Props) {
             {active === "gif" && <GifSearchSettings />}
             {active === "translation" && <TranslationSettingsTab />}
             {active === "voice" && <VoiceSettings />}
+            {active === "sound" && <SoundSettings />}
             {active === "notifications" && <NotificationSettings />}
             {active === "garble" && <GarbleSettings />}
             {active === "autoplay" && <AutoplaySettings />}

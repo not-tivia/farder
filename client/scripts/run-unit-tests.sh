@@ -10,4 +10,5 @@ npx esbuild src/lib/autoplay.ts --bundle --platform=node --format=esm --outfile=
 npx esbuild src/context/MediaPlayersContext.tsx --bundle --platform=node --format=esm --outfile="$out/players.mjs" --log-level=error
 npx esbuild src/lib/visibleInterval.ts --bundle --platform=node --format=esm --outfile="$out/visible.mjs" --log-level=error
 npx esbuild src/lib/notificationText.ts --bundle --platform=node --format=esm --outfile="$out/notiftext.mjs" --log-level=error
-NOTIFTEXT_JS="$out/notiftext.mjs" GARBLE_JS="$out/garble.mjs" VISIBLE_JS="$out/visible.mjs" AUTOPLAY_JS="$out/autoplay.mjs" PLAYERS_JS="$out/players.mjs" node --test tests/*.test.mjs
+npx esbuild src/lib/audioLimiterWorklet.ts --bundle --platform=node --format=esm --outfile="$out/limiter.mjs" --log-level=error
+LIMITER_JS="$out/limiter.mjs" NOTIFTEXT_JS="$out/notiftext.mjs" GARBLE_JS="$out/garble.mjs" VISIBLE_JS="$out/visible.mjs" AUTOPLAY_JS="$out/autoplay.mjs" PLAYERS_JS="$out/players.mjs" node --test tests/*.test.mjs

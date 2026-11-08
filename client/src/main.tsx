@@ -5,6 +5,7 @@ import ScreenSharePopout from "./components/ScreenSharePopout";
 import NotifyPopup from "./components/NotifyPopup";
 import { getActiveTheme } from "./lib/tauri-bridge";
 import { bookMigrateLegacyFavorites } from "./lib/book/client";
+import { initAudioLimits } from "./lib/audioLimiter";
 
 async function bootstrap() {
   // Detached screen-share preview window: render JUST the popout view (no
@@ -53,6 +54,9 @@ async function bootstrap() {
     ReactDOM.createRoot(document.getElementById("root")!).render(<NotifyPopup />);
     return;
   }
+
+  // Loudness limiter for videos and voice messages in chat (a no-op at defaults).
+  void initAudioLimits();
 
   // One-time migration of legacy ~/.farder/favorites.json into the new book.
   // No-op after the first successful run (server renames favorites.json → .bak).

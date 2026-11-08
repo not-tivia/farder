@@ -3,6 +3,7 @@ import { useProxiedMedia } from "../hooks/useProxiedMedia";
 import { setFloatAnchor } from "../lib/floatAnchor";
 import { getMediaVolume, setMediaVolume } from "../lib/mediaPrefs";
 import { useMediaPlayers, type MediaPlayerInfo } from "../context/MediaPlayersContext";
+import { attachLimiter } from "../lib/audioLimiter";
 
 export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
   const { focusPlayer, updatePlayer, setPlayerState, closePlayer } = useMediaPlayers();
@@ -16,7 +17,10 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
 
   // Apply remembered volume once the <video> + src are ready; persist on change.
   useEffect(() => {
-    if (player.kind === "video" && videoRef.current) videoRef.current.volume = getMediaVolume();
+    if (player.kind === "video" && videoRef.current) {
+      videoRef.current.volume = getMediaVolume();
+      attachLimiter(videoRef.current); // the universal loudness ceiling (no-op at defaults)
+    }
   }, [videoUrl, player.kind]);
   // A quiet (autoplayed) video starts muted and does not touch the remembered
   // volume until the person does. Their first click on it hands control over.

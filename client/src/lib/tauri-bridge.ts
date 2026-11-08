@@ -1562,3 +1562,22 @@ export async function revokeCapability(serverId: string, logServerId: string, me
 export async function getCapabilities(serverId: string): Promise<CapabilityHolder[]> {
   return invoke<CapabilityHolder[]>("get_capabilities", { serverId });
 }
+
+// ── Universal volume control ─────────────────────────────────────────────────
+
+export interface AudioLimitsView {
+  /** Master volume, 0..1.5; 1 = unchanged. */
+  master: number;
+  /** Loudness ceiling in dB (-40..-3); 0 = no ceiling. */
+  max_db: number;
+}
+
+export async function getAudioLimits(): Promise<AudioLimitsView> {
+  return invoke<AudioLimitsView>("get_audio_limits");
+}
+
+/** Set and save the master volume and the loudness ceiling (0 = off). The
+ *  backend clamps both and returns what it actually applied. */
+export async function setAudioLimits(master: number, maxDb: number): Promise<AudioLimitsView> {
+  return invoke<AudioLimitsView>("set_audio_limits", { master, maxDb });
+}

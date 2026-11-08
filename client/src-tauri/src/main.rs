@@ -52,6 +52,7 @@ mod profile_sync;
 mod screen_audio;
 #[cfg(windows)]
 mod screen_audio_wasapi;
+mod audio_limit;
 mod notify_popup;
 mod screenshare;
 mod video_encoder;
@@ -117,6 +118,8 @@ fn main() {
                     }
                 });
             }
+            // The saved master volume + loudness ceiling, in force before any call.
+            commands::apply_saved_audio_limits();
             // The skinned notification window, built hidden so its page is loaded
             // before the first message arrives.
             // Only when the person wants the themed pop-up: the window is a whole
@@ -362,6 +365,8 @@ fn main() {
             screenshare::start_screenshare_preview,
             screenshare::stop_screenshare_preview,
             commands::get_presence_enabled,
+            commands::get_audio_limits,
+            commands::set_audio_limits,
             commands::set_presence_enabled,
             commands::get_presence_music,
             commands::set_presence_music,

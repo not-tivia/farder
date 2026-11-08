@@ -32,6 +32,7 @@ import { useDataSaver } from "../context/DataSaverContext";
 import { imageIsGated, needsDownloadConsent } from "../lib/dataSaver";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
 import { displayGarble } from "../lib/garble";
+import { attachLimiter } from "../lib/audioLimiter";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
@@ -1174,7 +1175,7 @@ function SealedAttachmentDisplay({
   if (state.dataUrl && state.mimeType.startsWith("audio/")) {
     return (
       <div className="attachment-audio">
-        <audio controls src={state.dataUrl} />
+        <audio controls src={state.dataUrl} ref={attachLimiter} />
         <div className="attachment-name">🔒 {state.fileName}</div>
       </div>
     );
@@ -1355,7 +1356,7 @@ function AttachmentDisplay({
   if (isAudio && imageUrl) {
     return (
       <div className="attachment-audio">
-        <audio src={imageUrl} controls style={{ width: "100%", maxWidth: 300, height: 32 }} />
+        <audio src={imageUrl} controls ref={attachLimiter} style={{ width: "100%", maxWidth: 300, height: 32 }} />
         <div className="attachment-name">{attachment.name} ({formatSize(attachment.size)})</div>
       </div>
     );

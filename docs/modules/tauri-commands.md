@@ -3203,6 +3203,19 @@ cursor and rekey cadence**, which described a group that no longer exists.
 Added 2026-09-19 after `scripts/doc_audit.py` compared the handler list against
 this file. Six registered commands had no entry; they are as real as the rest.
 
+### `get_audio_limits() -> AudioLimits` / `set_audio_limits(master, max_db) -> Result<AudioLimits, String>`
+
+**What they do:** read / set the universal volume control: `master` (0.0 to 1.5,
+1.0 = unchanged) and `max_db`, a loudness CEILING in dB (-40 to -3; 0 = off).
+`set_audio_limits` clamps both (NaN or garbage means unchanged / off), applies
+them to the running voice mixer at once, saves them (`audio_master_volume`,
+`audio_max_db` in the settings file) and returns what it applied. They are also
+re-applied at startup (`apply_saved_audio_limits`). See `audio-limit.md`.
+**invoke names:** `"get_audio_limits"` / `"set_audio_limits"` ->
+`getAudioLimits()` / `setAudioLimits()`.
+
+---
+
 ### `grant_capability(state, server_id, log_server_id, member, capability) -> Result<EventAcceptedResult, String>`
 
 **What it does:** submits `PermissionGranted`: give `member` a power. `capability`
