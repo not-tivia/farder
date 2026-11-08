@@ -66,3 +66,29 @@ test("custom phrase is sanitised: control chars, newlines and length", () => {
 test("an unknown mode throws instead of silently passing text through", () => {
   assert.throws(() => g.makeTransform("nope"));
 });
+
+test("display garbling is deterministic per message and differs between messages", () => {
+  const mark = { mode: "bark", phrase: "" };
+  const a1 = g.displayGarble("one two three four five six seven eight", mark, "hash-A");
+  const a2 = g.displayGarble("one two three four five six seven eight", mark, "hash-A");
+  const b = g.displayGarble("one two three four five six seven eight", mark, "hash-B");
+  assert.equal(a1, a2, "same message, same drawing, every time and for every viewer");
+  assert.notEqual(a1, "one two three four five six seven eight");
+  assert.equal(a1.split(" ").length, 8, "spacing is kept");
+  assert.notEqual(a1, b, "different messages draw differently (not one fixed output)");
+});
+
+test("an unknown mode from a newer client is shown as written, never dropped", () => {
+  assert.equal(g.displayGarble("hello there", { mode: "from-the-future", phrase: "" }, "k"), "hello there");
+});
+
+test("the seeded generator stays inside [0,1) and the hash is stable", () => {
+  const r = g.seededRng(g.hashSeed("x"));
+  for (let i = 0; i < 1000; i++) { const v = r(); assert.ok(v >= 0 && v < 1); }
+  assert.equal(g.hashSeed("abc"), g.hashSeed("abc"));
+  assert.notEqual(g.hashSeed("abc"), g.hashSeed("abd"));
+});
+
+test("custom display uses the phrase from the mark", () => {
+  assert.equal(g.displayGarble("a b", { mode: "custom", phrase: "boop" }, "k"), "boop boop");
+});

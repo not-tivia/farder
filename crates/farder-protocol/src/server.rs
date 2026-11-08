@@ -905,8 +905,9 @@ pub enum ServerResponse {
     ActivityLogging { enabled: bool, retention_days: u32 },
     /// Answer to [`ServerRequest::GetGarbleState`]. `rules` holds only rules the
     /// caller may see (on them, set by them, or all of them for a moderator);
-    /// `consents` holds consents the caller gave or was given.
-    GarbleState { rules: Vec<GarbleRuleInfo>, consents: Vec<GarbleConsentInfo> },
+    /// `consents` holds consents the caller gave or was given. `can_moderate` says
+    /// whether the caller may start a moderation garble (holds "garble").
+    GarbleState { rules: Vec<GarbleRuleInfo>, consents: Vec<GarbleConsentInfo>, can_moderate: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

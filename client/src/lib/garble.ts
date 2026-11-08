@@ -105,3 +105,50 @@ export function garbleText(text: string, transform: Transform): string {
     .map((part, i) => (i % 2 === 1 ? part : part.replace(WORD_RE, (w) => transform(w))))
     .join("");
 }
+
+// ---- Display garbling (what OTHER people's garbled messages look like) -------
+//
+// A viewer must draw a garbled message the same way every time and the same way
+// as every other viewer, or it would flicker on each re-render and two people
+// would see different words. So the randomness is SEEDED from the message's
+// identity (its event hash) rather than from Math.random.
+
+/** FNV-1a, 32 bit. */
+export function hashSeed(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/** mulberry32: a tiny seeded generator, [0, 1). */
+export function seededRng(seed: number): Rng {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function isGarbleMode(mode: string): mode is GarbleMode {
+  return (MODES as readonly string[]).includes(mode);
+}
+
+/**
+ * The garbled text for a message another person sent, or the text unchanged if
+ * the mark names something this client does not know (fail safe: show the words
+ * rather than nothing).
+ */
+export function displayGarble(text: string, mark: { mode: string; phrase: string }, key: string): string {
+  if (!isGarbleMode(mark.mode)) return text;
+  try {
+    return garbleText(text, makeTransform(mark.mode, mark.phrase, seededRng(hashSeed(key))));
+  } catch {
+    return text;
+  }
+}

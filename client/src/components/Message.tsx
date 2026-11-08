@@ -31,6 +31,7 @@ import MemberAvatar from "./MemberAvatar";
 import { useDataSaver } from "../context/DataSaverContext";
 import { imageIsGated, needsDownloadConsent } from "../lib/dataSaver";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
+import { displayGarble } from "../lib/garble";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
@@ -568,6 +569,15 @@ export default function Message({ message, memberNames, grouped = false, serverI
         ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
         : message.content;
 
+  // Speech garbling: when a garble rule covered this author as the message was
+  // accepted, other people's copy is DRAWN garbled (the stored words are never
+  // changed). The author always sees their own words, with a note. The seed is
+  // the event hash so every viewer, and every re-render, draws the same thing.
+  const garbleMark = !deleted && message.garble ? message.garble : null;
+  const shownContent = garbleMark && !isOwnMessage
+    ? displayGarble(displayContent, garbleMark, message.event_hash ?? `m${message.id}`)
+    : displayContent;
+
   async function handleReactionClick(emoji: string, alreadyMe: boolean, fileId?: number) {
     if (reacting) return;
     setReacting(true);
@@ -731,7 +741,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
             </div>
           ) : (
             <RenderedMessageContent
-              text={displayContent}
+              text={shownContent}
               // A sealed row's blobs are ciphertext under a neutral name: the
               // plaintext renderer would show "attachment.bin" and try to
               // download bytes it cannot read. They render below instead.
@@ -764,6 +774,19 @@ export default function Message({ message, memberNames, grouped = false, serverI
                 ) : null
               }
             />
+          )}
+
+          {garbleMark && !editing && (
+            <div
+              style={{ fontSize: 10, color: "var(--xp-text-muted)", marginTop: 2 }}
+              title={garbleMark.moderation ? "A moderator set this" : "They agreed to this"}
+            >
+              {isOwnMessage
+                ? (garbleMark.moderation
+                    ? "Others see this garbled (set by a moderator)."
+                    : "Others see this garbled (as you agreed).")
+                : (garbleMark.moderation ? "garbled by a moderator" : "garbled (they agreed to this)")}
+            </div>
           )}
 
           {reporting && (

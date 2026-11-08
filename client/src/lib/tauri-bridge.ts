@@ -1490,3 +1490,48 @@ export async function cancelReminder(serverId: string, reminderId: number): Prom
 export async function listActiveWidgets(serverId: string, channelId: number): Promise<{ polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] }> {
   return invoke<{ polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] }>("list_active_widgets", { serverId, channelId });
 }
+
+// ── Speech garbling over the log ─────────────────────────────────────────────
+
+export interface GarbleRule {
+  target: string;
+  mode: string;
+  phrase: string;
+  remaining: number;
+  by: string;
+  moderation: boolean;
+}
+export interface GarbleConsent {
+  target: string;
+  controller: string;
+  max_messages: number;
+}
+export interface GarbleState {
+  rules: GarbleRule[];
+  consents: GarbleConsent[];
+  /** Whether I may start a moderation garble here. */
+  can_moderate: boolean;
+}
+
+/** Garble `target`'s next `messages` messages as every viewer draws them.
+ *  `consensual: false` is a moderation action; `true` needs their consent. */
+export async function garbleSet(opts: {
+  serverId: string; logServerId: string; target: string; mode: string;
+  phrase: string; messages: number; consensual: boolean;
+}): Promise<void> {
+  await invoke("garble_set", opts);
+}
+
+/** End the garble running on `target`. */
+export async function garbleClear(serverId: string, logServerId: string, target: string): Promise<void> {
+  await invoke("garble_clear", { serverId, logServerId, target });
+}
+
+/** Let `controller` garble ME, up to `maxMessages` at a time; 0 revokes. */
+export async function garbleConsent(serverId: string, logServerId: string, controller: string, maxMessages: number): Promise<void> {
+  await invoke("garble_consent", { serverId, logServerId, controller, maxMessages });
+}
+
+export async function getGarbleState(serverId: string): Promise<GarbleState> {
+  return invoke<GarbleState>("get_garble_state", { serverId });
+}

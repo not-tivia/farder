@@ -557,6 +557,13 @@ export function useServerEvents(): void {
       });
     }).then(safePush);
 
+    // A garble rule or consent changed somewhere on this server: tell whoever is
+    // showing garble state (message input banner, settings, member menu) to re-ask.
+    listen("server:garble_changed", (e) => {
+      const data = e.payload as { server_id: string };
+      window.dispatchEvent(new CustomEvent("farder:garble-changed", { detail: { serverId: data.server_id } }));
+    }).then(safePush);
+
     listen("server:member_data_deleted", (e) => {
       const data = e.payload as { server_id: string; public_key: string; public_key_bytes: number[] };
       const serverId = data.server_id;

@@ -94,6 +94,9 @@ fn dispatch_event(app: &AppHandle, server_id: &str, event: ServerEvent) {
                 "public_key": public_key.to_string(),
                 "public_key_bytes": public_key.as_bytes().to_vec(),
             })),
+        // A garble rule or consent changed: a bare pointer, the frontend re-asks.
+        ServerEvent::GarbleChanged { target } =>
+            app.emit("server:garble_changed", serde_json::json!({ "server_id": sid, "target": target.to_string() })),
         ServerEvent::MemberBanned { public_key, reason } =>
             app.emit("server:member_banned", serde_json::json!({ "server_id": sid, "public_key": public_key.to_string(), "reason": reason })),
         ServerEvent::MemberUnbanned { public_key } =>

@@ -3196,6 +3196,49 @@ cursor and rekey cadence**, which described a group that no longer exists.
 Added 2026-09-19 after `scripts/doc_audit.py` compared the handler list against
 this file. Six registered commands had no entry; they are as real as the rest.
 
+### `garble_set(state, server_id, log_server_id, target, mode, phrase, messages, consensual) -> Result<EventAcceptedResult, String>`
+
+**What it does:** signs and submits an `EventPayload::GarbleSet` as this device:
+garble `target`'s next `messages` messages as every viewer draws them.
+`consensual: false` is a MODERATION action (the fold requires the `garble`
+capability; the owner holds it implicitly; never the owner as a target; at most
+50 messages). `consensual: true` requires the target's earlier `garble_consent`
+naming this identity and stays inside it. The words are never rewritten in the
+log. The limit is a message COUNT because event timestamps are author-chosen.
+**Errors:** the fold's refusal text (e.g. "missing 'garble' capability", "the
+target has not consented to be garbled by you").
+**invoke name:** `"garble_set"` -> `garbleSet()`.
+
+---
+
+### `garble_clear(state, server_id, log_server_id, target) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `GarbleCleared`. Allowed for whoever set the rule, any
+holder of `garble`, and the target themselves ONLY for a consensual rule (their
+kill switch; they cannot end a moderation rule on themselves).
+**invoke name:** `"garble_clear"` -> `garbleClear()`.
+
+---
+
+### `garble_consent(state, server_id, log_server_id, controller, max_messages) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `GarbleConsent`: let `controller` garble ME up to
+`max_messages` at a time (max 500). `0` revokes, and also ends any consensual
+rule that controller has running on me. Does not affect a moderation rule.
+**invoke name:** `"garble_consent"` -> `garbleConsent()`.
+
+---
+
+### `get_garble_state(state, server_id) -> Result<GarbleStateView, String>`
+
+**What it does:** `ServerRequest::GetGarbleState`. Returns `{ rules, consents,
+can_moderate }`, filtered by the server to what concerns the caller: rules on
+them or set by them (every running rule if they hold `garble`) and the consents
+they gave or hold. Nobody else learns that a rule exists. Keys are `vk_<hex>`.
+**invoke name:** `"get_garble_state"` -> `getGarbleState()`.
+
+---
+
 ### `submit_message_deleted(state, server_id, log_server_id, channel_id, target, own_message) -> Result<EventAcceptedResult, String>`
 
 **What it does:** deletes a log-sourced message by writing a `MessageDeleted`

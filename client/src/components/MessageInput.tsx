@@ -23,6 +23,7 @@ import ReminderBuilderModal from "./ReminderBuilderModal";
 import { toast } from "../lib/toast";
 import { garbleText, makeTransform, MODE_LABELS } from "../lib/garble";
 import { GARBLE_CHANGED, getGarble, setGarble } from "../lib/garbleSettings";
+import { useGarbleState } from "../hooks/useGarbleState";
 
 interface MessageInputProps {
   channelId: number;
@@ -78,6 +79,10 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   }, [serverId]);
 
   const activeServer = useActiveServer();
+  // Garbling someone ELSE started on me (moderation, or one I agreed to): say so
+  // above the box, every time, so it is never a surprise.
+  const { state: garbleState, ownPk: garbleOwnPk } = useGarbleState(activeServer?.logServerId ? serverId : null);
+  const garbledByOthers = garbleState.rules.filter((r) => r.target === garbleOwnPk);
   const { dispatch } = useApp();
   const [repairing, setRepairing] = useState(false);
   const members = activeServer?.members ?? [];
@@ -657,6 +662,28 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
           </div>
         </div>
       )}
+      {garbledByOthers.map((r) => (
+        <div
+          key={`${r.by}-${r.mode}`}
+          role="status"
+          style={{
+            display: "flex", alignItems: "center", gap: 8, padding: "3px 8px", fontSize: 11,
+            color: "var(--xp-text-normal)", background: "var(--xp-panel-bg)",
+            border: "1px solid var(--xp-border)", borderRadius: 4, marginBottom: 4,
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            {r.moderation
+              ? `A moderator is garbling your next ${r.remaining} message${r.remaining === 1 ? "" : "s"}. You see your own words as you type them; others see them garbled and labelled.`
+              : `Someone you agreed to is garbling your next ${r.remaining} message${r.remaining === 1 ? "" : "s"}.`}
+          </span>
+          {!r.moderation && activeServer?.logServerId && (
+            <button className="xp-button" onClick={() => void api.garbleClear(serverId, activeServer.logServerId as string, r.target).catch(() => {})}>
+              Stop
+            </button>
+          )}
+        </div>
+      ))}
       {garble.enabled && (
         <div
           role="status"

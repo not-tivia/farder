@@ -7936,6 +7936,176 @@ pub async fn submit_message_deleted(
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Speech garbling over the log (moderation + consent)
+// ---------------------------------------------------------------------------
+
+/// Sign and submit one garble payload as this device, advancing its chain on
+/// success. Shared by `garble_set` / `garble_clear` / `garble_consent`, which
+/// differ only in the payload they build.
+async fn submit_garble_payload(
+    state: &State<'_, Arc<AppState>>,
+    server_id: &str,
+    log_server_id: &str,
+    payload: farder_crypto::event_log::EventPayload,
+) -> Result<EventAcceptedResult, String> {
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
+
+    let _chain_guard = state.device_chain_lock.lock().await;
+    let mut ds = crate::device::DeviceState::load(log_server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    let event = event_build_next(
+        &device,
+        &identity,
+        log_server_id,
+        ds.last_event_hash.clone(),
+        ds.next_seq,
+        ds.lamport,
+        payload,
+    );
+    let result = event_send_submit(state, server_id, &event).await?;
+
+    ds.next_seq = event.core.seq + 1;
+    ds.last_event_hash = Some(event.hash());
+    ds.lamport = event.core.lamport;
+    ds.save(log_server_id)?;
+    Ok(result)
+}
+
+/// Garble `target`'s next `messages` messages as every viewer draws them.
+/// `consensual: false` is a MODERATION action (needs the "garble" capability;
+/// the fold refuses otherwise); `consensual: true` needs the target's earlier
+/// `garble_consent` naming this identity. The fold is the authority on both.
+#[tauri::command]
+pub async fn garble_set(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    target: String,
+    mode: String,
+    phrase: String,
+    messages: u32,
+    consensual: bool,
+) -> Result<EventAcceptedResult, String> {
+    let target = parse_public_key(&target)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::GarbleSet { target, mode, phrase, messages, consensual },
+    )
+    .await
+}
+
+/// End the garble running on `target` (the target's own kill switch for a
+/// consensual one; a moderator or the setter otherwise).
+#[tauri::command]
+pub async fn garble_clear(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    target: String,
+) -> Result<EventAcceptedResult, String> {
+    let target = parse_public_key(&target)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::GarbleCleared { target },
+    )
+    .await
+}
+
+/// Let `controller` garble ME, up to `max_messages` at a time. `0` revokes.
+#[tauri::command]
+pub async fn garble_consent(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    controller: String,
+    max_messages: u32,
+) -> Result<EventAcceptedResult, String> {
+    let controller = parse_public_key(&controller)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::GarbleConsent { controller, max_messages },
+    )
+    .await
+}
+
+/// A garble rule as the frontend sees it (keys as `vk_<hex>` strings).
+#[derive(serde::Serialize)]
+pub struct GarbleRuleView {
+    pub target: String,
+    pub mode: String,
+    pub phrase: String,
+    pub remaining: u32,
+    pub by: String,
+    pub moderation: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct GarbleConsentView {
+    pub target: String,
+    pub controller: String,
+    pub max_messages: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct GarbleStateView {
+    pub rules: Vec<GarbleRuleView>,
+    pub consents: Vec<GarbleConsentView>,
+    /// Whether I may start a moderation garble on this server.
+    pub can_moderate: bool,
+}
+
+/// What garbling touches me: rules on me or set by me (all of them for a
+/// moderator) and the consents I gave or hold. The server filters; this just
+/// reshapes keys.
+#[tauri::command]
+pub async fn get_garble_state(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<GarbleStateView, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetGarbleState)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::GarbleState { rules, consents, can_moderate } => Ok(GarbleStateView {
+            can_moderate,
+            rules: rules
+                .into_iter()
+                .map(|r| GarbleRuleView {
+                    target: r.target.to_string(),
+                    mode: r.mode,
+                    phrase: r.phrase,
+                    remaining: r.remaining,
+                    by: r.by.to_string(),
+                    moderation: r.moderation,
+                })
+                .collect(),
+            consents: consents
+                .into_iter()
+                .map(|c| GarbleConsentView {
+                    target: c.target.to_string(),
+                    controller: c.controller.to_string(),
+                    max_messages: c.max_messages,
+                })
+                .collect(),
+        }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 /// The result of sealing and uploading one attachment for an E2EE channel.
 ///
 /// `key` is hex so it can cross the Tauri boundary; the frontend hands it

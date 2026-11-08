@@ -2037,7 +2037,7 @@ pub fn handle_request(
                     max_messages,
                 })
                 .collect();
-            ok(ServerResponse::GarbleState { rules, consents })
+            ok(ServerResponse::GarbleState { rules, consents, can_moderate: moderator })
         }
 
         ServerRequest::ListBlocked => {
@@ -6848,6 +6848,14 @@ mod tests {
         assert_eq!(state_for(&alice, false), 1, "the target sees it");
         assert_eq!(state_for(&owner, true), 1, "the setter sees it");
         assert_eq!(state_for(&bob, false), 0, "a bystander does not learn it exists");
+        let can_moderate = |who: &Keypair, is_owner: bool| -> bool {
+            match handle_request(&conn, &who.public_key(), is_owner, ServerRequest::GetGarbleState, "", &state).unwrap().response {
+                ServerResponse::GarbleState { can_moderate, .. } => can_moderate,
+                other => panic!("expected GarbleState, got {other:?}"),
+            }
+        };
+        assert!(can_moderate(&owner, true), "the owner may start a moderation garble");
+        assert!(!can_moderate(&alice, false) && !can_moderate(&bob, false), "ordinary members may not");
 
         // Alice's first two messages are marked, the third is not.
         let mut post = |text: &str, n: u64| -> MessageInfo {
