@@ -18,6 +18,11 @@ const ACTION_VERBS: Record<string, (target: string | null, meta: Record<string, 
     return `timed out ${t ?? ""}${u ? ` until ${new Date(u).toLocaleString()}` : ""}`;
   },
   untimeout: (t) => `removed timeout from ${t ?? ""}`,
+  // Speech garbling and delegated powers (acts of authority, kept forever).
+  garble_set: (t, m) => `started garbling ${t ?? ""} (${m["mode"] ?? "?"}, next ${m["messages"] ?? "?"} messages)`,
+  garble_cleared: (t) => `stopped garbling ${t ?? ""}`,
+  capability_granted: (t, m) => `gave ${t ?? ""} the "${m["capability"] ?? "?"}" power`,
+  capability_revoked: (t, m) => `took the "${m["capability"] ?? "?"}" power from ${t ?? ""}`,
   role_assigned: (t, m) => `assigned role "${m["role_name"] ?? "?"}" to ${t ?? ""}`,
   role_removed: (t, m) => `removed role "${m["role_name"] ?? "?"}" from ${t ?? ""}`,
   channel_created: (_t, m) => `created channel #${m["channel_name"] ?? "?"}`,
