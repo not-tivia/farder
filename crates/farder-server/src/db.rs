@@ -451,6 +451,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE messages ADD COLUMN event_hash TEXT", [])?;
     }
 
+    // Speech garbling: how a message is to be drawn (JSON of the fold's GarbleMark),
+    // written when the message is derived. NULL = draw as written.
+    let has_garble: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "garble")
+    };
+    if !has_garble {
+        conn.execute("ALTER TABLE messages ADD COLUMN garble TEXT", [])?;
+    }
+
     // Rung 2: the channel's content class, DERIVED from an accepted `ChannelCreated`
     // inside the same transaction that accepts the event. Legacy rows default to
     // 'plaintext' (Q8 carve-out: a channel the log never knew is permanently

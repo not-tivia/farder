@@ -177,6 +177,34 @@ pub struct MessageInfo {
     /// only. None for all plain messages; clients parse it as untrusted input.
     #[serde(default)]
     pub widget: Option<String>,
+    /// How this message is to be DRAWN when a garble rule covered its author at
+    /// the moment it was accepted (see `EventPayload::GarbleSet`). The words
+    /// themselves are unchanged; the client draws them garbled and labels it.
+    /// None for every ordinary message. Appended last (positional codec).
+    #[serde(default)]
+    pub garble: Option<farder_crypto::event_log::GarbleMark>,
+}
+
+/// A garble rule that is running right now (see `EventPayload::GarbleSet`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GarbleRuleInfo {
+    pub target: PublicKey,
+    pub mode: String,
+    pub phrase: String,
+    /// Messages still to be garbled.
+    pub remaining: u32,
+    /// Who set it.
+    pub by: PublicKey,
+    /// `true` = a moderation action; `false` = the target agreed to it.
+    pub moderation: bool,
+}
+
+/// "`target` lets `controller` garble them, up to `max_messages` at a time."
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GarbleConsentInfo {
+    pub target: PublicKey,
+    pub controller: PublicKey,
+    pub max_messages: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -737,6 +765,11 @@ pub enum ServerRequest {
     /// stops new rows but does not delete the ones already written (the sweep
     /// does that as they age out).
     SetActivityLogging { enabled: bool, retention_days: u32 },
+    /// What garbling touches the caller: rules running on them, rules they set
+    /// (or, for a holder of "garble", every running rule), and consents they gave
+    /// or hold. Answered with [`ServerResponse::GarbleState`]. Appended last
+    /// (positional codec).
+    GetGarbleState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -870,6 +903,10 @@ pub enum ServerResponse {
     ReportList { reports: Vec<ReportInfo> },
     /// Answer to [`ServerRequest::GetActivityLogging`].
     ActivityLogging { enabled: bool, retention_days: u32 },
+    /// Answer to [`ServerRequest::GetGarbleState`]. `rules` holds only rules the
+    /// caller may see (on them, set by them, or all of them for a moderator);
+    /// `consents` holds consents the caller gave or was given.
+    GarbleState { rules: Vec<GarbleRuleInfo>, consents: Vec<GarbleConsentInfo> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1018,6 +1055,9 @@ pub enum ServerEvent {
     /// a report is not an announcement. v2-only, like every variant added after
     /// v1 shipped.
     ReportCreated { report: ReportInfo },
+    /// A garble rule or consent changed. A bare pointer: clients re-ask
+    /// `GetGarbleState` rather than trusting a server-shaped summary. v2-only.
+    GarbleChanged { target: PublicKey },
 }
 
 /// Whether an event may only be delivered to a connection that negotiated
@@ -1038,7 +1078,8 @@ pub fn event_requires_v2(event: &ServerEvent) -> bool {
         // Variants added after v1 shipped: an old client cannot decode them, so
         // they must be v2-only whatever they carry.
         | ServerEvent::MemberDataDeleted { .. }
-        | ServerEvent::ReportCreated { .. } => true,
+        | ServerEvent::ReportCreated { .. }
+        | ServerEvent::GarbleChanged { .. } => true,
 
         // Every shipped (v1) variant, listed rather than wildcarded. v1 clients
         // keep receiving exactly what they received before.
@@ -1364,6 +1405,7 @@ mod tests {
             author_name_override: None,
             author_badge: None,
             widget: None,
+            garble: None,
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -1406,6 +1448,7 @@ mod tests {
                 author_name_override: None,
                 author_badge: None,
                 widget: None,
+                garble: None,
             },
         };
         let frame = ServerFrame::Event(event);
@@ -1751,6 +1794,7 @@ mod tests {
             author_name_override: None,
             author_badge: None,
             widget: None,
+            garble: None,
         };
         let bytes = codec::encode(&msg).unwrap();
         let decoded: MessageInfo = codec::decode(&bytes).unwrap();

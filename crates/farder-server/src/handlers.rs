@@ -2004,6 +2004,42 @@ pub fn handle_request(
             ok(ServerResponse::Ok)
         }
 
+        ServerRequest::GetGarbleState => {
+            // What garbling touches the CALLER. A rule is visible to its target,
+            // to whoever set it, and to a holder of "garble" (a moderator needs
+            // to see what is running to end it); a consent only to the two people
+            // it names. Nobody else learns that a rule exists.
+            let guard = state.log_state.lock().unwrap();
+            let Some(ls) = guard.as_ref() else {
+                return err("server is not running the event log (no genesis yet)");
+            };
+            let moderator = ls.has_capability(member, "garble");
+            let rules = ls
+                .garble_rules()
+                .into_iter()
+                .filter(|(target, r)| moderator || target == member || &r.by == member)
+                .map(|(target, r)| farder_protocol::server::GarbleRuleInfo {
+                    target,
+                    mode: r.mode,
+                    phrase: r.phrase,
+                    remaining: r.remaining,
+                    by: r.by,
+                    moderation: r.moderation,
+                })
+                .collect();
+            let consents = ls
+                .garble_consents()
+                .into_iter()
+                .filter(|(target, controller, _)| target == member || controller == member)
+                .map(|(target, controller, max_messages)| farder_protocol::server::GarbleConsentInfo {
+                    target,
+                    controller,
+                    max_messages,
+                })
+                .collect();
+            ok(ServerResponse::GarbleState { rules, consents })
+        }
+
         ServerRequest::ListBlocked => {
             // The caller's own list only. `member` is the authenticated
             // connection's key, never a parameter, so there is no request shape
@@ -2546,6 +2582,32 @@ pub fn handle_request(
                 return err(&format!("event rejected: {}", e));
             }
 
+            // 2b. Garbling is a display effect on someone else's words, so a
+            //     MODERATION garble is an act of authority and goes in the
+            //     moderation audit log (kept forever). A consensual one is play
+            //     between two people who agreed and is not an act of authority,
+            //     so it is not. `ls` is still the state BEFORE this event, which
+            //     is what tells us whether a clear ended a moderation rule.
+            let garble_audit: Option<(&'static str, PublicKey, serde_json::Value)> = match &event.core.payload {
+                EventPayload::GarbleSet { target, mode, messages, consensual: false, .. } => Some((
+                    "garble_set",
+                    target.clone(),
+                    serde_json::json!({ "mode": mode, "messages": messages }),
+                )),
+                EventPayload::GarbleCleared { target }
+                    if ls.active_garble(target).is_some_and(|r| r.moderation) =>
+                {
+                    Some(("garble_cleared", target.clone(), serde_json::json!({})))
+                }
+                _ => None,
+            };
+            // Whose garble state changed, so every client can re-ask for it.
+            let garble_changed: Option<PublicKey> = match &event.core.payload {
+                EventPayload::GarbleSet { target, .. } | EventPayload::GarbleCleared { target } => Some(target.clone()),
+                EventPayload::GarbleConsent { .. } => Some(event.core.author.clone()),
+                _ => None,
+            };
+
             // 3. For a message event, the referenced channel must exist (channels
             //    are still legacy DB state this slice).
             if let EventPayload::MessagePosted { channel_id, content, .. } = &event.core.payload {
@@ -2588,6 +2650,13 @@ pub fn handle_request(
                 };
                 let id = crate::event_ingest::derive_message_row(&tx, &event)
                     .map_err(|e| anyhow::anyhow!("failed to derive message: {}", e))?;
+                if id.is_some() {
+                    // Same transaction as the row, so a message and the mark that
+                    // says how to draw it are never out of step.
+                    let hash = event.hash();
+                    crate::messages::record_garble(&tx, &hash, trial.garble_mark(&hash))
+                        .map_err(|e| anyhow::anyhow!("failed to record garble mark: {}", e))?;
+                }
                 if let (Some(mid), Some(owner)) = (id, owner_pk.as_ref()) {
                     crate::event_ingest::derive_attachments(&tx, mid, &event, owner)
                         .map_err(|e| anyhow::anyhow!("failed to derive attachments: {}", e))?;
@@ -2750,6 +2819,18 @@ pub fn handle_request(
                 events.push(BroadcastEvent {
                     target: EventTarget::All,
                     event: ServerEvent::MembershipChanged { public_key: pk },
+                });
+            }
+
+            if let Some((action, target, meta)) = garble_audit {
+                if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
+                    events.push(ev);
+                }
+            }
+            if let Some(target) = garble_changed {
+                events.push(BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::GarbleChanged { target },
                 });
             }
 
@@ -6687,6 +6768,119 @@ mod tests {
         assert_eq!(att_count, 1, "message_attachments row should still exist");
     }
 
+    /// Speech garbling end to end through the real request path: a moderator
+    /// garbles a member, that member's next messages carry the mark in the row
+    /// and in the broadcast, the rule ends on schedule, the moderation audit log
+    /// records it, and only the people a rule concerns can see it.
+    #[test]
+    fn a_moderation_garble_reaches_the_row_the_broadcast_the_audit_log_and_only_the_right_eyes() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone_id = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let g = Genesis { version: 1, name: "garble".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        *state.genesis.lock().unwrap() = Some(g.clone());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner.public_key(), everyone_id).unwrap();
+        let channel_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+
+        let submit = |who: &Keypair, is_owner: bool, ev: &Event| {
+            handle_request(&conn, &who.public_key(), is_owner, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap()
+        };
+        let accepted = |r: &HandleResult| matches!(r.response, ServerResponse::EventAccepted { .. });
+
+        // Owner: device, then an open invite.
+        let cert = DeviceCert::create(&owner, &owner_dev.public_key(), 1);
+        let mut owner_prev = Event::next(&owner_dev, owner.public_key(), g.server_id(), None, 0, 1, EP::DeviceAuthorized { cert });
+        assert!(accepted(&submit(&owner, true, &owner_prev)));
+        let inv = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 1, 2,
+            EP::InviteCreated { code_hash: "h".into(), max_uses: 10, expires_at: 9_999_999_999, requires_approval: false });
+        assert!(accepted(&submit(&owner, true, &inv)));
+        owner_prev = inv.clone();
+
+        // Two members join through the real path.
+        let mut join = |name: &str| -> (Keypair, Keypair, Event) {
+            let kp = Keypair::generate();
+            let dev = Keypair::generate();
+            members::register_member(&conn, &kp.public_key(), name).unwrap();
+            members::assign_role(&conn, &kp.public_key(), everyone_id).unwrap();
+            let cert = DeviceCert::create(&kp, &dev.public_key(), 1);
+            let da = Event::next(&dev, kp.public_key(), g.server_id(), None, 0, 3, EP::DeviceAuthorized { cert });
+            assert!(accepted(&submit(&kp, false, &da)));
+            let j = Event::next(&dev, kp.public_key(), g.server_id(), Some(&da), 1, 4,
+                EP::MemberJoined { member: kp.public_key(), invite: inv.hash() });
+            assert!(accepted(&submit(&kp, false, &j)), "{name} joins");
+            (kp, dev, j)
+        };
+        let (alice, alice_dev, mut alice_prev) = join("Alice");
+        let (bob, _bob_dev, _) = join("Bob");
+
+        // Owner garbles Alice for 2 messages.
+        let garble = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 2, 5,
+            EP::GarbleSet { target: alice.public_key(), mode: "bark".into(), phrase: "".into(), messages: 2, consensual: false });
+        let r = submit(&owner, true, &garble);
+        assert!(accepted(&r), "owner may garble: {:?}", r.response);
+        assert!(
+            r.events.iter().any(|e| matches!(&e.event, ServerEvent::GarbleChanged { target } if *target == alice.public_key())),
+            "everyone is told a garble changed"
+        );
+        let audit_ev = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::AuditEventCreated { event } => Some(event.clone()),
+            _ => None,
+        }).expect("a moderation garble is audited");
+        assert_eq!(audit_ev.action, "garble_set");
+
+        // Who may see the rule: the target, the setter (owner) -- not Bob.
+        let state_for = |who: &Keypair, is_owner: bool| -> usize {
+            match handle_request(&conn, &who.public_key(), is_owner, ServerRequest::GetGarbleState, "", &state).unwrap().response {
+                ServerResponse::GarbleState { rules, .. } => rules.len(),
+                other => panic!("expected GarbleState, got {other:?}"),
+            }
+        };
+        assert_eq!(state_for(&alice, false), 1, "the target sees it");
+        assert_eq!(state_for(&owner, true), 1, "the setter sees it");
+        assert_eq!(state_for(&bob, false), 0, "a bystander does not learn it exists");
+
+        // Alice's first two messages are marked, the third is not.
+        let mut post = |text: &str, n: u64| -> MessageInfo {
+            let ev = Event::next(&alice_dev, alice.public_key(), g.server_id(), Some(&alice_prev), 10 + n, 20 + n,
+                EP::MessagePosted { channel_id, content: text.into(), reply_to: None, attachments: vec![] });
+            let r = submit(&alice, false, &ev);
+            assert!(accepted(&r), "{:?}", r.response);
+            alice_prev = ev;
+            r.events.iter().find_map(|e| match &e.event {
+                ServerEvent::NewMessage { message } => Some(message.clone()),
+                _ => None,
+            }).expect("the message is broadcast")
+        };
+        let m1 = post("hello", 1);
+        let m2 = post("again", 2);
+        let m3 = post("free", 3);
+        let mark = m1.garble.as_ref().expect("first message carries the mark in the broadcast");
+        assert_eq!((mark.mode.as_str(), mark.moderation), ("bark", true));
+        assert!(m2.garble.is_some());
+        assert!(m3.garble.is_none(), "the rule ended after two messages");
+        assert_eq!(m1.content, "hello", "the words themselves are never rewritten");
+
+        // The row persisted the mark, so history shows it too.
+        let stored: Option<String> = conn
+            .query_row("SELECT garble FROM messages WHERE id = ?1", [m1.id as i64], |r| r.get(0))
+            .unwrap();
+        assert!(stored.is_some(), "the mark is stored with the row");
+        let fetched = messages::get_message(&conn, m1.id, &alice.public_key()).unwrap().unwrap();
+        assert_eq!(fetched.garble, m1.garble, "history returns the same mark as the broadcast");
+        assert_eq!(state_for(&alice, false), 0, "a finished rule is gone");
+
+    }
+
     #[test]
     fn get_members_hides_non_log_members_on_mesh() {
         use crate::event_ingest;
@@ -9924,6 +10118,7 @@ mod tests {
                 | ServerRequest::BanMember { .. }
                 | ServerRequest::BlockUser { .. }
                 | ServerRequest::ListBlocked
+                | ServerRequest::GetGarbleState
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }

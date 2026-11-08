@@ -60,6 +60,9 @@ pub(crate) fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::MessageEditedE2ee { .. } => "MessageEditedE2ee",
         EventPayload::MessageDeleted { .. } => "MessageDeleted",
         EventPayload::DeviceRevoked { .. } => "DeviceRevoked",
+        EventPayload::GarbleSet { .. } => "GarbleSet",
+        EventPayload::GarbleCleared { .. } => "GarbleCleared",
+        EventPayload::GarbleConsent { .. } => "GarbleConsent",
     }
 }
 
@@ -675,6 +678,11 @@ pub fn reconcile_messages(conn: &Connection, log_state: Option<&LogState>) -> Re
         }
         if derive_message_row(conn, &event)?.is_some() {
             repaired += 1;
+            // A re-derived row must come back drawn the way the fold says it was.
+            if let Some(ls) = log_state {
+                let hash = event.hash();
+                crate::messages::record_garble(conn, &hash, ls.garble_mark(&hash))?;
+            }
         }
     }
 

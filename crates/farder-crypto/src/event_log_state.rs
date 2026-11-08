@@ -477,6 +477,37 @@ impl LogState {
             moderation: r.moderation,
         })
     }
+    /// Every running garble rule, sorted by target key for a stable order.
+    pub fn garble_rules(&self) -> Vec<(PublicKey, GarbleRuleView)> {
+        let mut out: Vec<_> = self
+            .garble_rules
+            .iter()
+            .map(|(t, r)| {
+                (
+                    t.clone(),
+                    GarbleRuleView {
+                        mode: r.mode.clone(),
+                        phrase: r.phrase.clone(),
+                        remaining: r.remaining,
+                        by: r.by.clone(),
+                        moderation: r.moderation,
+                    },
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        out
+    }
+    /// Every live consent as (target, controller, max_messages), sorted.
+    pub fn garble_consents(&self) -> Vec<(PublicKey, PublicKey, u32)> {
+        let mut out: Vec<_> = self
+            .garble_consents
+            .iter()
+            .map(|((t, c), m)| (t.clone(), c.clone(), *m))
+            .collect();
+        out.sort_by(|a, b| (a.0.as_bytes(), a.1.as_bytes()).cmp(&(b.0.as_bytes(), b.1.as_bytes())));
+        out
+    }
     /// The most messages `target` lets `controller` garble at once (0 = none).
     pub fn garble_consent(&self, target: &PublicKey, controller: &PublicKey) -> u32 {
         self.garble_consents.get(&(target.clone(), controller.clone())).copied().unwrap_or(0)
