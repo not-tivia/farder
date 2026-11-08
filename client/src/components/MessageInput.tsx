@@ -21,6 +21,8 @@ import GiveawayBuilderModal from "./GiveawayBuilderModal";
 import EventBuilderModal from "./EventBuilderModal";
 import ReminderBuilderModal from "./ReminderBuilderModal";
 import { toast } from "../lib/toast";
+import { garbleText, makeTransform, MODE_LABELS } from "../lib/garble";
+import { GARBLE_CHANGED, getGarble, setGarble } from "../lib/garbleSettings";
 
 interface MessageInputProps {
   channelId: number;
@@ -32,6 +34,13 @@ interface MessageInputProps {
 export default function MessageInput({ channelId, serverId, replyTo, onSent }: MessageInputProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
+  // The sender's own garbler choice; the badge below shows while it is on.
+  const [garble, setGarbleView] = useState(getGarble);
+  useEffect(() => {
+    const onChange = () => setGarbleView(getGarble());
+    window.addEventListener(GARBLE_CHANGED, onChange);
+    return () => window.removeEventListener(GARBLE_CHANGED, onChange);
+  }, []);
   const lastTypingSent = useRef(0);
   const [attachedFileId, setAttachedFileId] = useState<number | null>(null);
   const [attachedFileName, setAttachedFileName] = useState<string | null>(null);
@@ -327,7 +336,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
   const imageUrlRegex = /https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi;
 
   async function handleSend() {
-    const text = content.trim();
+    let text = content.trim();
     if ((!text && !attachedFileId) || sending) return;
 
     if (text.startsWith("/")) {
@@ -356,6 +365,12 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       }
       // unknown /word -> fall through and send as a normal message
     }
+
+    // The sender's own "speak as..." choice (Settings -> Speech Garbler). Applied
+    // after slash commands so they keep working, and before every send path below
+    // (sealed, direct, mesh) so all of them carry the same words.
+    const g = getGarble();
+    if (g.enabled) text = garbleText(text, makeTransform(g.mode, g.phrase));
 
     // Sealed branch (T10): an E2EE channel routes to the seal-and-submit
     // command instead of the legacy submitEvent/sendMessage paths. The legacy
@@ -640,6 +655,23 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
                 : "It uploads to this server, which can read it."}
             </div>
           </div>
+        </div>
+      )}
+      {garble.enabled && (
+        <div
+          role="status"
+          style={{
+            display: "flex", alignItems: "center", gap: 8, padding: "3px 8px", fontSize: 11,
+            color: "var(--xp-text-normal)", background: "var(--xp-panel-bg)",
+            border: "1px solid var(--xp-border)", borderRadius: 4, marginBottom: 4,
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            Speaking as: <strong>{MODE_LABELS[garble.mode]}</strong> -- your messages are being changed before they send.
+          </span>
+          <button className="xp-button" onClick={() => setGarble({ ...garble, enabled: false })}>
+            Turn off
+          </button>
         </div>
       )}
       <div className="message-input-wrapper">

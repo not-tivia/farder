@@ -5,6 +5,7 @@ import { TranslationSettingsTab } from "../TranslationSettingsTab";
 import VoiceSettings from "../VoiceSettings";
 import PrivacyDataSettings from "../PrivacyDataSettings";
 import NotificationSettings from "../NotificationSettings";
+import GarbleSettings from "./GarbleSettings";
 import AlertSubscriptions from "./AlertSubscriptions";
 import MyReminders from "./MyReminders";
 import HostedServers from "./HostedServers";
@@ -13,7 +14,7 @@ interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "gif" | "translation" | "voice" | "notifications" | "privacy" | "hosted" | "alerts" | "reminders";
+type SectionId = "appearance" | "gif" | "translation" | "voice" | "notifications" | "garble" | "privacy" | "hosted" | "alerts" | "reminders";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
@@ -21,6 +22,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "translation", label: "Translation" },
   { id: "voice", label: "Voice" },
   { id: "notifications", label: "Notifications" },
+  { id: "garble", label: "Speech Garbler" },
   { id: "privacy", label: "Privacy & Data" },
   { id: "hosted", label: "Hosted Servers" },
   { id: "alerts", label: "Alerts" },
@@ -69,6 +71,7 @@ export default function SettingsModal({ onClose }: Props) {
             {active === "translation" && <TranslationSettingsTab />}
             {active === "voice" && <VoiceSettings />}
             {active === "notifications" && <NotificationSettings />}
+            {active === "garble" && <GarbleSettings />}
             {active === "privacy" && <PrivacyDataSettings />}
             {active === "hosted" && <HostedServers />}
             {active === "alerts" && <AlertSubscriptions />}
