@@ -91,13 +91,13 @@ function shouldNotify(serverId: string, message: MessageInfo, prefs: Notificatio
  * yet fall back to notifying, as before.
  */
 function notifyIfWanted(serverId: string, message: MessageInfo, text: string): void {
-  if (!text) return;
-  if (notifPrefs && !shouldNotify(serverId, message, notifPrefs)) return;
+  if (!text) { console.log("[notify] skipped: empty text"); return; }
+  if (notifPrefs && !shouldNotify(serverId, message, notifPrefs)) { console.log("[notify] skipped: notification settings say no for this server/user"); return; }
   // "Off" means off: do not even build the text.
-  if (notifPrefs?.popupStyle === "off") return;
+  if (notifPrefs?.popupStyle === "off") { console.log("[notify] skipped: pop-ups are set to off"); return; }
   void getOwnPk().then((own) => {
     const author = publicKeyToString(message.author);
-    if (own && author === own) return;
+    if (own && author === own) { console.log("[notify] skipped: message is from this identity"); return; }
 
     // What the pop-up may say is the person's choice (full / sender only / nothing).
     // Decided here, before the text reaches either pop-up style.
@@ -121,13 +121,16 @@ function notifyIfWanted(serverId: string, message: MessageInfo, text: string): v
       normalizePopupContent(notifPrefs?.popupContent) !== "hidden" &&
       notifPrefs?.popupReply !== false;
     const reply = canReply ? { server_id: serverId, channel_id: message.channel_id } : null;
-    api.showNotification(shown.title, shown.body, media, reply).catch(() => {});
+    console.log("[notify] showing a pop-up");
+    api.showNotification(shown.title, shown.body, media, reply).catch((e) => console.warn("[notify] pop-up failed:", e));
   });
 }
 
 /** True when Farder is minimised, behind another program, or on another desktop. */
 function appIsInBackground(): boolean {
-  return typeof document !== "undefined" && !document.hasFocus();
+  const bg = typeof document !== "undefined" && !document.hasFocus();
+  if (!bg) console.log("[notify] no pop-up: Farder has keyboard focus and the message is in the channel you are viewing");
+  return bg;
 }
 
 export function refreshNotifPrefsCache(): void {
