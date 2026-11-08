@@ -7,6 +7,8 @@ import * as api from "../lib/tauri-bridge";
 import { refreshServerClasses } from "../lib/refreshServerClasses";
 import { dismiss as dismissTranslation, clearAll as clearTranslations } from "../lib/translation/store";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
+import { getAutoplay, shouldAutoplay, firstDirectMediaUrl, prefersReducedMotion } from "../lib/autoplay";
+import { getDataSaver } from "../lib/dataSaver";
 
 // Module-level cache for notification prefs and own public key
 let notifPrefs: NotificationPrefs | null = null;
@@ -82,8 +84,16 @@ function notifyIfWanted(serverId: string, message: MessageInfo, text: string): v
   if (!text) return;
   if (notifPrefs && !shouldNotify(serverId, message, notifPrefs)) return;
   void getOwnPk().then((own) => {
-    if (own && publicKeyToString(message.author) === own) return;
-    api.showNotification("Farder", text.slice(0, 120)).catch(() => {});
+    const author = publicKeyToString(message.author);
+    if (own && author === own) return;
+    // A muted preview of a direct video/image link, but only from someone the
+    // person has chosen to trust (and never under Data Saver / reduced motion).
+    const media = shouldAutoplay(
+      getAutoplay(), author,
+      { dataSaverOn: getDataSaver().enabled, reducedMotion: prefersReducedMotion() },
+      "popup",
+    ) ? firstDirectMediaUrl(text) : null;
+    api.showNotification("Farder", text.slice(0, 120), media).catch(() => {});
   });
 }
 

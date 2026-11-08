@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useProxiedMedia } from "../hooks/useProxiedMedia";
 import { setFloatAnchor } from "../lib/floatAnchor";
 import { getMediaVolume, setMediaVolume } from "../lib/mediaPrefs";
@@ -18,7 +18,27 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
   useEffect(() => {
     if (player.kind === "video" && videoRef.current) videoRef.current.volume = getMediaVolume();
   }, [videoUrl, player.kind]);
-  const onVolume = () => { if (videoRef.current) setMediaVolume(videoRef.current.volume); };
+  // A quiet (autoplayed) video starts muted and does not touch the remembered
+  // volume until the person does. Their first click on it hands control over.
+  const [userTookOver, setUserTookOver] = useState(false);
+  const onVolume = () => {
+    if (!videoRef.current) return;
+    if (player.quiet && !userTookOver) return; // the browser's own mute is not a preference
+    setMediaVolume(videoRef.current.volume);
+  };
+
+  // A quiet video pauses when it scrolls out of view and resumes when it returns,
+  // until the person takes over (so it never plays to nobody).
+  useEffect(() => {
+    if (!player.quiet || userTookOver || player.kind !== "video") return;
+    const el = rootRef.current; if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      const v = videoRef.current; if (!v) return;
+      for (const e of entries) { if (e.isIntersecting) void v.play().catch(() => {}); else v.pause(); }
+    }, { threshold: 0.25 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [player.quiet, userTookOver, player.kind, videoUrl]);
 
   // Drag (floating/minimized) via pointer capture — release outside the window still ends it.
   // DELTA-based: we add the pointer's MOVEMENT to the player's current position rather
@@ -61,7 +81,8 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
   // The media element — rendered ONCE; never repositioned in the DOM.
   const media = player.kind === "video"
     ? (videoUrl
-        ? <video ref={videoRef} className="mp-media" src={videoUrl} controls autoPlay onVolumeChange={onVolume} />
+        ? <video ref={videoRef} className="mp-media" src={videoUrl} controls autoPlay muted={player.quiet && !userTookOver}
+                 playsInline onVolumeChange={onVolume} onPointerDown={() => setUserTookOver(true)} />
         : <div className="mp-state">Couldn&rsquo;t load video</div>)
     : <iframe className="mp-media" src={player.src} title={player.title}
         sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"

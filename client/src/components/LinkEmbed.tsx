@@ -8,9 +8,12 @@ import EmbedConsentModal from "./EmbedConsentModal";
 import { buildEmbedPlayerSrc, getEmbedConsent, setEmbedConsent } from "../lib/embedPlayer";
 import { getAlwaysFloat } from "../lib/floatAnchor";
 import { useDataSaver } from "../context/DataSaverContext";
+import { useAutoplayFor } from "../hooks/useAutoplay";
 
-export default function LinkEmbed({ url }: { url: string }) {
+export default function LinkEmbed({ url, authorPk }: { url: string; authorPk?: string | null }) {
   const { settings } = useDataSaver();
+  // Muted autoplay of a video, only for people on my trusted list (see lib/autoplay).
+  const autoplay = useAutoplayFor(authorPk);
   // Gate only when the master Data Saver switch is on AND embed-gating is on.
   // Captured once on mount; newly-rendered embeds pick up a toggled setting,
   // already-mounted ones keep their state.
@@ -66,7 +69,7 @@ export default function LinkEmbed({ url }: { url: string }) {
 
       {/* Playable VIDEO (Twitter/X video, direct file) -> inline-first player */}
       {inlineMedia && isVideo && (
-        <MediaSlot hostId={hostId} kind="video" src={inlineMedia.url} title={e.author ?? e.title ?? "Video"} thumbUrl={thumbBlob} />
+        <MediaSlot hostId={hostId} kind="video" src={inlineMedia.url} title={e.author ?? e.title ?? "Video"} thumbUrl={thumbBlob} autoplay={autoplay} />
       )}
 
       {/* YouTube/Spotify -> "Watch here" opens an iframe player (after consent) */}

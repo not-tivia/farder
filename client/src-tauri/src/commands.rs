@@ -3835,12 +3835,17 @@ pub async fn play_audio_file(path: String) -> Result<(), String> {
 /// Show a desktop notification using notify-send (Linux) or equivalent.
 /// Falls back silently on unsupported platforms or when notify-send is absent.
 #[tauri::command]
-pub fn show_notification(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+pub fn show_notification(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+    media_url: Option<String>,
+) -> Result<(), String> {
     // Default: Farder's own skinned pop-up window (drawn locally, themed, never
     // copied into the OS notification history). `popupStyle: "system"` in the
     // notification prefs opts back into the OS toast below.
     if notification_popup_style() != "system" {
-        match crate::notify_popup::push(&app, title.clone(), body.clone()) {
+        match crate::notify_popup::push(&app, title.clone(), body.clone(), media_url) {
             Ok(()) => return Ok(()),
             Err(e) => eprintln!("[notify] pop-up window unavailable, using the OS toast: {e}"),
         }

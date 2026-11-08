@@ -18,15 +18,19 @@ keeps it in memory only, and makes no network request.
 2. `showNotification(title, body)` -> `show_notification` -> `notify_popup::push`
    emits the app event `notify:push` `{title, body}` to the `notify` window.
 3. `NotifyPopup` (page `index.html?notify=1`, branch in `main.tsx`) keeps up to 4
-   cards, each auto-dismissed after 6 s (paused while hovered), and calls
-   `notify_layout(count)` so Rust sizes, positions and shows (or hides) the window.
+   cards (3 if one has media), each auto-dismissed after 6 s (paused while
+   hovered), and calls `notify_layout(count, measuredHeight)` so Rust sizes,
+   positions and shows (or hides) the window.
+   A card may carry `media_url`: a muted, looping preview of a direct video/image
+   link, fetched through the relay-proxied path. The client sets it ONLY for a
+   sender on the person's Autoplay list with pop-up previews on (`lib/autoplay.ts`).
 4. Clicking a card calls `notify_activate`, which focuses the `main` window.
 
 ## Contracts to keep in step
 
-- `CARD_H`, `GAP`, `CARD_W`, `MAX_CARDS` in `notify_popup.rs` must match the
-  `.notify-popup-*` CSS in EVERY theme file and `MAX_CARDS` in `NotifyPopup.tsx`.
-  The native window is sized from these numbers.
+- `CARD_H`, `GAP`, `CARD_W` in `notify_popup.rs` must match the `.notify-popup-*`
+  CSS in EVERY theme file (a plain card is `min-height: CARD_H`). The window's
+  height comes from the page's own measurement, clamped to `MAX_HEIGHT`.
 - The window is created hidden at startup (`setup` in `main.rs`) so its page has
   loaded before the first message. `push` also builds it on demand (with a wait)
   as a fallback.

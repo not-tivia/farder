@@ -3556,15 +3556,15 @@ body {
 
 
 /* ── Skinned notification window ──────────────────────────────
-   Rendered in the always-on-top "notify" window (NotifyPopup.tsx). Card height
-   and gap MUST match CARD_H / GAP in src-tauri/src/notify_popup.rs, which sizes
-   the native window from them. All colour comes from the theme variables. */
+   Rendered in the always-on-top "notify" window (NotifyPopup.tsx). A plain
+   card is CARD_H tall (min-height); one with a media preview is taller and the
+   page reports the measured height to src-tauri/src/notify_popup.rs. All colour comes from the theme variables. */
 .notify-popup-stack {
   display: flex; flex-direction: column; gap: 8px; padding: 8px;
   width: 100%; box-sizing: border-box; user-select: none;
 }
 .notify-popup-card {
-  height: 76px; box-sizing: border-box; display: flex; align-items: center; gap: 10px;
+  min-height: 76px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; gap: 8px;
   padding: 10px 12px; cursor: pointer; overflow: hidden;
   background: var(--xp-panel-bg); color: var(--xp-text-normal);
   border: 1px solid var(--xp-border); border-left: 4px solid var(--xp-blue);
@@ -3573,6 +3573,11 @@ body {
   animation: notify-popup-in 0.18s ease-out;
 }
 .notify-popup-card:hover { border-color: var(--xp-blue); }
+.notify-popup-row { display: flex; align-items: center; gap: 10px; width: 100%; }
+.notify-popup-media {
+  display: block; width: 100%; max-height: 150px; object-fit: cover;
+  border-radius: 6px; background: var(--xp-sidebar-dark); pointer-events: none;
+}
 .notify-popup-text { flex: 1; min-width: 0; }
 .notify-popup-title {
   font-weight: bold; color: var(--xp-blue);

@@ -6,4 +6,6 @@ cd "$(dirname "$0")/.."
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 npx esbuild src/lib/garble.ts --bundle --platform=node --format=esm --outfile="$out/garble.mjs" --log-level=error
-GARBLE_JS="$out/garble.mjs" node --test tests/*.test.mjs
+npx esbuild src/lib/autoplay.ts --bundle --platform=node --format=esm --outfile="$out/autoplay.mjs" --log-level=error
+npx esbuild src/context/MediaPlayersContext.tsx --bundle --platform=node --format=esm --outfile="$out/players.mjs" --log-level=error
+GARBLE_JS="$out/garble.mjs" AUTOPLAY_JS="$out/autoplay.mjs" PLAYERS_JS="$out/players.mjs" node --test tests/*.test.mjs

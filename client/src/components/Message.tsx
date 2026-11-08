@@ -886,7 +886,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
         const urls = detectEmbedUrls(message.content);
         return urls.length > 0 ? (
           <div className="link-embeds">
-            {urls.map((u, i) => <LinkEmbed key={i} url={u} />)}
+            {urls.map((u, i) => <LinkEmbed key={i} url={u} authorPk={pkStr} />)}
           </div>
         ) : null;
       })()}

@@ -4,8 +4,8 @@ import { getAlwaysFloat } from "../lib/floatAnchor";
 import MediaPlayer from "./MediaPlayer";
 
 export default function MediaSlot({
-  hostId, kind, src, title, thumbUrl, aspect = 0.5625, manualTrigger = false,
-}: { hostId: string; kind: PlayerKind; src: string; title: string; thumbUrl?: string | null; aspect?: number; manualTrigger?: boolean }) {
+  hostId, kind, src, title, thumbUrl, aspect = 0.5625, manualTrigger = false, autoplay = false,
+}: { hostId: string; kind: PlayerKind; src: string; title: string; thumbUrl?: string | null; aspect?: number; manualTrigger?: boolean; autoplay?: boolean }) {
   const { players, setHostVisible, openPlayer, setPlayerState, closePlayer } = useMediaPlayers();
   const ref = useRef<HTMLDivElement>(null);
   const player = players.find((p) => p.hostId === hostId);
@@ -26,6 +26,26 @@ export default function MediaSlot({
     io.observe(el);
     return () => io.disconnect();
   }, [hostId, kind]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // AUTOPLAY (trusted sender, already decided by the caller): start the video once,
+  // muted, when at least half of it is on screen. Video only -- an iframe needs
+  // consent and never starts by itself. It starts at most once per card, so
+  // closing it is final until the message is re-rendered.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!autoplay || kind !== "video") return;
+    const el = ref.current; if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (autoStarted.current) return;
+      if (entries.some((e) => e.isIntersecting)) {
+        autoStarted.current = true;
+        openPlayer({ kind, src, hostId, title, float: false, quiet: true });
+        io.disconnect();
+      }
+    }, { threshold: 0.5 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [autoplay, kind, src, hostId, title]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // On unmount (e.g. switching server/channel) close this slot's player — floating
   // players live with their message and do not persist across navigation.

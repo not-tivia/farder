@@ -724,17 +724,17 @@ export async function playAudioFile(path: string): Promise<void> {
   return invoke<void>("play_audio_file", { path });
 }
 
-export async function showNotification(title: string, body: string): Promise<void> {
-  return invoke<void>("show_notification", { title, body });
+export async function showNotification(title: string, body: string, mediaUrl?: string | null): Promise<void> {
+  return invoke<void>("show_notification", { title, body, mediaUrl: mediaUrl ?? null });
 }
 
 /**
- * The skinned notification window reports how many cards it is showing so the
- * native window can be sized, positioned and shown (or hidden at 0). Only that
- * window calls this.
+ * The skinned notification window reports how many cards it is showing and how
+ * tall they are (logical px) so the native window can be sized, positioned and
+ * shown (or hidden at 0). Only that window calls this.
  */
-export async function notifyLayout(count: number): Promise<void> {
-  return invoke<void>("notify_layout", { count });
+export async function notifyLayout(count: number, height: number): Promise<void> {
+  return invoke<void>("notify_layout", { count, height });
 }
 
 /** A notification card was clicked: bring the main Farder window forward. */
