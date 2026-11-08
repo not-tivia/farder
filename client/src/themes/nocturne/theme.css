@@ -3616,3 +3616,55 @@ body {
 .notify-popup-reply-input:focus { outline: none; border-color: var(--xp-blue); }
 .notify-popup-reply-status { margin-top: 4px; font-size: var(--xp-font-size-small); color: var(--xp-text-muted); }
 .notify-popup-reply-error { color: var(--xp-e2ee-error); }
+
+/* ── Edge strip (EdgeStrip.tsx) ───────────────────────────────
+   One opaque 30px line in the always-on-top "strip" window. Height must match
+   edge_strip::HEIGHT. All colour comes from the theme variables. */
+.edge-strip {
+  width: 100%; height: 30px; box-sizing: border-box; display: flex; align-items: center; gap: 6px;
+  padding: 0 6px; overflow: hidden; user-select: none;
+  background: var(--xp-panel-bg); color: var(--xp-text-normal);
+  border: 1px solid var(--xp-border); border-left: 4px solid var(--xp-blue); border-radius: 6px;
+  font-family: var(--xp-font); font-size: var(--xp-font-size-small);
+}
+.edge-strip button:focus-visible, .edge-strip input:focus-visible { outline: 2px solid var(--xp-blue); outline-offset: 1px; }
+.edge-strip-av {
+  flex: 0 0 auto; width: 18px; height: 18px; line-height: 16px; text-align: center; padding: 0;
+  background: transparent; color: var(--xp-blue); border: 1px solid var(--xp-border); border-radius: 4px;
+  font-weight: bold; font-size: 11px; cursor: pointer;
+}
+.edge-strip-chip {
+  flex: 0 1 auto; min-width: 0; max-width: 160px; display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 8px; background: transparent; color: var(--xp-text-normal);
+  border: 1px solid var(--xp-border); border-radius: 10px; cursor: pointer; font: inherit;
+}
+.edge-strip-chip:hover { border-color: var(--xp-blue); }
+.edge-strip-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edge-strip-count { flex: none; color: var(--xp-blue); font-weight: bold; }
+.edge-strip-spacer { flex: 1; }
+.edge-strip-idle { flex: 1; color: var(--xp-text-muted); }
+.edge-strip-text {
+  flex: 1; min-width: 0; display: flex; gap: 8px; align-items: baseline; text-align: left;
+  background: transparent; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer;
+}
+.edge-strip-title { flex: none; max-width: 45%; font-weight: bold; color: var(--xp-blue); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edge-strip-body { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--xp-text-normal); }
+.edge-strip-btn {
+  flex: none; height: 20px; padding: 0 9px; background: transparent; color: var(--xp-blue);
+  border: 1px solid var(--xp-border); border-radius: 5px; cursor: pointer; font: inherit;
+}
+.edge-strip-btn:hover { border-color: var(--xp-blue); }
+.edge-strip-close {
+  flex: none; width: 20px; height: 20px; line-height: 18px; text-align: center; padding: 0;
+  background: transparent; color: var(--xp-text-muted); border: 1px solid transparent;
+  border-radius: 50%; cursor: pointer; font-size: 15px;
+}
+.edge-strip-close:hover { color: var(--xp-text-normal); border-color: var(--xp-border); }
+.edge-strip-input {
+  flex: 1; min-width: 0; height: 20px; box-sizing: border-box; padding: 0 7px; user-select: text;
+  background: var(--xp-window-bg); color: var(--xp-text-normal);
+  border: 1px solid var(--xp-input-border); border-radius: 5px; font: inherit;
+}
+.edge-strip-input:focus { outline: none; border-color: var(--xp-blue); }
+.edge-strip-status { flex: none; color: var(--xp-text-muted); }
+.edge-strip-error { color: var(--xp-e2ee-error); max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

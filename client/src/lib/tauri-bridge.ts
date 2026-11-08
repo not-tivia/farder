@@ -753,6 +753,39 @@ export async function notifyActivate(): Promise<void> {
   return invoke<void>("notify_activate");
 }
 
+/** The edge strip's saved settings (see `edge_strip.rs`). */
+export interface EdgeStripSettings {
+  enabled: boolean;
+  dock: "top" | "bottom";
+  align: "left" | "center" | "right";
+  width: number;
+  always_visible: boolean;
+}
+
+export async function getEdgeStrip(): Promise<EdgeStripSettings> {
+  return invoke<EdgeStripSettings>("get_edge_strip");
+}
+
+/** Save the settings; the strip window is created or destroyed to match. Returns what was saved (clamped). */
+export async function setEdgeStrip(settings: EdgeStripSettings): Promise<EdgeStripSettings> {
+  return invoke<EdgeStripSettings>("set_edge_strip", { settings });
+}
+
+/** Strip window only: tell Rust whether there is anything to show so it can place and show or hide the window. */
+export async function stripLayout(hasContent: boolean): Promise<void> {
+  return invoke<void>("strip_layout", { hasContent });
+}
+
+/** Strip window only: take keyboard focus while a reply box is open, give it back after. */
+export async function stripFocus(focusable: boolean): Promise<void> {
+  return invoke<void>("strip_focus", { focusable });
+}
+
+/** Strip window only: bring Farder forward, showing this conversation if one is given. */
+export async function stripOpen(serverId: string | null, channelId: number | null): Promise<void> {
+  return invoke<void>("strip_open", { serverId, channelId });
+}
+
 export interface NotificationPrefs {
   dmNotifications: "all" | "specific" | "none";
   dmAllowedUsers: string[];

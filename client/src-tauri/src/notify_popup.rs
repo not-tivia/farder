@@ -110,7 +110,7 @@ pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
 /// card plus transparent padding). Ask DWM for "no border". Best-effort: Windows
 /// 10 does not know the setting and ignores it, which is fine.
 #[cfg(windows)]
-fn hide_system_border(win: &tauri::WebviewWindow) {
+pub(crate) fn hide_system_border(win: &tauri::WebviewWindow) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
     let Ok(h) = win.hwnd() else { return };

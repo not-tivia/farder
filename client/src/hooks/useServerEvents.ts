@@ -15,6 +15,9 @@ import {
   type ReplyRequest, type ReplyResult, type ReplyServerView,
 } from "../lib/quickReply";
 import { getGarble } from "../lib/garbleSettings";
+import {
+  STRIP_OPEN_EVENT, STRIP_READY_EVENT, STRIP_STATE_EVENT, StripModel, parseOpen,
+} from "../lib/edgeStrip";
 import { garbleText, makeTransform } from "../lib/garble";
 
 // Module-level cache for notification prefs and own public key
@@ -23,6 +26,17 @@ let notifPrefs: NotificationPrefs | null = null;
 // (set by the hook below, which owns the app state).
 let serverLookup: ((serverId: string) => PerServerState | undefined) | null = null;
 api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
+// The edge strip (a one-line docked bar, see edge_strip.rs). When it is on it
+// REPLACES the pop-up: the same messages, the same privacy setting, one line.
+const strip = new StripModel();
+let stripEnabled = false;
+export function refreshStripCache(): void {
+  api.getEdgeStrip().then((s) => { stripEnabled = s.enabled; if (!s.enabled) strip.clear(); }).catch(() => {});
+}
+refreshStripCache();
+function publishStrip(): void {
+  void emit(STRIP_STATE_EVENT, strip.state()).catch(() => {});
+}
 // Own public key, fetched LAZILY: at module load the identity is still
 // PIN-locked, so an eager getPublicKey() fails and would leave this null for
 // the whole session (making every own-reaction event look like someone
@@ -121,6 +135,27 @@ function notifyIfWanted(serverId: string, message: MessageInfo, text: string): v
       normalizePopupContent(notifPrefs?.popupContent) !== "hidden" &&
       notifPrefs?.popupReply !== false;
     const reply = canReply ? { server_id: serverId, channel_id: message.channel_id } : null;
+    if (stripEnabled) {
+      const mode = normalizePopupContent(notifPrefs?.popupContent);
+      strip.note({
+        serverId,
+        channelId: message.channel_id,
+        mode,
+        sender,
+        channel,
+        isDm: !!server?.dms.some((d) => d.channel.id === message.channel_id),
+        title: shown.title,
+        body: shown.body,
+        // Replying from the strip follows the same rules as from the pop-up,
+        // except that it does not need the pop-up style to be the themed one.
+        reply: mode !== "hidden" && notifPrefs?.popupReply !== false
+          ? { server_id: serverId, channel_id: message.channel_id }
+          : null,
+      });
+      publishStrip();
+      console.log("[notify] showing it on the strip");
+      return; // the strip replaces the pop-up
+    }
     console.log("[notify] showing a pop-up");
     api.showNotification(shown.title, shown.body, media, reply).catch((e) => console.warn("[notify] pop-up failed:", e));
   });
@@ -638,6 +673,43 @@ export function useServerEvents(): void {
         void respond({ ok: false, error: String(err) });
       }
     }).then(safePush);
+
+    // --- the edge strip ---------------------------------------------------
+    // The strip window announces itself when its page loads: send it the state.
+    listen(STRIP_READY_EVENT, () => publishStrip()).then(safePush);
+    // A conversation was answered from the strip: it is dealt with.
+    listen("strip:replied", (e) => {
+      const t = e.payload as { server_id?: unknown; channel_id?: unknown } | null;
+      if (t && typeof t.server_id === "string" && typeof t.channel_id === "number") {
+        strip.resolve(t.server_id, t.channel_id);
+        publishStrip();
+      }
+    }).then(safePush);
+    // A chip or the preview was clicked: show that conversation. The payload comes
+    // from another window, so it is checked against what actually exists.
+    listen(STRIP_OPEN_EVENT, (e) => {
+      const o = parseOpen(e.payload);
+      if (!o) return;
+      const server = stateRef.current.servers[o.serverId];
+      if (!server) return;
+      dispatch({ type: "SET_ACTIVE_SERVER", serverId: o.serverId });
+      if (o.channelId === null) return;
+      if (server.dms.some((d) => d.channel.id === o.channelId)) {
+        dispatch({ type: "OPEN_DM_PANEL", serverId: o.serverId, payload: o.channelId });
+      } else if (server.channels.some((c) => c.id === o.channelId)) {
+        dispatch({ type: "SELECT_CHANNEL", serverId: o.serverId, payload: o.channelId });
+      }
+    }).then(safePush);
+    // Settings changed (turned on or off).
+    listen("strip:settings-changed", (e) => {
+      const on = (e.payload as { enabled?: unknown } | null)?.enabled === true;
+      stripEnabled = on;
+      if (!on) strip.clear();
+    }).then(safePush);
+    // Looking at Farder means the unread chips have been seen.
+    const onFocus = () => { if (stripEnabled) { strip.clear(); publishStrip(); } };
+    window.addEventListener("focus", onFocus);
+    safePush(() => window.removeEventListener("focus", onFocus));
 
     // A garble rule or consent changed somewhere on this server: tell whoever is
     // showing garble state (message input banner, settings, member menu) to re-ask.

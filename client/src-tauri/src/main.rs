@@ -54,6 +54,7 @@ mod screen_audio;
 mod screen_audio_wasapi;
 mod audio_limit;
 mod autostart;
+mod edge_strip;
 mod notify_popup;
 mod screenshare;
 mod video_encoder;
@@ -154,6 +155,12 @@ fn main() {
             if commands::notification_popup_style() == "skinned" {
                 if let Err(e) = notify_popup::ensure_window(&app.handle()) {
                     eprintln!("[notify] could not create the pop-up window: {e}");
+                }
+            }
+            // The edge strip, only when the person turned it on.
+            if edge_strip::load().enabled {
+                if let Err(e) = edge_strip::ensure_window(&app.handle()) {
+                    eprintln!("[strip] could not create the strip window: {e}");
                 }
             }
             let tray_ok = match tray::setup_tray(&app.handle()) {
@@ -319,6 +326,11 @@ fn main() {
             commands::stop_recording,
             commands::play_audio_file,
             commands::show_notification,
+            edge_strip::get_edge_strip,
+            edge_strip::set_edge_strip,
+            edge_strip::strip_layout,
+            edge_strip::strip_focus,
+            edge_strip::strip_open,
             notify_popup::notify_layout,
             notify_popup::notify_activate,
             notify_popup::notify_focus,

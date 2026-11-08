@@ -116,6 +116,7 @@ of key to filename.
 | `useProxiedMedia` | `(url, enabled)` | Media bytes through the relay as a blob URL, revoked on cleanup. The viewer's IP never reaches the origin. |
 | `useVoice` | `()` | The whole voice UI surface: join/leave, mute/deafen, per-peer speaking and volume, screenshare. Wraps the `voice_*` command family and the `voice://` event stream. |
 | `useDensity` | `()` | The message density (`roomy`/`normal`/`compact`/`irc`/`tiny`), re-read when `farder:density-changed` fires. Stored in `localStorage` only; see `density.md`. |
+| `useReplySender` | `(onSent)` | Sends a one-line reply from a small window (pop-up or edge strip) by ASKING the main window (`notify:reply`), then waits for `notify:reply-result`. Returns `{ state, error, send(target, text) }`. |
 
 ---
 

@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import * as api from "../lib/tauri-bridge";
 import { useLinkEmbed } from "../hooks/useLinkEmbed";
 import { useProxiedMedia } from "../hooks/useProxiedMedia";
-import {
-  MAX_REPLY_CHARS, REPLY_EVENT, REPLY_RESULT_EVENT,
-  type ReplyRequest, type ReplyResult, type ReplyTarget,
-} from "../lib/quickReply";
+import { useReplySender } from "../hooks/useReplySender";
+import { MAX_REPLY_CHARS, type ReplyTarget } from "../lib/quickReply";
 
 // The view rendered inside the detached, always-on-top "notify" window (see
 // src-tauri/src/notify_popup.rs). It shows the ACTIVE THEME's look, holds the
@@ -198,49 +196,12 @@ function PopupMedia({ url }: { url: string }) {
 }
 
 /**
- * One-line reply box. It does NOT send anything itself: it asks the main window
- * (`notify:reply`), which checks the request and sends it the way the message box
- * does (encrypting a DM first), then answers with `notify:reply-result`.
+ * One-line reply box. Sending goes through `useReplySender`, which only ASKS the
+ * main window to send (it checks the request first).
  */
 function ReplyBox({ target, onSent, onCancel }: { target: ReplyTarget; onSent: () => void; onCancel: () => void }) {
   const [text, setText] = useState("");
-  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
-  const [error, setError] = useState<string | null>(null);
-  const pending = useRef<{ timer: number; unlisten: () => void } | null>(null);
-
-  useEffect(() => () => {
-    if (pending.current) { pending.current.unlisten(); window.clearTimeout(pending.current.timer); }
-  }, []);
-
-  async function send() {
-    const body = text.trim();
-    if (!body || state === "sending" || state === "sent") return;
-    setState("sending");
-    setError(null);
-    const id = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    const finish = () => {
-      if (pending.current) { pending.current.unlisten(); window.clearTimeout(pending.current.timer); pending.current = null; }
-    };
-    const unlisten = await listen<ReplyResult>(REPLY_RESULT_EVENT, (e) => {
-      if (e.payload.id !== id) return;
-      finish();
-      if (e.payload.ok) {
-        setState("sent");
-        window.setTimeout(onSent, 900);
-      } else {
-        setState("error");
-        setError(e.payload.error ?? "Could not send.");
-      }
-    });
-    const timer = window.setTimeout(() => {
-      finish();
-      setState("error");
-      setError("Farder did not answer. Open the app and try again.");
-    }, 10_000);
-    pending.current = { timer, unlisten };
-    const req: ReplyRequest = { id, serverId: target.server_id, channelId: target.channel_id, text: body };
-    await emit(REPLY_EVENT, req);
-  }
+  const { state, error, send } = useReplySender(onSent);
 
   return (
     <div className="notify-popup-reply" onClick={(e) => e.stopPropagation()}>
@@ -253,7 +214,7 @@ function ReplyBox({ target, onSent, onCancel }: { target: ReplyTarget; onSent: (
         placeholder="Reply... (Enter to send, Esc to cancel)"
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") { e.preventDefault(); void send(); }
+          if (e.key === "Enter") { e.preventDefault(); void send(target, text.trim()); }
           else if (e.key === "Escape") { e.preventDefault(); onCancel(); }
         }}
         onBlur={() => { if (state !== "sending" && state !== "sent") onCancel(); }}

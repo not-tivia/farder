@@ -1926,6 +1926,48 @@ focuses the `main` window.
 
 ---
 
+### `get_edge_strip() -> StripSettings` / `set_edge_strip(settings) -> Result<StripSettings, String>`
+
+**What it does:** the edge strip's saved settings (`enabled`, `dock` top/bottom,
+`align` left/center/right, `width` 280-900 logical px, `always_visible`), stored
+under `edge_strip` in `settings.json`, OFF by default. `set_edge_strip` clamps the
+values, saves them, builds or destroys the strip window to match (it is an extra
+browser process, so it exists only while enabled) and emits `strip:settings-changed`.
+See `edge-strip.md`.
+**invoke name:** `"get_edge_strip"` -> `getEdgeStrip()`, `"set_edge_strip"` -> `setEdgeStrip()`.
+
+---
+
+### `strip_layout(has_content) -> Result<(), String>`
+
+**What it does:** called by the strip window whenever it has, or no longer has,
+anything to show. With content (or `always_visible`) the window is placed on the
+PRIMARY monitor's WORK AREA (so a bottom strip clears the taskbar) and shown
+without taking focus; otherwise it is hidden and made unfocusable again. Geometry
+is the pure, unit-tested `edge_strip::layout_for`.
+**Errors:** the strip window is not running, or there is no primary monitor.
+**invoke name:** `"strip_layout"` -> `stripLayout()`.
+
+---
+
+### `strip_focus(focusable) -> Result<(), String>`
+
+**What it does:** like `notify_focus`, for the strip: focusable (and focused) only
+while its reply box is open.
+**invoke name:** `"strip_focus"` -> `stripFocus()`.
+
+---
+
+### `strip_open(server_id, channel_id) -> Result<(), String>`
+
+**What it does:** a chip or the preview was clicked: un-minimises, shows and focuses
+the `main` window and emits `strip:open` `{server_id, channel_id}` to it, which
+`useServerEvents.ts` validates against what exists before switching to that server
+and channel or DM. Both ids may be absent (just open the app).
+**invoke name:** `"strip_open"` -> `stripOpen()`.
+
+---
+
 ### `get_notification_prefs() -> Result<Value, String>` / `save_notification_prefs(prefs) -> Result<(), String>`
 
 **What it does:** reads/writes `~/.farder/notifications.json`. Default prefs

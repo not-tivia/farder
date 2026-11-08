@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import AppearanceSettings from "../AppearanceSettings";
 import DensitySettings from "./DensitySettings";
+import EdgeStripSettings from "./EdgeStripSettings";
 import GifSearchSettings from "../GifSearchSettings";
 import { TranslationSettingsTab } from "../TranslationSettingsTab";
 import VoiceSettings from "../VoiceSettings";
@@ -18,11 +19,12 @@ interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "density" | "gif" | "translation" | "voice" | "notifications" | "garble" | "autoplay" | "sound" | "startup" | "privacy" | "hosted" | "alerts" | "reminders";
+type SectionId = "appearance" | "density" | "strip" | "gif" | "translation" | "voice" | "notifications" | "garble" | "autoplay" | "sound" | "startup" | "privacy" | "hosted" | "alerts" | "reminders";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "density", label: "Message density" },
+  { id: "strip", label: "Edge strip" },
   { id: "gif", label: "GIF Search" },
   { id: "translation", label: "Translation" },
   { id: "voice", label: "Voice" },
@@ -76,6 +78,7 @@ export default function SettingsModal({ onClose }: Props) {
           <section className="settings-content">
             {active === "appearance" && <AppearanceSettings />}
             {active === "density" && <DensitySettings />}
+            {active === "strip" && <EdgeStripSettings />}
             {active === "gif" && <GifSearchSettings />}
             {active === "translation" && <TranslationSettingsTab />}
             {active === "voice" && <VoiceSettings />}

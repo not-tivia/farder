@@ -4,6 +4,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import ScreenSharePopout from "./components/ScreenSharePopout";
 import NotifyPopup from "./components/NotifyPopup";
+import EdgeStrip from "./components/EdgeStrip";
 import { getActiveTheme } from "./lib/tauri-bridge";
 import { bookMigrateLegacyFavorites } from "./lib/book/client";
 import { initAudioLimits } from "./lib/audioLimiter";
@@ -53,6 +54,15 @@ async function bootstrap() {
     document.documentElement.style.setProperty("background", "transparent", "important");
     document.body.style.setProperty("background", "transparent", "important");
     ReactDOM.createRoot(document.getElementById("root")!).render(<NotifyPopup />);
+    return;
+  }
+
+  // The edge strip window: one line, docked to a screen edge (edge_strip.rs).
+  if (new URLSearchParams(window.location.search).get("strip") === "1") {
+    document.documentElement.style.setProperty("overflow", "hidden", "important");
+    document.body.style.setProperty("margin", "0", "important");
+    document.body.style.setProperty("overflow", "hidden", "important");
+    ReactDOM.createRoot(document.getElementById("root")!).render(<EdgeStrip />);
     return;
   }
 

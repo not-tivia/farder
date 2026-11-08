@@ -287,6 +287,38 @@ ten or so messages, including one long one, one with an image and one with a lin
 
 ---
 
+## Part 9 - Edge strip
+
+Settings -> **Edge strip** -> tick **Show the edge strip**. (It replaces the pop-up
+while on. Pop-up style must not be "No pop-ups at all".) Minimise Farder, have the
+second identity post a message in a normal channel and a DM.
+
+- [ ] A **one-line bar** appears at the top-centre of your main screen: a small **F**
+      button, then a chip for the conversation with a count. *(An empty strip must not
+      be on screen when nothing is unread.)*
+- [ ] On arrival it shows a **one-line preview**: bold sender, the message, a **Reply**
+      button and an **x**. After about 10 seconds it folds back to the chips; it
+      **holds while the mouse is over it**.
+- [ ] **It never steals focus.** Keep typing in Notepad while messages arrive: every
+      keystroke still goes to Notepad.
+- [ ] Click **Reply**: a box replaces the preview and you can type at once. Type, press
+      **Enter**: "Sending..." then "Sent", it folds away, and **the other identity sees
+      it**. Focus returns to what you were using. **Esc** cancels.
+- [ ] Click a **chip** (or the preview text): Farder comes forward showing **that**
+      conversation (the right server and channel, or the DM).
+- [ ] Open Farder normally: the chips clear.
+- [ ] Settings -> Edge strip: **Bottom** puts it above the taskbar (not under it);
+      **Left / Middle / Right** and **Narrow / Medium / Wide** work; "Keep it on screen"
+      shows "No new messages" when idle. Check at 125% display scale.
+- [ ] Privacy: with "What a pop-up may show" = *Only who sent it* the strip shows no
+      channel name or words; = *Nothing* it shows one "New messages" chip and **no
+      Reply button**.
+- [ ] Untick "Show the edge strip": the bar disappears, pop-ups work again, and Task
+      Manager shows **one fewer** `msedgewebview2`.
+- [ ] Look in two or three themes: readable, nothing clipped, no pale outline.
+
+---
+
 ## Leftovers from earlier work (still unseen)
 
 - [ ] **Plaintext delete stays deleted:** delete a message in a normal channel, quit
