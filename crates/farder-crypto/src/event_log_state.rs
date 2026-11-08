@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{bail, ensure, Context, Result};
 
 use crate::event_log::{
-    ChannelClass, DeleteReason, DeviceId, Event, EventHash, EventPayload, EventRef, Genesis,
-    ServerId,
+    ChannelClass, DeleteReason, DeviceId, Event, EventHash, EventPayload, EventRef, GarbleMark,
+    Genesis, ServerId, GARBLE_CONSENT_MAX_MESSAGES, GARBLE_MAX_PHRASE, GARBLE_MODERATION_MAX_MESSAGES,
+    GARBLE_MODES,
 };
 use crate::identity::PublicKey;
 
@@ -367,6 +368,36 @@ pub struct LogState {
     /// `MlsKeyPackagePublished` pins it; any later publish/commit/confirm from
     /// the device with a different hash is rejected (clone/restore poison).
     device_store_instance: HashMap<DeviceId, [u8; 32]>,
+    /// Running garble rules, one per target (a new `GarbleSet` replaces the old).
+    garble_rules: HashMap<PublicKey, GarbleRule>,
+    /// (target, controller) -> the most messages the target allows that
+    /// controller to garble at once. Absent = no consent.
+    garble_consents: HashMap<(PublicKey, PublicKey), u32>,
+    /// Message event hash -> how it is to be drawn. Written when the message is
+    /// accepted, from the rule running at that moment, so it is the same on
+    /// every replica and under replay. Bounded by the rules that produced it.
+    garbled_events: HashMap<EventHash, GarbleMark>,
+}
+
+/// A running garble rule (see `EventPayload::GarbleSet`).
+#[derive(Clone, Debug, PartialEq)]
+struct GarbleRule {
+    mode: String,
+    phrase: String,
+    /// Messages still to be garbled; the rule ends when this reaches zero.
+    remaining: u32,
+    by: PublicKey,
+    moderation: bool,
+}
+
+/// Read-only view of a running garble rule, for the UI.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GarbleRuleView {
+    pub mode: String,
+    pub phrase: String,
+    pub remaining: u32,
+    pub by: PublicKey,
+    pub moderation: bool,
 }
 
 impl LogState {
@@ -398,6 +429,9 @@ impl LogState {
             key_packages: HashMap::new(),
             consumed_key_packages: HashMap::new(),
             device_store_instance: HashMap::new(),
+            garble_rules: HashMap::new(),
+            garble_consents: HashMap::new(),
+            garbled_events: HashMap::new(),
         }
     }
 
@@ -427,6 +461,67 @@ impl LogState {
     /// The owner holds every capability; everyone else holds only what was granted.
     pub fn has_capability(&self, pk: &PublicKey, cap: &str) -> bool {
         self.is_owner(pk) || self.capabilities.get(pk).is_some_and(|c| c.contains(cap))
+    }
+    /// How a message (by event hash) is to be drawn, if it was accepted while a
+    /// garble rule was running on its author. `None` = draw it as written.
+    pub fn garble_mark(&self, event_hash: &str) -> Option<&GarbleMark> {
+        self.garbled_events.get(event_hash)
+    }
+    /// The garble rule currently running on `pk`, if any.
+    pub fn active_garble(&self, pk: &PublicKey) -> Option<GarbleRuleView> {
+        self.garble_rules.get(pk).map(|r| GarbleRuleView {
+            mode: r.mode.clone(),
+            phrase: r.phrase.clone(),
+            remaining: r.remaining,
+            by: r.by.clone(),
+            moderation: r.moderation,
+        })
+    }
+    /// The most messages `target` lets `controller` garble at once (0 = none).
+    pub fn garble_consent(&self, target: &PublicKey, controller: &PublicKey) -> u32 {
+        self.garble_consents.get(&(target.clone(), controller.clone())).copied().unwrap_or(0)
+    }
+    /// A mode must be a known one, and a phrase exists only for `custom`
+    /// (printable, single-line, bounded) -- canonical, so two spellings of the
+    /// same rule cannot exist.
+    fn garble_style_ok(mode: &str, phrase: &str) -> bool {
+        if !GARBLE_MODES.contains(&mode) {
+            return false;
+        }
+        if mode != "custom" {
+            return phrase.is_empty();
+        }
+        !phrase.is_empty()
+            && phrase.chars().count() <= GARBLE_MAX_PHRASE
+            && phrase == phrase.trim()
+            && !phrase.chars().any(|c| c.is_control())
+    }
+    /// If a rule is running on this event's author, record how the message is to
+    /// be drawn and spend one message from the rule.
+    fn garble_if_active(&mut self, event: &Event) {
+        let author = &event.core.author;
+        let Some(rule) = self.garble_rules.get_mut(author) else { return };
+        self.garbled_events.insert(
+            event.hash(),
+            GarbleMark {
+                mode: rule.mode.clone(),
+                phrase: rule.phrase.clone(),
+                by: rule.by.clone(),
+                moderation: rule.moderation,
+            },
+        );
+        rule.remaining = rule.remaining.saturating_sub(1);
+        if rule.remaining == 0 {
+            self.garble_rules.remove(author);
+        }
+    }
+    /// A member leaving or being banned: end everything garble-related that
+    /// involved them (their own rule, consents they gave or hold, and
+    /// consensual rules they were controlling).
+    fn forget_garble_for(&mut self, member: &PublicKey) {
+        self.garble_rules.remove(member);
+        self.garble_rules.retain(|_, r| r.moderation || &r.by != member);
+        self.garble_consents.retain(|(t, c), _| t != member && c != member);
     }
     /// Whether this attachment (by content hash) has been redacted.
     pub fn is_attachment_redacted(&self, hash: &str) -> bool {
@@ -1009,6 +1104,55 @@ impl LogState {
                 Ok(Authorized::Apply)
             }
 
+            EventPayload::GarbleSet { target, mode, phrase, messages, consensual } => {
+                ensure!(self.is_member(target), "garble target is not a member");
+                ensure!(author != target, "you cannot garble yourself over the log (use your own setting)");
+                ensure!(Self::garble_style_ok(mode, phrase), "unknown garble mode or invalid phrase");
+                ensure!(*messages >= 1, "a garble must cover at least one message");
+                if *consensual {
+                    let allowed = self.garble_consent(target, author);
+                    ensure!(allowed > 0, "the target has not consented to be garbled by you");
+                    ensure!(
+                        *messages <= allowed.min(GARBLE_CONSENT_MAX_MESSAGES),
+                        "more messages than the target consented to"
+                    );
+                } else {
+                    ensure!(self.has_capability(author, "garble"), "missing 'garble' capability");
+                    ensure!(!self.is_owner(target), "the owner cannot be garbled");
+                    ensure!(
+                        *messages <= GARBLE_MODERATION_MAX_MESSAGES,
+                        "a moderation garble covers at most 50 messages"
+                    );
+                }
+                Ok(Authorized::Apply)
+            }
+            EventPayload::GarbleCleared { target } => {
+                let rule = self
+                    .garble_rules
+                    .get(target)
+                    .context("no garble is running on that member")?;
+                ensure!(
+                    // the person's own kill switch, for a rule they agreed to
+                    (author == target && !rule.moderation)
+                        // whoever set it
+                        || *author == rule.by
+                        // a moderator
+                        || self.has_capability(author, "garble"),
+                    "not allowed to end this garble"
+                );
+                Ok(Authorized::Apply)
+            }
+            EventPayload::GarbleConsent { controller, max_messages } => {
+                ensure!(self.is_member(author), "only members may give consent");
+                ensure!(self.is_member(controller), "the controller is not a member");
+                ensure!(controller != author, "consent names someone else");
+                ensure!(
+                    *max_messages <= GARBLE_CONSENT_MAX_MESSAGES,
+                    "more messages than a consent may allow"
+                );
+                Ok(Authorized::Apply)
+            }
+
             EventPayload::MlsKeyPackagePublished { store_instance_hash, expires_at_log_pos, .. } => {
                 // Full members only (approved, non-pending — pending identities
                 // are never in `members`, checked explicitly for defense).
@@ -1518,17 +1662,20 @@ impl LogState {
                 if !self.channels.contains_key(channel_id) {
                     self.plaintext_history_channels.insert(*channel_id);
                 }
+                self.garble_if_active(event);
             }
             EventPayload::MemberRemoved { member } => {
                 self.members.remove(member);
                 self.pending.remove(member);
                 self.capabilities.remove(member);
+                self.forget_garble_for(member);
             }
             EventPayload::MemberBanned { member } => {
                 self.banned.insert(member.clone());
                 self.members.remove(member);
                 self.pending.remove(member);
                 self.capabilities.remove(member);
+                self.forget_garble_for(member);
             }
             EventPayload::MemberUnbanned { member } => {
                 self.banned.remove(member);
@@ -1573,6 +1720,34 @@ impl LogState {
                 // The device stays in `devices`/`devices_by_identity` — its
                 // history stands; liveness queries filter by this set.
                 self.revoked_devices.insert(device.clone());
+            }
+
+            EventPayload::GarbleSet { target, mode, phrase, messages, consensual } => {
+                self.garble_rules.insert(
+                    target.clone(),
+                    GarbleRule {
+                        mode: mode.clone(),
+                        phrase: phrase.clone(),
+                        remaining: *messages,
+                        by: event.core.author.clone(),
+                        moderation: !*consensual,
+                    },
+                );
+            }
+            EventPayload::GarbleCleared { target } => {
+                self.garble_rules.remove(target);
+            }
+            EventPayload::GarbleConsent { controller, max_messages } => {
+                let author = event.core.author.clone();
+                if *max_messages == 0 {
+                    self.garble_consents.remove(&(author.clone(), controller.clone()));
+                    // Revoking also ends a rule that controller has running on me.
+                    if self.garble_rules.get(&author).is_some_and(|r| !r.moderation && &r.by == controller) {
+                        self.garble_rules.remove(&author);
+                    }
+                } else {
+                    self.garble_consents.insert((author, controller.clone()), *max_messages);
+                }
             }
 
             EventPayload::MlsKeyPackagePublished { store_instance_hash, expires_at_log_pos, .. } => {
@@ -1723,6 +1898,7 @@ impl LogState {
                         .or_insert_with(|| cap.uploader.clone());
                 }
                 self.bump_channel_counters(*channel_id);
+                self.garble_if_active(event);
             }
 
             EventPayload::MessageEditedE2ee { channel_id, .. } => {
@@ -5197,6 +5373,264 @@ mod tests {
                 surface(&resumed, &channels, &ids, &devices, &targets, TS), expected,
                 "query surfaces must agree after resuming from checkpoint {cut}"
             );
+        }
+    }
+
+    // ---- Speech garbling ----------------------------------------------------
+
+    struct Actor {
+        id: Keypair,
+        dev: Keypair,
+        prev: Ev,
+    }
+    impl Actor {
+        fn pk(&self) -> PublicKey {
+            self.id.public_key()
+        }
+    }
+
+    /// Fold `payload` as `who`; the actor's chain advances only if it folds.
+    fn act(st: &mut LogState, who: &mut Actor, payload: EP) -> Result<Ev> {
+        let ev = Ev::next(
+            &who.dev, who.id.public_key(), st.server_id().clone(), Some(&who.prev),
+            who.prev.core.lamport + 1, 600, payload,
+        );
+        st.apply(&ev)?;
+        who.prev = ev.clone();
+        Ok(ev)
+    }
+
+    fn say(st: &mut LogState, who: &mut Actor) -> EventHash {
+        act(st, who, EP::MessagePosted { channel_id: 1, content: "hi".into(), reply_to: None, attachments: vec![] })
+            .expect("a plain message folds")
+            .hash()
+    }
+
+    fn garble_set(target: &Actor, mode: &str, phrase: &str, messages: u32, consensual: bool) -> EP {
+        EP::GarbleSet { target: target.pk(), mode: mode.into(), phrase: phrase.into(), messages, consensual }
+    }
+
+    struct GarbleWorld {
+        st: LogState,
+        owner: Actor,
+        moderator: Actor, // holds "garble"
+        alice: Actor,
+        bob: Actor,
+    }
+
+    fn garble_world() -> GarbleWorld {
+        let owner_kp = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner_kp, &owner_dev);
+        let mut owner_prev = da;
+        let (m, md, ml) = add_member_with_cap(&mut st, &owner_kp, &owner_dev, &mut owner_prev, Some("garble"));
+        let (a, ad, al) = add_member_with_cap(&mut st, &owner_kp, &owner_dev, &mut owner_prev, None);
+        let (b, bd, bl) = add_member_with_cap(&mut st, &owner_kp, &owner_dev, &mut owner_prev, None);
+        GarbleWorld {
+            st,
+            owner: Actor { id: owner_kp, dev: owner_dev, prev: owner_prev },
+            moderator: Actor { id: m, dev: md, prev: ml },
+            alice: Actor { id: a, dev: ad, prev: al },
+            bob: Actor { id: b, dev: bd, prev: bl },
+        }
+    }
+
+    #[test]
+    fn a_moderation_garble_marks_exactly_the_next_n_messages_then_ends() {
+        let mut w = garble_world();
+        act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "", 2, false)).expect("a holder of 'garble' may");
+        let before = say(&mut w.st, &mut w.alice);
+        let m1 = say(&mut w.st, &mut w.bob);
+        let m2 = say(&mut w.st, &mut w.bob);
+        let m3 = say(&mut w.st, &mut w.bob);
+        assert!(w.st.garble_mark(&before).is_none(), "someone else's message is never marked");
+        for h in [&m1, &m2] {
+            let mark = w.st.garble_mark(h).expect("covered by the rule");
+            assert_eq!(mark.mode, "bark");
+            assert!(mark.moderation, "a moderator's garble is labelled as moderation");
+            assert_eq!(mark.by, w.moderator.pk());
+        }
+        assert!(w.st.garble_mark(&m3).is_none(), "the rule ended after its 2 messages");
+        assert!(w.st.active_garble(&w.bob.pk()).is_none());
+    }
+
+    #[test]
+    fn a_marked_message_stays_marked_under_replay_and_from_a_checkpoint() {
+        let mut w = garble_world();
+        act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "meow", "", 1, false)).unwrap();
+        let h = say(&mut w.st, &mut w.bob);
+        assert!(w.st.garble_mark(&h).is_some());
+        // A clone (a checkpoint) keeps the mark and composes with the tail.
+        let mut replay = w.st.clone();
+        assert_eq!(replay.garble_mark(&h), w.st.garble_mark(&h));
+        let next = say(&mut replay, &mut w.alice);
+        assert!(replay.garble_mark(&next).is_none());
+    }
+
+    #[test]
+    fn moderation_garble_authority_and_limits() {
+        let mut w = garble_world();
+        // No capability: refused.
+        let e = act(&mut w.st, &mut w.alice, garble_set(&w.bob, "bark", "", 1, false)).unwrap_err();
+        assert!(e.to_string().contains("'garble' capability"), "{e}");
+        // The owner cannot be garbled.
+        let e = act(&mut w.st, &mut w.moderator, garble_set(&w.owner, "bark", "", 1, false)).unwrap_err();
+        assert!(e.to_string().contains("owner cannot be garbled"), "{e}");
+        // Over the moderation cap.
+        let e = act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "", GARBLE_MODERATION_MAX_MESSAGES + 1, false)).unwrap_err();
+        assert!(e.to_string().contains("at most 50"), "{e}");
+        // Zero messages, unknown mode, a phrase on a non-custom mode, custom without a phrase.
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "", 0, false)).is_err());
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "woof", "", 1, false)).is_err());
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "hello", 1, false)).is_err());
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "custom", "", 1, false)).is_err());
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "custom", "a\nb", 1, false)).is_err());
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "custom", &"x".repeat(GARBLE_MAX_PHRASE + 1), 1, false)).is_err());
+        // Not on yourself, not on a non-member.
+        let mod_pk = w.moderator.pk();
+        let self_target = EP::GarbleSet { target: mod_pk, mode: "bark".into(), phrase: "".into(), messages: 1, consensual: false };
+        assert!(act(&mut w.st, &mut w.moderator, self_target).is_err());
+        let stranger = Actor { id: Keypair::generate(), dev: Keypair::generate(), prev: w.alice.prev.clone() };
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&stranger, "bark", "", 1, false)).is_err());
+        // A valid custom phrase is accepted and carried in the mark.
+        act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "custom", "boop", 1, false)).expect("valid custom");
+        let h = say(&mut w.st, &mut w.bob);
+        assert_eq!(w.st.garble_mark(&h).unwrap().phrase, "boop");
+        // Nothing above left a rule behind that should not exist.
+        assert!(w.st.active_garble(&w.alice.pk()).is_none());
+    }
+
+    #[test]
+    fn who_may_end_a_moderation_garble() {
+        let mut w = garble_world();
+        act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "", 10, false)).unwrap();
+        // The target cannot clear a MODERATION rule on themselves.
+        let bob_pk = w.bob.pk();
+        let e = act(&mut w.st, &mut w.bob, EP::GarbleCleared { target: bob_pk }).unwrap_err();
+        assert!(e.to_string().contains("not allowed"), "{e}");
+        // A bystander with no authority cannot.
+        assert!(act(&mut w.st, &mut w.alice, EP::GarbleCleared { target: w.bob.pk() }).is_err());
+        // Clearing when nothing runs is refused rather than silently accepted.
+        assert!(act(&mut w.st, &mut w.moderator, EP::GarbleCleared { target: w.alice.pk() }).is_err());
+        // The owner (implicitly holds 'garble') can.
+        act(&mut w.st, &mut w.owner, EP::GarbleCleared { target: w.bob.pk() }).expect("owner may clear");
+        let h = say(&mut w.st, &mut w.bob);
+        assert!(w.st.garble_mark(&h).is_none());
+    }
+
+    #[test]
+    fn a_consensual_garble_needs_consent_stays_inside_it_and_is_labelled() {
+        let mut w = garble_world();
+        // No consent yet: the controller (who holds no capability) is refused.
+        let e = act(&mut w.st, &mut w.alice, garble_set(&w.bob, "mumble", "", 3, true)).unwrap_err();
+        assert!(e.to_string().contains("not consented"), "{e}");
+        // Bob consents, up to 5 messages, to Alice.
+        act(&mut w.st, &mut w.bob, EP::GarbleConsent { controller: w.alice.pk(), max_messages: 5 }).unwrap();
+        assert_eq!(w.st.garble_consent(&w.bob.pk(), &w.alice.pk()), 5);
+        // More than consented: refused. Someone else Bob never named: refused.
+        assert!(act(&mut w.st, &mut w.alice, garble_set(&w.bob, "mumble", "", 6, true)).is_err());
+        assert!(act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "mumble", "", 1, true)).is_err());
+        act(&mut w.st, &mut w.alice, garble_set(&w.bob, "mumble", "", 5, true)).expect("inside the consent");
+        let h = say(&mut w.st, &mut w.bob);
+        let mark = w.st.garble_mark(&h).unwrap();
+        assert!(!mark.moderation, "a consensual garble is not labelled moderation");
+        assert_eq!(mark.by, w.alice.pk());
+    }
+
+    #[test]
+    fn the_target_can_always_stop_a_consensual_garble_and_revoking_consent_ends_it() {
+        let mut w = garble_world();
+        act(&mut w.st, &mut w.bob, EP::GarbleConsent { controller: w.alice.pk(), max_messages: 50 }).unwrap();
+        act(&mut w.st, &mut w.alice, garble_set(&w.bob, "bark", "", 50, true)).unwrap();
+        // Kill switch: Bob ends it himself.
+        let bob_pk = w.bob.pk();
+        act(&mut w.st, &mut w.bob, EP::GarbleCleared { target: bob_pk }).expect("the target's kill switch");
+        assert!(w.st.active_garble(&w.bob.pk()).is_none());
+        // Start again, then revoke consent instead.
+        act(&mut w.st, &mut w.alice, garble_set(&w.bob, "bark", "", 50, true)).unwrap();
+        act(&mut w.st, &mut w.bob, EP::GarbleConsent { controller: w.alice.pk(), max_messages: 0 }).unwrap();
+        assert!(w.st.active_garble(&w.bob.pk()).is_none(), "revoking consent ends the running rule");
+        assert_eq!(w.st.garble_consent(&w.bob.pk(), &w.alice.pk()), 0);
+        assert!(act(&mut w.st, &mut w.alice, garble_set(&w.bob, "bark", "", 1, true)).is_err());
+    }
+
+    #[test]
+    fn revoking_consent_does_not_end_a_moderators_rule_and_consent_is_not_self_serve() {
+        let mut w = garble_world();
+        // Alice consents to Bob; Bob is not a moderator. Consent to yourself is refused.
+        let alice_pk = w.alice.pk();
+        assert!(act(&mut w.st, &mut w.alice, EP::GarbleConsent { controller: alice_pk.clone(), max_messages: 5 }).is_err());
+        assert!(act(&mut w.st, &mut w.alice, EP::GarbleConsent { controller: alice_pk, max_messages: GARBLE_CONSENT_MAX_MESSAGES + 1 }).is_err());
+        act(&mut w.st, &mut w.alice, EP::GarbleConsent { controller: w.bob.pk(), max_messages: 5 }).unwrap();
+        // A moderator garbles Alice for real; Alice then "revokes" consent to Bob.
+        act(&mut w.st, &mut w.moderator, garble_set(&w.alice, "bark", "", 10, false)).unwrap();
+        act(&mut w.st, &mut w.alice, EP::GarbleConsent { controller: w.bob.pk(), max_messages: 0 }).unwrap();
+        let running = w.st.active_garble(&w.alice.pk()).expect("the moderation rule survives");
+        assert!(running.moderation);
+    }
+
+    #[test]
+    fn a_newer_rule_replaces_the_older_one() {
+        let mut w = garble_world();
+        act(&mut w.st, &mut w.bob, EP::GarbleConsent { controller: w.alice.pk(), max_messages: 5 }).unwrap();
+        act(&mut w.st, &mut w.alice, garble_set(&w.bob, "mumble", "", 5, true)).unwrap();
+        act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "", 3, false)).unwrap();
+        let h = say(&mut w.st, &mut w.bob);
+        let mark = w.st.garble_mark(&h).unwrap();
+        assert_eq!((mark.mode.as_str(), mark.moderation), ("bark", true));
+    }
+
+    #[test]
+    fn leaving_or_being_banned_ends_every_garble_involving_the_member() {
+        let mut w = garble_world();
+        act(&mut w.st, &mut w.bob, EP::GarbleConsent { controller: w.alice.pk(), max_messages: 5 }).unwrap();
+        act(&mut w.st, &mut w.alice, garble_set(&w.bob, "bark", "", 5, true)).unwrap();
+        // The controller is banned: the consensual rule they were running ends too.
+        act(&mut w.st, &mut w.owner, EP::MemberBanned { member: w.alice.pk() }).unwrap();
+        assert!(w.st.active_garble(&w.bob.pk()).is_none());
+        assert_eq!(w.st.garble_consent(&w.bob.pk(), &w.alice.pk()), 0);
+        // A garbled member who is banned leaves nothing behind.
+        act(&mut w.st, &mut w.moderator, garble_set(&w.bob, "bark", "", 5, false)).unwrap();
+        act(&mut w.st, &mut w.owner, EP::MemberBanned { member: w.bob.pk() }).unwrap();
+        assert!(w.st.active_garble(&w.bob.pk()).is_none());
+    }
+
+    #[test]
+    fn sealed_messages_are_marked_too() {
+        let mut f = e2ee_fixture();
+        apply_bootstrap(&mut f);
+        add_and_confirm_alice(&mut f);
+        let owner_pk = f.owner.public_key();
+        let alice_pk = f.alice.public_key();
+        // Owner (implicitly holds 'garble') garbles Alice for one message.
+        let g = Ev::next(&f.owner_dev, owner_pk.clone(), f.sid.clone(), Some(&f.owner_prev),
+            f.owner_prev.core.lamport + 1, 600,
+            EP::GarbleSet { target: alice_pk.clone(), mode: "moo".into(), phrase: "".into(), messages: 1, consensual: false });
+        f.st.apply(&g).expect("owner garbles alice");
+        f.owner_prev = g;
+        let m1 = sealed_post(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, CH, 0, 2, vec![]);
+        f.st.apply(&m1).expect("alice's sealed post folds");
+        f.alice_prev = m1.clone();
+        assert_eq!(f.st.garble_mark(&m1.hash()).map(|m| m.mode.as_str()), Some("moo"));
+        let m2 = sealed_post(&f.alice_dev, &alice_pk, &f.sid, &f.alice_prev, CH, 0, 2, vec![]);
+        f.st.apply(&m2).expect("second sealed post folds");
+        assert!(f.st.garble_mark(&m2.hash()).is_none(), "the one-message rule is spent");
+    }
+
+    #[test]
+    fn existing_payload_bytes_are_untouched_by_the_garble_variants() {
+        // Appending variants must not shift an existing variant's encoding.
+        let before = rmp_serde::to_vec(&EP::DeviceRevoked { device: "d".into() }).unwrap();
+        let again = rmp_serde::to_vec(&EP::DeviceRevoked { device: "d".into() }).unwrap();
+        assert_eq!(before, again);
+        // ...and the new variants round-trip.
+        for p in [
+            EP::GarbleSet { target: Keypair::generate().public_key(), mode: "bark".into(), phrase: "".into(), messages: 3, consensual: false },
+            EP::GarbleCleared { target: Keypair::generate().public_key() },
+            EP::GarbleConsent { controller: Keypair::generate().public_key(), max_messages: 5 },
+        ] {
+            let bytes = rmp_serde::to_vec(&p).unwrap();
+            assert_eq!(rmp_serde::from_slice::<EP>(&bytes).unwrap(), p);
         }
     }
 }
