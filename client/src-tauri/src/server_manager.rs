@@ -82,9 +82,46 @@ impl ServerProcesses {
 
 /// Find an available UDP port starting from `start`.
 fn find_available_port(start: u16) -> Option<u16> {
-    (start..start + 100).find(|&port| {
-        std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok()
-    })
+    pick_port(None, start, port_is_free)
+}
+
+fn port_is_free(port: u16) -> bool {
+    std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok()
+}
+
+/// Choose a port: the one this server used last time if it is free (so a direct
+/// server keeps the same address across restarts and the people who joined it can
+/// still find it), otherwise the first free one from `start`.
+pub fn pick_port(preferred: Option<u16>, start: u16, is_free: impl Fn(u16) -> bool) -> Option<u16> {
+    if let Some(p) = preferred {
+        if p != 0 && is_free(p) {
+            return Some(p);
+        }
+    }
+    (start..start.saturating_add(100)).find(|&port| is_free(port))
+}
+
+/// PowerShell that stops every `farder-server*` process whose command line names
+/// `data_dir`. Windows has no `pgrep`; this is the equivalent. Pure so it can be
+/// tested on any machine.
+pub fn windows_reap_script(data_dir: &str) -> String {
+    let dir = data_dir.replace('\'', "''");
+    format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ $_.Name -like 'farder-server*' -and $_.CommandLine -and $_.CommandLine.IndexOf('{dir}', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Wait-Process -Id $_.ProcessId -Timeout 5 -ErrorAction SilentlyContinue }}"
+    )
+}
+
+/// Stop leftover servers for a data directory (Windows). Best-effort.
+#[cfg(windows)]
+pub fn reap_orphans_windows(data_dir: &str) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &windows_reap_script(data_dir)])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Resolve the data directory for a server. Creates it if needed.
@@ -201,8 +238,9 @@ pub fn spawn_server_with_data_dir(
     template: &str,
     data_dir: &str,
     relay_addr: Option<SocketAddr>,
+    preferred_port: Option<u16>,
 ) -> Result<(ManagedServer, Child), String> {
-    let port = find_available_port(4435)
+    let port = pick_port(preferred_port, 4435, port_is_free)
         .ok_or_else(|| "no available port found (tried 4435-4534)".to_string())?;
     let data_path = PathBuf::from(data_dir);
     let server_bin = find_server_binary()?;
@@ -245,6 +283,25 @@ mod tests {
         assert!(args.iter().any(|a| a == "203.0.113.42:4433"));
         assert!(args.iter().any(|a| a == "--data-dir"));
         assert!(!args.iter().any(|a| a == "--bind"), "relay mode must not bind a port");
+    }
+
+    #[test]
+    fn a_server_keeps_its_old_port_when_it_is_free() {
+        assert_eq!(pick_port(Some(4440), 4435, |_| true), Some(4440));
+        // Taken: fall back to the first free one from the start.
+        assert_eq!(pick_port(Some(4440), 4435, |p| p != 4440 && p != 4435), Some(4436));
+        // No preference, or a nonsense one, behaves as before.
+        assert_eq!(pick_port(None, 4435, |_| true), Some(4435));
+        assert_eq!(pick_port(Some(0), 4435, |_| true), Some(4435));
+        assert_eq!(pick_port(None, 4435, |_| false), None);
+    }
+
+    #[test]
+    fn the_windows_cleanup_script_names_the_folder_and_survives_quotes() {
+        let s = windows_reap_script(r"C:\Users\O'Brien\farder\srv");
+        assert!(s.contains(r"C:\Users\O''Brien\farder\srv"), "{s}");
+        assert!(s.contains("farder-server*"));
+        assert!(s.contains("OrdinalIgnoreCase"));
     }
 
     #[test]

@@ -2333,10 +2333,12 @@ No disk or network I/O.
 
 **What it does:** called at app startup. Reads `servers.json`, kills any orphan
 `farder-server` processes whose `--db` flag matches each local server's data
-directory (Unix only, via `pgrep -af`), respawns each local server, and
-updates `servers.json` with new ports (ports may differ on restart). Remote
-servers are passed through unchanged.
-**Side effects:** may `kill -9` orphan OS processes; spawns child processes;
+directory (`pgrep -af` on Unix; a PowerShell `Get-CimInstance` + `Stop-Process`
+on Windows, `server_manager::reap_orphans_windows`), respawns each local server,
+and updates `servers.json`. A direct server tries its previous port first
+(`server_manager::pick_port`), so its address stays the same across restarts;
+it only changes if that port is taken. Remote servers are passed through unchanged.
+**Side effects:** may kill orphan OS processes; spawns child processes;
 rewrites `servers.json`.
 **invoke name:** `"restart_local_servers"` → `restartLocalServers()`.
 

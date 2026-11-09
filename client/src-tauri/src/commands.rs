@@ -4671,7 +4671,7 @@ pub fn list_templates() -> Vec<serde_json::Value> {
 /// kill -9, OOM, crashes). Each orphan against the same SQLite DB is a
 /// concurrency hazard.
 ///
-/// Best-effort: uses `pgrep -af farder-server` on Unix; no-op on Windows.
+/// Best-effort: uses `pgrep -af farder-server` on Unix, PowerShell on Windows.
 fn reap_orphan_servers_for_data_dir(data_dir: &str) {
     #[cfg(unix)]
     {
@@ -4709,7 +4709,14 @@ fn reap_orphan_servers_for_data_dir(data_dir: &str) {
             eprintln!("[restart] Killed orphan farder-server pid {} for data dir {}", pid, data_dir);
         }
     }
-    let _ = data_dir; // silence unused-var on non-unix
+    // Windows has no pgrep: without this a server left running by the last session
+    // keeps its port, so the new one lands on the next port (a NEW address that
+    // everyone who joined the old one can no longer reach) and both share one
+    // database.
+    #[cfg(windows)]
+    crate::server_manager::reap_orphans_windows(data_dir);
+    #[cfg(not(any(unix, windows)))]
+    let _ = data_dir;
 }
 
 /// Restart any locally-managed servers from the saved server list.
@@ -4734,6 +4741,8 @@ pub fn restart_local_servers(
                 &local.template,
                 &local.data_dir,
                 relay_addr,
+                // Keep the address it had, so people who joined can still find it.
+                entry.id.strip_prefix("127.0.0.1:").and_then(|p| p.parse::<u16>().ok()),
             ) {
                 Ok((info, child)) => {
                     let new_id = if relay_addr.is_some() {
