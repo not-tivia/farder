@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import * as api from "../lib/tauri-bridge";
@@ -17,6 +17,9 @@ function badge(n: number): string {
 export default function BuddyList() {
   const [entries, setEntries] = useState<BuddyEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [waited, setWaited] = useState(0);
+  const entriesRef = useRef<BuddyEntry[] | null>(null);
+  entriesRef.current = entries;
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -33,8 +36,13 @@ export default function BuddyList() {
       } catch { /* keep the current look */ }
       setEntries(e.payload?.entries ?? []);
     }).then((u) => { if (cancelled) u(); else unlisten = u; });
-    void emit(BUDDY_READY_EVENT, {});
-    return () => { cancelled = true; unlisten?.(); };
+    // Ask for the list, and keep asking until it arrives (the main window may
+    // still be starting, or locked behind the PIN screen).
+    let got = false;
+    const ask = () => { if (!got && !cancelled) void emit(BUDDY_READY_EVENT, {}); };
+    ask();
+    const retry = window.setInterval(() => { if (entriesRef.current !== null) { got = true; window.clearInterval(retry); } else { setWaited((n) => n + 1); ask(); } }, 2000);
+    return () => { cancelled = true; unlisten?.(); window.clearInterval(retry); };
   }, []);
 
   function open(en: BuddyEntry) {
@@ -55,9 +63,15 @@ export default function BuddyList() {
         <button className="server-invite-btn" onClick={() => api.stripOpen(null, null).catch(() => {})} title="Open the Farder window">&#9632;</button>
       </div>
       <div className="channel-list" style={{ flex: 1, overflowY: "auto" }}>
-        {entries === null && <div className="channel-category">LOADING...</div>}
+        {entries === null && (
+          <div style={{ padding: 10, color: "var(--xp-text-normal)" }}>
+            {waited < 2
+              ? "Loading..."
+              : "Waiting for the main Farder window. Make sure Farder is open and unlocked."}
+          </div>
+        )}
         {entries !== null && entries.length === 0 && (
-          <div className="channel-category">NOTHING TO SHOW YET</div>
+          <div style={{ padding: 10, color: "var(--xp-text-normal)" }}>No conversations yet.</div>
         )}
         {people.length > 0 && <div className="channel-category">PEOPLE ({people.length})</div>}
         {people.map((p) => (

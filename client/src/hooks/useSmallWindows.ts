@@ -27,7 +27,12 @@ export function useSmallWindows(): void {
   const timer = useRef<number | null>(null);
 
   async function exists(label: string): Promise<boolean> {
-    try { return (await WebviewWindow.getByLabel(label)) !== null; } catch { return false; }
+    // If the lookup itself fails we cannot tell, so assume the window is there
+    // (sending to a closed one is harmless) rather than silently never sending.
+    try { return (await WebviewWindow.getByLabel(label)) !== null; } catch (e) {
+      console.warn("[buddy] could not look up window", label, e);
+      return true;
+    }
   }
 
   async function publish() {
@@ -39,7 +44,8 @@ export function useSmallWindows(): void {
       const json = JSON.stringify(bs);
       if (lastSent.current.get("buddy") !== json) {
         lastSent.current.set("buddy", json);
-        await emitTo("buddy", BUDDY_STATE_EVENT, bs).catch(() => {});
+        console.log("[buddy] sending the list:", bs.entries.length, "entries");
+        await emitTo("buddy", BUDDY_STATE_EVENT, bs).catch((e) => console.warn("[buddy] could not send the list:", e));
       }
     } else {
       lastSent.current.delete("buddy");
@@ -52,7 +58,7 @@ export function useSmallWindows(): void {
       if (lastSent.current.get(label) === json) continue;
       lastSent.current.set(label, json);
       // A conversation that no longer exists is sent as `null` so the window says so.
-      await emitTo(label, CHAT_STATE_EVENT, cs).catch(() => {});
+      await emitTo(label, CHAT_STATE_EVENT, cs).catch((e) => console.warn("[chat] could not send the conversation:", e));
     }
   }
 
@@ -68,7 +74,7 @@ export function useSmallWindows(): void {
     const un: (() => void)[] = [];
     let cancelled = false;
     const keep = (p: Promise<() => void>) => p.then((u) => { if (cancelled) u(); else un.push(u); });
-    keep(listen(BUDDY_READY_EVENT, () => { lastSent.current.delete("buddy"); schedule(); }));
+    keep(listen(BUDDY_READY_EVENT, () => { console.log("[buddy] list asked for its state"); lastSent.current.delete("buddy"); schedule(); }));
     keep(listen(CHAT_READY_EVENT, (e) => {
       const ref = parseChatRef(e.payload);
       if (!ref) return;

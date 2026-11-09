@@ -52,10 +52,13 @@ export default function ChatWindow() {
       } catch { /* keep the current look */ }
       setChat(e.payload ?? null);
     }).then((u) => { if (cancelled) u(); else unlisten = u; });
-    void emit(CHAT_READY_EVENT, { label: win.label, server_id: serverId, channel_id: channelId });
+    // Ask for the conversation, and keep asking until it arrives.
+    const ask = () => void emit(CHAT_READY_EVENT, { label: win.label, server_id: serverId, channel_id: channelId });
+    ask();
+    const retry = window.setInterval(() => { if (chatRef.current === undefined) ask(); else window.clearInterval(retry); }, 2000);
     const onFocus = () => markRead();
     window.addEventListener("focus", onFocus);
-    return () => { cancelled = true; unlisten?.(); window.removeEventListener("focus", onFocus); };
+    return () => { cancelled = true; unlisten?.(); window.clearInterval(retry); window.removeEventListener("focus", onFocus); };
   }, []);
 
   // Keep the newest message in view, and count what is on screen as read while
@@ -70,7 +73,7 @@ export default function ChatWindow() {
     <div className="mini-chat">
       <div className="mini-chat-head">{chat === undefined ? "..." : chat === null ? "Conversation not found" : chat.title}</div>
       <div className="mini-chat-log" ref={logRef}>
-        {chat === undefined && <div className="mini-chat-note">Loading...</div>}
+        {chat === undefined && <div className="mini-chat-note">Loading... (if this stays, make sure the main Farder window is open and unlocked)</div>}
         {chat === null && <div className="mini-chat-note">This conversation is not available any more. Open Farder and check you are still connected.</div>}
         {chat && chat.lines.length === 0 && <div className="mini-chat-note">No messages yet.</div>}
         {chat && chat.lines.map((l) => (
