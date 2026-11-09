@@ -12,7 +12,27 @@ import { getActiveTheme } from "./lib/tauri-bridge";
 import { bookMigrateLegacyFavorites } from "./lib/book/client";
 import { initAudioLimits } from "./lib/audioLimiter";
 
+/** The buddy list and chat windows: say so on screen if anything goes wrong, instead of staying blank. */
+function showSmallWindowDiagnostics() {
+  const q = new URLSearchParams(window.location.search);
+  if (q.get("buddy") !== "1" && q.get("chat") !== "1") return;
+  const root = document.getElementById("root");
+  if (root) { root.style.cssText = "padding:10px;font:13px sans-serif;color:#222;background:#fff;height:100vh;box-sizing:border-box;overflow:auto"; root.textContent = "Starting..."; }
+  const report = (what: unknown) => {
+    const r = document.getElementById("root");
+    if (!r) return;
+    const msg = what instanceof Error ? `${what.message}\n${what.stack ?? ""}` : String(what);
+    const pre = document.createElement("pre");
+    pre.style.cssText = "white-space:pre-wrap;color:#a00;font:11px monospace";
+    pre.textContent = "Something went wrong in this window:\n" + msg.slice(0, 1500);
+    r.appendChild(pre);
+  };
+  window.addEventListener("error", (e) => report(e.error ?? e.message));
+  window.addEventListener("unhandledrejection", (e) => report(e.reason));
+}
+
 async function bootstrap() {
+  showSmallWindowDiagnostics();
   // Detached screen-share preview window: render JUST the popout view (no
   // servers/voice/full app) so it only decodes the app-wide frame events.
   if (new URLSearchParams(window.location.search).get("popout") === "screenshare") {
@@ -76,7 +96,11 @@ async function bootstrap() {
     document.documentElement.style.setProperty("overflow", "hidden", "important");
     document.body.style.setProperty("margin", "0", "important");
     document.body.style.setProperty("overflow", "hidden", "important");
-    ReactDOM.createRoot(document.getElementById("root")!).render(kind.get("buddy") === "1" ? <BuddyList /> : <ChatWindow />);
+    // Drop the plain "Starting..." text and its box styling (see showSmallWindowDiagnostics).
+    const rootEl = document.getElementById("root")!;
+    rootEl.style.cssText = "";
+    rootEl.textContent = "";
+    ReactDOM.createRoot(rootEl).render(kind.get("buddy") === "1" ? <BuddyList /> : <ChatWindow />);
     return;
   }
 
