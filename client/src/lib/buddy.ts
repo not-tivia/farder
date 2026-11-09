@@ -190,7 +190,7 @@ export interface ChatRef { label: string; serverId: string; channelId: number }
 export function parseChatRef(p: unknown): ChatRef | null {
   const o = p as { label?: unknown; server_id?: unknown; channel_id?: unknown } | null;
   if (!o || !isChatLabel(o.label)) return null;
-  if (typeof o.server_id !== "string" || o.server_id.length === 0 || o.server_id.length > 128) return null;
+  if (typeof o.server_id !== "string" || o.server_id.length === 0 || o.server_id.length > 1024) return null;
   if (typeof o.channel_id !== "number" || !Number.isInteger(o.channel_id) || o.channel_id < 0) return null;
   return { label: o.label, serverId: o.server_id, channelId: o.channel_id };
 }

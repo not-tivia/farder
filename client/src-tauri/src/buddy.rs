@@ -110,7 +110,7 @@ pub async fn open_buddy_list(app: AppHandle) -> Result<(), String> {
 /// the conversation exists.
 #[tauri::command]
 pub async fn chat_open(app: AppHandle, server_id: String, channel_id: u64, title: String) -> Result<(), String> {
-    if server_id.is_empty() || server_id.len() > 128 {
+    if server_id.is_empty() || server_id.len() > 1024 {
         return Err("bad server id".into());
     }
     let label = chat_label(&server_id, channel_id);
@@ -165,7 +165,7 @@ mod tests {
     fn a_label_is_only_ever_safe_characters_whatever_the_server_id() {
         // The page checks labels with /^chat-[0-9a-f]{8}-\d{1,15}$/ (buddy.ts);
         // pin the shape so the two cannot drift apart.
-        for id in ["abc", "has spaces & symbols/../..", "日本語", &"x".repeat(128)] {
+        for id in ["abc", "has spaces & symbols/../..", "日本語", &"x".repeat(300)] {
             let l = chat_label(id, 123456789);
             let parts: Vec<&str> = l.split('-').collect();
             assert_eq!(parts.len(), 3, "{l}");

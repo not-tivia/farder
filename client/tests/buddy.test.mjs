@@ -107,10 +107,12 @@ test("attachments are named, not loaded", () => {
 test("requests from another window are checked", () => {
   const ok = { label: "chat-0badf00d-12", server_id: "s", channel_id: 12, last_id: 5 };
   assert.deepEqual(b.parseChatRef(ok), { label: "chat-0badf00d-12", serverId: "s", channelId: 12 });
+  // A relay server id is a long link (address + id + certificate fingerprint): it must pass.
+  assert.equal(b.parseChatRef({ ...ok, server_id: "farder://relay/45.61.136.29:4433/" + "a".repeat(32) + "/" + "b".repeat(64) }).channelId, 12);
   assert.equal(b.parseChatRead(ok).lastId, 5);
   for (const bad of [
     null, {}, { ...ok, label: "main" }, { ...ok, label: "chat-XYZ-1" }, { ...ok, label: "chat-0badf00d-" },
-    { ...ok, server_id: "" }, { ...ok, server_id: "x".repeat(129) }, { ...ok, channel_id: -1 }, { ...ok, channel_id: 1.5 }, { ...ok, channel_id: "1" },
+    { ...ok, server_id: "" }, { ...ok, server_id: "x".repeat(1025) }, { ...ok, channel_id: -1 }, { ...ok, channel_id: 1.5 }, { ...ok, channel_id: "1" },
   ]) assert.equal(b.parseChatRef(bad), null, JSON.stringify(bad));
   assert.equal(b.parseChatRead({ ...ok, last_id: -1 }), null);
   assert.equal(b.parseChatRead({ ...ok, last_id: "5" }), null);
