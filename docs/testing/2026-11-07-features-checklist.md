@@ -319,6 +319,32 @@ second identity post a message in a normal channel and a DM.
 
 ---
 
+## Part 10 - Small window layout
+
+Settings -> **Window layout** -> **Small window**.
+
+- [ ] The window **shrinks** to about 560 x 380 and the server column, channel
+      sidebar and member list disappear. A narrow list shows your server name at the
+      top, **DIRECT MESSAGES** (if any) and **CHANNELS**, with a **Full window**
+      button at the bottom.
+- [ ] Click a channel: it opens in the chat on the right. Click a person under
+      DIRECT MESSAGES: that DM opens in the same place.
+- [ ] A message in another conversation makes its row **bold / dotted** (unread).
+- [ ] Click the **server name**: a list of your servers appears; picking one switches
+      server (its channels and DMs load). **+ Add server** opens the add dialog.
+- [ ] The **gear** opens your Settings. Type and send a message: the box works.
+- [ ] You can drag the window as small as about **380 x 280** and not smaller. Look at
+      the chat header and the message box at that size: nothing important cut off.
+- [ ] Combine with **Message density -> Compact** and the **edge strip**: still fine.
+- [ ] Join a voice channel from the full window, switch to small: **Leave voice** is
+      there and works.
+- [ ] Click **Full window** (or choose Full window in Settings): the window grows
+      back (1200 x 800) and everything returns.
+- [ ] Quit and relaunch while in the small layout: it starts small.
+- [ ] Look in two or three themes: the list is readable and styled like the sidebar.
+
+---
+
 ## Leftovers from earlier work (still unseen)
 
 - [ ] **Plaintext delete stays deleted:** delete a message in a normal channel, quit

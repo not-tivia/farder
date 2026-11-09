@@ -1,5 +1,6 @@
 import React from "react";
 import { initDensity } from "./lib/density";
+import { initLayout } from "./lib/layoutWindow";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import ScreenSharePopout from "./components/ScreenSharePopout";
@@ -70,6 +71,8 @@ async function bootstrap() {
   void initAudioLimits();
   // Message density (roomy ... tiny): stylesheet + the saved choice.
   initDensity();
+  // Window layout (full / small window): stylesheet, saved choice, window size.
+  initLayout();
 
   // One-time migration of legacy ~/.farder/favorites.json into the new book.
   // No-op after the first successful run (server renames favorites.json → .bak).

@@ -7,6 +7,8 @@ import { MessageSearchOverlay } from "./MessageSearchOverlay";
 import MemberSidebar from "./MemberSidebar";
 import DmPanel from "./DmPanel";
 import ServerStrip from "./ServerStrip";
+import CompactList from "./CompactList";
+import { useLayout } from "../hooks/useLayout";
 import KickedBannedDialog from "./KickedBannedDialog";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { useVoice } from "../hooks/useVoice";
@@ -30,6 +32,7 @@ export default function AppShell() {
   // between the sidebar's Join button and the main-area screen-share stage, and
   // avoids duplicate voice event listeners (which would double-decode video).
   const voice = useVoice();
+  const layout = useLayout();
 
   const [searchOpen, setSearchOpen] = useState(false);
   // Counter that increments every time something tries to open the overlay.
@@ -174,6 +177,7 @@ export default function AppShell() {
       <div className="main-layout" style={{ position: "relative" }}>
         <ServerStrip />
         <ChannelSidebar voice={voice} />
+        {layout === "small" && <CompactList voice={voice} />}
         <ChatPanel />
         <MemberSidebar />
         <ScreenShareStage voice={voice} />

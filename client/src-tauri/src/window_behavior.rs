@@ -150,6 +150,57 @@ fn tell_once_it_is_still_running(app: &AppHandle) {
     }
 }
 
+/// Window sizes for the two layouts (logical pixels). The small layout is the
+/// Skype-style single window: a conversation list and one chat, nothing else.
+pub const FULL_MIN: (f64, f64) = (900.0, 560.0);
+pub const FULL_DEFAULT: (f64, f64) = (1200.0, 800.0);
+pub const SMALL_MIN: (f64, f64) = (380.0, 280.0);
+pub const SMALL_DEFAULT: (f64, f64) = (560.0, 380.0);
+
+#[derive(Debug, PartialEq)]
+pub struct LayoutPlan {
+    /// The smallest the window may be dragged to.
+    pub min: (f64, f64),
+    /// A new size to set, or `None` to leave the window as it is.
+    pub size: Option<(f64, f64)>,
+}
+
+/// What switching layout does to the window, given its current logical size.
+/// Pure so it can be tested. Going small shrinks a big window but never touches
+/// one the person already made small; going full grows a window that is now below
+/// the full layout's minimum.
+pub fn plan_layout(small: bool, cur_w: f64, cur_h: f64) -> LayoutPlan {
+    if small {
+        let too_big = !(cur_w <= 700.0 && cur_h <= 520.0);
+        LayoutPlan { min: SMALL_MIN, size: if too_big { Some(SMALL_DEFAULT) } else { None } }
+    } else {
+        let too_small = cur_w < FULL_MIN.0 || cur_h < FULL_MIN.1;
+        LayoutPlan { min: FULL_MIN, size: if too_small { Some(FULL_DEFAULT) } else { None } }
+    }
+}
+
+/// Switch the main window between the full and the small layout: change its
+/// minimum size and, if needed, its size. The page changes what it draws.
+#[tauri::command]
+pub fn set_window_layout(app: AppHandle, small: bool) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    // A maximised window ignores size changes; come out of it first.
+    if main.is_maximized().unwrap_or(false) {
+        let _ = main.unmaximize();
+    }
+    let scale = main.scale_factor().map_err(|e| e.to_string())?;
+    let phys = main.inner_size().map_err(|e| e.to_string())?;
+    let plan = plan_layout(small, phys.width as f64 / scale, phys.height as f64 / scale);
+    // Minimum first: lowering it must come before shrinking, raising it before growing.
+    main.set_min_size(Some(tauri::LogicalSize::new(plan.min.0, plan.min.1))).map_err(|e| e.to_string())?;
+    if let Some((w, h)) = plan.size {
+        main.set_size(tauri::LogicalSize::new(w, h)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +255,33 @@ mod tests {
         assert!(!should_start_hidden(false, &none, true), "by default the window shows");
         assert!(!should_start_hidden(true, &flag, false), "no tray: the window must show");
         assert!(!should_start_hidden(false, &["--minimizedx".to_string()], true), "the flag is matched exactly");
+    }
+
+    #[test]
+    fn going_small_shrinks_a_big_window_but_leaves_a_small_one() {
+        let p = plan_layout(true, 1200.0, 800.0);
+        assert_eq!((p.min, p.size), (SMALL_MIN, Some(SMALL_DEFAULT)));
+        // Already small (the person dragged it): do not touch the size.
+        assert_eq!(plan_layout(true, 480.0, 400.0).size, None);
+        // Wide but short, or narrow but tall: still too big on one side.
+        assert_eq!(plan_layout(true, 1200.0, 300.0).size, Some(SMALL_DEFAULT));
+        assert_eq!(plan_layout(true, 400.0, 900.0).size, Some(SMALL_DEFAULT));
+    }
+
+    #[test]
+    fn going_full_grows_a_window_that_is_below_the_full_minimum() {
+        let p = plan_layout(false, 560.0, 380.0);
+        assert_eq!((p.min, p.size), (FULL_MIN, Some(FULL_DEFAULT)));
+        assert_eq!(plan_layout(false, 1300.0, 900.0).size, None);
+        // One dimension short is enough to need growing.
+        assert_eq!(plan_layout(false, 1300.0, 500.0).size, Some(FULL_DEFAULT));
+    }
+
+    #[test]
+    fn the_defaults_respect_their_own_minimums() {
+        assert!(SMALL_DEFAULT.0 >= SMALL_MIN.0 && SMALL_DEFAULT.1 >= SMALL_MIN.1);
+        assert!(FULL_DEFAULT.0 >= FULL_MIN.0 && FULL_DEFAULT.1 >= FULL_MIN.1);
+        // Matches tauri.conf.json's minWidth/minHeight for the full layout.
+        assert_eq!(FULL_MIN, (900.0, 560.0));
     }
 }

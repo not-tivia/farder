@@ -326,6 +326,7 @@ fn main() {
             commands::stop_recording,
             commands::play_audio_file,
             commands::show_notification,
+            window_behavior::set_window_layout,
             edge_strip::get_edge_strip,
             edge_strip::set_edge_strip,
             edge_strip::strip_layout,

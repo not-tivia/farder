@@ -3,7 +3,7 @@ import { useApp, useActiveServer, useActiveServerId } from "../context/ServerCon
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
 import type { ChannelInfo, CategoryInfo, MemberInfo } from "../lib/types";
-import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
+import { publicKeyToString, isE2eeChannel } from "../lib/types";
 
 import InviteDialog from "./InviteDialog";
 import ServerSettingsDialog from "./ServerSettingsDialog";
@@ -14,7 +14,8 @@ import SettingsModal from "./settings/SettingsModal";
 import { ConfirmDialog } from "./ConfirmDialog";
 import VoiceControlBar from "./VoiceControlBar";
 import VoiceParticipantContextMenu from "./VoiceParticipantContextMenu";
-import { getLastChannel, setLastChannel } from "../lib/lastChannel";
+import { getLastChannel } from "../lib/lastChannel";
+import { selectChannel } from "../lib/selectChannel";
 import type { UseVoice } from "../hooks/useVoice";
 
 function UserFooter({ members, roles }: { members: MemberInfo[]; roles: import("../lib/types").RoleInfo[] }) {
@@ -369,21 +370,7 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
 
   async function handleSelectChannel(channel: ChannelInfo) {
     if (!serverId) return;
-    dispatch({ type: "SELECT_CHANNEL", serverId, payload: channel.id });
-    setLastChannel(serverId, channel.id);
-    try {
-      const msgs = isE2eeChannel(channel)
-        ? flattenMessageInfoV2(await api.fetchHistoryV2(serverId, channel.id))
-        : await api.fetchHistory(serverId, channel.id);
-      const reversed = msgs.reverse();
-      dispatch({ type: "SET_MESSAGES", serverId, payload: { channelId: channel.id, messages: reversed } });
-      if (reversed.length > 0) {
-        const latestId = Math.max(...reversed.map((m) => m.id));
-        dispatch({ type: "MARK_READ", serverId, payload: { channelId: channel.id, lastMessageId: latestId } });
-      }
-    } catch (e) {
-      console.error("[channel] failed to load history:", e);
-    }
+    await selectChannel(dispatch, serverId, channel);
   }
 
   async function handleMoveChannel(channelId: number, targetCategoryId: number | null, targetPosition: number) {

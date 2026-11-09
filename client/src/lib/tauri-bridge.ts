@@ -753,6 +753,11 @@ export async function notifyActivate(): Promise<void> {
   return invoke<void>("notify_activate");
 }
 
+/** Switch the main window between the full layout and the small single-window layout (changes its minimum size and, if needed, its size). */
+export async function setWindowLayout(small: boolean): Promise<void> {
+  return invoke<void>("set_window_layout", { small });
+}
+
 /** The edge strip's saved settings (see `edge_strip.rs`). */
 export interface EdgeStripSettings {
   enabled: boolean;

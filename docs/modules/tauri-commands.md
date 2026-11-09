@@ -1926,6 +1926,20 @@ focuses the `main` window.
 
 ---
 
+### `set_window_layout(small) -> Result<(), String>`
+
+**What it does:** switches the `main` window between the full layout and the
+small single-window layout (a conversation list and one chat). It changes the
+window's MINIMUM size (full 900 x 560, small 380 x 280) and, only if needed, its
+size (going small shrinks a window bigger than 700 x 520 to 560 x 380; going full
+grows one below the full minimum to 1200 x 800; a window the person already made
+small is left alone). A maximised window is restored first. The page decides what
+to draw (`lib/layout.ts`, `CompactList.tsx`). The planning is the pure,
+unit-tested `window_behavior::plan_layout`.
+**invoke name:** `"set_window_layout"` -> `setWindowLayout()`. See `small-window.md`.
+
+---
+
 ### `get_edge_strip() -> StripSettings` / `set_edge_strip(settings) -> Result<StripSettings, String>`
 
 **What it does:** the edge strip's saved settings (`enabled`, `dock` top/bottom,
