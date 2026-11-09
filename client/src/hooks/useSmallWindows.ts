@@ -3,6 +3,8 @@ import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useApp } from "../context/ServerContext";
 import { getOwnPk } from "./useServerEvents";
+import * as api from "../lib/tauri-bridge";
+import { flattenMessageInfoV2, isE2eeChannel, publicKeyToString } from "../lib/types";
 import {
   BUDDY_READY_EVENT, BUDDY_STATE_EVENT, CHAT_READ_EVENT, CHAT_READY_EVENT, CHAT_STATE_EVENT,
   buildBuddyState, buildChatState, parseChatRead, parseChatRef,
@@ -62,6 +64,35 @@ export function useSmallWindows(): void {
     }
   }
 
+  /** A conversation nobody opened in the main window has no messages loaded yet:
+   *  fetch them the way the main window would, so the small window is not empty. */
+  async function loadHistory(ref: ChatRef) {
+    const server = stateRef.current.servers[ref.serverId];
+    if (!server || server.messages[ref.channelId]) return;
+    const dm = server.dms.find((d) => d.channel.id === ref.channelId);
+    const channel = server.channels.find((c) => c.id === ref.channelId);
+    if (!dm && !channel) return;
+    try {
+      let msgs;
+      if (dm) {
+        const peer = publicKeyToString(dm.participant.public_key);
+        const raw = await api.fetchHistory(ref.serverId, ref.channelId);
+        msgs = await Promise.all(raw.map(async (m) => {
+          try { return { ...m, content: await api.dmDecrypt(peer, m.content) }; } catch { return m; }
+        }));
+      } else if (channel && isE2eeChannel(channel)) {
+        msgs = flattenMessageInfoV2(await api.fetchHistoryV2(ref.serverId, ref.channelId));
+      } else {
+        msgs = await api.fetchHistory(ref.serverId, ref.channelId);
+      }
+      // Someone may have loaded it while we waited; do not overwrite that.
+      if (stateRef.current.servers[ref.serverId]?.messages[ref.channelId]) return;
+      dispatch({ type: "SET_MESSAGES", serverId: ref.serverId, payload: { channelId: ref.channelId, messages: msgs.reverse() } });
+    } catch (e) {
+      console.warn("[chat] could not load the history for", ref.label, e);
+    }
+  }
+
   function schedule() {
     if (timer.current !== null) return;
     timer.current = window.setTimeout(() => { timer.current = null; void publish(); }, 200);
@@ -79,6 +110,7 @@ export function useSmallWindows(): void {
       const ref = parseChatRef(e.payload);
       if (!ref) return;
       chats.current.set(ref.label, ref);
+      void loadHistory(ref);
       lastSent.current.delete(ref.label);
       schedule();
     }));
