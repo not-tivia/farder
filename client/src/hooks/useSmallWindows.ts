@@ -91,7 +91,14 @@ export function useSmallWindows(): void {
       if (r.lastId <= (server.readState[r.channelId] ?? 0)) return;
       dispatch({ type: "MARK_READ", serverId: r.serverId, payload: { channelId: r.channelId, lastMessageId: r.lastId } });
     }));
-    return () => { cancelled = true; un.forEach((u) => u()); if (timer.current !== null) window.clearTimeout(timer.current); };
+    return () => {
+      cancelled = true;
+      un.forEach((u) => u());
+      // Clear AND forget the timer: React (dev) mounts, unmounts and remounts this
+      // effect once, and a cancelled timer still marked pending made `schedule`
+      // return early forever, so nothing was ever sent to the small windows.
+      if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null; }
+    };
   }, []);
 
 }
