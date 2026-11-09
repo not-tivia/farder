@@ -98,9 +98,10 @@ pub fn set_buddy_settings(settings: BuddySettings) -> Result<BuddySettings, Stri
     Ok(settings)
 }
 
-/// Open (or bring forward) the buddy list.
+/// Open (or bring forward) the buddy list. (async on purpose: on Windows a window
+/// built inside a synchronous command can hang and stay blank white.)
 #[tauri::command]
-pub fn open_buddy_list(app: AppHandle) -> Result<(), String> {
+pub async fn open_buddy_list(app: AppHandle) -> Result<(), String> {
     open_buddy_window(&app)
 }
 
@@ -108,7 +109,7 @@ pub fn open_buddy_list(app: AppHandle) -> Result<(), String> {
 /// names the window; what it shows comes from the main window, which checks that
 /// the conversation exists.
 #[tauri::command]
-pub fn chat_open(app: AppHandle, server_id: String, channel_id: u64, title: String) -> Result<(), String> {
+pub async fn chat_open(app: AppHandle, server_id: String, channel_id: u64, title: String) -> Result<(), String> {
     if server_id.is_empty() || server_id.len() > 128 {
         return Err("bad server id".into());
     }
