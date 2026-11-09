@@ -228,6 +228,15 @@ export function useServerEvents(): void {
       else unlisten.push(u);
     };
 
+    // A message for a server that is not the one on screen is normally only counted.
+    // If that conversation's history is already loaded (a buddy-list chat window
+    // opened it), keep it current too, or that window would never see new lines.
+    const keepLoaded = (serverId: string, message: MessageInfo) => {
+      if (stateRef.current.servers[serverId]?.messages[message.channel_id]) {
+        dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
+      }
+    };
+
     listen("server:new_message", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
@@ -250,6 +259,7 @@ export function useServerEvents(): void {
               if (appIsInBackground()) notifyIfWanted(serverId, decryptedMsg, plaintext);
             } else {
               dispatch({ type: "INCREMENT_UNREAD", serverId });
+              keepLoaded(serverId, decryptedMsg);
               notifyIfWanted(serverId, decryptedMsg, plaintext);
             }
           })
@@ -259,6 +269,7 @@ export function useServerEvents(): void {
               dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
             } else {
               dispatch({ type: "INCREMENT_UNREAD", serverId });
+              keepLoaded(serverId, message);
             }
           });
         return;
@@ -269,6 +280,7 @@ export function useServerEvents(): void {
         if (appIsInBackground()) notifyIfWanted(serverId, message, message.content);
       } else {
         dispatch({ type: "INCREMENT_UNREAD", serverId });
+        keepLoaded(serverId, message);
         notifyIfWanted(serverId, message, message.content);
       }
     }).then(safePush);
