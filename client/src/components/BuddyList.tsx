@@ -18,6 +18,7 @@ export default function BuddyList() {
   const [entries, setEntries] = useState<BuddyEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [waited, setWaited] = useState(0);
+  const [status, setStatus] = useState<string | null>(null);
   const entriesRef = useRef<BuddyEntry[] | null>(null);
   entriesRef.current = entries;
 
@@ -48,7 +49,9 @@ export default function BuddyList() {
   function open(en: BuddyEntry) {
     setError(null);
     const title = en.kind === "person" ? en.label : `#${en.label}`;
-    api.chatOpen(en.server_id, en.channel_id, title).catch((e) => setError(String(e)));
+    setStatus(`Opening ${title}...`);
+    window.setTimeout(() => setStatus(null), 2500);
+    api.chatOpen(en.server_id, en.channel_id, title).catch((e) => { setStatus(null); setError(`Could not open the chat window: ${e}`); });
   }
 
   const people = (entries ?? []).filter((e) => e.kind === "person");
@@ -86,6 +89,7 @@ export default function BuddyList() {
           </div>
         ))}
       </div>
+      {status && <div style={{ padding: 6, color: "var(--xp-text-normal)" }}>{status}</div>}
       {error && <div className="error-text" style={{ padding: 6 }}>{error}</div>}
     </div>
   );
@@ -98,8 +102,8 @@ function BuddyRow({ entry, onOpen }: { entry: BuddyEntry; onOpen: (e: BuddyEntry
       className={`channel-item${person ? " dm-item" : ""}${entry.unread > 0 ? " unread" : ""}`}
       role="button"
       tabIndex={0}
-      title="Double-click to open a chat window"
-      onDoubleClick={() => onOpen(entry)}
+      title="Click to open a chat window"
+      onClick={() => onOpen(entry)}
       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onOpen(entry); } }}
     >
       {person

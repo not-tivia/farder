@@ -18,14 +18,17 @@ function showSmallWindowDiagnostics() {
   if (q.get("buddy") !== "1" && q.get("chat") !== "1") return;
   const root = document.getElementById("root");
   if (root) { root.style.cssText = "padding:10px;font:13px sans-serif;color:#222;background:#fff;height:100vh;box-sizing:border-box;overflow:auto"; root.textContent = "Starting..."; }
+  // Appended to <body>, not #root: React clears its own container when it gives up.
   const report = (what: unknown) => {
-    const r = document.getElementById("root");
-    if (!r) return;
     const msg = what instanceof Error ? `${what.message}\n${what.stack ?? ""}` : String(what);
-    const pre = document.createElement("pre");
-    pre.style.cssText = "white-space:pre-wrap;color:#a00;font:11px monospace";
-    pre.textContent = "Something went wrong in this window:\n" + msg.slice(0, 1500);
-    r.appendChild(pre);
+    let box = document.getElementById("small-window-error");
+    if (!box) {
+      box = document.createElement("pre");
+      box.id = "small-window-error";
+      box.style.cssText = "position:fixed;left:0;right:0;bottom:0;max-height:70vh;overflow:auto;margin:0;padding:8px;white-space:pre-wrap;background:#fff;color:#a00;font:11px monospace;z-index:99999";
+      document.body.appendChild(box);
+    }
+    box.textContent += "Something went wrong in this window:\n" + msg.slice(0, 1500) + "\n\n";
   };
   window.addEventListener("error", (e) => report(e.error ?? e.message));
   window.addEventListener("unhandledrejection", (e) => report(e.reason));

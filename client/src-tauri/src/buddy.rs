@@ -80,6 +80,7 @@ pub fn open_buddy_window(app: &AppHandle) -> Result<(), String> {
         .inner_size(BUDDY_W, BUDDY_H)
         .min_inner_size(190.0, 220.0)
         .resizable(true)
+        .on_page_load(|w, p| eprintln!("[buddy] {} page {:?}: {}", w.label(), p.event(), p.url()))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -123,11 +124,13 @@ pub fn chat_open(app: AppHandle, server_id: String, channel_id: u64, title: Stri
         urlencode(&server_id),
         channel_id
     );
+    eprintln!("[chat] opening {label} at {url}");
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(clean_title(&title))
         .inner_size(CHAT_W, CHAT_H)
         .min_inner_size(240.0, 200.0)
         .resizable(true)
+        .on_page_load(|w, p| eprintln!("[chat] {} page {:?}: {}", w.label(), p.event(), p.url()))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
