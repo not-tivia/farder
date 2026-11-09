@@ -2,7 +2,7 @@
 
 **What it does:** MSN-Messenger style. An opt-in **buddy list** window lists your
 people (direct messages, from every connected server, latest writer first) and the
-text channels of each server, with an unread number beside each. **Double-clicking**
+text channels of each server, with an unread number beside each. **Clicking**
 an entry opens a small **chat window** for that conversation: the 60 newest messages
 and a one-line box to reply. One window per conversation; opening it again brings
 the existing one forward. Several can be open with the main window closed.

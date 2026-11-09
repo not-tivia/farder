@@ -3697,3 +3697,6 @@ body {
 .mini-chat-note { color: var(--xp-text-muted); padding: 2px 0; }
 .mini-chat-error { color: var(--xp-e2ee-error); }
 .buddy-list .channel-item.unread::after { display: none; }
+
+/* chat window: pin to the window edges so the reply box is never pushed out of view */
+.mini-chat { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: auto; height: auto; overflow: hidden; }

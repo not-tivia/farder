@@ -4,7 +4,7 @@ import type { BuddySettings as Buddy } from "../../lib/tauri-bridge";
 
 /**
  * The buddy list: a narrow list of your people and channels in its own small
- * window, like MSN Messenger. Double-click an entry to open a small chat window
+ * window, like MSN Messenger. Click an entry to open a small chat window
  * for that conversation, one window each.
  */
 export default function BuddySettings() {
@@ -29,7 +29,7 @@ export default function BuddySettings() {
             <div className="connect-section">
                 <div className="connect-section-title">Your people and channels in a small window of their own</div>
                 <div style={{ fontSize: 11, color: "var(--xp-text-muted)", marginBottom: 8 }}>
-                    Double-click a name to open a small chat window for it. You can have several open at once
+                    Click a name to open a small chat window for it. You can have several open at once
                     and leave the main window closed. Unread messages show as a number beside the name.
                     Encrypted channels can be read there but not answered; use the Farder window for those.
                 </div>
