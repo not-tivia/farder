@@ -55,6 +55,7 @@ mod screen_audio_wasapi;
 mod audio_limit;
 mod autostart;
 mod edge_strip;
+mod buddy;
 mod notify_popup;
 mod screenshare;
 mod video_encoder;
@@ -161,6 +162,12 @@ fn main() {
             if edge_strip::load().enabled {
                 if let Err(e) = edge_strip::ensure_window(&app.handle()) {
                     eprintln!("[strip] could not create the strip window: {e}");
+                }
+            }
+            // The buddy list, when the person wants it open at start.
+            if buddy::load().open_at_start {
+                if let Err(e) = buddy::open_buddy_window(&app.handle()) {
+                    eprintln!("[buddy] could not open the buddy list: {e}");
                 }
             }
             let tray_ok = match tray::setup_tray(&app.handle()) {
@@ -332,6 +339,10 @@ fn main() {
             edge_strip::strip_layout,
             edge_strip::strip_focus,
             edge_strip::strip_open,
+            buddy::get_buddy_settings,
+            buddy::set_buddy_settings,
+            buddy::open_buddy_list,
+            buddy::chat_open,
             notify_popup::notify_layout,
             notify_popup::notify_activate,
             notify_popup::notify_focus,

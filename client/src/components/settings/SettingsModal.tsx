@@ -3,6 +3,7 @@ import AppearanceSettings from "../AppearanceSettings";
 import DensitySettings from "./DensitySettings";
 import LayoutSettings from "./LayoutSettings";
 import EdgeStripSettings from "./EdgeStripSettings";
+import BuddySettings from "./BuddySettings";
 import GifSearchSettings from "../GifSearchSettings";
 import { TranslationSettingsTab } from "../TranslationSettingsTab";
 import VoiceSettings from "../VoiceSettings";
@@ -20,13 +21,14 @@ interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "layout" | "density" | "strip" | "gif" | "translation" | "voice" | "notifications" | "garble" | "autoplay" | "sound" | "startup" | "privacy" | "hosted" | "alerts" | "reminders";
+type SectionId = "appearance" | "layout" | "density" | "strip" | "buddy" | "gif" | "translation" | "voice" | "notifications" | "garble" | "autoplay" | "sound" | "startup" | "privacy" | "hosted" | "alerts" | "reminders";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
   { id: "layout", label: "Window layout" },
   { id: "density", label: "Message density" },
   { id: "strip", label: "Edge strip" },
+  { id: "buddy", label: "Buddy list" },
   { id: "gif", label: "GIF Search" },
   { id: "translation", label: "Translation" },
   { id: "voice", label: "Voice" },
@@ -82,6 +84,7 @@ export default function SettingsModal({ onClose }: Props) {
             {active === "layout" && <LayoutSettings />}
             {active === "density" && <DensitySettings />}
             {active === "strip" && <EdgeStripSettings />}
+            {active === "buddy" && <BuddySettings />}
             {active === "gif" && <GifSearchSettings />}
             {active === "translation" && <TranslationSettingsTab />}
             {active === "voice" && <VoiceSettings />}

@@ -345,6 +345,34 @@ Settings -> **Window layout** -> **Small window**.
 
 ---
 
+## Part 11 - Buddy list and chat windows
+
+Settings -> **Buddy list** -> **Open the buddy list**.
+
+- [ ] A small window (about 250 x 480) opens with a normal title bar. It lists
+      **PEOPLE** (your direct messages) and then your channels under each server's name.
+- [ ] A message from someone makes their row **bold with a number** (not a double dot).
+- [ ] **Double-click** a person: a small chat window opens, titled with their name, showing
+      the recent messages. Double-click the same person again: the SAME window comes forward
+      (no second one). Double-click a channel: a second window opens.
+- [ ] Type a line in a chat window and press **Enter**: it sends, the box clears, and the
+      message appears in the window and in the main Farder window. Send a second one right
+      after (the box must not stay locked).
+- [ ] A message arriving while a chat window is open appears in it within a second.
+- [ ] While a chat window is in front, its unread number in the buddy list goes away.
+- [ ] A DM you send from a chat window is end-to-end encrypted like normal (check the other
+      identity gets it).
+- [ ] An **encrypted channel** opens read-only: the box is greyed out and says to reply from
+      the Farder window.
+- [ ] Switch theme in Settings: both windows follow the next time something arrives.
+- [ ] Tick **Open the buddy list when Farder starts**, quit and relaunch: it opens by itself.
+- [ ] Close the buddy list and the chat windows: Farder keeps working normally. Reopen
+      the list from Settings: it fills in again.
+- [ ] Works together with the **small window layout** and the **edge strip**.
+- [ ] Look at both windows in two or three themes: styled, readable, nothing raw.
+
+---
+
 ## Leftovers from earlier work (still unseen)
 
 - [ ] **Plaintext delete stays deleted:** delete a message in a normal channel, quit
@@ -362,6 +390,8 @@ Settings -> **Window layout** -> **Small window**.
 - **Start with Windows** only works in an installed build, not `tauri dev`.
 - **YouTube/Spotify** iframes can't be volume-limited or autoplayed.
 - **Encrypted channels** raise no pop-ups, so there is nothing to reply to from them.
+- Chat windows show **text only**: images, files and reactions appear as `[file: name]`
+  or not at all. Open the Farder window for those.
 - **Edits** to a garbled message are not re-garbled.
 - Only the **owner** has the Powers screen; a delegated holder can use their power but
   can't hand it on from a screen.

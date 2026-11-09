@@ -6,6 +6,8 @@ import App from "./App";
 import ScreenSharePopout from "./components/ScreenSharePopout";
 import NotifyPopup from "./components/NotifyPopup";
 import EdgeStrip from "./components/EdgeStrip";
+import BuddyList from "./components/BuddyList";
+import ChatWindow from "./components/ChatWindow";
 import { getActiveTheme } from "./lib/tauri-bridge";
 import { bookMigrateLegacyFavorites } from "./lib/book/client";
 import { initAudioLimits } from "./lib/audioLimiter";
@@ -64,6 +66,17 @@ async function bootstrap() {
     document.body.style.setProperty("margin", "0", "important");
     document.body.style.setProperty("overflow", "hidden", "important");
     ReactDOM.createRoot(document.getElementById("root")!).render(<EdgeStrip />);
+    return;
+  }
+
+  // The buddy list and its chat windows (buddy.rs): small windows that only draw
+  // what the main window pushes to them.
+  const kind = new URLSearchParams(window.location.search);
+  if (kind.get("buddy") === "1" || kind.get("chat") === "1") {
+    document.documentElement.style.setProperty("overflow", "hidden", "important");
+    document.body.style.setProperty("margin", "0", "important");
+    document.body.style.setProperty("overflow", "hidden", "important");
+    ReactDOM.createRoot(document.getElementById("root")!).render(kind.get("buddy") === "1" ? <BuddyList /> : <ChatWindow />);
     return;
   }
 

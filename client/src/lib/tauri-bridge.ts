@@ -791,6 +791,29 @@ export async function stripOpen(serverId: string | null, channelId: number | nul
   return invoke<void>("strip_open", { serverId, channelId });
 }
 
+/** The buddy list's saved settings (see `buddy.rs`). */
+export interface BuddySettings {
+  open_at_start: boolean;
+}
+
+export async function getBuddySettings(): Promise<BuddySettings> {
+  return invoke<BuddySettings>("get_buddy_settings");
+}
+
+export async function setBuddySettings(settings: BuddySettings): Promise<BuddySettings> {
+  return invoke<BuddySettings>("set_buddy_settings", { settings });
+}
+
+/** Open the buddy list window, or bring it forward if it is already open. */
+export async function openBuddyList(): Promise<void> {
+  return invoke<void>("open_buddy_list");
+}
+
+/** Open (or bring forward) the small chat window for one conversation. `title` only names the window. */
+export async function chatOpen(serverId: string, channelId: number, title: string): Promise<void> {
+  return invoke<void>("chat_open", { serverId, channelId, title });
+}
+
 export interface NotificationPrefs {
   dmNotifications: "all" | "specific" | "none";
   dmAllowedUsers: string[];

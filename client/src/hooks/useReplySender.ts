@@ -55,5 +55,8 @@ export function useReplySender(onSent: () => void) {
     await emit(REPLY_EVENT, req);
   }, [state]);
 
-  return { state, error, send };
+  /** Back to idle, for a window that stays open after a send (the chat window). */
+  const reset = useCallback(() => { setState("idle"); setError(null); }, []);
+
+  return { state, error, send, reset };
 }

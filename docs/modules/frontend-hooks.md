@@ -117,7 +117,8 @@ of key to filename.
 | `useVoice` | `()` | The whole voice UI surface: join/leave, mute/deafen, per-peer speaking and volume, screenshare. Wraps the `voice_*` command family and the `voice://` event stream. |
 | `useLayout` | `()` | The window layout (`full` / `small`), re-read when `farder:layout-changed` fires. Stored in `localStorage` only; see `small-window.md`. |
 | `useDensity` | `()` | The message density (`roomy`/`normal`/`compact`/`irc`/`tiny`), re-read when `farder:density-changed` fires. Stored in `localStorage` only; see `density.md`. |
-| `useReplySender` | `(onSent)` | Sends a one-line reply from a small window (pop-up or edge strip) by ASKING the main window (`notify:reply`), then waits for `notify:reply-result`. Returns `{ state, error, send(target, text) }`. |
+| `useSmallWindows` | `()` | Main window only (mounted in `App.tsx`). Feeds the buddy list and chat windows: pushes `buddy:state` and a per-window `chat:state` (via `emitTo`) whenever app state changes, but only to windows that are open. Handles `buddy:ready`, `chat:ready` and `chat:read`, checking each against real servers/channels first. See `buddy-list.md`. |
+| `useReplySender` | `(onSent)` | Sends a one-line reply from a small window (pop-up or edge strip) by ASKING the main window (`notify:reply`), then waits for `notify:reply-result`. Returns `{ state, error, send(target, text), reset }` (`reset` returns it to idle, for the chat window which stays open). |
 
 ---
 

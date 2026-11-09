@@ -15,4 +15,5 @@ npx esbuild src/lib/quickReply.ts --bundle --platform=node --format=esm --outfil
 npx esbuild src/lib/density.ts --bundle --platform=node --format=esm --outfile="$out/density.mjs" --log-level=error
 npx esbuild src/lib/edgeStrip.ts --bundle --platform=node --format=esm --outfile="$out/edgestrip.mjs" --log-level=error
 npx esbuild src/lib/layout.ts --bundle --platform=node --format=esm --outfile="$out/layout.mjs" --log-level=error
-LAYOUT_JS="$out/layout.mjs" EDGESTRIP_JS="$out/edgestrip.mjs" DENSITY_JS="$out/density.mjs" QUICKREPLY_JS="$out/quickreply.mjs" LIMITER_JS="$out/limiter.mjs" NOTIFTEXT_JS="$out/notiftext.mjs" GARBLE_JS="$out/garble.mjs" VISIBLE_JS="$out/visible.mjs" AUTOPLAY_JS="$out/autoplay.mjs" PLAYERS_JS="$out/players.mjs" node --test tests/*.test.mjs
+npx esbuild src/lib/buddy.ts --bundle --platform=node --format=esm --outfile="$out/buddy.mjs" --log-level=error
+BUDDY_JS="$out/buddy.mjs" LAYOUT_JS="$out/layout.mjs" EDGESTRIP_JS="$out/edgestrip.mjs" DENSITY_JS="$out/density.mjs" QUICKREPLY_JS="$out/quickreply.mjs" LIMITER_JS="$out/limiter.mjs" NOTIFTEXT_JS="$out/notiftext.mjs" GARBLE_JS="$out/garble.mjs" VISIBLE_JS="$out/visible.mjs" AUTOPLAY_JS="$out/autoplay.mjs" PLAYERS_JS="$out/players.mjs" node --test tests/*.test.mjs

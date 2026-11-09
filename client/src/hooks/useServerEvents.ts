@@ -43,7 +43,7 @@ function publishStrip(): void {
 // else's — the stacking-reactions bug). A failed fetch retries next call.
 let cachedOwnPk: string | null = null;
 let ownPkPromise: Promise<string | null> | null = null;
-function getOwnPk(): Promise<string | null> {
+export function getOwnPk(): Promise<string | null> {
   if (cachedOwnPk != null) return Promise.resolve(cachedOwnPk);
   if (!ownPkPromise) {
     ownPkPromise = api

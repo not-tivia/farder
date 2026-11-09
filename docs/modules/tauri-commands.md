@@ -1982,6 +1982,35 @@ and channel or DM. Both ids may be absent (just open the app).
 
 ---
 
+### `get_buddy_settings() -> BuddySettings` / `set_buddy_settings(settings) -> Result<BuddySettings, String>`
+
+**What it does:** reads/writes the buddy list's saved setting (`open_at_start`,
+default off) under the `buddy_list` settings key. Opening at start is done in
+`main.rs` setup.
+**invoke names:** `"get_buddy_settings"` -> `getBuddySettings()`, `"set_buddy_settings"` -> `setBuddySettings()`.
+
+---
+
+### `open_buddy_list() -> Result<(), String>`
+
+**What it does:** builds the `buddy` window (250x480, normal title bar, resizable,
+page `index.html?buddy=1`) or, if it exists, un-minimises and focuses it.
+**invoke name:** `"open_buddy_list"` -> `openBuddyList()`.
+
+---
+
+### `chat_open(server_id, channel_id, title) -> Result<(), String>`
+
+**What it does:** builds (or brings forward) the small chat window for one
+conversation. The label is `chat-<fnv1a(server_id) as 8 hex>-<channel_id>`, so the
+same conversation always maps to the same window. `title` only names the window
+(control characters stripped, 60 chars max); the transcript comes from the main
+window, which checks the conversation exists. A server id longer than 128 bytes is
+refused.
+**invoke name:** `"chat_open"` -> `chatOpen()`.
+
+---
+
 ### `get_notification_prefs() -> Result<Value, String>` / `save_notification_prefs(prefs) -> Result<(), String>`
 
 **What it does:** reads/writes `~/.farder/notifications.json`. Default prefs

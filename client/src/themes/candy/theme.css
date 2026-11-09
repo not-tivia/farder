@@ -3676,3 +3676,32 @@ body {
 .edge-strip-input:focus { outline: none; border-color: var(--xp-blue); }
 .edge-strip-status { flex: none; color: var(--xp-text-muted); }
 .edge-strip-error { color: var(--xp-e2ee-error); max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Buddy list and chat windows (BuddyList.tsx, ChatWindow.tsx) ─────────
+   The list reuses the channel list classes; this is the unread number and the
+   small chat window. All colour comes from the theme variables. */
+.buddy-unread {
+  flex: none; min-width: 16px; padding: 0 5px; box-sizing: border-box; text-align: center;
+  background: var(--xp-blue); color: var(--xp-window-bg); border-radius: 9px;
+  font-size: 10px; font-weight: bold; line-height: 16px;
+}
+.mini-chat {
+  display: flex; flex-direction: column; width: 100vw; height: 100vh; box-sizing: border-box;
+  background: var(--xp-window-bg); color: var(--xp-text-normal);
+  font-family: var(--xp-font); font-size: var(--xp-font-size-small);
+}
+.mini-chat-head {
+  flex: none; padding: 6px 10px; font-weight: bold; color: var(--xp-blue);
+  background: var(--xp-panel-bg); border-bottom: 1px solid var(--xp-border);
+}
+.mini-chat-log { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 10px; user-select: text; }
+.mini-chat-line { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; word-break: break-word; }
+.mini-chat-time { flex: none; color: var(--xp-text-muted); font-size: 10px; }
+.mini-chat-author { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: bold; color: var(--xp-blue); }
+.mini-chat-line.mine .mini-chat-author { color: var(--xp-text-muted); }
+.mini-chat-text { min-width: 0; color: var(--xp-text-normal); }
+.mini-chat-foot { flex: none; padding: 6px 8px; border-top: 1px solid var(--xp-border); background: var(--xp-panel-bg); }
+.mini-chat-input { width: 100%; box-sizing: border-box; }
+.mini-chat-note { color: var(--xp-text-muted); padding: 2px 0; }
+.mini-chat-error { color: var(--xp-e2ee-error); }
+.buddy-list .channel-item.unread::after { display: none; }
