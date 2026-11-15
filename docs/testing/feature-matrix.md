@@ -46,7 +46,7 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Themes (6) | UNVERIFIED | |
+| Themes (6) apply, text readable, nothing overflows | VERIFIED | selftest themes (screenshots in the results folder). Found and fixed: avatar letters nearly invisible in Candy and Hello Kitty. NOT judged by a machine: whether they look good, and gradient sidebars (contrast not measurable) |
 | Tray, start in tray, start with Windows | UNVERIFIED | checklist Parts 1-2 |
 | Notification pop-up (message from another server: shows it, Reply from the pop-up reaches the sender) | VERIFIED | selftest popup. NOT automatable: pop-up when Farder is in the BACKGROUND (the test driver forces "has focus"), position/centring, keyboard focus after use: still checklist Part 3, chris to eyeball. keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
 | Autoplay | UNVERIFIED | Part 4 |
