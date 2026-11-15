@@ -4,6 +4,7 @@ import { useRecoveryStatus } from "../hooks/useRecoveryStatus";
 import { getOwnPk } from "../hooks/useServerEvents";
 import { publicKeyToString, memberDisplayName } from "../lib/types";
 import { describeWait, takeoverState } from "../lib/recovery";
+import { toast } from "../lib/toast";
 
 const dismissKey = (serverId: string) => `farder.recovery-nudge.${serverId}`;
 
@@ -28,6 +29,20 @@ export default function RecoveryBanner() {
     if (!serverId) return;
     try { setDismissed(localStorage.getItem(dismissKey(serverId)) === "1"); } catch { setDismissed(false); }
   }, [serverId]);
+
+  // A takeover is meant to be SEEN: besides the banner, pop up once per takeover on this device
+  // (remembered by its claim id, so a takeover that was already waiting when the app opened is
+  // announced too, but not again on every restart).
+  const claim = status?.pending?.claim ?? null;
+  useEffect(() => {
+    if (!serverId || !claim) return;
+    const key = `farder.recovery-claim-seen.${serverId}`;
+    let seen: string | null = null;
+    try { seen = localStorage.getItem(key); } catch { /* not remembered: announce again, which is the safe side */ }
+    if (seen === claim) return;
+    try { localStorage.setItem(key, claim); } catch { /* ignore */ }
+    toast.info("Heads up: the recovery key has started taking over this server. See the banner at the top.");
+  }, [serverId, claim]);
 
   if (!status || !serverId) return null;
 

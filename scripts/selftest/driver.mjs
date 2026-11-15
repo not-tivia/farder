@@ -1294,6 +1294,7 @@ async function recovery() {
     return "old words refused after the rotation";
   });
   await check("B starts a takeover with the 24 words; both screens show it, with a countdown", async () => {
+    for (const c of [A, B]) await c.page.evaluate(() => { window.__toasts = []; window.addEventListener("farder:toast", (e) => window.__toasts.push(e.detail.message)); });
     await B.page.getByLabel("The 24 recovery words").fill(words);
     await B.page.getByRole("button", { name: "Start the takeover" }).click();
     await B.page.locator(".modal-body").getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
@@ -1306,6 +1307,12 @@ async function recovery() {
     // Every member sees it on the main screen, without opening any settings.
     await A.page.locator(".recovery-banner", { hasText: "Ownership of this server is moving" }).waitFor({ timeout: 30000 });
     await B.page.locator(".recovery-banner", { hasText: "Ownership of this server is moving" }).waitFor({ timeout: 30000 });
+    // ...and once as a pop-up on each screen. A pop-up fades after a few seconds, so each page recorded
+    // the pop-up events from before the takeover started.
+    for (const [c, label] of [[A, "A"], [B, "B"]]) {
+      const heard = await c.page.evaluate(() => (window.__toasts || []).some((m) => /recovery key has started taking over/.test(m)));
+      if (!heard) throw new Error("no takeover pop-up on " + label);
+    }
     await shot(A.page, "A-banner");
   });
   await check("finishing early is not possible (the button waits), and A cannot cancel it", async () => {
