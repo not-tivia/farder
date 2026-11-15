@@ -53,6 +53,12 @@ struct Args {
     /// With --restore-from: replace an existing server. The old data is moved aside, not deleted.
     #[arg(long)]
     force: bool,
+    /// Host-side owner reset, then exit: make this member (vk_ + 64 hex) the owner. For a
+    /// server whose owner lost the account and has no recovery key. The server must be stopped.
+    /// Takes a backup first, moves the old signed history aside (not deleted). Friends rejoin
+    /// with a fresh invite; channels and plaintext messages stay. See docs/hosting-on-ubuntu.md.
+    #[arg(long)]
+    reset_owner: Option<String>,
 
     /// How many seconds a recovery-key takeover must wait before it can finish (default 72
     /// hours). The waiting period is what lets the real owner notice and react, so values
@@ -147,6 +153,19 @@ async fn main() -> Result<()> {
             args.force,
         )?;
         info!("Restored the backup made at unix time {} ({} files). Start the server normally now.", m.created_at, m.files_count);
+        return Ok(());
+    }
+    if let Some(key) = &args.reset_owner {
+        let new_owner = farder_server::reset_owner::parse_member_key(key)?;
+        let mut conn = db::open_file(&args.db)?;
+        let pre = args.backup_dir.clone().unwrap_or_else(|| args.data_dir.join("pre-reset-backups"));
+        let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&args.storage_dir), &args.data_dir, &pre)?;
+        info!("Backup made first: {}", made.display());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        let r = farder_server::reset_owner::reset_owner(&mut conn, &new_owner, args.force, now)?;
+        info!("Owner reset. Old server history id {} moved aside ({} signed records kept in events_before_reset_{}). New history id {}.",
+              r.old_server_id, r.events_moved_aside, now, r.new_server_id);
+        info!("Start the server normally. The new owner may need to reconnect; other friends rejoin with a fresh invite.");
         return Ok(());
     }
     if let Some(out) = &args.backup_now {

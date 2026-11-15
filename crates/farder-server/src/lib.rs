@@ -25,6 +25,7 @@ pub mod reactions;
 pub mod reports;
 pub mod relay;
 pub mod reminders;
+pub mod reset_owner;
 pub mod retention;
 pub mod ssrf;
 pub mod state;
