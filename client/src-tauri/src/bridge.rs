@@ -23,8 +23,22 @@ pub async fn send_request(state: &AppState, server_id: &str, request: ServerRequ
         crate::connection::write_frame(&mut send, &data).await.context("failed to write request frame")?;
     }
 
-    rx.await.context("response channel closed")
+    // Never wait forever. A server that restarted or vanished used to leave this waiting
+    // for an answer that could not come, and the chat box stayed disabled until the app was
+    // restarted. A request that outlives REQUEST_TIMEOUT gives up with a clear error, and
+    // the waiting slot is freed.
+    match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        Ok(answer) => answer.context("the connection to the server was lost before it answered"),
+        Err(_) => {
+            conn.pending_requests.lock().unwrap().remove(&id);
+            Err(anyhow::anyhow!("the server did not answer within {} seconds", REQUEST_TIMEOUT.as_secs()))
+        }
+    }
 }
+
+/// How long a request may wait for the server's answer. Generous (some requests make the
+/// server fetch a web page for you), but finite.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Spawn the background task that reads `ServerFrame`s and dispatches them.
 ///
@@ -41,6 +55,9 @@ pub fn spawn_event_reader(
         loop {
             match crate::connection::recv_server_frame(&mut recv).await {
                 Err(_) => {
+                    // The connection is gone: every request still waiting for an answer
+                    // would wait forever. Dropping their senders makes each fail at once.
+                    conn.pending_requests.lock().unwrap().clear();
                     let _ = app.emit("server:disconnected", serde_json::json!({ "server_id": &server_id }));
                     break;
                 }

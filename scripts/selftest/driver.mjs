@@ -1130,11 +1130,23 @@ async function ubuntuRestored() {
     await B.page.locator(".channel-item", { hasText: "general" }).first().click();
     await seesText(B, "hello from A to ubuntu " + stamp, 90000);
   });
-  await check("both can chat on the restored server", async () => {
-    await sendText(A, "after the restore from A " + stamp);
-    await seesText(B, "after the restore from A " + stamp, 30000);
-    await sendText(B, "after the restore from B " + stamp);
-    await seesText(A, "after the restore from B " + stamp, 30000);
+  // Right after the server comes back the clients are still reconnecting, so the first
+  // send may fail. Try again like a person would, for up to a minute, and report how long it took.
+  const sendUntilSeen = async (from, to, text) => {
+    const t0 = Date.now();
+    for (let i = 0; i < 12; i++) {
+      const box = from.page.getByPlaceholder(/Type a message/);
+      if (await box.isEnabled().catch(() => false)) {
+        await box.fill(text); await box.press("Enter");
+        if (await to.page.locator(".message-content", { hasText: text }).first().waitFor({ timeout: 5000 }).then(() => true, () => false)) return Math.round((Date.now() - t0) / 1000);
+      } else await new Promise((r) => setTimeout(r, 5000));
+    }
+    throw new Error("could not send within a minute (the message box stayed " + ((await from.page.getByPlaceholder(/Type a message/).isEnabled().catch(() => false)) ? "enabled" : "disabled") + ")");
+  };
+  await check("both can chat on the restored server (clients reconnect on their own)", async () => {
+    const a = await sendUntilSeen(A, B, "after the restore from A " + stamp);
+    const b = await sendUntilSeen(B, A, "after the restore from B " + stamp);
+    return `A's line seen after ${a}s, B's after ${b}s`;
   });
   await check("A is still the owner (the server settings button is there)", async () => {
     await A.page.getByTitle("Server Settings").waitFor({ timeout: 10000 });
