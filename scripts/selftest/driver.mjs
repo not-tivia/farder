@@ -1073,6 +1073,8 @@ async function ubuntu() {
   const B = await attach(PORT_B, "B");
   for (const c of [A, B]) {
     if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    // A dialog left open by an earlier scenario would block every click.
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
   }
   if (!(await check("A (Windows) claims the Linux server with its setup token and becomes the owner", async () => {
     await A.page.getByTitle("Add Server").click();
@@ -1188,7 +1190,7 @@ async function serverDown() {
   await check("the add-server button still works while a server is down", async () => {
     await A.page.getByTitle("Add Server").click({ timeout: 8000 });
     await A.page.getByText("Join a Server").waitFor({ timeout: 8000 });
-    await A.page.keyboard.press("Escape");
+    await A.page.locator(".modal-close").first().click();     // Escape does not close this dialog
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
