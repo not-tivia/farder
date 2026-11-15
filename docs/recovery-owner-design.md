@@ -149,8 +149,7 @@ authorizations) and end-to-end encrypted channel membership. Consequence for fri
 the new owner is "not a member" until they rejoin with a fresh invite; history stays. Verified on
 the real stack: old messages still visible, new owner has owner powers and the Powers tab, old
 owner refused (and still refused after rejoining and after a server restart), same answer after
-restart. Not yet: a friendly "this server was reset by its host, rejoin" message in old clients
-(today they see "not a member of this server").
+restart. The friendly reset message is below.
 
 **Rotation (verified 2026-11-15, recovery scenario now 10 checks):** with the current 24 words, "Replace the recovery key" makes a new key and shows its new words once; the old words are then refused ("not the recovery key of this server"), the new ones carry a takeover through. The audit log shows two `recovery_key_set` entries. The everyday owner key cannot rotate (rule pinned by unit tests).
 
@@ -163,7 +162,16 @@ RATE of damage by a stolen key (the thief gets 5 actions, not a wiped server); i
 involve the recovery key. Verified: unit tests (a deliberate break was caught) and `ubuntu-suite.sh brake`
 on the real stack (Windows app owner, Ubuntu server).
 
+**Takeover pop-up (built, verified 2026-11-15, recovery scenario, 10 checks):** besides the banner, every
+member gets a one-time in-app pop-up when a takeover starts (once per takeover per device, remembered by
+the claim id). It is an in-app toast, not an operating-system notification.
+
+**Reset message (built, verified):** after a host-side reset, someone who is still on the member list but
+not in the new history is told "this server was reset by its host: ask the owner for a fresh invite to
+rejoin (your old messages are kept)" instead of a bare "not a member"; a stranger still gets the plain
+answer (the server remembers `owner_reset_at`). It comes from the server, so old clients get it too. The app
+has no dedicated screen for it: it appears wherever the app shows a refused request.
+
 Not built yet:
 
-- A pop-up when a takeover starts (the banner for every member IS built).
 - The cancellable waiting period for destructive actions by the everyday key (a pending-action system). What IS built instead is the bulk-damage brake below.

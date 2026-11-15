@@ -78,7 +78,9 @@ Last updated: 2026-11-15.
 | Host-side owner reset (`--reset-owner`): old messages kept, new owner has powers, old owner refused incl. after rejoin and restart | VERIFIED | selftest `ubuntu-suite.sh reset`, 11 checks; 3 unit tests |
 | Rotate the recovery key in the app; old words stop working | VERIFIED | selftest recovery, 10 checks |
 | Bulk-damage brake: 5 destructive changes per account per 10 min, then "slow down" + audit entry | VERIFIED | 3 unit tests (break caught); `ubuntu-suite.sh brake`, 3 checks on the real stack |
-| Cancellable waiting period for destructive acts; friendly message for reset-out clients | NOT BUILT | see docs/recovery-owner-design.md |
+| Takeover pop-up for every member (in-app toast, once per takeover) | VERIFIED | selftest recovery, 10 checks |
+| "Reset by its host, rejoin" message for members left out by a host reset | VERIFIED | selftest `ubuntu-suite.sh reset` + unit test |
+| Cancellable waiting period for destructive acts; OS-level notification for a takeover; a dedicated reset screen | NOT BUILT | see docs/recovery-owner-design.md |
 
 ## Hosting on Ubuntu
 
