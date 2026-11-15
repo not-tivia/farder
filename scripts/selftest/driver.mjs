@@ -20,9 +20,14 @@ function log(status, name, detail = "") {
   results.push({ status, name, detail });
   console.log(`${status.padEnd(4)} ${name}${detail ? "  -- " + detail : ""}`);
 }
+const watched = [];
 async function check(name, fn) {
   try { const d = await fn(); log("PASS", name, d ?? ""); return true; }
-  catch (e) { log("FAIL", name, String(e.message || e).split("\n")[0]); return false; }
+  catch (e) {
+    log("FAIL", name, String(e.message || e).split("\n")[0]);
+    for (const c of watched) for (const l of c.logs.slice(-12)) console.log(`      [${c.who} log] ${l}`);
+    return false;
+  }
 }
 async function shot(page, tag) {
   const dir = process.env.SHOTS || "selftest-shots";
@@ -33,6 +38,11 @@ async function shot(page, tag) {
 }
 
 async function attach(port, who) {
+  const c = await attach1(port, who);
+  watched.push(c);
+  return c;
+}
+async function attach1(port, who) {
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   const ctx = browser.contexts()[0];
   // The main window is the page that is not one of the small windows (?buddy, ?chat, ?notify, ?strip).
@@ -44,7 +54,10 @@ async function attach(port, who) {
   if (!page) throw new Error(`no main window found for ${who}`);
   page.setDefaultTimeout(15000);
   page.on("pageerror", (e) => console.log(`[${who}] page error: ${e.message.split("\n")[0]}`));
-  return { browser, ctx, page, who };
+  // Keep the app's own [chat]/[buddy] log lines so a failure can show what it did.
+  const logs = [];
+  page.on("console", (m) => { const t = m.text(); if (/^\[(chat|buddy)\]/.test(t)) logs.push(`${new Date().toISOString().slice(11, 19)} ${t.slice(0, 160)}`); });
+  return { browser, ctx, page, who, logs };
 }
 
 async function createIdentity(c, name) {
@@ -272,7 +285,18 @@ async function dm() {
       await shot(B.page, "B-no-dm");
       throw new Error("B has no DM entry in the sidebar; B's backend list_dms = " + JSON.stringify(info));
     }
-    await seesText(B, "dm one " + stamp, 30000);
+    try { await seesText(B, "dm one " + stamp, 30000); } catch (e) {
+      const info = await B.page.evaluate(async () => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const s = (await inv("get_saved_servers"))[0];
+        const dms = await inv("list_dms", { serverId: s.id });
+        const hist = await inv("fetch_history", { serverId: s.id, channelId: dms[0].channel.id });
+        return { dmChannel: dms[0].channel.id, backendLines: hist.map((m) => String(m.content).slice(0, 30)) };
+      }).catch((x) => "evaluate failed: " + x);
+      await shot(B.page, "B-dm-view");
+      const dom = await B.page.locator(".message-content").allInnerTexts();
+      throw new Error("B's DM view shows " + JSON.stringify(dom.slice(-3)) + "; backend has " + JSON.stringify(info));
+    }
   });
   let list, chat;
   await check("A: the buddy list shows Bob under PEOPLE", async () => {

@@ -59,6 +59,7 @@ export function useSmallWindows(): void {
       const json = JSON.stringify(cs);
       if (lastSent.current.get(label) === json) continue;
       lastSent.current.set(label, json);
+      console.log("[chat] sending", label, cs ? `${cs.lines.length} lines, last id ${cs.last_id}` : "nothing (conversation not found)");
       // A conversation that no longer exists is sent as `null` so the window says so.
       await emitTo(label, CHAT_STATE_EVENT, cs).catch((e) => console.warn("[chat] could not send the conversation:", e));
     }
@@ -110,6 +111,7 @@ export function useSmallWindows(): void {
       const ref = parseChatRef(e.payload);
       if (!ref) return;
       chats.current.set(ref.label, ref);
+      console.log("[chat] window asked for its conversation:", ref.label);
       void loadHistory(ref);
       lastSent.current.delete(ref.label);
       schedule();
