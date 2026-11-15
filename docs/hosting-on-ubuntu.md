@@ -18,7 +18,7 @@ Windows connects to it the same way it connects to a server on another Windows P
 - Running it as a boot-time service (the unit file below is untested).
 - Over the internet, through a router, or through the relay (`--relay`) from Ubuntu.
 - A release build, a long uptime, and restart after a crash.
-- Backups and restore (not built yet: see `docs/mesh-hosting-status.md`).
+- Copying backups to ANOTHER machine automatically (a backup is a plain folder; copying it off the host is manual for now).
 
 ## Steps
 
@@ -32,6 +32,25 @@ Windows connects to it the same way it connects to a server on another Windows P
 4. Make invites from the app as usual.
 5. To keep it running without a terminal, use `deploy/server/farder-server.service`.
 
-Your server's data lives in the database file and the storage folder named by `--db` and
-`--storage-dir`. Back those up together (copy them while the server is stopped) until a
-real backup feature exists.
+## Backups and restore (built and tested 2026-11-15)
+
+```
+# automatic: one at start, then every 6 hours, keeping the newest 14
+farder-server ... --backup-dir /var/backups/farder
+# one now (works while the server runs)
+farder-server ... --backup-now /var/backups/farder
+# restore (server stopped). Refuses to overwrite unless --force; with --force the old
+# data is moved aside to *.before-restore-<time>, never deleted.
+farder-server ... --restore-from /var/backups/farder/farder-backup-<time> [--force]
+```
+
+A backup is a folder with the database snapshot, the uploaded files, the server's stable
+identity, and a checksum that is verified before any restore. Copy that folder to another
+machine (rsync, a USB stick, a cloud folder) to survive a dead disk.
+
+Tested for real: two Windows clients chatted on an Ubuntu-hosted server, a backup was taken
+while it ran, the server's data was destroyed, the backup restored, and the server came back
+as the same server: both clients reconnected on their own with their history, membership
+and (for A) ownership, and chatted again. A backup is a copy: if an attacker with the
+owner's key wipes things and a later automatic backup runs, that backup holds the damage,
+which is why several are kept. See `docs/recovery-owner-design.md` for the plan for that case.

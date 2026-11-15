@@ -73,6 +73,8 @@ Last updated: 2026-11-15.
 |---|---|---|
 | Server runs headless on Ubuntu, prints a setup token | VERIFIED | ran on Ubuntu 24.04 (2026-11-15); 1010 tests pass there |
 | Windows client claims a Linux-hosted server and chats | VERIFIED | selftest ubuntu (4 checks), direct connection |
+| Backup (automatic, rotated), restore, wipe-and-restore on a Linux server with two clients reconnecting | VERIFIED | 7 unit tests (3 deliberate breaks caught) + real run (selftest ubuntu + ubuntu-restored; server DB read directly) |
+| Chat box recovers after the server restarts (request fails at once, 60s limit) | VERIFIED | found by the restore run (box froze disabled); fixed; ubuntu-restored passes |
 | Runs as a systemd service, over the internet, behind the relay, long uptime | UNVERIFIED | unit file written (`deploy/server/farder-server.service`), never installed |
 
 See `docs/hosting-on-ubuntu.md`.
