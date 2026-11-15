@@ -1063,8 +1063,11 @@ async function popupSize() {
 // (see docs/testing/feature-matrix.md). Run after `core` or on its own.
 async function ubuntu() {
   const addr = process.env.UBU_ADDR, token = process.env.UBU_TOKEN;
-  if (!addr || !token) throw new Error("set UBU_ADDR (host:port) and UBU_TOKEN");
-  const name = "Ubuntu Server";
+  // UBU_LINK: the whole first-owner link (used for a server reached THROUGH THE RELAY);
+  // UBU_NAME: the server's name as shown in the strip. Otherwise a direct link is built.
+  const firstLink = process.env.UBU_LINK || (addr && token ? `farder://${addr}/setup:${token}` : null);
+  if (!firstLink) throw new Error("set UBU_LINK, or UBU_ADDR (host:port) and UBU_TOKEN");
+  const name = process.env.UBU_NAME || "Ubuntu Server";
   const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
   const A = await attach(PORT_A, "A");
   const B = await attach(PORT_B, "B");
@@ -1074,7 +1077,7 @@ async function ubuntu() {
   if (!(await check("A (Windows) claims the Linux server with its setup token and becomes the owner", async () => {
     await A.page.getByTitle("Add Server").click();
     await A.page.getByText("Join a Server").click();
-    await A.page.getByPlaceholder("farder://server/invite-code").fill(`farder://${addr}/setup:${token}`);
+    await A.page.getByPlaceholder("farder://server/invite-code").fill(firstLink);
     await A.page.getByRole("button", { name: "Join", exact: true }).click();
     const confirm = A.page.getByText(/Join it\?/);
     if (await confirm.waitFor({ timeout: 6000 }).then(() => true, () => false)) await A.page.getByRole("button", { name: "Join", exact: true }).last().click();
