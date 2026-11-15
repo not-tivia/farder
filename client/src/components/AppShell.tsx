@@ -13,7 +13,6 @@ import KickedBannedDialog from "./KickedBannedDialog";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { useVoice } from "../hooks/useVoice";
 import * as api from "../lib/tauri-bridge";
-import { WATCHED_CHANGED_EVENT, subscriptionIds } from "../lib/watchedChannels";
 
 let openSearchRef: (() => void) | null = null;
 
@@ -67,24 +66,7 @@ export default function AppShell() {
     return () => window.removeEventListener("keydown", handler, true);
   }, []);
 
-  // Subscribe to all active channels whenever they change
-  useEffect(() => {
-    if (!serverId || !activeServer?.connected) return;
-    // What is on screen, plus any channel a small chat window is showing (a
-    // subscribe call replaces the previous list, so those must be repeated here).
-    const resubscribe = () => {
-      const ids = subscriptionIds(
-        [activeServer.currentChannelId, activeServer.dmPanelChannelId, activeServer.threadChannelId],
-        serverId,
-      );
-      if (ids.length > 0) {
-        api.subscribeChannels(serverId, ids).catch((e) => console.error("[subscribe] failed; channel may stop receiving messages:", e));
-      }
-    };
-    resubscribe();
-    window.addEventListener(WATCHED_CHANGED_EVENT, resubscribe);
-    return () => window.removeEventListener(WATCHED_CHANGED_EVENT, resubscribe);
-  }, [serverId, activeServer?.connected, activeServer?.currentChannelId, activeServer?.dmPanelChannelId, activeServer?.threadChannelId]);
+  // Channel subscriptions live in hooks/useSubscriptions.ts (mounted in App.tsx).
 
   // Reconnect logic per-server
   useEffect(() => {
@@ -104,9 +86,7 @@ export default function AppShell() {
             const dms = await api.listDms(serverId);
             dispatch({ type: "SET_DMS", serverId, payload: dms });
           } catch {}
-          if (activeServer?.currentChannelId) {
-            await api.subscribeChannels(serverId, [activeServer.currentChannelId]);
-          }
+          // (Channel subscriptions are re-sent by hooks/useSubscriptions.ts.)
           break;
         } catch (e) {
           console.error(`[reconnect] ${serverId}:`, e);

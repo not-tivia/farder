@@ -4,6 +4,7 @@ import { AppProvider, useApp } from "./context/ServerContext";
 import { MediaPlayersProvider } from "./context/MediaPlayersContext";
 import { DataSaverProvider } from "./context/DataSaverContext";
 import { useSmallWindows } from "./hooks/useSmallWindows";
+import { useSubscriptions } from "./hooks/useSubscriptions";
 import { useServerEvents } from "./hooks/useServerEvents";
 import { useMlsSteward } from "./hooks/useMlsSteward";
 import { useSealedDecrypt } from "./hooks/useSealedDecrypt";
@@ -32,6 +33,7 @@ function AppInner() {
   const [pendingInvite, setPendingInvite] = useState<string | null>(null);
   useServerEvents();
   useSmallWindows();
+  useSubscriptions();
   useMlsSteward();
   // Order matters: hydration sets the gate `useSealedDecrypt` waits on.
   useLocalHistory();

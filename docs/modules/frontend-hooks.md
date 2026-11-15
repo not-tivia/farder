@@ -129,6 +129,18 @@ of key to filename.
 - `client/src/lib/tauri-bridge.ts` — the command wrappers (`frontend-bridge.md`).
 - `docs/modules/tauri-bridge.md` — the event names the hooks listen for.
 
+## `useSubscriptions` (mounted in `App.tsx` after `useSmallWindows`)
+
+Sends each connected server the list of channels we want live messages for: every
+channel the person can see (not voice), every DM, what is on screen, and what the
+small chat windows show (`lib/watchedChannels.ts`). The server only pushes a
+channel's events to subscribers and each subscribe call REPLACES the previous list
+(`crates/farder-server/src/subscriptions.rs`), so this is the ONLY place that calls
+`subscribe_channels`; adding another caller would silently drop channels. It sends
+again after a reconnect (it forgets what it sent while `connectionLost`). Without
+it, a message in any channel you are not viewing never arrived and unread badges and
+the buddy list never moved.
+
 ## Gotchas
 
 - **Mount order in `App.tsx` is part of the contract** (see above). Moving

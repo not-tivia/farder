@@ -4,7 +4,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useApp } from "../context/ServerContext";
 import { getOwnPk } from "./useServerEvents";
 import * as api from "../lib/tauri-bridge";
-import { setWatched, subscriptionIds } from "../lib/watchedChannels";
+import { setWatched } from "../lib/watchedChannels";
 import { flattenMessageInfoV2, isE2eeChannel, publicKeyToString } from "../lib/types";
 import {
   BUDDY_READY_EVENT, BUDDY_STATE_EVENT, CHAT_READ_EVENT, CHAT_READY_EVENT, CHAT_STATE_EVENT,
@@ -38,21 +38,11 @@ export function useSmallWindows(): void {
     }
   }
 
-  /** Tell the server we want live messages for every channel a chat window shows. */
+  /** Record which channels the chat windows show; useSubscriptions subscribes to them. */
   function syncWatched() {
     const bySrv = new Map<string, number[]>();
     for (const r of chats.current.values()) bySrv.set(r.serverId, [...(bySrv.get(r.serverId) ?? []), r.channelId]);
-    const servers = new Set<string>([...bySrv.keys(), ...Object.keys(stateRef.current.servers)]);
-    for (const sid of servers) {
-      const ids = bySrv.get(sid) ?? [];
-      // For the server on screen, AppShell does the subscribing (it listens for this change).
-      setWatched(sid, ids);
-      const sv = stateRef.current.servers[sid];
-      if (sid !== stateRef.current.activeServerId && sv?.connected && ids.length > 0) {
-        const all = subscriptionIds([sv.currentChannelId], sid);
-        api.subscribeChannels(sid, all).catch((e) => console.warn("[chat] could not subscribe for the chat window:", e));
-      }
-    }
+    for (const sid of new Set<string>([...bySrv.keys(), ...Object.keys(stateRef.current.servers)])) setWatched(sid, bySrv.get(sid) ?? []);
   }
 
   async function publish() {
@@ -87,7 +77,7 @@ export function useSmallWindows(): void {
    *  fetch them the way the main window would, so the small window is not empty. */
   async function loadHistory(ref: ChatRef) {
     const server = stateRef.current.servers[ref.serverId];
-    if (!server || server.messages[ref.channelId]) return;
+    if (!server) return;
     const dm = server.dms.find((d) => d.channel.id === ref.channelId);
     const channel = server.channels.find((c) => c.id === ref.channelId);
     if (!dm && !channel) return;
@@ -104,8 +94,6 @@ export function useSmallWindows(): void {
       } else {
         msgs = await api.fetchHistory(ref.serverId, ref.channelId);
       }
-      // Someone may have loaded it while we waited; do not overwrite that.
-      if (stateRef.current.servers[ref.serverId]?.messages[ref.channelId]) return;
       dispatch({ type: "SET_MESSAGES", serverId: ref.serverId, payload: { channelId: ref.channelId, messages: msgs.reverse() } });
     } catch (e) {
       console.warn("[chat] could not load the history for", ref.label, e);
