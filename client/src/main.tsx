@@ -85,8 +85,15 @@ async function bootstrap() {
     document.documentElement.style.setProperty("height", "auto", "important");
     document.body.style.setProperty("height", "auto", "important");
     document.body.style.setProperty("margin", "0", "important");
-    document.getElementById("root")!.style.setProperty("height", "auto", "important");
-    ReactDOM.createRoot(document.getElementById("root")!).render(<NotifyPopup />);
+    const notifyRoot = document.getElementById("root")!;
+    notifyRoot.style.setProperty("height", "auto", "important");
+    // The themes draw the main app's window frame on #root (a border, a drop shadow,
+    // rounded corners). In this window that frame showed as an outline around the
+    // pop-up and pushed the card down so its bottom edge was cut off. Draw none of it.
+    for (const [prop, value] of [["border", "0"], ["box-shadow", "none"], ["border-radius", "0"], ["overflow", "visible"], ["background", "transparent"]] as const) {
+      notifyRoot.style.setProperty(prop, value, "important");
+    }
+    ReactDOM.createRoot(notifyRoot).render(<NotifyPopup />);
     return;
   }
 

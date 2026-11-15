@@ -1057,6 +1057,58 @@ async function popupSize() {
   await B.browser.close().catch(() => {});
 }
 
+// A server running on UBUNTU (Linux), not on Windows: the Windows client claims it with
+// the one-time setup token, invites the second client, and they chat. Needs the server
+// started on the Linux side first; its address and token come in as UBU_ADDR / UBU_TOKEN
+// (see docs/testing/feature-matrix.md). Run after `core` or on its own.
+async function ubuntu() {
+  const addr = process.env.UBU_ADDR, token = process.env.UBU_TOKEN;
+  if (!addr || !token) throw new Error("set UBU_ADDR (host:port) and UBU_TOKEN");
+  const name = "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  if (!(await check("A (Windows) claims the Linux server with its setup token and becomes the owner", async () => {
+    await A.page.getByTitle("Add Server").click();
+    await A.page.getByText("Join a Server").click();
+    await A.page.getByPlaceholder("farder://server/invite-code").fill(`farder://${addr}/setup:${token}`);
+    await A.page.getByRole("button", { name: "Join", exact: true }).click();
+    const confirm = A.page.getByText(/Join it\?/);
+    if (await confirm.waitFor({ timeout: 6000 }).then(() => true, () => false)) await A.page.getByRole("button", { name: "Join", exact: true }).last().click();
+    await A.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 90000 });
+    await A.page.locator(`.server-icon[title="${name}"]`).click();
+    await A.page.locator(".channel-item", { hasText: "general" }).first().waitFor({ timeout: 30000 });
+    await skipTranslation(A);
+    await shot(A.page, "A-ubuntu-owner");
+  }))) return;
+  let link;
+  if (!(await check("A creates an invite on the Linux server", async () => { link = await makeInvite(A); return link.slice(0, 48); }))) return;
+  if (!(await check("B (Windows) joins the Linux server from the invite", async () => {
+    await B.page.getByTitle("Add Server").click();
+    await B.page.getByText("Join a Server").click();
+    await B.page.getByPlaceholder("farder://server/invite-code").fill(link);
+    await B.page.getByRole("button", { name: "Join", exact: true }).click();
+    const confirm = B.page.getByText(/Join it\?/);
+    if (await confirm.waitFor({ timeout: 8000 }).then(() => true, () => false)) await B.page.getByRole("button", { name: "Join", exact: true }).last().click();
+    await B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 90000 });
+    await B.page.locator(`.server-icon[title="${name}"]`).click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().waitFor({ timeout: 30000 });
+  }))) return;
+  await check("chat both ways across Windows clients and the Linux server", async () => {
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await sendText(A, "hello from A to ubuntu " + stamp);
+    await seesText(B, "hello from A to ubuntu " + stamp, 30000);
+    await sendText(B, "hello from B to ubuntu " + stamp);
+    await seesText(A, "hello from B to ubuntu " + stamp, 30000);
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1072,6 +1124,7 @@ try {
   else if (scenario === "garble") await garble();
   else if (scenario === "tray") await tray();
   else if (scenario === "powers") await powers();
+  else if (scenario === "ubuntu") await ubuntu();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();
