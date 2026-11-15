@@ -67,12 +67,22 @@ export function parseInviteLink(input: string): ParsedInvite {
   // ResolveInvite) can use the bare code. Segment positions mirror the Rust
   // parse_relay_target: compact `farder://relayd/<server_id>/<code>` → code is
   // index 1; full `farder://relay/<addr>/<server_id>/<cert_fp>/<code>` → index 3.
+  //
+  // A relay link can also carry the ONE-TIME SETUP TOKEN of a server that has no owner yet
+  // (`.../setup:<token>`, how a headless server on a home PC or an Ubuntu box is claimed).
+  // The connection code takes that token separately and wants NO invite code left in the
+  // link, so it is split out here; left in, the server answered "invite not found" and a
+  // relay-hosted server could never be claimed.
   if (/^farder:\/\/relayd\//i.test(trimmed)) {
     const parts = trimmed.replace(/^farder:\/\/relayd\//i, "").split("/");
+    const code = parts.slice(1).join("/");
+    if (code.startsWith("setup:")) return { address: `farder://relayd/${parts[0]}`, setupToken: code.slice(6) };
     return { address: trimmed, inviteCode: parts[1] || undefined };
   }
   if (/^farder:\/\/relay\//i.test(trimmed)) {
     const parts = trimmed.replace(/^farder:\/\/relay\//i, "").split("/");
+    const code = parts.slice(3).join("/");
+    if (code.startsWith("setup:")) return { address: `farder://relay/${parts[0]}/${parts[1]}/${parts[2]}/`, setupToken: code.slice(6) };
     return { address: trimmed, inviteCode: parts[3] || undefined };
   }
 
