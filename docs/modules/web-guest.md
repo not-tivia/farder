@@ -44,9 +44,15 @@ gateway, 9 checks (join screen and privacy note, joining with the link, history,
 refresh keeps the guest, a second person on the same link with live messages, wrong code refused, no
 script errors). The owner in that test is the Rust fixture `crates/farder-gateway/examples/guest_fixture.rs`.
 
+## The owner's side (in the app)
+
+The invite dialog has a "Guest link" section: the owner switches guest links on, picks how long the link
+works (1 hour to 7 days) and the web name (what the host called the server on the gateway), and gets
+`https://<site>/<web name>/t#<code>`. Commands: `get_guest_links`, `set_guest_links`, `create_guest_invite`
+(`docs/modules/tauri-commands.md`). Verified end to end by `bash scripts/selftest/ubuntu-suite.sh guestlink`.
+
 ## Not done
 
-The owner's in-app screen (switch, "make a guest link", copying `https://<domain>/<name>/t#<code>`, and
-the route name that matches the gateway's `--route`); running behind Caddy over real TLS; phones'
+Running behind Caddy over real TLS; phones'
 browsers (layout is responsive but untested); voice; encrypted channels; an expired link shown nicely
 while already connected.

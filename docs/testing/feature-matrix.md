@@ -113,5 +113,5 @@ See `docs/modules/portability.md`.
 | Browser guest page: WebAssembly crypto, joins a server with a signed history with its OWN key, reads, writes, live messages, text-not-HTML, refresh keeps the guest, wrong code refused | VERIFIED | `bash scripts/selftest/guest-suite.sh`: real Edge, real server, via gateway, 9 checks |
 | A guest cannot use the signed history for anything but join/post | VERIFIED (unit) | test + deliberate break caught |
 | Caddy routes `/<name>/t` and `/ws/*` over real TLS | UNVERIFIED | written in `deploy/website/Caddyfile`, never run |
-| Owner's in-app screen for guest links (switch, make link) | NOT BUILT | |
+| Owner's in-app screen for guest links: switch, make a link (duration, web name), copy; link then works in a real browser; both apps see the guest and their messages | VERIFIED | `ubuntu-suite.sh guestlink`: 2 + 9 + 2 checks (Windows apps, Ubuntu server, gateway, real Edge) |
 | Guest page on a phone browser | UNVERIFIED | responsive CSS only |

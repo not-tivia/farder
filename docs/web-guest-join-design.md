@@ -69,9 +69,11 @@ link using its OWN key (also joining the server's signed history), reads history
 messages, text is never rendered as HTML, a refresh keeps the same guest, a second person joins with the
 same link, a wrong code gets a plain explanation. A guest may only join and post through the signed
 history (server guard, tested with a deliberate break). The owner's side in this test is a Rust fixture
-that does what the app must do; the in-app screen is not built.
+that does what the app must do. The in-app screen is built too: `bash scripts/selftest/ubuntu-suite.sh guestlink`
+(Windows apps + Ubuntu server + gateway + real Edge) verifies the owner making the link in the app, the browser
+joining with it, and both apps seeing the guest.
 
 **Known gaps in step 1:** on a server with a signed history a guest must also become a LOG member
 (`MemberJoined` citing the invite), which only the browser client can sign, so the end-to-end guest
-join is step 3/4; no owner screen for the switch yet; direct messages, uploads and reactions are not
+join is step 3/4; direct messages, uploads and reactions are not
 yet specifically limited for guests beyond the permission cap.
