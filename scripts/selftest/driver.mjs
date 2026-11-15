@@ -1335,6 +1335,7 @@ async function recovery() {
 // time after another restart to prove the answer is the same.
 async function hostReset() {
   const name = process.env.UBU_NAME || "Ubuntu Server";
+  const pass = process.env.RESET_PASS || "1";
   const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
   const A = await attach(PORT_A, "A");
   const B = await attach(PORT_B, "B");
@@ -1342,20 +1343,18 @@ async function hostReset() {
     if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
     for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
     await c.page.locator(`.server-icon[title="${name}"]`).click();
-    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
   }
-  await check("the old messages are still there after the reset (both screens)", async () => {
-    for (const c of [A, B]) {
-      await seesText(c, "hello from A to ubuntu " + stamp, 90000);
-      await seesText(c, "hello from B to ubuntu " + stamp, 30000);
-    }
+  await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+  await check("B still sees the old messages after the reset", async () => {
+    await seesText(B, "hello from A to ubuntu " + stamp, 90000);
+    await seesText(B, "hello from B to ubuntu " + stamp, 30000);
   });
   const act = (c, cmd, extra) => c.page.evaluate(async ([nm, command, more]) => {
     const inv = window.__TAURI_INTERNALS__.invoke;
     const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
     try { await inv(command, { serverId: s.id, ...more }); return "ok"; } catch (e) { return "refused: " + String(e).slice(0, 90); }
   }, [name, cmd, extra]);
-  const chan = "reset-" + Date.now();
+  const chan = "reset" + pass + "-" + Date.now();
   await check("the NEW owner (B) can do owner-only things", async () => {
     let r = "";
     for (let i = 0; i < 12; i++) {
@@ -1365,19 +1364,29 @@ async function hostReset() {
     }
     throw new Error("B could not act as owner: " + r);
   });
+  await check("B has the owner's Powers tab", async () => {
+    await B.page.getByTitle("Server Settings").click();
+    await B.page.locator(".settings-tab", { hasText: "Powers" }).waitFor({ timeout: 30000 });
+    await B.page.locator(".modal-close").first().click();
+  });
   await check("the OLD owner (A) is refused owner-only things", async () => {
     const r = await act(A, "create_channel", { name: chan + "-a", channelType: "Text", categoryId: null });
     if (r === "ok") throw new Error("the old owner could still create a channel");
     return r;
   });
-  await check("the server settings button is B's, not A's", async () => {
-    await B.page.getByTitle("Server Settings").click();
-    await B.page.locator(".settings-tab", { hasText: "Powers" }).waitFor({ timeout: 30000 });
-    await B.page.locator(".modal-close").first().click();
-    await A.page.getByTitle("Server Settings").click();
-    await new Promise((r) => setTimeout(r, 1500));
-    if (await A.page.locator(".settings-tab", { hasText: "Powers" }).count()) throw new Error("A still sees the owner's Powers tab");
-    await A.page.locator(".modal-close").first().click();
+  if (pass === "1") {
+    let link;
+    await check("friends rejoin: B makes a fresh invite and A joins with it", async () => {
+      await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+      link = await makeInvite(B);
+      await A.page.getByTitle("Add Server").click();
+      await joinWithLink(A, link);
+    });
+  }
+  await check("A (rejoined or not) is NOT the owner: still refused owner-only things", async () => {
+    const r = await act(A, "create_channel", { name: chan + "-a2", channelType: "Text", categoryId: null });
+    if (r === "ok") throw new Error("the old owner could still create a channel");
+    return r;
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});

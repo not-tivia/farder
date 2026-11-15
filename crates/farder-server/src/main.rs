@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
     if let Some(key) = &args.reset_owner {
         let new_owner = farder_server::reset_owner::parse_member_key(key)?;
         let mut conn = db::open_file(&args.db)?;
-        let pre = args.backup_dir.clone().unwrap_or_else(|| args.data_dir.join("pre-reset-backups"));
+        let pre = args.backup_dir.clone().unwrap_or_else(|| args.data_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".")).join("farder-pre-reset-backups"));
         let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&args.storage_dir), &args.data_dir, &pre)?;
         info!("Backup made first: {}", made.display());
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();

@@ -28,7 +28,7 @@ WSLIP=$(hostname -I | awk '{print $1}')
 PS="powershell.exe -NoProfile -ExecutionPolicy Bypass -File"
 
 winrun() { # winrun <scenario>   (UBU_* come from the environment)
-  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
+  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; \$env:RESET_PASS='${RESET_PASS:-1}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
 }
 fresh_pair() {
   $PS "$WIN_PATH\\scripts\\selftest\\stop-pair.ps1" >/dev/null
@@ -102,9 +102,9 @@ print('vk_'+c.execute('select hex(public_key) from members order by joined_at de
   echo "== host resets the owner to B ($BKEY)"
   "$BIN" --reset-owner "$BKEY" --db "$D/u.db" --storage-dir "$D/files" --data-dir "$D/sd" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-200 | tail -4
   start_direct $PORT "$D"
-  echo "== after the reset"; winrun host-reset
+  echo "== after the reset"; RESET_PASS=1 winrun host-reset
   echo "== restart the server: same answer"; pkill -x farder-server; sleep 2; start_direct $PORT "$D"
-  winrun host-reset
+  RESET_PASS=2 winrun host-reset
   pkill -x farder-server
 }
 
