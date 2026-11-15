@@ -800,6 +800,19 @@ pub enum ServerRequest {
     /// every channel's messages, including ones a member has no access to. Answered with
     /// [`ServerResponse::LogPage`]. Appended last (positional codec).
     FetchLog { after: u64, limit: u32 },
+    /// OWNER ONLY: allow or stop a member keeping a full copy of this server (a "replica", see
+    /// docs/mesh-hosting-status.md). A replica sees EVERYTHING the host sees (all channels, invite codes),
+    /// so only trusted machines. Answered with [`ServerResponse::Replicas`]. Appended last.
+    SetReplica { member: PublicKey, enabled: bool },
+    /// OWNER ONLY: who is a replica. Answered with [`ServerResponse::Replicas`]. Appended last.
+    ListReplicas,
+    /// OWNER or a replica: take a consistent snapshot of the server's database and say how big it is
+    /// and its SHA-256, then fetch it in pieces with `SnapshotChunk`. Answered with
+    /// [`ServerResponse::SnapshotInfo`]. Appended last.
+    SnapshotBegin,
+    /// OWNER or a replica: `len` bytes (at most 1 MiB) of snapshot `id` from `offset`. Answered with
+    /// [`ServerResponse::SnapshotData`]. Appended last.
+    SnapshotChunk { id: u64, offset: u64, len: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -954,6 +967,12 @@ pub enum ServerResponse {
     /// Answer to [`ServerRequest::FetchLog`]: the genesis (so the copy can check the server's id),
     /// the next events in acceptance order, and whether that is all of them.
     LogPage { genesis: farder_crypto::event_log::Genesis, events: Vec<StoredEvent>, done: bool },
+    /// Answer to `SetReplica` / `ListReplicas`.
+    Replicas { members: Vec<PublicKey> },
+    /// Answer to `SnapshotBegin`.
+    SnapshotInfo { id: u64, size: u64, sha256: String },
+    /// Answer to `SnapshotChunk`.
+    SnapshotData { data: Vec<u8> },
 }
 
 /// One accepted event with the server's own bookkeeping, as handed to a copy.

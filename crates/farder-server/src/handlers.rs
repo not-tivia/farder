@@ -676,7 +676,7 @@ fn handle_request_inner(
     member: &PublicKey,
     is_owner: bool,
     request: ServerRequest,
-    _storage_dir: &str,
+    storage_dir: &str,
     state: &Arc<ServerState>,
 ) -> Result<HandleResult> {
     // Mesh content gate: when this server has an event log, the log is
@@ -2645,14 +2645,44 @@ fn handle_request_inner(
         ServerRequest::FetchLog { after, limit } => {
             // Owner only: the raw history holds every channel's messages, including ones a member
             // cannot see through the normal history request.
-            if !is_owner {
-                return err("only the owner can fetch the server's full history");
+            if !is_owner && !members::is_replica(conn, member) {
+                return err("only the owner (or a replica the owner allowed) can fetch the server's full history");
             }
             let Some(genesis) = crate::event_ingest::load_genesis(conn)? else {
                 return err("this server has no signed history yet");
             };
             let (events, done) = crate::event_ingest::load_events_page(conn, after, limit)?;
             ok(ServerResponse::LogPage { genesis, events, done })
+        }
+        ServerRequest::SetReplica { member: target, enabled } => {
+            if !is_owner { return err("only the owner can allow a replica"); }
+            if members::get_member(conn, &target)?.is_none() { return err("that account is not a member of this server"); }
+            members::set_replica(conn, &target, enabled)?;
+            let ev = audit_emit(conn, member, Some(&target), if enabled { "replica_allowed" } else { "replica_removed" }, json!({}));
+            Ok(HandleResult { response: ServerResponse::Replicas { members: members::list_replicas(conn)? }, events: ev.into_iter().collect(), orphaned_file_ids: vec![] })
+        }
+        ServerRequest::ListReplicas => {
+            if !is_owner { return err("only the owner can see the replicas"); }
+            ok(ServerResponse::Replicas { members: members::list_replicas(conn)? })
+        }
+        ServerRequest::SnapshotBegin => {
+            if !is_owner && !members::is_replica(conn, member) {
+                return err("only the owner (or a replica the owner allowed) can take a snapshot");
+            }
+            let dir = if storage_dir.is_empty() { std::env::temp_dir().join("farder-snapshots") } else { std::path::Path::new(storage_dir).join(".snapshots") };
+            match state.snapshots.begin(conn, &dir) {
+                Ok((id, size, sha256)) => ok(ServerResponse::SnapshotInfo { id, size, sha256 }),
+                Err(e) => err(&e.to_string()),
+            }
+        }
+        ServerRequest::SnapshotChunk { id, offset, len } => {
+            if !is_owner && !members::is_replica(conn, member) {
+                return err("only the owner (or a replica the owner allowed) can fetch a snapshot");
+            }
+            match state.snapshots.chunk(id, offset, len) {
+                Ok(data) => ok(ServerResponse::SnapshotData { data }),
+                Err(e) => err(&e.to_string()),
+            }
         }
         ServerRequest::GetRecoveryStatus => {
             let guard = state.log_state.lock().unwrap();
@@ -10465,6 +10495,10 @@ mod tests {
                 | ServerRequest::SetGuestLinks { .. }
                 | ServerRequest::GetGuestLinks
                 | ServerRequest::FetchLog { .. }
+                | ServerRequest::SetReplica { .. }
+                | ServerRequest::ListReplicas
+                | ServerRequest::SnapshotBegin
+                | ServerRequest::SnapshotChunk { .. }
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
@@ -12120,6 +12154,39 @@ mod tests {
         let friend = add_member(&conn, "Friend");
         let r = handle_request(&conn, &friend, false, ServerRequest::FetchLog { after: 0, limit: 10 }, "", &st).unwrap().response;
         assert!(matches!(&r, ServerResponse::Error { reason } if reason.contains("only the owner")), "{r:?}");
+    }
+
+    #[test]
+    fn only_the_owner_and_a_replica_the_owner_allowed_can_take_a_snapshot_and_a_replica_cannot_make_more_replicas() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let replica = add_member(&conn, "Anchor");
+        let friend = add_member(&conn, "Friend");
+        let ask = |who: &PublicKey, is_owner: bool, r: ServerRequest| handle_request(&conn, who, is_owner, r, "", &st).unwrap().response;
+        // Before the owner allows it, nobody but the owner can.
+        assert!(matches!(ask(&replica, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
+        // The owner allows one account; only the owner can, and it must be a member.
+        assert!(matches!(ask(&friend, false, ServerRequest::SetReplica { member: replica.clone(), enabled: true }), ServerResponse::Error { .. }));
+        let stranger = Keypair::generate().public_key();
+        assert!(matches!(ask(&owner, true, ServerRequest::SetReplica { member: stranger, enabled: true }), ServerResponse::Error { .. }));
+        assert!(matches!(ask(&owner, true, ServerRequest::SetReplica { member: replica.clone(), enabled: true }), ServerResponse::Replicas { members } if members == vec![replica.clone()]));
+        // The replica can snapshot and read it in pieces; the friend still cannot.
+        let ServerResponse::SnapshotInfo { id, size, sha256 } = ask(&replica, false, ServerRequest::SnapshotBegin) else { panic!("snapshot") };
+        assert!(size > 0);
+        let mut all = Vec::new();
+        while (all.len() as u64) < size {
+            let ServerResponse::SnapshotData { data } = ask(&replica, false, ServerRequest::SnapshotChunk { id, offset: all.len() as u64, len: 4096 }) else { panic!("chunk") };
+            assert!(!data.is_empty());
+            all.extend(data);
+        }
+        use sha2::{Digest, Sha256};
+        assert_eq!(hex::encode(Sha256::digest(&all)), sha256, "the copy matches the hash the server gave");
+        assert!(matches!(ask(&friend, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
+        assert!(matches!(ask(&friend, false, ServerRequest::SnapshotChunk { id, offset: 0, len: 10 }), ServerResponse::Error { .. }));
+        // A replica cannot make more replicas, and the owner can take the permission away again.
+        assert!(matches!(ask(&replica, false, ServerRequest::SetReplica { member: friend.clone(), enabled: true }), ServerResponse::Error { .. }));
+        assert!(matches!(ask(&owner, true, ServerRequest::SetReplica { member: replica.clone(), enabled: false }), ServerResponse::Replicas { members } if members.is_empty()));
+        assert!(matches!(ask(&replica, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
     }
 
 }

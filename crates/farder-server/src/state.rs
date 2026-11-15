@@ -117,6 +117,9 @@ pub struct ServerState {
 
     /// The bulk-damage brake (see `brake.rs`): a limit on destructive changes per account.
     pub brake: crate::brake::Brake,
+
+    /// Snapshots handed to replicas, fetched in pieces (id -> file, size, when made). See `snapshot.rs`.
+    pub snapshots: crate::snapshot::Snapshots,
 }
 
 /// Default waiting period for a recovery takeover: 72 hours.
@@ -149,6 +152,7 @@ impl ServerState {
             client_protocol: StdRwLock::new(HashMap::new()),
             recovery_wait_secs: DEFAULT_RECOVERY_WAIT_SECS,
             brake: crate::brake::Brake::default(),
+            snapshots: crate::snapshot::Snapshots::default(),
         }
     }
 

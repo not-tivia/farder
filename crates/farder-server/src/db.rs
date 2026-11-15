@@ -278,6 +278,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Replicas: members the owner allows to keep a full copy of the server (mesh step 2).
+    conn.execute("CREATE TABLE IF NOT EXISTS replicas (public_key BLOB PRIMARY KEY)", [])?;
+
     // Guest links: an invite can be marked guest, and a member who joined with one has an
     // expiry (NULL = a normal member).
     let has_guest_col = |table: &str, col: &str| -> anyhow::Result<bool> {
