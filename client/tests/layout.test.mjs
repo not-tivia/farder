@@ -32,6 +32,8 @@ test("the stylesheet hides the wide-layout parts only in the small layout, and k
   }
   // On a phone-width screen the chat and the list never show together.
   assert.ok(css.includes('[data-phone-view="chat"] .compact-list { display: none; }'));
+  // ...and the typing box gets its own full-width row there.
+  assert.ok(css.includes(".message-input-textwrap { flex: 1 1 100%; order: -1; }"));
   // Theme-compatibility rule: no literal colours.
   assert.equal(/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(css), false);
 });

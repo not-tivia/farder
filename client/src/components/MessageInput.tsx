@@ -830,7 +830,7 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
             >
               Mic
             </button>
-            <div ref={textareaWrapperRef} style={{ position: "relative", flex: 1 }}>
+            <div ref={textareaWrapperRef} className="message-input-textwrap" style={{ position: "relative", flex: 1 }}>
               {filteredCommands.length > 0 && (
                 <div className="mention-autocomplete">
                   {filteredCommands.map((cmd, i) => (

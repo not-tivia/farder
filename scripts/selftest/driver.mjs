@@ -967,6 +967,8 @@ async function phone() {
       await A.page.locator(".chat-panel").first().waitFor({ state: "visible", timeout: 10000 });
       const input = A.page.getByPlaceholder(/Type a message/);
       if (!(await inView(input, w, h))) throw new Error("the typing box is not on the screen");
+      const ib = await input.boundingBox();
+      if (!ib || ib.width < w * 0.6) throw new Error(`the typing box is only ${Math.round(ib?.width ?? 0)}px wide on a ${w}px screen`);
       const back = A.page.locator(".phone-back");
       if (!(await back.first().isVisible())) throw new Error("no Back button in the chat");
       const m = await measure();

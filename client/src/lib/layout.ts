@@ -73,6 +73,7 @@ html[data-layout="small"] .dm-panel { display: none; }
 html[data-layout="small"] .compact-list { width: 168px; min-width: 168px; }
 html[data-layout="small"] .chat-panel { min-width: 0; }
 html[data-layout="small"] .channel-header-topic { display: none; }
+html[data-layout="small"] .message-input-textwrap { min-width: 0; }
 /* The Back button (only rendered in the small layout) shows on a phone-width screen only. */
 html[data-layout="small"] .phone-back { display: none; }
 @media (max-width: ${PHONE_MAX_WIDTH}px) {
@@ -82,5 +83,9 @@ html[data-layout="small"] .phone-back { display: none; }
   html[data-layout="small"][data-phone-view="chat"] .compact-list { display: none; }
   html[data-layout="small"][data-phone-view="chat"] .chat-panel { width: 100%; flex: 1 1 auto; }
   html[data-layout="small"] .phone-back { display: inline-block; margin-right: 6px; }
+  /* The typing box gets a whole row to itself above the buttons: squeezed between six
+     buttons it was 28px wide. */
+  html[data-layout="small"] .message-input-row { flex-wrap: wrap; }
+  html[data-layout="small"] .message-input-textwrap { flex: 1 1 100%; order: -1; }
 }
 `;
