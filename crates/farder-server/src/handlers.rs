@@ -1884,11 +1884,16 @@ pub fn handle_request(
 
             let mut events = Vec::new();
             if was_created {
+                // Tell ONLY the other person, and name the person who opened it as
+                // the "participant" (each side sees the OTHER one). Announcing it to
+                // everyone told the whole server that a private conversation exists
+                // and left the person it was opened with without a conversation.
+                let opener = build_member_info(conn, state, member)?;
                 events.push(BroadcastEvent {
-                    target: EventTarget::All,
+                    target: EventTarget::Members(vec![target_key.clone()]),
                     event: ServerEvent::DmCreated {
                         channel: channel.clone(),
-                        participant: participant.clone(),
+                        participant: opener,
                     },
                 });
             }
@@ -4524,8 +4529,14 @@ mod tests {
         // DmCreated event should be emitted.
         assert_eq!(result.events.len(), 1);
         match &result.events[0].event {
-            ServerEvent::DmCreated { .. } => {}
+            // The other person is told, and sees the OPENER as their participant.
+            ServerEvent::DmCreated { participant, .. } => assert_eq!(participant.public_key, owner_pk),
             other => panic!("expected DmCreated event, got {:?}", other),
+        }
+        // Only the other person hears about it, not the whole server.
+        match &result.events[0].target {
+            EventTarget::Members(keys) => assert_eq!(keys, &vec![alice.clone()]),
+            _ => panic!("a new DM must be announced only to the person it was opened with"),
         }
     }
 
