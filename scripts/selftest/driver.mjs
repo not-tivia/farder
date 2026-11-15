@@ -1302,8 +1302,10 @@ async function recovery() {
     if (await A.page.locator(".settings-tab", { hasText: "Powers" }).count()) throw new Error("A still sees the owner's Powers tab");
     await closeDialog(A);
     // And the banner is gone for everyone.
-    await A.page.locator(".recovery-banner").waitFor({ state: "detached", timeout: 30000 });
-    await B.page.locator(".recovery-banner").waitFor({ state: "detached", timeout: 30000 });
+    // (the new owner is then nudged to make a fresh recovery key, since the old one was spent)
+    await A.page.locator(".recovery-banner:not(.nudge)").waitFor({ state: "detached", timeout: 30000 });
+    await B.page.locator(".recovery-banner:not(.nudge)").waitFor({ state: "detached", timeout: 30000 });
+    await B.page.locator(".recovery-banner.nudge").waitFor({ timeout: 30000 });
   });
   await check("the old owner (still connected) can no longer do owner-only things; the new owner can", async () => {
     const act = (c, nm, cmd, extra) => c.page.evaluate(async ([name, command, more]) => {
