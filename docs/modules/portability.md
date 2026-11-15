@@ -28,21 +28,35 @@ knows where the work is, and the rules to follow so new code does not make it wo
 
 ## What has been checked (2026-11-14)
 
-`bash scripts/portability_check.sh` type-checks the shared crates for
-`aarch64-linux-android` and `aarch64-apple-ios`:
+**Android: the whole Rust side type-checks.** `scripts\portability_check_android.ps1`
+(Windows, uses the NDK Android Studio installed) runs `cargo check --target
+aarch64-linux-android` and passes for `farder-protocol`, `farder-crypto`,
+`farder-history`, `farder-e2ee-client`, `farder-mls` and, with `-Client`, the Tauri
+app crate `farder-client` itself (including the C libraries SQLite and Opus, built with
+the NDK through `scripts/android-toolchain.cmake`).
 
-| Crate | Android | iOS | Note |
-|---|---|---|---|
-| `farder-protocol`, `farder-crypto` | compiles | compiles | pure Rust, nothing to do |
-| `farder-history`, `farder-e2ee-client`, `farder-mls` | needs toolchain | needs toolchain | they bundle SQLite (C): the C step needs the Android NDK / Xcode, which are not installed on the dev machine. Not a code failure; install the toolchain to settle it |
-| `farder-client` (the Tauri app) | not tried | not tried | see below |
+What it took, and what it means for the next steps:
 
-`client/src-tauri/tauri.android.conf.json` and `tauri.ios.conf.json` are Tauri's
-per-platform config overrides. They drop the bundled-server sidecar
-(`externalBin`) on phones, where a child server process cannot run. They have no
-effect on desktop builds. A phone build still needs a mobile `main`/lib entry point
-and the desktop-only modules below behind `cfg`; that is the real port and has not
-been started.
+- Native file dialogs (`rfd`) are desktop-only: now behind `cfg`, with an error on
+  phones where `pick_file` / `save_recovery_image` need a system-picker plugin.
+- Everything that builds or drives extra windows or the tray (`buddy`, `edge_strip`,
+  `notify_popup`, `window_behavior`, `tray`, `open_themes_folder`) has a real version
+  for desktop and a small stub for phones (`#[cfg(any(target_os = "android",
+  target_os = "ios"))]`), so the command names stay registered and the seam audit
+  stays at zero.
+- `client/src-tauri/tauri.android.conf.json` / `tauri.ios.conf.json` drop the bundled
+  server on phones.
+
+**What is still not done for Android:** type-checking is not a build. Nobody has
+produced an APK, linked the native libraries, or run it. Still open: the mobile entry
+point (`tauri android init`), a system file-picker plugin, microphone/capture
+permissions, push notifications instead of pop-ups, and the one-window layout as the
+default on phones (the small-window layout, checklist Part 10, is the starting point).
+
+**iOS:** `farder-protocol` and `farder-crypto` type-check for `aarch64-apple-ios`
+(`scripts/portability_check.sh`). The SQLite crates and the app need the Apple SDK,
+which exists only on a Mac, so iOS cannot be checked from this machine. The same
+`cfg` split above applies to iOS, and the platform stubs already cover it.
 
 ## Rules for new code
 

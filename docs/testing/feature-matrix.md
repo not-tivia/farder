@@ -67,4 +67,10 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 
 ## Portability (Android / Apple)
 
-See `docs/modules/portability.md`. Not a feature to test yet; an audit of what is desktop-only.
+| Item | Status | Evidence |
+|---|---|---|
+| Shared Rust crates + the app crate type-check for Android (NDK) | VERIFIED | `scripts\portability_check_android.ps1 -Client`, 2026-11-14 |
+| Android app builds, installs, runs | UNVERIFIED | not started (needs `tauri android init`, file-picker plugin, permissions) |
+| iOS | UNVERIFIED | pure crates type-check; the rest needs a Mac and the Apple SDK |
+
+See `docs/modules/portability.md`.
