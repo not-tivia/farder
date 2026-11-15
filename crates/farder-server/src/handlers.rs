@@ -593,6 +593,9 @@ pub fn connection_speaks_v2(state: &crate::state::ServerState, member: &PublicKe
     connection_protocol_version(state, member) >= farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
 }
 
+/// What someone is told when the host reset this server's owner and they are not in the new history.
+pub const RESET_BY_HOST: &str = "this server was reset by its host: ask the owner for a fresh invite to rejoin (your old messages are kept)";
+
 /// What a v1 connection is told when it asks for something only a v2 client can
 /// be given. Actionable where `E2EE_REFUSED` would be baffling.
 pub const UPGRADE_REQUIRED: &str = "this channel requires a newer client";
@@ -682,7 +685,15 @@ fn handle_request_inner(
     // server info); everything else is rejected. Legacy servers (no log) skip
     // this entirely.
     if request_requires_membership(&request) {
-        if let Some(reason) = content_block_reason(state, member) {
+        if let Some(mut reason) = content_block_reason(state, member) {
+            // After a host-side owner reset the old members are not in the new history. Say what
+            // happened and what to do, instead of a bare "not a member".
+            if reason == "not a member of this server"
+                && members::get_member(conn, member).ok().flatten().is_some()
+                && crate::db::get_setting(conn, "owner_reset_at").ok().flatten().is_some()
+            {
+                reason = RESET_BY_HOST.to_string();
+            }
             return err(&reason);
         }
     }
@@ -12013,6 +12024,32 @@ mod tests {
             let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: *id }, "", &off).unwrap();
             assert!(!matches!(r.response, ServerResponse::Error { .. }));
         }
+    }
+
+    #[test]
+    fn after_a_host_reset_old_members_are_told_to_rejoin_not_just_that_they_are_not_members() {
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, old) = (Keypair::generate(), Keypair::generate());
+        for (k, n) in [(&owner, "Owner"), (&old, "Old")] {
+            members::register_member(&conn, &k.public_key(), n).unwrap();
+            members::assign_role(&conn, &k.public_key(), everyone).unwrap();
+        }
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        crate::event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let ask = || handle_request(&conn, &old.public_key(), false, ServerRequest::GetMembers, "", &state).unwrap().response;
+        // No reset yet: the plain answer.
+        assert!(matches!(ask(), ServerResponse::Error { reason } if reason == "not a member of this server"));
+        crate::db::set_setting(&conn, "owner_reset_at", "123").unwrap();
+        assert!(matches!(ask(), ServerResponse::Error { reason } if reason == RESET_BY_HOST));
+        // A stranger who was never a member still gets the plain answer, even after a reset.
+        let stranger = Keypair::generate().public_key();
+        let r = handle_request(&conn, &stranger, false, ServerRequest::GetMembers, "", &state).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { reason } if reason == "not a member of this server"));
     }
 
 }

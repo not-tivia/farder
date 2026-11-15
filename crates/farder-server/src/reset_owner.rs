@@ -64,6 +64,12 @@ pub fn reset_owner(conn: &mut Connection, new_owner: &PublicKey, force: bool, no
          DELETE FROM events;
          DELETE FROM genesis;"))?;
     tx.execute("INSERT INTO genesis (singleton, genesis_body, server_id) VALUES (0, ?1, ?2)", rusqlite::params![genesis.to_bytes(), new_id])?;
+    // Remember that the host reset the owner, so people who are no longer in the new history are told
+    // what happened ("rejoin with a fresh invite") instead of a bare "not a member".
+    tx.execute(
+        "INSERT INTO server_settings (key, value) VALUES ('owner_reset_at', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![now.to_string()],
+    )?;
     tx.commit()?;
     Ok(ResetReport { old_server_id: old_id, new_server_id: new_id, events_moved_aside: n })
 }

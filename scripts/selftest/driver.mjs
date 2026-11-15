@@ -1397,6 +1397,8 @@ async function hostReset() {
   await check("the OLD owner (A) is refused owner-only things", async () => {
     const r = await act(A, "create_channel", { name: chan + "-a", channelType: "Text", categoryId: null });
     if (r === "ok") throw new Error("the old owner could still create a channel");
+    // Before A rejoins, A is told WHAT HAPPENED and what to do, not just "not a member".
+    if (pass === "1" && !/reset by its host.*fresh invite/.test(r)) throw new Error("not the plain reset message: " + r);
     return r;
   });
   if (pass === "1") {
