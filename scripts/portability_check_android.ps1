@@ -25,8 +25,9 @@ $env:CMAKE_GENERATOR = "Ninja"
 $env:CMAKE_TOOLCHAIN_FILE_aarch64_linux_android = Join-Path $PSScriptRoot "android-toolchain.cmake"
 $env:CARGO_TARGET_DIR = Join-Path (Split-Path -Parent $PSScriptRoot) "target-android-check"
 rustup target add $triple | Out-Null
-# A leftover CMake cache from a run with a different generator makes CMake refuse to continue.
-Get-ChildItem (Join-Path $env:CARGO_TARGET_DIR "$triple\debug\build") -Directory -Filter "audiopus_sys-*" -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -Recurse -Force (Join-Path $_.FullName "out") -ErrorAction SilentlyContinue }
+# A leftover CMake cache from a run with a different generator makes CMake refuse to continue; remove the whole
+# build-script folder (not just its output) so Cargo really re-runs it and finds the library it builds.
+Get-ChildItem (Join-Path $env:CARGO_TARGET_DIR "$triple\debug\build") -Directory -Filter "audiopus_sys-*" -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
 Set-Location (Split-Path -Parent $PSScriptRoot)
 Write-Host "NDK: $($ndk.Name)"
 $crates = @("farder-protocol", "farder-crypto", "farder-history", "farder-e2ee-client", "farder-mls")
