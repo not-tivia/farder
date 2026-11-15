@@ -3371,6 +3371,53 @@ listed. Keys are `vk_<hex>`.
 
 ---
 
+### `recovery_status(state, server_id) -> Result<RecoveryStatusView, String>`
+
+**What it does:** `ServerRequest::GetRecoveryStatus`. Whether the server has a recovery key,
+its public half, how long a takeover must wait on this server (`wait_secs`), and the takeover in
+progress if any (`claim`, `new_owner`, `accepted_at`, `ready_at`, the server's own clock). Any
+member may ask: a takeover is meant to be seen by everyone.
+**invoke name:** `"recovery_status"` -> `recoveryStatus()`. Used by `RecoveryTab.tsx`.
+
+---
+
+### `recovery_create(state, server_id, log_server_id) -> Result<RecoveryCreatedView, String>`
+
+**What it does:** owner only. Makes a random recovery key, signs and submits
+`EventPayload::RecoveryKeySet` naming its public half, and returns the 24-word phrase ONCE
+(`phrase`, `recovery_key`). The words are kept nowhere on this computer.
+**invoke name:** `"recovery_create"` -> `recoveryCreate()`.
+**Side effects:** one event in the server's history; audit-logged; every client is told.
+
+---
+
+### `recovery_claim(state, server_id, log_server_id, phrase, new_owner) -> Result<EventAcceptedResult, String>`
+
+**What it does:** starts a takeover. Derives the recovery key from the 24 words, checks it is THIS
+server's recovery key, registers a throwaway device for it (cert valid one hour), and submits
+`RecoveryClaim { new_owner }`. `new_owner` must already be a member. The words are used once and
+never stored.
+**invoke name:** `"recovery_claim"` -> `recoveryClaim()`.
+
+---
+
+### `recovery_cancel(state, server_id, log_server_id, phrase) -> Result<EventAcceptedResult, String>`
+
+**What it does:** the recovery key withdraws the takeover that is waiting
+(`RecoveryCancel`). The everyday owner key cannot do this.
+**invoke name:** `"recovery_cancel"` -> `recoveryCancel()`.
+
+---
+
+### `recovery_finalize(state, server_id, log_server_id, phrase) -> Result<EventAcceptedResult, String>`
+
+**What it does:** the recovery key finishes the waiting takeover (`RecoveryFinalize`). The SERVER
+refuses it until the waiting period has passed (its own clock); on success the new owner is the
+owner from the very next request and the recovery key is spent.
+**invoke name:** `"recovery_finalize"` -> `recoveryFinalize()`.
+
+---
+
 ### `garble_set(state, server_id, log_server_id, target, mode, phrase, messages, consensual) -> Result<EventAcceptedResult, String>`
 
 **What it does:** signs and submits an `EventPayload::GarbleSet` as this device:

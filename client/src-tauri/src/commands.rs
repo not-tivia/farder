@@ -8235,6 +8235,163 @@ pub async fn revoke_capability(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Recovery owner (docs/recovery-owner-design.md)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct RecoveryCreatedView {
+    /// The 24 words. Shown ONCE and kept nowhere on this computer.
+    pub phrase: String,
+    /// The recovery key's public half (what the server stores).
+    pub recovery_key: String,
+}
+
+/// Make a recovery key for this server and name it in the server's signed history.
+/// Only the owner can. The words are returned for the person to write down and are NOT
+/// stored anywhere here: losing them means this recovery key is gone (make another).
+#[tauri::command]
+pub async fn recovery_create(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+) -> Result<RecoveryCreatedView, String> {
+    let seed: [u8; 32] = rand::random();
+    let phrase = farder_crypto::recovery::phrase_from_key(&seed).map_err(|e| e.to_string())?;
+    let recovery = Keypair::from_signing_key_bytes(&seed);
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::RecoveryKeySet { recovery: recovery.public_key() },
+    )
+    .await?;
+    Ok(RecoveryCreatedView { phrase, recovery_key: recovery.public_key().to_string() })
+}
+
+#[derive(serde::Serialize)]
+pub struct RecoveryPendingView {
+    pub claim: String,
+    pub new_owner: String,
+    pub accepted_at: u64,
+    pub ready_at: u64,
+}
+
+#[derive(serde::Serialize)]
+pub struct RecoveryStatusView {
+    pub key_set: bool,
+    pub recovery_key: Option<String>,
+    pub wait_secs: u64,
+    pub pending: Option<RecoveryPendingView>,
+}
+
+/// Whether this server has a recovery key and whether a takeover is waiting (anyone may ask:
+/// a takeover is meant to be seen by everybody).
+#[tauri::command]
+pub async fn recovery_status(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<RecoveryStatusView, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetRecoveryStatus)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::RecoveryStatus { key_set, recovery_key, wait_secs, pending } => Ok(RecoveryStatusView {
+            key_set,
+            recovery_key: recovery_key.map(|k| k.to_string()),
+            wait_secs,
+            pending: pending.map(|p| RecoveryPendingView {
+                claim: p.claim,
+                new_owner: p.new_owner.to_string(),
+                accepted_at: p.accepted_at,
+                ready_at: p.ready_at,
+            }),
+        }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Sign and send ONE recovery step as the recovery key (made from its 24 words).
+///
+/// The recovery key is not a member of the server and has no device there, so each step
+/// registers a throwaway device (valid for one hour, so it frees its slot afterwards) and then
+/// sends the step from it. The words are used here and never stored.
+async fn submit_as_recovery_key(
+    state: &State<'_, Arc<AppState>>,
+    server_id: &str,
+    log_server_id: &str,
+    phrase: &str,
+    payload: farder_crypto::event_log::EventPayload,
+) -> Result<EventAcceptedResult, String> {
+    use farder_crypto::event_log::{DeviceCert, EventPayload};
+    let seed = farder_crypto::recovery::key_from_phrase(phrase)
+        .map_err(|_| "those 24 words are not a valid recovery phrase (check the spelling and the order)".to_string())?;
+    let recovery = Keypair::from_signing_key_bytes(&seed);
+    // The words must be THIS server's recovery key, or the server would just refuse a signed
+    // step with a confusing message.
+    let status = recovery_status(state.clone(), server_id.to_string()).await?;
+    if status.recovery_key.as_deref() != Some(recovery.public_key().to_string().as_str()) {
+        return Err("these words are not the recovery key of this server".to_string());
+    }
+    let device = Keypair::generate();
+    let now = event_now_secs();
+    let cert = DeviceCert::create_expiring(&recovery, &device.public_key(), now, now + 3600);
+    let authorize = event_build_next(&device, &recovery, log_server_id, None, 0, 0, EventPayload::DeviceAuthorized { cert });
+    event_send_submit(state, server_id, &authorize).await?;
+    let step = event_build_next(&device, &recovery, log_server_id, Some(authorize.hash()), 1, authorize.core.lamport, payload);
+    event_send_submit(state, server_id, &step).await
+}
+
+/// Start a takeover: make `new_owner` (a member of the server) the owner after the waiting
+/// period. Needs the recovery key's 24 words.
+#[tauri::command]
+pub async fn recovery_claim(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+    new_owner: String,
+) -> Result<EventAcceptedResult, String> {
+    let new_owner = parse_public_key(&new_owner)?;
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryClaim { new_owner },
+    ).await
+}
+
+/// Withdraw the takeover that is waiting.
+#[tauri::command]
+pub async fn recovery_cancel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+) -> Result<EventAcceptedResult, String> {
+    let status = recovery_status(state.clone(), server_id.clone()).await?;
+    let claim = status.pending.ok_or_else(|| "there is no takeover waiting".to_string())?.claim;
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryCancel { claim },
+    ).await
+}
+
+/// Finish the takeover once the waiting period is over (the server refuses earlier).
+#[tauri::command]
+pub async fn recovery_finalize(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+) -> Result<EventAcceptedResult, String> {
+    let status = recovery_status(state.clone(), server_id.clone()).await?;
+    let claim = status.pending.ok_or_else(|| "there is no takeover waiting".to_string())?.claim;
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryFinalize { claim },
+    ).await
+}
+
 #[derive(serde::Serialize)]
 pub struct CapabilityHolderView {
     pub member: String,

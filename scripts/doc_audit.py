@@ -15,7 +15,7 @@ import sys
 import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MAIN = ROOT / "client/src-tauri/src/main.rs"
+MAIN = ROOT / "client/src-tauri/src/lib.rs"
 DOC = ROOT / "docs/modules/tauri-commands.md"
 
 

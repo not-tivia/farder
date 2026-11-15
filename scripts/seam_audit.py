@@ -2,7 +2,7 @@
 """Seam audit for the Farder Tauri client.
 
 Cross-checks three surfaces that have no compile-time link:
-  1. every invoke("X") in tauri-bridge.ts  <->  a registered #[tauri::command] in main.rs
+  1. every invoke("X") in tauri-bridge.ts  <->  a registered #[tauri::command] in lib.rs (the app library; main.rs only calls it)
   2. every listen("server:...") in useServerEvents.ts  <->  an emit("server:...") in bridge.rs
   3. every emit("server:...") in bridge.rs  <->  a listen in useServerEvents.ts (no orphan emit)
 Exits non-zero on any hard mismatch.
@@ -11,7 +11,7 @@ import re, sys, pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 bridge_ts = (ROOT / "client/src/lib/tauri-bridge.ts").read_text()
-main_rs = (ROOT / "client/src-tauri/src/main.rs").read_text()
+main_rs = (ROOT / "client/src-tauri/src/lib.rs").read_text()
 use_events = (ROOT / "client/src/hooks/useServerEvents.ts").read_text()
 bridge_rs = (ROOT / "client/src-tauri/src/bridge.rs").read_text()
 

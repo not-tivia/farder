@@ -1638,6 +1638,41 @@ export async function getCapabilities(serverId: string): Promise<CapabilityHolde
   return invoke<CapabilityHolder[]>("get_capabilities", { serverId });
 }
 
+// ── Recovery owner (docs/recovery-owner-design.md) ───────────────────────────
+
+export interface RecoveryStatus {
+  key_set: boolean;
+  recovery_key: string | null;
+  /** How long a takeover must wait on this server, in seconds. */
+  wait_secs: number;
+  pending: { claim: string; new_owner: string; accepted_at: number; ready_at: number } | null;
+}
+
+/** Whether a recovery key exists and whether a takeover is waiting. Any member may ask. */
+export async function recoveryStatus(serverId: string): Promise<RecoveryStatus> {
+  return invoke<RecoveryStatus>("recovery_status", { serverId });
+}
+
+/** Owner only. Makes a recovery key, names it in the server's history and returns its 24
+ *  words ONCE. Nothing about the words is kept on this computer. */
+export async function recoveryCreate(serverId: string, logServerId: string): Promise<{ phrase: string; recovery_key: string }> {
+  return invoke("recovery_create", { serverId, logServerId });
+}
+
+/** Start a takeover with the recovery key's 24 words; `newOwner` must be a member. */
+export async function recoveryClaim(serverId: string, logServerId: string, phrase: string, newOwner: string): Promise<void> {
+  await invoke("recovery_claim", { serverId, logServerId, phrase, newOwner });
+}
+
+export async function recoveryCancel(serverId: string, logServerId: string, phrase: string): Promise<void> {
+  await invoke("recovery_cancel", { serverId, logServerId, phrase });
+}
+
+/** Finish a takeover after the waiting period (the server refuses earlier). */
+export async function recoveryFinalize(serverId: string, logServerId: string, phrase: string): Promise<void> {
+  await invoke("recovery_finalize", { serverId, logServerId, phrase });
+}
+
 // ── Universal volume control ─────────────────────────────────────────────────
 
 export interface AudioLimitsView {
