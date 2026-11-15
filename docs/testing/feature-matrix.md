@@ -24,7 +24,7 @@ Last updated: 2026-11-15.
 | T2 Client crate | `cd client/src-tauri && cargo test -- --test-threads=1` | 250 pass, 0 fail (2026-11-15) |
 | T3 Frontend | `client/scripts/run-unit-tests.sh` + `npx tsc --noEmit` | 91 pass, tsc clean |
 | T4 Audits | `scripts/seam_audit.py`, `reachability_audit.py`, `doc_audit.py` | all three pass (2026-11-15) |
-| T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-14/15: 15 scenarios, 63/63 checks PASS (core 9, dm 7, buddy 5, edit 3, direct 4, unread 4, popup 3, attach 2, garble 2, admin-garble 5, strip 2, themes 6, relaunch 6, direct-relaunch 3, tray 2); relay and direct servers; run on a build that includes the Android stubs |
+| T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-15: 17 scenarios, 70/70 checks PASS in one run on the latest code (core 9, dm 7, buddy 5, edit 3, direct 4, unread 4, popup 3, attach 2, garble 2, admin-garble 5, powers 4, voice 3, strip 2, themes 6, relaunch 6, direct-relaunch 3, tray 2); includes the app-as-library change; relay and direct servers |
 
 ## Core chat (what friends will use)
 
