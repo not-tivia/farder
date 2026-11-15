@@ -164,6 +164,11 @@ async function relaunch() {
   const B = await attach(PORT_B, "B");
   await check("A: unlock after relaunch, still in the server", () => unlock(A));
   await check("B: unlock after relaunch, still in the server (no re-invite)", () => unlock(B));
+  // The app reopens on the server used last; go to the first one, where the history is.
+  for (const c of [A, B]) {
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
   await check("A: earlier history is still there", () => seesText(A, "hello from B " + stamp));
   await check("B: earlier history is still there", () => seesText(B, "hello from A " + stamp));
   await check("A: send after relaunch, B sees it", async () => { await sendText(A, "after relaunch A " + stamp); await seesText(B, "after relaunch A " + stamp); });
