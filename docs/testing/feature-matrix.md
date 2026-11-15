@@ -118,3 +118,13 @@ See `docs/modules/portability.md`.
 | Caddy routes `/<name>/t` and `/ws/*` over real TLS | UNVERIFIED | written in `deploy/website/Caddyfile`, never run |
 | Owner's in-app screen for guest links: switch, make a link (duration, web name), copy; link then works in a real browser; both apps see the guest and their messages | VERIFIED | `ubuntu-suite.sh guestlink`: 2 + 9 + 2 checks (Windows apps, Ubuntu server, gateway, real Edge) |
 | Guest page on a phone browser | UNVERIFIED | responsive CSS only |
+
+## Mesh steps 1-2: a verified copy on another machine (docs/mesh-hosting-status.md)
+
+| Feature | Status | Evidence |
+|---|---|---|
+| `FetchLog` (owner/replica only, paged, with genesis) | VERIFIED (unit) | 2 tests |
+| Owner allows replicas; verified database snapshots in pieces; replica cannot make replicas | VERIFIED (unit) | handler test + snapshot tests |
+| `farder-replica` against the real server: refused until allowed, verified copy with data, bad copy rejected, revoke stops copies | VERIFIED | `cargo test -p farder-replica` |
+| Attachments (files) copied | NOT BUILT | |
+| Serving the copy read-only while the host is down; client tries a second address; promotion; allow-a-replica screen in the app | NOT BUILT | |

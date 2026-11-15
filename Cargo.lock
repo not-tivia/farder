@@ -960,6 +960,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "farder-replica"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "farder-crypto",
+ "farder-protocol",
+ "farder-server",
+ "farder-web",
+ "hex",
+ "quinn",
+ "rusqlite",
+ "rustls",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "farder-server"
 version = "0.1.0"
 dependencies = [

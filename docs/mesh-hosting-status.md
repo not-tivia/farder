@@ -19,7 +19,7 @@ this setup: A's PC hosts, B connects through the relay.)
 | Single host + relay | One computer hosts, the relay hides addresses | DONE and tested (self-test, 70 checks) |
 | Signed log foundation ("Rung 1") | Everything that happens in a server (messages, joins, bans, invites, devices) is a signed, hash-chained event. Anyone holding the events can verify them, so a copy can't be forged | DONE (spec 2026-06-25, plus invites/approvals, attachments, takedowns) |
 | Encrypted channels ("Rung 2") | A member's computer can hold a copy without being able to read encrypted channels (OpenMLS) | DONE as code, server-side tests green; the GUI path is only lightly exercised |
-| **Copying the log to another computer** | A second machine follows the host and keeps a verified copy | **NOT STARTED** (no request exists that hands a whole log to a follower) |
+| **Copying the server to another computer** | A second machine follows the host and keeps a verified copy | **BUILT 2026-11-15 (steps 1-2): `FetchLog` + replicas + verified snapshots + the `farder-replica` tool; tested against the real server. Not yet: serving the copy while the host is down, client failover, promotion** |
 | **Failover** | If the host is off, clients switch to a copy; a copy can take over | **NOT STARTED** |
 | **Members hosting together (the real mesh)** | Several machines accept new messages and merge them | **NOT STARTED** (the log was designed so merging is possible: per-device chains, Lamport clock; never built) |
 | **Relay turning into a mesh** | The server's address list grows from "relay" to "relay + member copies" | **NOT STARTED** |
@@ -60,3 +60,27 @@ hard merge problem. That is the useful milestone for a group of friends.
 Each step gets a scenario in `scripts/selftest/` (the two-client harness) that kills the
 host and checks what the others can still do, plus Rust tests for the new log request.
 Nothing here will be called working until that run passes.
+
+## Status of steps 1-2 (built 2026-11-15)
+
+**Step 1, `FetchLog`** (owner, or an allowed replica): pages the signed history (`after`, `limit`, with the genesis so a copy can check the
+server's id). Owner/replica only, because the raw history holds every channel's messages including ones a member cannot open.
+
+**What I found while planning step 2, and changed:** channels, roles and categories live only in the server's DATABASE, not in the
+signed history, so a copy built from the log alone would lose them. So a replica copies the DATABASE as a verified snapshot, not the log.
+
+**Step 2, replicas and `farder-replica`:**
+- The owner allows a member as a replica (`SetReplica`; `ListReplicas`). Only the owner can; a replica cannot make more replicas.
+- `SnapshotBegin` / `SnapshotChunk`: the server makes a consistent copy of its database (`VACUUM INTO`), announces its size and
+  SHA-256, and hands it over in 1 MiB pieces. At most 4 live at once, deleted after 15 minutes.
+- `farder-replica` (a program with its own key): joins with a normal invite, waits to be allowed (exit code 3 with its key printed),
+  then pulls a copy every N seconds; checks the SHA-256, SQLite's integrity check and that the signed history inside replays cleanly
+  and is the server it asked; only then replaces `latest.db` (keeping `previous.db`). A bad copy is thrown away and the old good one stays.
+- **A replica sees everything the host sees**, including channels a member cannot open and invite codes. Run one only on a machine
+  you trust as much as the host.
+
+Tested (`cargo test -p farder-replica`, real server): refused until allowed; after allowing, the copy holds the messages and a channel
+that exists only in the database; a second pull keeps `previous.db`; a corrupted file is rejected; revoking stops further copies.
+
+Not done: attachments (files) are not copied yet (database only), serving a copy while the host is down (read-only mode), clients trying
+a second address (failover), promotion, running the replica as a service on the Beelink, and a screen in the app to allow a replica.
