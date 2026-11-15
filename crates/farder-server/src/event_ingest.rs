@@ -64,6 +64,10 @@ pub(crate) fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::GarbleCleared { .. } => "GarbleCleared",
         EventPayload::GarbleConsent { .. } => "GarbleConsent",
         EventPayload::PermissionRevoked { .. } => "PermissionRevoked",
+        EventPayload::RecoveryKeySet { .. } => "RecoveryKeySet",
+        EventPayload::RecoveryClaim { .. } => "RecoveryClaim",
+        EventPayload::RecoveryCancel { .. } => "RecoveryCancel",
+        EventPayload::RecoveryFinalize { .. } => "RecoveryFinalize",
     }
 }
 

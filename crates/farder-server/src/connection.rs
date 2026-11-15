@@ -649,10 +649,7 @@ pub(crate) async fn authenticate(
 
     // Step 8: Check is_owner (computed before registry inserts so the session
     // registry records the correct owner flag in a single insert).
-    let is_owner = {
-        let owner = state.owner.read().await;
-        owner.as_ref().map(|o| o == &public_key).unwrap_or(false)
-    };
+    let is_owner = state.is_current_owner(&public_key).await;
 
     // Step 6: Register client in state.clients
     let (event_tx, event_rx) = mpsc::channel::<ServerEvent>(64);
@@ -856,7 +853,9 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
                     let mk = member_clone.clone();
                     tokio::spawn(async move {
                         let _permit = permit; // held until task completes
-                        if let Err(e) = handle_auxiliary_stream(&st, &mk, is_owner, s, r).await {
+                        // Ownership may have changed since this connection opened.
+                        let owner_now = st.is_current_owner(&mk).await;
+                        if let Err(e) = handle_auxiliary_stream(&st, &mk, owner_now, s, r).await {
                             tracing::debug!("auxiliary stream error: {}", e);
                         }
                     });
@@ -931,12 +930,17 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 pub(crate) async fn main_loop(
     state: Arc<ServerState>,
     member_key: PublicKey,
-    is_owner: bool,
+    is_owner_at_connect: bool,
     send: &mut SendStream,
     recv: &mut RecvStream,
     mut event_rx: mpsc::Receiver<ServerEvent>,
 ) -> Result<()> {
+    let _ = is_owner_at_connect; // only the starting value: ownership is re-read for every request below
     loop {
+        // Ownership can change while a connection is open (a recovery takeover). Reading it
+        // once at connect would let a person who was the owner a minute ago keep owner powers
+        // until they reconnect, so it is asked again for every message.
+        let is_owner = state.is_current_owner(&member_key).await;
         tokio::select! {
             // Client request branch
             frame_result = recv_client_frame(recv) => {
@@ -1532,7 +1536,7 @@ pub(crate) async fn main_loop(
                                                 ..
                                             } => {
                                                 *name = state.server_name.clone();
-                                                *owner_public_key = state.owner.read().await.clone();
+                                                *owner_public_key = state.current_owner().await;
                                             }
                                             _ => {}
                                         }
@@ -1665,7 +1669,7 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
         }
         EventTarget::PermissionHolders(perm_bit) => {
             let clients = state.clients.read().await;
-            let owner_pk = state.owner.read().await.clone();
+            let owner_pk = state.current_owner().await;
             let conn = state.db.lock().unwrap();
             for (pk_bytes, sender) in clients.iter() {
                 let pk = farder_crypto::identity::PublicKey::from_bytes(*pk_bytes);

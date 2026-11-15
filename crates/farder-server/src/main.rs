@@ -53,6 +53,12 @@ struct Args {
     /// With --restore-from: replace an existing server. The old data is moved aside, not deleted.
     #[arg(long)]
     force: bool,
+
+    /// How many seconds a recovery-key takeover must wait before it can finish (default 72
+    /// hours). The waiting period is what lets the real owner notice and react, so values
+    /// under 24 hours are for testing only and are warned about at start.
+    #[arg(long, default_value_t = farder_server::state::DEFAULT_RECOVERY_WAIT_SECS)]
+    recovery_wait_secs: u64,
 }
 
 fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -91,7 +97,14 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
         }
     }
 
-    let state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
+    let mut state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
+    state.recovery_wait_secs = args.recovery_wait_secs;
+    if args.recovery_wait_secs < 24 * 3600 {
+        tracing::warn!(
+            "the recovery takeover waiting period is only {} seconds; under 24 hours it gives the real owner little time to notice (fine for testing)",
+            args.recovery_wait_secs
+        );
+    }
     if !first_run {
         // Detect owner: first member by joined_at
         let owner_key: Option<Vec<u8>> = {

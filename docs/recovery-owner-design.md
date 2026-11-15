@@ -1,4 +1,4 @@
-# Recovery owner: design (2026-11-15, not built)
+# Recovery owner: design (2026-11-15; log rules and server built, app screens not yet)
 
 Plain words first. Details for whoever builds it after.
 
@@ -101,3 +101,28 @@ change (a new genesis carrying members, channels and messages over) and is the s
 A thief who gets BOTH keys. A host machine that is itself taken over (they can read normal
 channels and delete the database, which is what backups are for). Metadata. And nothing
 here helps if the owner never sets up a recovery key, so the app should ask at creation.
+
+
+## Build status (2026-11-15)
+
+Built and tested (no network, no screens):
+
+1. **The signed-history rules** (`crates/farder-crypto/src/event_log_state.rs`, tests in
+   `recovery_owner_tests`): four new record types, appended to the format: `RecoveryKeySet`,
+   `RecoveryClaim`, `RecoveryCancel`, `RecoveryFinalize`. The owner is now whoever the history
+   says. Rules pinned by tests (and by deliberately breaking each one): the owner names the
+   recovery key once and only the recovery key can change it; the owner key can NOT cancel or
+   finish a takeover; the recovery key cannot be banned and survives its device being revoked;
+   the new owner must already be a member (a friend's new account joins by an ordinary invite
+   first); folding the same history from scratch gives the same owner.
+2. **The server side** (`crates/farder-server`): the waiting period is enforced with the
+   SERVER'S OWN clock when a takeover is finished (default 72 hours, `--recovery-wait-secs`,
+   warned about below 24 hours); the owner is read from the signed history, per request, so a
+   thief who is still connected loses owner powers at once and a restart gives the same
+   answer; every recovery step goes in the permanent audit log and tells all clients.
+
+Not built yet: the app (create the recovery key and show its 24 words, the take-over screen,
+the countdown every member sees), the command that lets a recovery key holder with no account
+on the server authorize a fresh device, the host-side reset fallback, and the cooling-off
+period for destructive actions. Until the app screens exist the feature can only be driven by
+tests.

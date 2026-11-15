@@ -8,7 +8,7 @@ use anyhow::Result;
 use farder_crypto::event_log::EventPayload;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -2604,6 +2604,29 @@ pub fn handle_request(
                 return err(&format!("event rejected: {}", e));
             }
 
+            // 2a. RECOVERY TAKEOVER WAITING PERIOD. The fold cannot measure real time (event
+            //     timestamps are chosen by their author, and someone who has stolen the recovery
+            //     key could simply claim an early date), so the SERVER enforces it with its own
+            //     clock: a takeover may only be finished once `recovery_wait_secs` have passed
+            //     since THIS server stored the claim. The claim's stored time is the
+            //     `created_at` of its row in `events`.
+            if let EventPayload::RecoveryFinalize { claim } = &event.core.payload {
+                let accepted: Option<i64> = conn
+                    .query_row("SELECT created_at FROM events WHERE event_hash = ?1", rusqlite::params![claim], |r| r.get(0))
+                    .optional()?;
+                let Some(accepted) = accepted else {
+                    return err("event rejected: the takeover claim is not in this server's history");
+                };
+                let ready_at = (accepted as u64).saturating_add(state.recovery_wait_secs);
+                let now = crate::db::now();
+                if now < ready_at {
+                    return err(&format!(
+                        "event rejected: the takeover cannot finish yet: {} more seconds of the waiting period",
+                        ready_at - now
+                    ));
+                }
+            }
+
             // 2b. Garbling is a display effect on someone else's words, so a
             //     MODERATION garble is an act of authority and goes in the
             //     moderation audit log (kept forever). A consensual one is play
@@ -2624,6 +2647,15 @@ pub fn handle_request(
                 _ => None,
             };
             // Granting or taking away a power is an act of authority: audit it.
+            // Every recovery step is an act of authority over the whole server: it goes in the
+            // moderation audit log, which is kept forever.
+            let recovery_audit: Option<(&'static str, PublicKey, serde_json::Value)> = match &event.core.payload {
+                EventPayload::RecoveryKeySet { recovery } => Some(("recovery_key_set", recovery.clone(), serde_json::json!({}))),
+                EventPayload::RecoveryClaim { new_owner } => Some(("recovery_claim", new_owner.clone(), serde_json::json!({ "wait_secs": state.recovery_wait_secs }))),
+                EventPayload::RecoveryCancel { .. } => Some(("recovery_cancel", event.core.author.clone(), serde_json::json!({}))),
+                EventPayload::RecoveryFinalize { .. } => Some(("recovery_finalize", ls.pending_claim().map(|p| p.new_owner.clone()).unwrap_or_else(|| event.core.author.clone()), serde_json::json!({}))),
+                _ => None,
+            };
             let capability_audit: Option<(&'static str, PublicKey, serde_json::Value)> = match &event.core.payload {
                 EventPayload::PermissionGranted { member, capability } => Some((
                     "capability_granted", member.clone(), serde_json::json!({ "capability": capability }),
@@ -2841,6 +2873,10 @@ pub fn handle_request(
             // Broadcast a membership change so every client re-fetches its own
             // status + the member list + the pending queue.
             let membership_pk: Option<PublicKey> = match &event.core.payload {
+                // A recovery step changes who may do what (and, at the end, who owns the server).
+                EventPayload::RecoveryKeySet { recovery } => Some(recovery.clone()),
+                EventPayload::RecoveryClaim { new_owner } => Some(new_owner.clone()),
+                EventPayload::RecoveryCancel { .. } | EventPayload::RecoveryFinalize { .. } => Some(event.core.author.clone()),
                 EventPayload::MemberJoined { member, .. }
                 | EventPayload::MemberApproved { member }
                 | EventPayload::MemberRemoved { member }
@@ -2864,6 +2900,11 @@ pub fn handle_request(
                 }
             }
             if let Some((action, target, meta)) = capability_audit {
+                if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
+                    events.push(ev);
+                }
+            }
+            if let Some((action, target, meta)) = recovery_audit {
                 if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
                     events.push(ev);
                 }
@@ -11603,4 +11644,86 @@ mod tests {
             !state.log_state.lock().unwrap().as_ref().unwrap().is_tombstoned(&"e".repeat(64))
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Recovery owner: the server's side (waiting period, who the owner is)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_recovery_takeover_is_refused_early_then_accepted_after_the_wait_and_moves_the_owner() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let mut st = ServerState::new_for_test().unwrap();
+        st.recovery_wait_secs = 3600;
+        let state = Arc::new(st);
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, owner_dev) = (Keypair::generate(), Keypair::generate());
+        let (rec, rec_dev) = (Keypair::generate(), Keypair::generate());
+        let (newo, newo_dev) = (Keypair::generate(), Keypair::generate());
+        for (kp, name) in [(&owner, "Owner"), (&newo, "NewOwner")] {
+            members::register_member(&conn, &kp.public_key(), name).unwrap();
+            members::assign_role(&conn, &kp.public_key(), everyone).unwrap();
+        }
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let sid = g.server_id();
+
+        // One person's chain of events, submitted through the real request handler.
+        struct Chain { dev: Keypair, id: Keypair, last: Option<Event>, n: u64 }
+        impl Chain {
+            fn new(id: &Keypair, dev: &Keypair) -> Self { Chain { dev: Keypair::from_signing_key_bytes(&dev.signing_key_bytes()), id: Keypair::from_signing_key_bytes(&id.signing_key_bytes()), last: None, n: 0 } }
+            fn submit(&mut self, conn: &Connection, state: &Arc<ServerState>, sid: &str, is_owner: bool, p: EP) -> std::result::Result<HandleResult, String> {
+                self.n += 1;
+                let ev = Event::next(&self.dev, self.id.public_key(), sid.to_string(), self.last.as_ref(), self.n, 10 + self.n, p);
+                let r = handle_request(conn, &self.id.public_key(), is_owner, ServerRequest::SubmitEvent { event: ev.clone() }, "", state).unwrap();
+                match &r.response {
+                    ServerResponse::Error { reason } => Err(reason.clone()),
+                    _ => { self.last = Some(ev); Ok(r) }
+                }
+            }
+        }
+        let (mut o, mut r, mut n) = (Chain::new(&owner, &owner_dev), Chain::new(&rec, &rec_dev), Chain::new(&newo, &newo_dev));
+        for (c, id, dev) in [(&mut o, &owner, &owner_dev), (&mut r, &rec, &rec_dev), (&mut n, &newo, &newo_dev)] {
+            c.submit(&conn, &state, &sid, false, EP::DeviceAuthorized { cert: DeviceCert::create(id, &dev.public_key(), 1) }).unwrap();
+        }
+        // The new account joins by an ordinary invite, then the owner names the recovery key.
+        let inv = o.submit(&conn, &state, &sid, true, EP::InviteCreated { code_hash: "h".into(), max_uses: 5, expires_at: u64::MAX, requires_approval: false }).unwrap();
+        let _ = inv;
+        let invite_hash = o.last.as_ref().unwrap().hash();
+        n.submit(&conn, &state, &sid, false, EP::MemberJoined { member: newo.public_key(), invite: invite_hash }).unwrap();
+        o.submit(&conn, &state, &sid, true, EP::RecoveryKeySet { recovery: rec.public_key() }).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert!(rt.block_on(state.is_current_owner(&owner.public_key())));
+
+        // The claim is accepted and announced; finishing it NOW is refused by the waiting period.
+        let claim = r.submit(&conn, &state, &sid, false, EP::RecoveryClaim { new_owner: newo.public_key() }).unwrap();
+        assert!(claim.events.iter().any(|b| matches!(&b.event, ServerEvent::MembershipChanged { .. })), "everyone is told");
+        let claim_hash = r.last.as_ref().unwrap().hash();
+        let early = r.submit(&conn, &state, &sid, false, EP::RecoveryFinalize { claim: claim_hash.clone() }).err().expect("an early finish must be refused");
+        assert!(early.contains("waiting period"), "{early}");
+        assert!(rt.block_on(state.is_current_owner(&owner.public_key())), "nothing changed");
+
+        // Backdating the event's own timestamp does not help (the server uses its own clock):
+        // simulate the passage of time by ageing the STORED acceptance time of the claim.
+        conn.execute("UPDATE events SET created_at = created_at - 4000 WHERE event_hash = ?1", rusqlite::params![claim_hash]).unwrap();
+        r.submit(&conn, &state, &sid, false, EP::RecoveryFinalize { claim: claim_hash }).unwrap();
+
+        // The server now treats the new account as the owner, and the old one as an ordinary member,
+        // from the very next request (no reconnect needed), and the answer survives a rebuild
+        // from the stored history.
+        assert!(rt.block_on(state.is_current_owner(&newo.public_key())));
+        assert!(!rt.block_on(state.is_current_owner(&owner.public_key())));
+        let rebuilt = event_ingest::build_log_state(&conn).unwrap().expect("history rebuilds");
+        assert_eq!(rebuilt.owner(), &newo.public_key());
+        // Every recovery step was written to the permanent audit log.
+        let actions: Vec<String> = conn.prepare("SELECT action FROM audit_events WHERE action LIKE 'recovery_%' ORDER BY id").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().flatten().collect();
+        assert_eq!(actions, vec!["recovery_key_set", "recovery_claim", "recovery_finalize"]);
+    }
+
 }

@@ -322,6 +322,23 @@ pub enum EventPayload {
     /// revoke is never a silent no-op. Delegation does NOT cascade: revoking a
     /// holder does not revoke what they granted onward.
     PermissionRevoked { member: PublicKey, capability: String },
+
+    // ---- Recovery owner (a cold key that can take the server back, slowly) ----
+    // See docs/recovery-owner-design.md. All four are APPENDED here and never reordered.
+    /// Name the recovery key. The OWNER may do this once (while none is set); after that
+    /// only the recovery key itself may change it. Otherwise a thief holding the everyday
+    /// owner key could swap in their own recovery key.
+    RecoveryKeySet { recovery: PublicKey },
+    /// Authored by the recovery key: "ownership moves to `new_owner`". Takes effect only
+    /// after a `RecoveryFinalize`, which the SERVER refuses until a public waiting period
+    /// has passed (the fold cannot measure real time: event timestamps are author-chosen).
+    RecoveryClaim { new_owner: PublicKey },
+    /// Authored by the recovery key: withdraw its own pending claim. The everyday owner
+    /// key can NOT cancel it (a thief with that key would otherwise always win).
+    RecoveryCancel { claim: EventRef },
+    /// Authored by the recovery key once the waiting period is over: `new_owner` becomes
+    /// the owner. The recovery key is spent by this and must be set again.
+    RecoveryFinalize { claim: EventRef },
 }
 
 /// The words a garbled message was drawn with, and why. Computed by the log fold

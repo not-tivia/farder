@@ -303,6 +303,10 @@ struct ChainHead {
 pub struct LogState {
     server_id: ServerId,
     owner: PublicKey,
+    /// The cold recovery key, if one was named (see `EventPayload::RecoveryKeySet`).
+    recovery: Option<PublicKey>,
+    /// A takeover the recovery key has started and not yet finished or withdrawn.
+    pending_claim: Option<PendingClaim>,
     members: HashSet<PublicKey>,
     pending: HashSet<PublicKey>,
     banned: HashSet<PublicKey>,
@@ -400,7 +404,30 @@ pub struct GarbleRuleView {
     pub moderation: bool,
 }
 
+/// A takeover started by the recovery key, waiting for its public waiting period.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingClaim {
+    /// Hash of the `RecoveryClaim` event (what a cancel or finalize must cite).
+    pub claim: EventHash,
+    /// The recovery key that started it.
+    pub claimant: PublicKey,
+    /// Who becomes the owner when it completes.
+    pub new_owner: PublicKey,
+    /// Position in the log at which it was recorded.
+    pub log_pos: u64,
+}
+
 impl LogState {
+    /// The recovery key, if one is set.
+    pub fn recovery_key(&self) -> Option<&PublicKey> {
+        self.recovery.as_ref()
+    }
+
+    /// The takeover in progress, if any.
+    pub fn pending_claim(&self) -> Option<&PendingClaim> {
+        self.pending_claim.as_ref()
+    }
+
     /// Initial state: the genesis owner is the sole member and root of authority.
     pub fn from_genesis(g: &Genesis) -> Self {
         let mut members = HashSet::new();
@@ -408,6 +435,8 @@ impl LogState {
         Self {
             server_id: g.server_id(),
             owner: g.owner.clone(),
+            recovery: None,
+            pending_claim: None,
             members,
             pending: HashSet::new(),
             banned: HashSet::new(),
@@ -1048,6 +1077,9 @@ impl LogState {
             EventPayload::MemberBanned { member } => {
                 ensure!(self.has_capability(author, "ban"), "missing 'ban' capability");
                 ensure!(!self.is_owner(member), "the owner cannot be banned");
+                // A banned identity cannot act from any device, so banning the recovery key
+                // would lock out the one thing meant to survive a stolen owner key.
+                ensure!(self.recovery.as_ref() != Some(member), "the recovery key cannot be banned");
                 Ok(Authorized::Apply)
             }
 
@@ -1137,6 +1169,51 @@ impl LogState {
                         ensure!(self.is_member(author), "only members may delete their messages");
                     }
                 }
+                Ok(Authorized::Apply)
+            }
+
+            EventPayload::RecoveryKeySet { recovery } => {
+                match &self.recovery {
+                    // First time: the everyday owner key names it.
+                    None => ensure!(self.is_owner(author), "only the owner may name the recovery key"),
+                    // After that: only the recovery key itself may change it, and never in
+                    // the middle of a takeover.
+                    Some(current) => {
+                        ensure!(author == current, "only the recovery key may change the recovery key");
+                        ensure!(self.pending_claim.is_none(), "cannot change the recovery key during a takeover");
+                    }
+                }
+                ensure!(recovery != &self.owner, "the recovery key must differ from the owner key");
+                ensure!(!self.is_banned(recovery), "the recovery key cannot be a banned identity");
+                Ok(Authorized::Apply)
+            }
+
+            EventPayload::RecoveryClaim { new_owner } => {
+                ensure!(self.recovery.as_ref() == Some(author), "only the recovery key may start a takeover");
+                ensure!(self.pending_claim.is_none(), "a takeover is already pending: cancel it first");
+                ensure!(!self.is_banned(new_owner), "the new owner cannot be a banned identity");
+                // The new owner must already belong to the server (joined by an ordinary
+                // invite, as a friend's new account would). That keeps the takeover from
+                // handing the server to an identity the server has never seen.
+                ensure!(self.is_member(new_owner), "the new owner must already be a member of the server");
+                Ok(Authorized::Apply)
+            }
+
+            EventPayload::RecoveryCancel { claim } => {
+                ensure!(self.recovery.as_ref() == Some(author), "only the recovery key may cancel its takeover");
+                let p = self.pending_claim.as_ref().context("there is no takeover to cancel")?;
+                ensure!(&p.claim == claim, "that is not the pending takeover");
+                Ok(Authorized::Apply)
+            }
+
+            EventPayload::RecoveryFinalize { claim } => {
+                ensure!(self.recovery.as_ref() == Some(author), "only the recovery key may finish a takeover");
+                let p = self.pending_claim.as_ref().context("there is no takeover to finish")?;
+                ensure!(&p.claim == claim, "that is not the pending takeover");
+                ensure!(&p.claimant == author, "the takeover was started by a different key");
+                ensure!(!self.is_banned(&p.new_owner), "the new owner is now banned: cancel and claim again");
+                // NOTE: the waiting period is enforced by the SERVER when it accepts this event
+                // (the fold cannot measure time). See docs/recovery-owner-design.md.
                 Ok(Authorized::Apply)
             }
 
@@ -1745,6 +1822,31 @@ impl LogState {
             }
             EventPayload::PermissionGranted { member, capability } => {
                 self.capabilities.entry(member.clone()).or_default().insert(capability.clone());
+            }
+            EventPayload::RecoveryKeySet { recovery } => {
+                self.recovery = Some(recovery.clone());
+            }
+            EventPayload::RecoveryClaim { new_owner } => {
+                self.pending_claim = Some(PendingClaim {
+                    claim: event.hash(),
+                    claimant: event.core.author.clone(),
+                    new_owner: new_owner.clone(),
+                    log_pos: self.log_pos,
+                });
+            }
+            EventPayload::RecoveryCancel { .. } => {
+                self.pending_claim = None;
+            }
+            EventPayload::RecoveryFinalize { .. } => {
+                if let Some(p) = self.pending_claim.take() {
+                    // The new owner is a member from this moment (they may not have joined
+                    // by invite), the old owner stays a member but loses the owner's powers,
+                    // and the recovery key is spent.
+                    self.pending.remove(&p.new_owner);
+                    self.members.insert(p.new_owner.clone());
+                    self.owner = p.new_owner;
+                    self.recovery = None;
+                }
             }
             EventPayload::AttachmentRedacted { content_hash } => {
                 self.redacted_attachments.insert(content_hash.clone());
@@ -5751,5 +5853,278 @@ mod tests {
             let bytes = rmp_serde::to_vec(&p).unwrap();
             assert_eq!(rmp_serde::from_slice::<EP>(&bytes).unwrap(), p);
         }
+    }
+}
+
+/// Tests for the recovery owner (docs/recovery-owner-design.md): a cold key that can take
+/// the server back from a thief who holds the everyday owner key.
+#[cfg(test)]
+mod recovery_owner_tests {
+    use super::*;
+    use crate::event_log::{DeviceCert, Event as Ev, EventPayload as EP};
+    use crate::identity::Keypair;
+
+    /// One person: an identity key, one device key, and their chain of events so far.
+    struct Actor {
+        id: Keypair,
+        dev: Keypair,
+        last: Option<Ev>,
+        clock: u64,
+    }
+
+    impl Actor {
+        fn new() -> Self {
+            Actor { id: Keypair::generate(), dev: Keypair::generate(), last: None, clock: 0 }
+        }
+        fn pk(&self) -> PublicKey {
+            self.id.public_key()
+        }
+        fn act(&mut self, st: &mut LogState, payload: EP) -> Result<Ev> {
+            self.clock += 1;
+            let ev = Ev::next(
+                &self.dev,
+                self.pk(),
+                st.server_id().clone(),
+                self.last.as_ref(),
+                self.clock,
+                100 + self.clock,
+                payload,
+            );
+            st.apply(&ev)?;
+            self.last = Some(ev.clone());
+            Ok(ev)
+        }
+        /// Register this person's device (anyone may; it needs no membership).
+        fn authorize(&mut self, st: &mut LogState) {
+            let cert = DeviceCert::create(&self.id, &self.dev.public_key(), 1);
+            self.act(st, EP::DeviceAuthorized { cert }).expect("device authorization");
+        }
+        /// A brand-new device for the same identity (the old chain is abandoned).
+        fn new_device(&mut self, st: &mut LogState) {
+            self.dev = Keypair::generate();
+            self.last = None;
+            self.clock = 0;
+            self.authorize(st);
+        }
+    }
+
+    struct World {
+        st: LogState,
+        owner: Actor,
+        recovery: Actor,
+        log: Vec<Ev>,
+    }
+
+    /// A server whose owner has named a recovery key (and the recovery key has a device).
+    fn world() -> World {
+        let mut owner = Actor::new();
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.pk(), created_at: 1, nonce: [0u8; 16] };
+        let mut st = LogState::from_genesis(&g);
+        let mut recovery = Actor::new();
+        owner.authorize(&mut st);
+        recovery.authorize(&mut st);
+        let set = owner.act(&mut st, EP::RecoveryKeySet { recovery: recovery.pk() }).expect("owner names the recovery key");
+        let mut log = vec![];
+        log.push(owner.last.clone().unwrap());
+        let _ = set;
+        World { st, owner, recovery, log }
+    }
+
+    /// Bring `who` into the server the ordinary way: an invite from the owner, then a join.
+    /// (A friend's new account does exactly this before the recovery key claims for it.)
+    fn make_member(w: &mut World, who: &mut Actor) {
+        who.authorize(&mut w.st);
+        let invite = w
+            .owner
+            .act(&mut w.st, EP::InviteCreated { code_hash: "h".into(), max_uses: 50, expires_at: u64::MAX, requires_approval: false })
+            .unwrap();
+        who.act(&mut w.st, EP::MemberJoined { member: who.pk(), invite: invite.hash() }).unwrap();
+    }
+
+    #[test]
+    fn the_owner_names_a_recovery_key_once_and_only_the_recovery_key_can_change_it() {
+        let mut w = world();
+        assert_eq!(w.st.recovery_key(), Some(&w.recovery.pk()));
+        // The everyday owner key cannot swap it out: a thief with that key would.
+        let thief_choice = Actor::new();
+        let err = w.owner.act(&mut w.st, EP::RecoveryKeySet { recovery: thief_choice.pk() }).unwrap_err().to_string();
+        assert!(err.contains("only the recovery key"), "{err}");
+        assert_eq!(w.st.recovery_key(), Some(&w.recovery.pk()), "unchanged");
+        // The recovery key itself can rotate it.
+        let next = Actor::new();
+        w.recovery.act(&mut w.st, EP::RecoveryKeySet { recovery: next.pk() }).unwrap();
+        assert_eq!(w.st.recovery_key(), Some(&next.pk()));
+    }
+
+    #[test]
+    fn the_first_recovery_key_must_be_named_by_the_owner_and_differ_from_the_owner_key() {
+        let mut owner = Actor::new();
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.pk(), created_at: 1, nonce: [0u8; 16] };
+        let mut st = LogState::from_genesis(&g);
+        owner.authorize(&mut st);
+        // Naming the owner's own key would protect nothing.
+        let err = owner.act(&mut st, EP::RecoveryKeySet { recovery: owner.pk() }).unwrap_err().to_string();
+        assert!(err.contains("must differ"), "{err}");
+        // A stranger cannot name one.
+        let mut stranger = Actor::new();
+        stranger.authorize(&mut st);
+        let err = stranger.act(&mut st, EP::RecoveryKeySet { recovery: stranger.pk() }).unwrap_err().to_string();
+        assert!(err.contains("only the owner"), "{err}");
+        assert!(st.recovery_key().is_none());
+    }
+
+    #[test]
+    fn a_takeover_after_the_wait_moves_ownership_and_the_everyday_key_cannot_stop_it() {
+        let mut w = world();
+        let mut new_owner = Actor::new();
+        make_member(&mut w, &mut new_owner);
+        let claim = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: new_owner.pk() }).unwrap();
+        let pending = w.st.pending_claim().expect("pending").clone();
+        assert_eq!(pending.new_owner, new_owner.pk());
+        assert_eq!(pending.claim, claim.hash());
+
+        // The thief (holding the everyday owner key) tries every way to stop it.
+        let e1 = w.owner.act(&mut w.st, EP::RecoveryCancel { claim: claim.hash() }).unwrap_err().to_string();
+        assert!(e1.contains("only the recovery key"), "{e1}");
+        let e2 = w.owner.act(&mut w.st, EP::RecoveryKeySet { recovery: w.owner.pk() }).unwrap_err().to_string();
+        assert!(e2.contains("only the recovery key") || e2.contains("must differ"), "{e2}");
+        let e3 = w.owner.act(&mut w.st, EP::RecoveryFinalize { claim: claim.hash() }).unwrap_err().to_string();
+        assert!(e3.contains("only the recovery key"), "{e3}");
+        // The owner is NOT frozen meanwhile: the real owner can still run the server.
+        w.owner.act(&mut w.st, EP::ChannelCreated { channel_id: 1, name: "general".into(), kind: "text".into(), class: crate::event_log::ChannelClass::Plaintext, parent: None }).unwrap();
+        assert!(w.st.pending_claim().is_some(), "still pending");
+
+        // The recovery key finishes it (the SERVER enforces the waiting period; see the design).
+        w.recovery.act(&mut w.st, EP::RecoveryFinalize { claim: claim.hash() }).unwrap();
+        assert_eq!(w.st.owner(), &new_owner.pk());
+        assert!(w.st.is_member(&new_owner.pk()));
+        assert!(w.st.pending_claim().is_none());
+        assert!(w.st.recovery_key().is_none(), "the recovery key is spent");
+
+        // The old owner is still a member but no longer the owner.
+        let old = w.owner.pk();
+        assert!(w.st.is_member(&old) && !w.st.is_owner(&old));
+        assert!(!w.st.has_capability(&old, "ban"));
+        let denied = w.owner.act(&mut w.st, EP::ChannelCreated { channel_id: 2, name: "x".into(), kind: "text".into(), class: crate::event_log::ChannelClass::Plaintext, parent: None }).unwrap_err().to_string();
+        assert!(denied.contains("only the owner"), "{denied}");
+
+        // The new owner can act (after registering a device).
+        let mut n = new_owner;
+        n.act(&mut w.st, EP::ChannelCreated { channel_id: 3, name: "mine".into(), kind: "text".into(), class: crate::event_log::ChannelClass::Plaintext, parent: None }).unwrap();
+    }
+
+    #[test]
+    fn the_recovery_key_can_withdraw_its_own_claim_and_a_stale_reference_is_refused() {
+        let mut w = world();
+        let mut n = Actor::new();
+        make_member(&mut w, &mut n);
+        let claim = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: n.pk() }).unwrap();
+        // A cancel citing the wrong event is refused.
+        let e = w.recovery.act(&mut w.st, EP::RecoveryCancel { claim: "not-the-claim".into() }).unwrap_err().to_string();
+        assert!(e.contains("not the pending"), "{e}");
+        // A second claim while one is pending is refused.
+        let e = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: n.pk() }).unwrap_err().to_string();
+        assert!(e.contains("already pending"), "{e}");
+        w.recovery.act(&mut w.st, EP::RecoveryCancel { claim: claim.hash() }).unwrap();
+        assert!(w.st.pending_claim().is_none());
+        assert_eq!(w.st.owner(), &w.owner.pk(), "ownership did not move");
+        // Finishing a cancelled claim is refused.
+        let e = w.recovery.act(&mut w.st, EP::RecoveryFinalize { claim: claim.hash() }).unwrap_err().to_string();
+        assert!(e.contains("no takeover"), "{e}");
+    }
+
+    #[test]
+    fn a_takeover_cannot_be_finished_without_a_matching_claim_or_for_a_banned_key() {
+        let mut w = world();
+        let e = w.recovery.act(&mut w.st, EP::RecoveryFinalize { claim: "x".into() }).unwrap_err().to_string();
+        assert!(e.contains("no takeover"), "{e}");
+        // A claim for a banned identity is refused outright.
+        let mut banned = Actor::new();
+        banned.authorize(&mut w.st);
+        // (Put them in the log as a member first so the ban is an ordinary one.)
+        w.owner.act(&mut w.st, EP::MemberBanned { member: banned.pk() }).unwrap();
+        let e = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: banned.pk() }).unwrap_err().to_string();
+        assert!(e.contains("banned"), "{e}");
+        // A claim for someone who never joined is refused.
+        let outsider = Actor::new();
+        let e = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: outsider.pk() }).unwrap_err().to_string();
+        assert!(e.contains("already be a member"), "{e}");
+        // Banned AFTER the claim: finishing is refused (cancel and claim again).
+        let mut n = Actor::new();
+        make_member(&mut w, &mut n);
+        let claim = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: n.pk() }).unwrap();
+        w.owner.act(&mut w.st, EP::MemberBanned { member: n.pk() }).unwrap();
+        let e = w.recovery.act(&mut w.st, EP::RecoveryFinalize { claim: claim.hash() }).unwrap_err().to_string();
+        assert!(e.contains("banned"), "{e}");
+        assert_eq!(w.st.owner(), &w.owner.pk());
+    }
+
+    #[test]
+    fn the_recovery_key_cannot_be_banned_and_survives_having_its_device_revoked() {
+        let mut w = world();
+        let e = w.owner.act(&mut w.st, EP::MemberBanned { member: w.recovery.pk() }).unwrap_err().to_string();
+        assert!(e.contains("recovery key cannot be banned"), "{e}");
+        // The owner (a thief) revokes the recovery key's device: it just makes a new one.
+        let dev = crate::event_log::device_id(&w.recovery.dev.public_key());
+        w.owner.act(&mut w.st, EP::DeviceRevoked { device: dev }).unwrap();
+        let e = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: Actor::new().pk() }).unwrap_err().to_string();
+        assert!(e.contains("revoked"), "{e}");
+        w.recovery.new_device(&mut w.st);
+        let mut n = Actor::new();
+        make_member(&mut w, &mut n);
+        let claim = w.recovery.act(&mut w.st, EP::RecoveryClaim { new_owner: n.pk() }).unwrap();
+        w.recovery.act(&mut w.st, EP::RecoveryFinalize { claim: claim.hash() }).unwrap();
+        assert_eq!(w.st.owner(), &n.pk());
+    }
+
+    #[test]
+    fn folding_the_same_history_from_scratch_reaches_the_same_owner() {
+        // The takeover must be a property of the signed history, not of one machine's memory:
+        // a replica (or this server after a restart) must reach the same owner.
+        let mut owner = Actor::new();
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.pk(), created_at: 1, nonce: [0u8; 16] };
+        let mut st = LogState::from_genesis(&g);
+        let mut recovery = Actor::new();
+        let mut n = Actor::new();
+        let mut log = vec![];
+        owner.authorize(&mut st); log.push(owner.last.clone().unwrap());
+        recovery.authorize(&mut st); log.push(recovery.last.clone().unwrap());
+        owner.act(&mut st, EP::RecoveryKeySet { recovery: recovery.pk() }).unwrap(); log.push(owner.last.clone().unwrap());
+        // The new account joins by an ordinary invite first.
+        n.authorize(&mut st); log.push(n.last.clone().unwrap());
+        let invite = owner.act(&mut st, EP::InviteCreated { code_hash: "h".into(), max_uses: 5, expires_at: u64::MAX, requires_approval: false }).unwrap(); log.push(invite.clone());
+        n.act(&mut st, EP::MemberJoined { member: n.pk(), invite: invite.hash() }).unwrap(); log.push(n.last.clone().unwrap());
+        let claim = recovery.act(&mut st, EP::RecoveryClaim { new_owner: n.pk() }).unwrap(); log.push(claim.clone());
+        recovery.act(&mut st, EP::RecoveryFinalize { claim: claim.hash() }).unwrap(); log.push(recovery.last.clone().unwrap());
+
+        let mut replay = LogState::from_genesis(&g);
+        for ev in &log {
+            // Round-trip through the wire format too: the bytes are what a replica receives.
+            let decoded = Ev::from_bytes(&ev.to_bytes()).unwrap();
+            replay.apply(&decoded).unwrap();
+        }
+        assert_eq!(replay.owner(), &n.pk());
+        assert_eq!(replay.owner(), st.owner());
+        assert!(replay.recovery_key().is_none() && replay.pending_claim().is_none());
+        assert!(replay.is_member(&n.pk()));
+    }
+
+    #[test]
+    fn the_new_record_types_round_trip_and_do_not_disturb_existing_ones() {
+        let a = Actor::new();
+        for p in [
+            EP::RecoveryKeySet { recovery: a.pk() },
+            EP::RecoveryClaim { new_owner: a.pk() },
+            EP::RecoveryCancel { claim: "abc".into() },
+            EP::RecoveryFinalize { claim: "abc".into() },
+        ] {
+            let ev = Ev::next(&a.dev, a.pk(), "s".into(), None, 1, 5, p.clone());
+            let back = Ev::from_bytes(&ev.to_bytes()).unwrap();
+            assert_eq!(back.core.payload, p);
+        }
+        // An old record type encodes exactly as before (the new ones were APPENDED).
+        let old = Ev::next(&a.dev, a.pk(), "s".into(), None, 1, 5, EP::MessagePosted { channel_id: 1, content: "hi".into(), reply_to: None, attachments: vec![] });
+        let again = Ev::next(&a.dev, a.pk(), "s".into(), None, 1, 5, EP::MessagePosted { channel_id: 1, content: "hi".into(), reply_to: None, attachments: vec![] });
+        assert_eq!(old.core.payload, again.core.payload);
     }
 }
