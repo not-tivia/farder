@@ -821,6 +821,111 @@ async function tray() {
   await B.browser.close().catch(() => {});
 }
 
+// Delegated powers: the owner hands Bob the "garble" and "invite" powers; Bob can use
+// them only while he holds them; the owner takes them back. Run after `core`.
+async function powers() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  const call = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
+  const info = async (page, name) => page.evaluate(async (nm) => {
+    const inv = window.__TAURI_INTERNALS__.invoke;
+    const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+    const i = await inv("get_server_info_v2", { serverId: s.id });
+    const members = await inv("get_members", { serverId: s.id });
+    const pk = (n) => { const m = members.find((x) => x.display_name === n); return "vk_" + m.public_key.bytes.map((b) => b.toString(16).padStart(2, "0")).join(""); };
+    return { serverId: s.id, logServerId: i.server_id, alice: pk("Alice"), bob: pk("Bob") };
+  }, name);
+  const a = await info(A.page, "SelfTest " + stamp);
+  const b = await info(B.page, "SelfTest " + stamp);
+  const tries = async (fn) => { try { await fn(); return true; } catch { return false; } };
+  const garbleAlice = () => call(B.page, "garble_set", { serverId: b.serverId, logServerId: b.logServerId, target: b.alice, mode: "bark", phrase: "", messages: 1, consensual: false });
+  const makeInvite = () => call(B.page, "create_invite", { serverId: b.serverId, logServerId: b.logServerId, maxUses: 1, requiresApproval: false });
+
+  await check("before: Bob (a plain member) cannot garble anyone or create an invite", async () => {
+    if (await tries(garbleAlice)) throw new Error("Bob could garble without the power");
+    if (await tries(makeInvite)) throw new Error("Bob could create an invite without the power");
+  });
+  await check("owner A grants Bob 'garble' and 'invite'; the list of power-holders shows it", async () => {
+    await call(A.page, "grant_capability", { serverId: a.serverId, logServerId: a.logServerId, member: a.bob, capability: "garble" });
+    await call(A.page, "grant_capability", { serverId: a.serverId, logServerId: a.logServerId, member: a.bob, capability: "invite" });
+    await new Promise((r) => setTimeout(r, 2500));
+    const holders = await call(A.page, "get_capabilities", { serverId: a.serverId });
+    const bob = holders.find((h) => h.member === a.bob);
+    if (!bob || !bob.capabilities.includes("garble") || !bob.capabilities.includes("invite")) throw new Error("holders list: " + JSON.stringify(holders));
+  });
+  await check("now Bob can create an invite, and his garble gets past the power check (the owner is protected)", async () => {
+    await makeInvite();                                    // allowed only with the 'invite' power
+    let msg = "";
+    try { await garbleAlice(); } catch (e) { msg = String(e.message || e); }
+    // Alice owns the server and can never be garbled. Reaching THAT rule (instead of
+    // "not allowed") shows the 'garble' power is in force.
+    if (!/owner cannot be garbled/.test(msg)) throw new Error("expected the owner protection, got: " + msg.slice(0, 120));
+    return "invite created; garble stopped only by: owner cannot be garbled";
+  });
+  await check("owner A takes the powers back; Bob is refused again", async () => {
+    await call(A.page, "revoke_capability", { serverId: a.serverId, logServerId: a.logServerId, member: a.bob, capability: "garble" });
+    await call(A.page, "revoke_capability", { serverId: a.serverId, logServerId: a.logServerId, member: a.bob, capability: "invite" });
+    await new Promise((r) => setTimeout(r, 2500));
+    if (await tries(garbleAlice)) throw new Error("Bob could still garble after the power was taken");
+    if (await tries(makeInvite)) throw new Error("Bob could still create an invite after the power was taken");
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// Voice channels, signalling only: a voice channel can be created, both people join
+// it, each sees the other in the roster, and leaving removes them. This does NOT open
+// a microphone or speakers (that would capture the room on the machine running the
+// test): the audio path itself is not covered here. Run after `core`.
+async function voice() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  const call = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
+  const sid = (page) => page.evaluate(async (nm) => (await window.__TAURI_INTERNALS__.invoke("get_saved_servers")).find((x) => x.name === nm).id, "SelfTest " + stamp);
+  const aSid = await sid(A.page), bSid = await sid(B.page);
+  const vname = "Voice" + stamp;
+  let chA, chB;
+  await check("A creates a voice channel; it appears for B", async () => {
+    await call(A.page, "create_channel", { serverId: aSid, name: vname, channelType: "Voice", categoryId: null });
+    await B.page.locator(".channel-item", { hasText: vname }).first().waitFor({ timeout: 30000 });
+    const find = (page, s) => page.evaluate(async ([sv, nm]) => { const i = await window.__TAURI_INTERNALS__.invoke("get_server_info_v2", { serverId: sv }); return i.channels.find((c) => (c.base ?? c).name === nm)?.base?.id ?? i.channels.find((c) => (c.base ?? c).name === nm)?.id; }, [s, vname]);
+    chA = await find(A.page, aSid); chB = await find(B.page, bSid);
+    if (!chA || chA !== chB) throw new Error("channel ids differ: " + chA + " vs " + chB);
+    await shot(B.page, "B-voice-channel");
+  });
+  await check("both join the voice channel; each side's roster lists both people", async () => {
+    await call(A.page, "join_voice", { serverId: aSid, channelId: chA });
+    await call(B.page, "join_voice", { serverId: bSid, channelId: chB });
+    await new Promise((r) => setTimeout(r, 2500));
+    for (const [name, page, s] of [["A", A.page, aSid], ["B", B.page, bSid]]) {
+      const roster = await call(page, "get_voice_state", { serverId: s, channelId: chA });
+      const names = roster.map((m) => m.display_name || m.displayName).sort();
+      if (names.length !== 2) throw new Error(`${name} sees ${JSON.stringify(roster).slice(0, 160)}`);
+    }
+  });
+  await check("B leaves: A's roster drops to one", async () => {
+    await call(B.page, "leave_voice", { serverId: bSid, channelId: chB });
+    await new Promise((r) => setTimeout(r, 2500));
+    const roster = await call(A.page, "get_voice_state", { serverId: aSid, channelId: chA });
+    if (roster.length !== 1) throw new Error("A still sees " + roster.length);
+  });
+  await call(A.page, "leave_voice", { serverId: aSid, channelId: chA }).catch(() => {});
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -835,6 +940,8 @@ try {
   else if (scenario === "attach") await attach_file();
   else if (scenario === "garble") await garble();
   else if (scenario === "tray") await tray();
+  else if (scenario === "powers") await powers();
+  else if (scenario === "voice") await voice();
   else if (scenario === "admin-garble") await adminGarble();
   else if (scenario === "strip") await strip();
   else if (scenario === "direct-relaunch") await directRelaunch();
