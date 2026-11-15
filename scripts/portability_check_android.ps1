@@ -13,6 +13,16 @@ $env:CC_aarch64_linux_android = Join-Path $bin "aarch64-linux-android24-clang.cm
 $env:CXX_aarch64_linux_android = Join-Path $bin "aarch64-linux-android24-clang++.cmd"
 $env:AR_aarch64_linux_android = Join-Path $bin "llvm-ar.exe"
 $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# The cmake crate finds the Android toolchain through these.
+$env:ANDROID_NDK_HOME = $ndk.FullName
+$env:ANDROID_NDK = $ndk.FullName
+$env:ANDROID_NDK_ROOT = $ndk.FullName
+# C libraries built with CMake (Opus): use the NDK's own toolchain file and Ninja,
+# not the Visual Studio generator Windows would pick by default.
+$sdkCmake = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Android\Sdk\cmake") -Directory | Sort-Object Name -Descending | Select-Object -First 1
+if ($sdkCmake) { $env:PATH = (Join-Path $sdkCmake.FullName "bin") + ";" + $env:PATH }
+$env:CMAKE_GENERATOR = "Ninja"
+$env:CMAKE_TOOLCHAIN_FILE_aarch64_linux_android = Join-Path $ndk.FullName "build\cmake\android.toolchain.cmake"
 $env:CARGO_TARGET_DIR = Join-Path (Split-Path -Parent $PSScriptRoot) "target-android-check"
 rustup target add $triple | Out-Null
 Set-Location (Split-Path -Parent $PSScriptRoot)
