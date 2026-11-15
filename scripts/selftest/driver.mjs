@@ -216,11 +216,77 @@ async function buddy() {
   await B.browser.close().catch(() => {});
 }
 
+// The chat window whose heading is `head` (several chat windows can be open).
+async function chatWithHead(c, head, ms = 30000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    for (const p of c.ctx.pages().filter((x) => /[?&]chat=1/.test(x.url()))) {
+      const t = await p.locator(".mini-chat-head").first().innerText().catch(() => "");
+      if (t.trim() === head) { p.setDefaultTimeout(15000); return p; }
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  throw new Error("no chat window titled " + head);
+}
+
+// Direct messages: A messages B from the member list, then the same conversation
+// through A's buddy list. Run when both clients are up (after `core`).
+async function dm() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  await check("A: B's display name (Bob) replaces \"Anonymous\" in A's member list", async () => {
+    const t0 = Date.now();
+    await A.page.locator(".member-item", { hasText: "Bob" }).first().waitFor({ timeout: 120000 });
+    return `after ${Math.round((Date.now() - t0) / 1000)}s from the start of this check`;
+  });
+  if (!(await check("A: open a direct message with Bob (member list -> Message)", async () => {
+    await A.page.locator(".member-item", { hasText: "Bob" }).first().click();
+    await A.page.getByRole("button", { name: "Message", exact: true }).click();
+    // Opening a DM takes a few seconds: wait for the DM view itself (header "Bob" + Pop Out).
+    await A.page.getByRole("button", { name: "Pop Out" }).waitFor({ timeout: 40000 });
+  }))) return shot(A.page, "A-dm-open-fail");
+  await shot(A.page, "A-dm-open");
+  await check("A: send a direct message, A sees it", async () => { await sendText(A, "dm one " + stamp); await seesText(A, "dm one " + stamp); });
+  await check("B: the direct message reaches B (readable, not ciphertext)", async () => {
+    await B.page.locator(".dm-item, .channel-item", { hasText: "Alice" }).first().click({ timeout: 30000 });
+    await seesText(B, "dm one " + stamp, 30000);
+  });
+  let list, chat;
+  await check("A: the buddy list shows Bob under PEOPLE", async () => {
+    await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("open_buddy_list"));
+    list = await pageMatching(A, /[?&]buddy=1/);
+    await list.locator(".channel-item.dm-item", { hasText: "Bob" }).first().waitFor({ timeout: 30000 });
+  });
+  if (!list) return;
+  await shot(list, "A-buddy-people");
+  await check("A: clicking Bob opens a chat window with the direct message", async () => {
+    await list.locator(".channel-item.dm-item", { hasText: "Bob" }).first().click();
+    chat = await chatWithHead(A, "Bob");
+    await chat.locator(".mini-chat-text", { hasText: "dm one " + stamp }).first().waitFor({ timeout: 30000 });
+  });
+  if (!chat) return;
+  await shot(chat, "A-dm-chat");
+  await check("A: a line typed in the DM chat window reaches B", async () => {
+    const box = chat.locator(".mini-chat-input");
+    await box.fill("dm from mini " + stamp);
+    await box.press("Enter");
+    await chat.locator(".mini-chat-text", { hasText: "dm from mini " + stamp }).first().waitFor({ timeout: 30000 });
+    await seesText(B, "dm from mini " + stamp, 30000);
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
   else if (scenario === "relaunch") await relaunch();
   else if (scenario === "buddy") await buddy();
+  else if (scenario === "dm") await dm();
   else throw new Error("unknown scenario " + scenario);
 } catch (e) {
   log("FAIL", "driver", String(e.message || e));

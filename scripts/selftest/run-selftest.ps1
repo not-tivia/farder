@@ -14,6 +14,10 @@ $bad = 0
 & "$here\start-pair.ps1" -DataRoot $DataRoot -Fresh | Out-Null
 $env:RESULTS = Join-Path $DataRoot "results-core.json"
 node "$here\driver.mjs" core; if ($LASTEXITCODE -ne 0) { $bad++ }
+$env:RESULTS = Join-Path $DataRoot "results-dm.json"
+node "$here\driver.mjs" dm; if ($LASTEXITCODE -ne 0) { $bad++ }
+$env:RESULTS = Join-Path $DataRoot "results-buddy.json"
+node "$here\driver.mjs" buddy; if ($LASTEXITCODE -ne 0) { $bad++ }
 & "$here\stop-pair.ps1" -DataRoot $DataRoot | Out-Null
 & "$here\start-pair.ps1" -DataRoot $DataRoot | Out-Null
 $env:RESULTS = Join-Path $DataRoot "results-relaunch.json"

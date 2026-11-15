@@ -6839,6 +6839,18 @@ pub async fn join_log_server(
             ds.lamport = join.core.lamport;
             ds.joined = true;
             ds.save(&log_server_id)?;
+            // The connect-time profile push ran BEFORE we were a member, so the
+            // server dropped it and everyone saw this person as "Anonymous" until
+            // their next reconnect. Now that the join went through, send it again.
+            {
+                let state_arc: Arc<AppState> = Arc::clone(state.inner());
+                let sid = server_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::profile_sync::push_profile_on_connect(&state_arc, &sid).await {
+                        eprintln!("[profile-sync] push after join to {} failed: {}", sid, e);
+                    }
+                });
+            }
             Ok(())
         }
         // Already a member (e.g. joined on another device): treat as success so we
