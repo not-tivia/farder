@@ -2616,6 +2616,16 @@ pub fn handle_request(
                 None => return err("server is not running the event log (no genesis yet)"),
             };
 
+            // 1a. A guest (browser-link joiner) may only join and post. The signed history gives
+            //     ordinary members more (making invites, for one); a guest must not reach any of it,
+            //     or the permission cap on the request side would be a locked door beside an open one.
+            if members::guest_expiry(conn, member).is_some() || members::guest_expiry(conn, &event.core.author).is_some() {
+                let kind = crate::event_ingest::payload_type(&event.core.payload);
+                if !matches!(kind, "DeviceAuthorized" | "MemberJoined" | "MessagePosted") {
+                    return err("guests can only join and post messages");
+                }
+            }
+
             // 1b. INGEST CAPS, before anything allocation-heavy. `LogState::apply`
             //     runs on a CLONE of the whole fold state, so the clone is what a
             //     cap breach would otherwise buy; and the fold checks no size caps
@@ -11883,5 +11893,39 @@ mod tests {
         assert!(matches!(r, ServerResponse::Error { ref reason } if reason.contains("expired")), "{r:?}");
     }
 
+
+    #[test]
+    fn a_guest_can_join_and_post_through_the_signed_history_but_nothing_else() {
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, guest, gdev) = (Keypair::generate(), Keypair::generate(), Keypair::generate());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::register_member(&conn, &guest.public_key(), "Guest").unwrap();
+        members::assign_role(&conn, &guest.public_key(), everyone).unwrap();
+        members::set_guest_expiry(&conn, &guest.public_key(), db::now() + 600).unwrap();
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        crate::event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let sid = g.server_id();
+        let submit = |prev: Option<&Event>, n: u64, p: EP| {
+            let ev = Event::next(&gdev, guest.public_key(), sid.clone(), prev, n, 10 + n, p);
+            let r = handle_request(&conn, &guest.public_key(), false, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap();
+            (ev, r.response)
+        };
+        // Joining machinery is NOT refused by the guest guard.
+        let (da, r) = submit(None, 1, EP::DeviceAuthorized { cert: DeviceCert::create(&guest, &gdev.public_key(), 1) });
+        assert!(!matches!(&r, ServerResponse::Error { reason } if reason.contains("guests can only")), "{r:?}");
+        // Anything else is, whatever the fold would have said: a normal invite, a ban, a grant.
+        for p in [
+            EP::InviteCreated { code_hash: "x".into(), max_uses: 1, expires_at: db::now() + 60, requires_approval: false },
+            EP::MemberBanned { member: owner.public_key() },
+        ] {
+            let (_, r) = submit(Some(&da), 2, p);
+            assert!(matches!(&r, ServerResponse::Error { reason } if reason.contains("guests can only join and post")), "{r:?}");
+        }
+    }
 
 }

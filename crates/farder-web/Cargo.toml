@@ -1,0 +1,17 @@
+[package]
+name = "farder-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Farder's own protocol and signing, compiled to WebAssembly for the browser guest page"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+farder-crypto = { workspace = true }
+farder-protocol = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = "0.2"
+# The browser's random source (a guest's key is made from it). Only affects the wasm build.
+getrandom = { version = "0.2", features = ["js"] }
