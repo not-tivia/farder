@@ -38,6 +38,16 @@ function Check($name, $dir) {
     if ($errs) { Write-Host "FAIL  $name"; ($errs -split "`n" | Select-Object -First 8) | ForEach-Object { Write-Host "      $_" } }
     else { Write-Host "ok    $name" }
 }
+if ($Link) {
+    # Really compile and LINK the app library for Android (produces libfarder_client_lib.so).
+    $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = Join-Path $bin "aarch64-linux-android24-clang.cmd"
+    Push-Location (Join-Path (Get-Location) "client\src-tauri")
+    cargo build --lib --target $triple 2>&1 | Select-Object -Last 25
+    Pop-Location
+    $so = Join-Path $env:CARGO_TARGET_DIR "$triple\debug\libfarder_client_lib.so"
+    if (Test-Path $so) { Write-Host ("LINKED: " + $so + "  " + [math]::Round((Get-Item $so).Length / 1MB, 1) + " MB") } else { Write-Host "NOT LINKED" }
+    exit
+}
 if ($Client) { Check "farder-client (the Tauri app)" (Join-Path (Get-Location) "client\src-tauri"); exit }
 foreach ($c in $crates) {
     $out = cargo check -p $c --target $triple 2>&1 | Out-String
