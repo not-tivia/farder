@@ -1,6 +1,7 @@
 # Run a Farder community server on Ubuntu as a background service that starts at boot and
-# restarts if it crashes. NOT yet tested as a service (the program itself is tested on
-# Ubuntu 24.04; see docs/hosting-on-ubuntu.md). Install:
+# restarts if it crashes. Tested 2026-11-15 as a USER service on Ubuntu 24.04
+# (starts, setup token in the journal, comes back after kill -9 within seconds, stops cleanly);
+# the system install with User=farder needs sudo and has not been run (see docs/hosting-on-ubuntu.md). Install:
 #   cargo build --release -p farder-server
 #   sudo cp target/release/farder-server /usr/local/bin/
 #   sudo useradd -r -s /usr/sbin/nologin farder && sudo mkdir -p /var/lib/farder-server && sudo chown farder /var/lib/farder-server

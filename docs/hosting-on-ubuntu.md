@@ -15,7 +15,7 @@ Windows connects to it the same way it connects to a server on another Windows P
 
 ## Not tested yet
 
-- Running it as a boot-time service (the unit file below is untested).
+- Running it as a boot-time service: the unit's start, restart-after-crash and stop were run as a user service; the full system install (`User=farder`) is untested.
 - Over the internet, through a router, or through the relay (`--relay`) from Ubuntu.
 - A release build, a long uptime, and restart after a crash.
 - Copying backups to ANOTHER machine automatically (a backup is a plain folder; copying it off the host is manual for now).
