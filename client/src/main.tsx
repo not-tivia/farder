@@ -79,6 +79,13 @@ async function bootstrap() {
   if (new URLSearchParams(window.location.search).get("notify") === "1") {
     document.documentElement.style.setProperty("background", "transparent", "important");
     document.body.style.setProperty("background", "transparent", "important");
+    // This window is exactly as tall as its cards. The themes give html/body/#root
+    // height: 100%, which pins the content to the window and makes it unmeasurable
+    // from inside: let the content set the height.
+    document.documentElement.style.setProperty("height", "auto", "important");
+    document.body.style.setProperty("height", "auto", "important");
+    document.body.style.setProperty("margin", "0", "important");
+    document.getElementById("root")!.style.setProperty("height", "auto", "important");
     ReactDOM.createRoot(document.getElementById("root")!).render(<NotifyPopup />);
     return;
   }

@@ -108,7 +108,8 @@ export default function NotifyPopup() {
   useEffect(() => {
     if (cards.length === 0) { api.notifyLayout(0, 0).catch(() => {}); return; }
     const el = stackRef.current;
-    const report = () => api.notifyLayout(cards.length, el ? el.offsetHeight : 0).catch(() => {});
+    // The natural height of the stack (not clipped to the window), rounded up.
+    const report = () => api.notifyLayout(cards.length, el ? Math.ceil(el.getBoundingClientRect().height) : 0).catch(() => {});
     report();
     if (!el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(report);
@@ -117,11 +118,15 @@ export default function NotifyPopup() {
   }, [cards.length]);
 
   return (
-    <div className="notify-popup-stack" ref={stackRef}>
+    <div className="notify-popup-stack" ref={stackRef} style={{ flexShrink: 0 }}>
       {cards.map((c) => (
         <div
           key={c.id}
           className="notify-popup-card"
+          // Never let a card shrink below its content: the page is as tall as the window
+          // (height: 100%), the card has overflow: hidden, so without this the cards were
+          // squashed to their minimum height and the bottom (Reply button, long text) was cut off.
+          style={{ flexShrink: 0 }}
           role="status"
           onMouseEnter={() => {
             const t = timers.current.get(c.id);

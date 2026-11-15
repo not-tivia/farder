@@ -1020,13 +1020,15 @@ async function popupSize() {
     if (g.cardRight + 1 > g.win.w) problems.push(`the card runs ${g.cardRight - g.win.w}px past the window's right edge`);
     if (g.page.scrollH > g.win.h + 1) problems.push(`the page is ${g.page.scrollH}px tall in a ${g.win.h}px window`);
     if (g.cardClip > 1) problems.push(`the card's own content is cut off by ${g.cardClip}px`);
-    if (problems.length) throw new Error(`${what}: ${problems.join("; ")}  [${JSON.stringify(g)}]`);
+    if (problems.length) throw new Error(`${what}: ${problems.join("; ")}  [${JSON.stringify(g)}] size requests so far: ${reports.slice(-6).join(" ")}`);
     return `${what}: window ${g.win.w}x${g.win.h}, card ends at ${g.cardBottom} (margin ${g.bodyMargin})`;
   };
   let pop;
+  const reports = [];   // every size the pop-up page asked its window to be
   await check("short message: the whole pop-up fits in its window", async () => {
     await sendText(A, "size test short " + stamp);
     pop = await pageMatching(B, /[?&]notify=1/, 30000);
+    pop.on("request", (r) => { if (/notify_layout/.test(r.url())) reports.push(`${r.postData()}@${Date.now() % 100000}`); });
     await pop.locator(".notify-popup-card", { hasText: "size test short " + stamp }).first().waitFor({ timeout: 30000 });
     await new Promise((r) => setTimeout(r, 600));
     await shot(pop, "popup-short");
