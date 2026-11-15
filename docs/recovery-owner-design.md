@@ -135,12 +135,13 @@ the old owner, still connected, is refused owner-only actions ("missing MANAGE_C
 permission") while the new owner succeeds; the audit log holds `recovery_key_set`,
 `recovery_claim`, `recovery_finalize`.
 
+**Banner (verified 2026-11-15, 9/9 checks):** every member sees "Ownership of this server is moving to ..." with a countdown on the main screen; the owner is nudged (dismissable) when no recovery key exists; after a takeover the banner clears and the new owner is nudged for a fresh key.
+
 Not built yet:
 
-- A banner for EVERY member (today the countdown is inside the Recovery tab, which people must
-  open); a pop-up when a takeover starts.
+- A pop-up when a takeover starts (the banner for every member IS built).
 - The host-side reset for a server with no recovery key (`farder-server --reset-owner`).
 - The cooling-off period for destructive actions by the everyday key.
 - The e2e test only used made-up words for the "thief" case; a VALID phrase that belongs to some
   other server is refused by a check in the app command, covered by reading, not by a test.
-- A reminder when the owner has not made a recovery key yet, and a way to rotate it from the app.
+- A way to rotate the recovery key from the app.
