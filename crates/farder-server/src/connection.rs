@@ -538,6 +538,7 @@ pub(crate) async fn authenticate(
                 },
             )
             .await;
+            flush_refusal(send).await;
             anyhow::bail!("expected Authenticate frame");
         }
     };
@@ -546,6 +547,7 @@ pub(crate) async fn authenticate(
     if let Err(e) = auth::verify_challenge(&public_key, &nonce, &signed_challenge) {
         let reason = format!("signature verification failed: {}", e);
         let _ = send_server_frame(send, &ServerFrame::AuthError { reason: reason.clone() }).await;
+        flush_refusal(send).await;
         anyhow::bail!("{}", reason);
     }
 
@@ -633,6 +635,7 @@ pub(crate) async fn authenticate(
             },
         )
         .await;
+        flush_refusal(send).await;
         anyhow::bail!("auth rejected: {}", reason);
     }
 
@@ -812,6 +815,14 @@ pub(crate) async fn cleanup_session(
 // ---------------------------------------------------------------------------
 // Main handler (public)
 // ---------------------------------------------------------------------------
+
+/// After sending a refusal, let it REACH the person before the connection is torn down:
+/// closing straight away can discard the unread reason (e.g. "this guest link has expired"),
+/// leaving them with a generic "connection lost".
+async fn flush_refusal(send: &mut quinn::SendStream) {
+    let _ = send.finish();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), send.stopped()).await;
+}
 
 pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection) -> Result<()> {
     let (mut send, mut recv) = conn.open_bi().await?;

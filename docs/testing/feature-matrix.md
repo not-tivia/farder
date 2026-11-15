@@ -102,3 +102,12 @@ See `docs/hosting-on-ubuntu.md`.
 | iOS | UNVERIFIED | pure crates type-check; the rest needs a Mac and the Apple SDK |
 
 See `docs/modules/portability.md`.
+
+## Browser guest links (docs/web-guest-join-design.md)
+
+| Feature | Status | Evidence |
+|---|---|---|
+| Server: guest invite type, owner switch (off by default), expiry, permission cap | VERIFIED (unit) | 2 tests, cap break caught |
+| Gateway: WebSocket to the real server, guest joins with its own key, limited | VERIFIED | `cargo test -p farder-gateway`, 6 tests incl. real server; pin break caught |
+| Refusal reasons reach a refused login (expired link etc.) | VERIFIED | same real-server test |
+| Browser crypto (WebAssembly), guest screens, `farder.xyz/<name>/t` route, joining a server with a signed history | NOT BUILT | |

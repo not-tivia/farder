@@ -57,6 +57,10 @@ a joiner with one is marked a guest (`members.guest_expires_at`), is capped to v
 roles they get, cannot make invites, and cannot reconnect after the link expires. Normal invites are
 unchanged.
 
+**Step 2, the gateway (built 2026-11-15, `docs/modules/gateway.md`):** WebSocket to the server's QUIC main
+stream, a dumb frame pump with a route table, certificate pin, per-address cap, size and idle limits; tested
+against a fake server and against the real server (a guest joins with its own key, with limits).
+
 **Known gaps in step 1:** on a server with a signed history a guest must also become a LOG member
 (`MemberJoined` citing the invite), which only the browser client can sign, so the end-to-end guest
 join is step 3/4; no owner screen for the switch yet; direct messages, uploads and reactions are not

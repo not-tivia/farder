@@ -11,6 +11,7 @@ members = [
     "crates/farder-mls",
     "crates/farder-e2ee-client",
     "crates/farder-history",
+    "crates/farder-gateway",
 ]
 
 [package]
