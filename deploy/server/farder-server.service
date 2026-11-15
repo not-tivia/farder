@@ -1,0 +1,25 @@
+# Run a Farder community server on Ubuntu as a background service that starts at boot and
+# restarts if it crashes. NOT yet tested as a service (the program itself is tested on
+# Ubuntu 24.04; see docs/hosting-on-ubuntu.md). Install:
+#   cargo build --release -p farder-server
+#   sudo cp target/release/farder-server /usr/local/bin/
+#   sudo useradd -r -s /usr/sbin/nologin farder && sudo mkdir -p /var/lib/farder-server && sudo chown farder /var/lib/farder-server
+#   sudo cp deploy/server/farder-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now farder-server
+#   sudo journalctl -u farder-server | grep -i "token"     # the one-time owner setup token (first run)
+# Open the port in the firewall: it is UDP, not TCP:  sudo ufw allow 4435/udp
+[Unit]
+Description=Farder community server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/var/lib/farder-server
+ExecStart=/usr/local/bin/farder-server --bind 0.0.0.0:4435 --name "My Farder Server" --db /var/lib/farder-server/farder-server.db --storage-dir /var/lib/farder-server/files --data-dir /var/lib/farder-server/data
+User=farder
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

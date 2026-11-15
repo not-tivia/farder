@@ -49,6 +49,7 @@ Last updated: 2026-11-15.
 |---|---|---|
 | Themes (6) apply, text readable, nothing overflows | VERIFIED | selftest themes (screenshots in the results folder). Found and fixed: avatar letters nearly invisible in Candy and Hello Kitty. NOT judged by a machine: whether they look good, and gradient sidebars (contrast not measurable) |
 | Close to tray (app survives closing its window, receives messages, pop-up shows) | VERIFIED | selftest tray (the pop-up part with focus simulated). Tray icon/menu clicks, start in tray, start with Windows: UNVERIFIED (Parts 1-2) |
+| Pop-up window fits its content (short, long, reply box open; no outline frame) | VERIFIED | selftest popup-size. Found and fixed: the page inherited the main window's frame (border + shadow) and squashed the card, cutting off its bottom |
 | Notification pop-up (message from another server: shows it, Reply from the pop-up reaches the sender) | VERIFIED | selftest popup. Background pop-up (focus simulated by overriding the one "has focus" answer) also VERIFIED. NOT automatable: pop-up position/centring, keyboard focus after use: checklist Part 3, chris to eyeball. keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
 | Autoplay | UNVERIFIED | Part 4 |
 | Garbler (own "speak as": B receives garbled words; off restores normal) | VERIFIED | selftest garble |
@@ -65,6 +66,16 @@ Last updated: 2026-11-15.
 | Chat window: DMs | VERIFIED | selftest dm |
 | Live messages / unread for channels not on screen | VERIFIED | selftest buddy (was broken: app only subscribed to the viewed channel; fixed by useSubscriptions). Unread BADGE rendering itself not asserted yet |
 | Display name shows right after joining | VERIFIED | selftest dm (was "Anonymous" until reconnect; fixed) |
+
+## Hosting on Ubuntu
+
+| Item | Status | Evidence |
+|---|---|---|
+| Server runs headless on Ubuntu, prints a setup token | VERIFIED | ran on Ubuntu 24.04 (2026-11-15); 1010 tests pass there |
+| Windows client claims a Linux-hosted server and chats | VERIFIED | selftest ubuntu (4 checks), direct connection |
+| Runs as a systemd service, over the internet, behind the relay, long uptime | UNVERIFIED | unit file written (`deploy/server/farder-server.service`), never installed |
+
+See `docs/hosting-on-ubuntu.md`.
 
 ## Portability (Android / Apple)
 
