@@ -142,6 +142,4 @@ Not built yet:
 - A pop-up when a takeover starts (the banner for every member IS built).
 - The host-side reset for a server with no recovery key (`farder-server --reset-owner`).
 - The cooling-off period for destructive actions by the everyday key.
-- The e2e test only used made-up words for the "thief" case; a VALID phrase that belongs to some
-  other server is refused by a check in the app command, covered by reading, not by a test.
 - A way to rotate the recovery key from the app.
