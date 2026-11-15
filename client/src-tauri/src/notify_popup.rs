@@ -60,6 +60,37 @@ pub fn layout_for(content_h: f64, monitor_x: i32, monitor_y: i32, monitor_w: u32
     Layout { x, y, width, height }
 }
 
+/// Logical size to physical pixels at `scale`, never zero. Used so a window is sized in
+/// the exact pixels it will occupy on the monitor it is placed on.
+pub fn physical_size(width: f64, height: f64, scale: f64) -> (u32, u32) {
+    let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    (((width * s).round().max(1.0)) as u32, ((height * s).round().max(1.0)) as u32)
+}
+
+/// Put a small window at `(x, y)` (physical pixels) with a LOGICAL size on the monitor
+/// whose scale factor is `scale`.
+///
+/// Order matters on Windows. The window is created on whichever monitor it opens on and
+/// is then moved to the primary one. Setting a logical size BEFORE the move converts it
+/// with the scale of the monitor the window is still on; on a 125% primary monitor the
+/// window then ended up about 80% of the size its content needs, so the bottom of the
+/// card was cut off and the window's outline showed. So: move first, then set the size
+/// in exact physical pixels, then settle the position again.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn place_window(
+    win: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: f64,
+    height: f64,
+    scale: f64,
+) -> Result<(), String> {
+    win.set_position(PhysicalPosition::new(x, y)).map_err(|e| e.to_string())?;
+    let (w, h) = physical_size(width, height, scale);
+    win.set_size(tauri::PhysicalSize::new(w, h)).map_err(|e| e.to_string())?;
+    win.set_position(PhysicalPosition::new(x, y)).map_err(|e| e.to_string())
+}
+
 /// Where a reply typed into the pop-up should go. Set by the client ONLY when the
 /// person allows replying from pop-ups and the pop-up is showing who it is from.
 /// The pop-up merely carries it back; the main window re-checks it before sending.
@@ -194,8 +225,7 @@ pub fn notify_layout(app: AppHandle, count: u32, height: f64) -> Result<(), Stri
         monitor.size().width,
         monitor.scale_factor(),
     );
-    win.set_size(tauri::LogicalSize::new(l.width, l.height)).map_err(|e| e.to_string())?;
-    win.set_position(PhysicalPosition::new(l.x, l.y)).map_err(|e| e.to_string())?;
+    place_window(&win, l.x, l.y, l.width, l.height, monitor.scale_factor())?;
     win.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
     // `focusable(false)` means this shows without activating.
     win.show().map_err(|e| e.to_string())
@@ -250,6 +280,21 @@ pub fn notify_activate(app: AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::physical_size;
+
+    #[test]
+    fn a_window_is_sized_in_the_pixels_it_will_occupy() {
+        // 396 x 92 logical on a 125% monitor is 495 x 115 physical; the bug was sizing
+        // with the OTHER monitor's scale and getting about 80% of that.
+        assert_eq!(physical_size(396.0, 92.0, 1.25), (495, 115));
+        assert_eq!(physical_size(396.0, 92.0, 1.0), (396, 92));
+        assert_eq!(physical_size(396.0, 92.0, 1.5), (594, 138));
+        // A zero or broken scale never produces a zero-sized window.
+        assert_eq!(physical_size(396.0, 92.0, 0.0), (396, 92));
+        assert_eq!(physical_size(396.0, 92.0, f64::NAN), (396, 92));
+        assert_eq!(physical_size(0.0, 0.0, 1.25), (1, 1));
+    }
+
     use super::*;
 
     const ONE: f64 = CARD_H + 2.0 * GAP;

@@ -86,6 +86,7 @@ html[data-layout="small"] .phone-back { display: none; }
   /* The typing box gets a whole row to itself above the buttons: squeezed between six
      buttons it was 28px wide. */
   html[data-layout="small"] .message-input-row { flex-wrap: wrap; }
-  html[data-layout="small"] .message-input-textwrap { flex: 1 1 100%; order: -1; }
+  /* !important: the element carries an inline flex: 1 that would otherwise win. */
+  html[data-layout="small"] .message-input-textwrap { flex: 1 1 100% !important; order: -1; }
 }
 `;

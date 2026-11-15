@@ -194,8 +194,8 @@ pub fn strip_layout(app: AppHandle, has_content: bool) -> Result<(), String> {
         .ok_or_else(|| "no primary monitor".to_string())?;
     let work = monitor.work_area();
     let l = layout_for(&s, work.position.x, work.position.y, work.size.width, work.size.height, monitor.scale_factor());
-    win.set_size(tauri::LogicalSize::new(l.width, l.height)).map_err(|e| e.to_string())?;
-    win.set_position(PhysicalPosition::new(l.x, l.y)).map_err(|e| e.to_string())?;
+    // Move first, then size in physical pixels (see notify_popup::place_window for why).
+    crate::notify_popup::place_window(&win, l.x, l.y, l.width, l.height, monitor.scale_factor())?;
     // `focusable(false)` means this shows without activating.
     win.show().map_err(|e| e.to_string())
 }

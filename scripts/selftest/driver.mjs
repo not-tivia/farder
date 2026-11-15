@@ -955,6 +955,7 @@ async function phone() {
   for (const [w, h, label] of [[390, 844, "phone"], [360, 640, "small-phone"]]) {
     await check(`${label} ${w}x${h}: conversation list fills the screen, then a chat with a working Back button`, async () => {
       await set(w, h);
+      await A.page.evaluate(() => { document.documentElement.dataset.phoneView = "list"; });   // start from the list each time
       await new Promise((r) => setTimeout(r, 1500));
       // 1) The list is showing and the conversation is findable on screen.
       const item = A.page.locator(".compact-list .channel-item", { hasText: "general" }).first();
@@ -984,6 +985,76 @@ async function phone() {
   await A.browser.close().catch(() => {});
 }
 
+// The pop-up window must be big enough for everything in it: nothing cut off at the
+// bottom or the sides, for a short message, a long one, and with the reply box open.
+// Run after `direct`.
+async function popupSize() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const first = `.server-icon[title="SelfTest ${stamp}"]`;
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  await A.page.locator(first).click();
+  await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+  await B.page.locator(`.server-icon[title="Direct ${stamp}"]`).click();
+  const geometry = (pop) => pop.evaluate(() => {
+    const cards = [...document.querySelectorAll(".notify-popup-card")];
+    const stack = document.querySelector(".notify-popup-stack");
+    const bottoms = cards.map((c) => c.getBoundingClientRect().bottom);
+    const rights = cards.map((c) => c.getBoundingClientRect().right);
+    const clipped = cards.map((c) => c.scrollHeight - c.clientHeight);       // a card whose own content is cut off
+    return {
+      win: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio },
+      page: { scrollH: document.documentElement.scrollHeight, scrollW: document.documentElement.scrollWidth },
+      stack: stack ? { h: Math.round(stack.getBoundingClientRect().height), top: Math.round(stack.getBoundingClientRect().top) } : null,
+      cardBottom: Math.round(Math.max(0, ...bottoms)), cardRight: Math.round(Math.max(0, ...rights)),
+      bodyMargin: getComputedStyle(document.body).margin,
+      cardClip: Math.max(0, ...clipped),
+    };
+  });
+  const verdict = (g, what) => {
+    const problems = [];
+    if (g.cardBottom + 1 > g.win.h) problems.push(`the card runs ${g.cardBottom - g.win.h}px below the window`);
+    if (g.cardRight + 1 > g.win.w) problems.push(`the card runs ${g.cardRight - g.win.w}px past the window's right edge`);
+    if (g.page.scrollH > g.win.h + 1) problems.push(`the page is ${g.page.scrollH}px tall in a ${g.win.h}px window`);
+    if (g.cardClip > 1) problems.push(`the card's own content is cut off by ${g.cardClip}px`);
+    if (problems.length) throw new Error(`${what}: ${problems.join("; ")}  [${JSON.stringify(g)}]`);
+    return `${what}: window ${g.win.w}x${g.win.h}, card ends at ${g.cardBottom} (margin ${g.bodyMargin})`;
+  };
+  let pop;
+  await check("short message: the whole pop-up fits in its window", async () => {
+    await sendText(A, "size test short " + stamp);
+    pop = await pageMatching(B, /[?&]notify=1/, 30000);
+    await pop.locator(".notify-popup-card", { hasText: "size test short " + stamp }).first().waitFor({ timeout: 30000 });
+    await new Promise((r) => setTimeout(r, 600));
+    await shot(pop, "popup-short");
+    return verdict(await geometry(pop), "short");
+  });
+  if (!pop) return;
+  await check("long message: the whole pop-up fits in its window", async () => {
+    await new Promise((r) => setTimeout(r, 7000));                                 // let the first card go
+    await sendText(A, "size test long " + ("this is a much longer message that has to wrap onto several lines " .repeat(4)) + stamp);
+    await pop.locator(".notify-popup-card", { hasText: "size test long" }).first().waitFor({ timeout: 30000 });
+    await new Promise((r) => setTimeout(r, 600));
+    await shot(pop, "popup-long");
+    return verdict(await geometry(pop), "long");
+  });
+  await check("reply box open: the whole pop-up (with the box and its button) fits", async () => {
+    await new Promise((r) => setTimeout(r, 7000));
+    await sendText(A, "size test reply " + stamp);
+    await pop.locator(".notify-popup-card", { hasText: "size test reply" }).first().waitFor({ timeout: 30000 });
+    await pop.locator(".notify-popup-reply-btn").first().click();
+    await pop.locator(".notify-popup-reply-input").first().waitFor({ timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 800));
+    await shot(pop, "popup-reply-open");
+    return verdict(await geometry(pop), "reply open");
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1000,6 +1071,7 @@ try {
   else if (scenario === "tray") await tray();
   else if (scenario === "powers") await powers();
   else if (scenario === "voice") await voice();
+  else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();
   else if (scenario === "admin-garble") await adminGarble();
   else if (scenario === "strip") await strip();
