@@ -797,8 +797,10 @@ async function tray() {
   for (const c of [A, B]) {
     if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
   }
-  await A.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
-  await A.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  for (const c of [A, B]) {   // both look at the first server's #general
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
   const ps = (cmd) => execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" }).trim();
   await check("closing B's window leaves the app running (hidden in the tray, not quit)", async () => {
     ps(`(Get-Process -Id ${bPid}).CloseMainWindow() | Out-Null`);
