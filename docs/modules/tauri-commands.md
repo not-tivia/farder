@@ -3401,6 +3401,31 @@ never stored.
 
 ---
 
+### `get_guest_links(state, server_id) -> Result<bool, String>`
+
+**What it does:** whether guest links (browser joins) are turned on for this server (`GetGuestLinks`).
+**invoke name:** `"get_guest_links"` -> `getGuestLinks()`.
+
+---
+
+### `set_guest_links(state, server_id, enabled) -> Result<bool, String>`
+
+**What it does:** owner only: turn guest links on or off (`SetGuestLinks`); off by default. Returns the new state.
+**invoke name:** `"set_guest_links"` -> `setGuestLinks()`.
+
+---
+
+### `create_guest_invite(state, server_id, log_server_id, route_name, expires_in_secs, max_uses) -> Result<GuestInviteResult, String>`
+
+**What it does:** makes a temporary guest link (`CreateGuestInvite`; default a day, at most a week, server-clamped).
+On a server with a signed history it also records the invite there as a signed `InviteCreated` event
+(shared helper `record_invite_in_log`, also used by `create_invite`), because a guest must cite it when
+joining. `route_name` is the name the host gave the gateway; it may use only letters, numbers, `-`, `_`.
+Returns `{ code, link }` where `link` is `https://<site>/<route_name>/t#<code>`.
+**invoke name:** `"create_guest_invite"` -> `createGuestInvite()`.
+
+---
+
 ### `recovery_rotate(state, server_id, log_server_id, phrase) -> Result<RecoveryCreatedView, String>`
 
 **What it does:** replaces the recovery key. Needs the CURRENT 24 words (the everyday owner key

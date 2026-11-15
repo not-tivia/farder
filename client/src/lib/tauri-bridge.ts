@@ -534,6 +534,27 @@ export async function createInvite(serverId: string, logServerId: string | null,
   return invoke<InviteResult>("create_invite", { serverId, logServerId, maxUses: maxUses ?? null, requiresApproval: requiresApproval ?? false });
 }
 
+/** Whether guest links (browser joins, no install) are turned on for this server. */
+export async function getGuestLinks(serverId: string): Promise<boolean> {
+  return invoke<boolean>("get_guest_links", { serverId });
+}
+
+/** Owner only: turn guest links on or off (off by default). */
+export async function setGuestLinks(serverId: string, enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_guest_links", { serverId, enabled });
+}
+
+export interface GuestInviteResult {
+  code: string;
+  /** https://<site>/<web name>/t#<code> */
+  link: string;
+}
+
+/** A temporary guest link. `routeName` is the name the host gave the gateway (`--route name=...`). */
+export async function createGuestInvite(serverId: string, logServerId: string | null, routeName: string, expiresInSecs?: number, maxUses?: number): Promise<GuestInviteResult> {
+  return invoke<GuestInviteResult>("create_guest_invite", { serverId, logServerId, routeName, expiresInSecs: expiresInSecs ?? null, maxUses: maxUses ?? null });
+}
+
 export async function fetchUrl(serverId: string, url: string, channelId: number): Promise<number> {
   return invoke<number>("fetch_url", { serverId, url, channelId });
 }

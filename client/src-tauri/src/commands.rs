@@ -2432,6 +2432,113 @@ pub struct InviteResult {
     pub deep_link: String,
 }
 
+/// Record an invite code as a signed `InviteCreated` event in the server's history (mesh servers), so
+/// a joiner can cite it in their `MemberJoined`. The first action on a server also authorizes this
+/// device. Serialized against the other writers of this device's chain.
+async fn record_invite_in_log(
+    state: &State<'_, Arc<AppState>>,
+    server_id: &str,
+    log_sid: &str,
+    code: &str,
+    max_uses: u32,
+    expires_at: u64,
+    requires_approval: bool,
+) -> Result<(), String> {
+    let _chain_guard = state.device_chain_lock.lock().await;
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
+    let mut ds = crate::device::DeviceState::load(log_sid)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+    // First action on this server authorizes the device (mirrors submit_event).
+    if !ds.authorized {
+        let cert = crate::device::device_cert(&identity, &device);
+        let da = event_build_next(&device, &identity, log_sid, ds.last_event_hash.clone(), ds.next_seq, ds.lamport,
+            farder_crypto::event_log::EventPayload::DeviceAuthorized { cert });
+        event_send_submit(state, server_id, &da).await?;
+        ds.next_seq = da.core.seq + 1;
+        ds.last_event_hash = Some(da.hash());
+        ds.lamport = da.core.lamport;
+        ds.authorized = true;
+        ds.save(log_sid)?;
+    }
+    let inv = event_build_next(&device, &identity, log_sid, ds.last_event_hash.clone(), ds.next_seq, ds.lamport,
+        farder_crypto::event_log::EventPayload::InviteCreated {
+            code_hash: farder_crypto::event_log::invite_code_hash(code),
+            max_uses,
+            expires_at,
+            requires_approval,
+        });
+    event_send_submit(state, server_id, &inv).await?;
+    ds.next_seq = inv.core.seq + 1;
+    ds.last_event_hash = Some(inv.hash());
+    ds.lamport = inv.core.lamport;
+    ds.save(log_sid)?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct GuestInviteResult {
+    pub code: String,
+    /// `https://<site>/<route name>/t#<code>`: what the guest opens in a browser.
+    pub link: String,
+}
+
+/// Whether guest links (browser joins) are turned on for this server.
+#[tauri::command]
+pub async fn get_guest_links(state: State<'_, Arc<AppState>>, server_id: String) -> Result<bool, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetGuestLinks).await.map_err(|e| e.to_string())? {
+        ServerResponse::GuestLinks { enabled } => Ok(enabled),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Owner only: turn guest links on or off (off by default).
+#[tauri::command]
+pub async fn set_guest_links(state: State<'_, Arc<AppState>>, server_id: String, enabled: bool) -> Result<bool, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::SetGuestLinks { enabled }).await.map_err(|e| e.to_string())? {
+        ServerResponse::GuestLinks { enabled } => Ok(enabled),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Make a temporary guest link: a short-lived invite that lets someone chat from a browser with no
+/// install. `route_name` is the name the server's host gave the gateway (`--route name=...`);
+/// it becomes part of the link. On a server with a signed history the invite is also recorded there.
+#[tauri::command]
+pub async fn create_guest_invite(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: Option<String>,
+    route_name: String,
+    expires_in_secs: Option<u64>,
+    max_uses: Option<u32>,
+) -> Result<GuestInviteResult, String> {
+    let route = route_name.trim().to_string();
+    if route.is_empty() || !route.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("the web name may only use letters, numbers, - and _".to_string());
+    }
+    let response = bridge::send_request(&state, &server_id, ServerRequest::CreateGuestInvite { max_uses, expires_in_secs })
+        .await.map_err(|e| e.to_string())?;
+    let code = match response {
+        ServerResponse::InviteCreated { code } => code,
+        ServerResponse::Error { reason } => return Err(reason),
+        other => return Err(format!("unexpected response: {:?}", other)),
+    };
+    if let Some(log_sid) = log_server_id {
+        // Mirror the server's own clamp (default a day, at most a week).
+        let secs = expires_in_secs.unwrap_or(24 * 3600).clamp(60, 7 * 24 * 3600);
+        record_invite_in_log(&state, &server_id, &log_sid, &code,
+            max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX), event_now_secs() + secs, false).await?;
+    }
+    Ok(GuestInviteResult { link: format!("https://{}/{}/t#{}", crate::connection::WEB_INVITE_HOST, route, code), code })
+}
+
 #[tauri::command]
 pub async fn create_invite(
     state: State<'_, Arc<AppState>>,
@@ -2478,58 +2585,12 @@ pub async fn create_invite(
             // in the log, so a joiner can cite it in their MemberJoined.
             // Instant invite for now (requires_approval = false; approval is sub-project 3).
             if let Some(log_sid) = log_server_id {
-                // Serialize chain writes against submit_event and join_log_server.
-                let _chain_guard = state.device_chain_lock.lock().await;
-
-                let identity = {
-                    let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
-                    let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
-                    Keypair::from_signing_key_bytes(&bytes)
-                };
-                let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
-                let mut ds = crate::device::DeviceState::load(&log_sid)?
-                    .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
-
-                // First action on this server authorizes the device (mirrors submit_event).
-                if !ds.authorized {
-                    let cert = crate::device::device_cert(&identity, &device);
-                    let da = event_build_next(
-                        &device,
-                        &identity,
-                        &log_sid,
-                        ds.last_event_hash.clone(),
-                        ds.next_seq,
-                        ds.lamport,
-                        farder_crypto::event_log::EventPayload::DeviceAuthorized { cert },
-                    );
-                    event_send_submit(&state, &server_id, &da).await?;
-                    ds.next_seq = da.core.seq + 1;
-                    ds.last_event_hash = Some(da.hash());
-                    ds.lamport = da.core.lamport;
-                    ds.authorized = true;
-                    ds.save(&log_sid)?;
-                }
-
-                let expires_at = event_now_secs() + 30 * 24 * 60 * 60;
-                let inv = event_build_next(
-                    &device,
-                    &identity,
-                    &log_sid,
-                    ds.last_event_hash.clone(),
-                    ds.next_seq,
-                    ds.lamport,
-                    farder_crypto::event_log::EventPayload::InviteCreated {
-                        code_hash: farder_crypto::event_log::invite_code_hash(&code),
-                        max_uses: max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX),
-                        expires_at,
-                        requires_approval: requires_approval.unwrap_or(false),
-                    },
-                );
-                event_send_submit(&state, &server_id, &inv).await?;
-                ds.next_seq = inv.core.seq + 1;
-                ds.last_event_hash = Some(inv.hash());
-                ds.lamport = inv.core.lamport;
-                ds.save(&log_sid)?;
+                record_invite_in_log(
+                    &state, &server_id, &log_sid, &code,
+                    max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX),
+                    event_now_secs() + 30 * 24 * 60 * 60,
+                    requires_approval.unwrap_or(false),
+                ).await?;
             }
 
             Ok(InviteResult { code, link, deep_link })
