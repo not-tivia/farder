@@ -1223,7 +1223,7 @@ async function recovery() {
   let words = "";
   if (!(await check("A (owner) makes a recovery key and is shown 24 words once", async () => {
     await openRecovery(A);
-    await A.page.getByText(/no recovery key/i).waitFor({ timeout: 15000 });
+    await A.page.getByRole("button", { name: "Make a recovery key" }).waitFor({ timeout: 15000 });
     await A.page.getByRole("button", { name: "Make a recovery key" }).click();
     const box = A.page.getByLabel("Recovery words", { exact: true });
     await box.waitFor({ timeout: 30000 });
