@@ -1417,6 +1417,57 @@ async function hostReset() {
   await B.browser.close().catch(() => {});
 }
 
+// Guest links from the app (docs/web-guest-join-design.md). Phase "make": A (the owner of the Ubuntu
+// server, after `ubuntu`) opens the invite dialog, allows guest links and makes a guest link, which is
+// written to GUEST_LINK_OUT for the browser test. Phase "seen": after the browser guest chatted, A and B
+// must see the guest's message and the guest among the members.
+async function guestLink() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const phase = process.env.GUEST_PHASE || "make";
+  const out = process.env.GUEST_LINK_OUT;
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  if (phase === "make") {
+    await check("A (owner) allows guest links and makes a guest link from the invite dialog", async () => {
+      await A.page.getByTitle("Create Invite").click();
+      await A.page.getByText(/Guest link \(for friends without the app/).click();
+      await A.page.getByLabel(/Allow guest links on this server/).check();
+      await A.page.getByLabel("Web name").waitFor({ timeout: 20000 });
+      await A.page.getByLabel("Web name").fill(process.env.GUEST_ROUTE || "ubuntu");
+      await A.page.getByLabel("Guest link duration").selectOption("3600");
+      await A.page.getByRole("button", { name: "Make a guest link" }).click();
+      const input = A.page.getByLabel("Guest link", { exact: true });
+      await input.waitFor({ timeout: 30000 });
+      const link = await input.inputValue();
+      if (!/^https:\/\/[^/]+\/[A-Za-z0-9_-]+\/t#[A-Za-z0-9]+$/.test(link)) throw new Error("unexpected link " + link);
+      if (out) fs.writeFileSync(out, link);
+      await shot(A.page, "A-guest-link");
+      await A.page.locator(".modal-close").first().click();
+      return link;
+    });
+    await check("B (a normal member) is told the owner decides, or can make a link only if allowed", async () => {
+      await B.page.getByTitle("Create Invite").click();
+      await B.page.getByText(/Guest link \(for friends without the app/).click();
+      await B.page.getByLabel("Web name").waitFor({ timeout: 20000 });      // on now, so B may make one too
+      await B.page.locator(".modal-close").first().click();
+    });
+  } else {
+    await check("the owner sees the browser guest's message and the guest in the member list", async () => {
+      await seesText(A, "hello from a browser guest", 60000);
+      await A.page.locator(".member-item", { hasText: "Webby" }).first().waitFor({ timeout: 30000 });
+    });
+    await check("the other member sees it too", async () => { await seesText(B, "hello from a browser guest", 60000); });
+  }
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1437,6 +1488,7 @@ try {
   else if (scenario === "server-down") await serverDown();
   else if (scenario === "recovery") await recovery();
   else if (scenario === "host-reset") await hostReset();
+  else if (scenario === "guest-link") await guestLink();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();

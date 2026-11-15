@@ -28,7 +28,7 @@ WSLIP=$(hostname -I | awk '{print $1}')
 PS="powershell.exe -NoProfile -ExecutionPolicy Bypass -File"
 
 winrun() { # winrun <scenario>   (UBU_* come from the environment)
-  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; \$env:RESET_PASS='${RESET_PASS:-1}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
+  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; \$env:GUEST_PHASE='${GUEST_PHASE:-make}'; \$env:GUEST_ROUTE='${GUEST_ROUTE:-ubuntu}'; \$env:GUEST_LINK_OUT='${GUEST_LINK_OUT:-}'; \$env:RESET_PASS='${RESET_PASS:-1}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
 }
 fresh_pair() {
   $PS "$WIN_PATH\\scripts\\selftest\\stop-pair.ps1" >/dev/null
@@ -108,12 +108,40 @@ print('vk_'+c.execute('select hex(public_key) from members order by joined_at de
   pkill -x farder-server
 }
 
+suite_guestlink() {
+  local D="$TMP/guestlink" PORT=4574; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server; pkill -x farder-gateway
+  fresh_pair
+  start_direct $PORT "$D"
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  setsid nohup "$ROOT/target/debug/farder-gateway" --listen 127.0.0.1:8480 --route ubuntu=127.0.0.1:$PORT > "$D/gateway.log" 2>&1 &
+  ( cd "$ROOT/website" && exec setsid python3 -m http.server 8099 --bind 127.0.0.1 > "$D/static.log" 2>&1 ) &
+  local STATIC_PID=$!
+  cp -r "$ROOT/website/guest" "$WIN_COPY/website/" 2>/dev/null
+  cp "$ROOT/scripts/selftest/guest-browser.mjs" "$WIN_COPY/scripts/selftest/"
+  sleep 2
+  echo "== the owner makes a guest link in the app"
+  export GUEST_LINK_OUT="$DATA\\guest-link.txt"; rm -f "$WIN_COPY/../farder-selftest-data/guest-link.txt"
+  GUEST_PHASE=make GUEST_ROUTE=ubuntu winrun guest-link
+  local LINK; LINK=$(tr -d '\r\n' < /mnt/c/Users/Deez/farder-selftest-data/guest-link.txt)
+  echo "link: $LINK"
+  echo "== a real browser joins with that link"
+  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-guest'; \$env:GUEST_SERVER_NAME='Ubuntu Server'; \$env:GUEST_WELCOME='hello from A to ubuntu'; node scripts\\selftest\\guest-browser.mjs '$LINK' 2>&1" | tr -d '\r' | cut -c1-240
+  echo "== the app sees the browser guest"
+  GUEST_PHASE=seen winrun guest-link
+  python3 -c "
+import sqlite3; c=sqlite3.connect('$D/u.db')
+print('server: guest members:', c.execute('select display_name from members where guest_expires_at is not null').fetchall())"
+  pkill -x farder-server; pkill -x farder-gateway; kill $STATIC_PID 2>/dev/null
+}
+
 case "${1:-all}" in
+  guestlink) suite_guestlink ;;
   reset) suite_reset ;;
   restore) suite_restore ;;
   relay) suite_relay ;;
   recovery) suite_recovery ;;
   all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
-  *) echo "usage: $0 [restore|relay|recovery|reset|all]"; exit 2 ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|all]"; exit 2 ;;
 esac
 echo FINISHED

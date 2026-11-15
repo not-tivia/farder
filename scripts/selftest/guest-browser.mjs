@@ -5,9 +5,16 @@
 import { chromium } from "playwright-core";
 import fs from "node:fs";
 
-const code = process.argv[2];
-if (!code) { console.log("usage: node guest-browser.mjs <guest code>"); process.exit(2); }
-const BASE = "http://127.0.0.1:8099/guest/index.html?server=friends&gateway=ws://127.0.0.1:8480/ws/friends";
+// Argument: a bare guest code (fixture mode), or the full link the app made (https://host/<name>/t#<code>),
+// which is mapped to the local page and gateway. Env: GUEST_SERVER_NAME / GUEST_WELCOME for what to expect.
+let code = process.argv[2];
+if (!code) { console.log("usage: node guest-browser.mjs <guest code or link>"); process.exit(2); }
+let route = "friends";
+const m = code.match(/^https?:\/\/[^/]+\/([A-Za-z0-9_-]+)\/t#(.+)$/);
+if (m) { route = m[1]; code = m[2]; }
+const EXPECT_SERVER = process.env.GUEST_SERVER_NAME || "Friends Server";
+const EXPECT_WELCOME = process.env.GUEST_WELCOME || "Welcome to the friends server!";
+const BASE = `http://127.0.0.1:8099/guest/index.html?server=${route}&gateway=ws://127.0.0.1:8480/ws/${route}`;
 const SHOTS = process.env.SHOTS || ".";
 fs.mkdirSync(SHOTS, { recursive: true });
 let pass = 0, fail = 0;
@@ -35,10 +42,10 @@ await check("with a name and the guest link the guest gets into the chat", async
   await page.locator("#go").click();
   await page.locator("#chat").waitFor({ state: "visible", timeout: 30000 });
   await page.locator("#status", { hasText: "connected as a guest" }).waitFor({ timeout: 30000 });
-  if ((await page.locator("#server-name").innerText()) !== "Friends Server") throw new Error("wrong server name");
+  if ((await page.locator("#server-name").innerText()) !== EXPECT_SERVER) throw new Error("wrong server name");
 });
-await check("the guest sees the owner's earlier message in #general", async () => {
-  await page.locator(".msg", { hasText: "Welcome to the friends server!" }).waitFor({ timeout: 20000 });
+await check("the guest sees the earlier message in #general", async () => {
+  await page.locator(".msg", { hasText: EXPECT_WELCOME }).waitFor({ timeout: 20000 });
   await page.screenshot({ path: `${SHOTS}/guest-chat.png` });
 });
 await check("the guest can write, and sees their own message under their chosen name", async () => {
