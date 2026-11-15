@@ -152,8 +152,9 @@ owner refused (and still refused after rejoining and after a server restart), sa
 restart. Not yet: a friendly "this server was reset by its host, rejoin" message in old clients
 (today they see "not a member of this server").
 
+**Rotation (verified 2026-11-15, recovery scenario now 10 checks):** with the current 24 words, "Replace the recovery key" makes a new key and shows its new words once; the old words are then refused ("not the recovery key of this server"), the new ones carry a takeover through. The audit log shows two `recovery_key_set` entries. The everyday owner key cannot rotate (rule pinned by unit tests).
+
 Not built yet:
 
 - A pop-up when a takeover starts (the banner for every member IS built).
 - The cooling-off period for destructive actions by the everyday key.
-- A way to rotate the recovery key from the app.
