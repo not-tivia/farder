@@ -1437,7 +1437,7 @@ async function guestLink() {
     await check("A (owner) allows guest links and makes a guest link from the invite dialog", async () => {
       await A.page.getByTitle("Create Invite").click();
       await A.page.getByText(/Guest link \(for friends without the app/).click();
-      await A.page.getByLabel(/Allow guest links on this server/).check();
+      await A.page.getByLabel(/Allow guest links on this server/).click();     // flips once the server confirms
       await A.page.getByLabel("Web name").waitFor({ timeout: 20000 });
       await A.page.getByLabel("Web name").fill(process.env.GUEST_ROUTE || "ubuntu");
       await A.page.getByLabel("Guest link duration").selectOption("3600");
