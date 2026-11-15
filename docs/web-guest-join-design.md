@@ -57,8 +57,7 @@ a joiner with one is marked a guest (`members.guest_expires_at`), is capped to v
 roles they get, cannot make invites, and cannot reconnect after the link expires. Normal invites are
 unchanged.
 
-**Known gaps in step 1:** a guest who is already connected is not cut off the instant the link
-expires (only on reconnect); on a server with a signed history a guest must also become a LOG member
+**Known gaps in step 1:** on a server with a signed history a guest must also become a LOG member
 (`MemberJoined` citing the invite), which only the browser client can sign, so the end-to-end guest
 join is step 3/4; no owner screen for the switch yet; direct messages, uploads and reactions are not
 yet specifically limited for guests beyond the permission cap.

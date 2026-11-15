@@ -635,6 +635,12 @@ pub fn handle_request(
             return err(&reason);
         }
     }
+    // A guest's session ends with their link, even on a connection that is already open.
+    if let Some(end) = members::guest_expiry(conn, member) {
+        if crate::db::now() >= end {
+            return err("this guest link has expired");
+        }
+    }
 
     match request {
         // ----------------------------------------------------------------
@@ -11872,6 +11878,9 @@ mod tests {
         assert!(crate::auth::authenticate_existing_member(&conn, &gpk).unwrap().is_ok());
         members::set_guest_expiry(&conn, &gpk, db::now() - 1).unwrap();
         assert!(crate::auth::authenticate_existing_member(&conn, &gpk).unwrap().unwrap_err().contains("expired"));
+        // ...including on a connection that is already open.
+        let r = handle_request(&conn, &gpk, false, ServerRequest::GetGuestLinks, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { ref reason } if reason.contains("expired")), "{r:?}");
     }
 
 
