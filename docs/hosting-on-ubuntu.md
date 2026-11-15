@@ -54,3 +54,18 @@ as the same server: both clients reconnected on their own with their history, me
 and (for A) ownership, and chatted again. A backup is a copy: if an attacker with the
 owner's key wipes things and a later automatic backup runs, that backup holds the damage,
 which is why several are kept. See `docs/recovery-owner-design.md` for the plan for that case.
+
+## Owner lost the account and made no recovery key: reset the owner from the host
+
+Stop the server, then run (the new owner must already be a member; copy their key from the
+members list, `vk_` followed by 64 hex characters):
+
+```
+farder-server ... --reset-owner vk_<member key>
+```
+
+It makes a backup first (in `farder-pre-reset-backups` beside the data folder), keeps the old signed
+history under `events_before_reset_<time>` in the database, and starts a new history owned by that
+member. Start the server again. Channels and plain messages stay; everyone except the new owner
+rejoins with a fresh invite. End-to-end encrypted channels lose their membership. If the server
+HAS a recovery key, use the takeover in Server Settings > Recovery instead (`--force` overrides).

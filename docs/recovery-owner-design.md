@@ -137,9 +137,23 @@ permission") while the new owner succeeds; the audit log holds `recovery_key_set
 
 **Banner (verified 2026-11-15, 9/9 checks):** every member sees "Ownership of this server is moving to ..." with a countdown on the main screen; the owner is nudged (dismissable) when no recovery key exists; after a takeover the banner clears and the new owner is nudged for a fresh key.
 
+**Host-side reset (built, verified 2026-11-15, selftest `ubuntu-suite.sh reset`):** with the server
+STOPPED, `farder-server --reset-owner vk_<member key>` makes an existing member the owner. It takes
+a backup first (into `farder-pre-reset-backups` beside the data folder), moves the old signed
+history aside into `events_before_reset_<time>` / `genesis_before_reset_<time>` (never deleted)
+and writes a new first record naming the new owner (so the server's history id changes). It
+refuses a key that is not an active member, the current owner, and a server that HAS a recovery
+key (use the takeover; `--force` overrides when the words are lost too). Carries over: channels,
+plaintext messages, files, members' names. Does NOT carry over: the signed history (device
+authorizations) and end-to-end encrypted channel membership. Consequence for friends: everyone but
+the new owner is "not a member" until they rejoin with a fresh invite; history stays. Verified on
+the real stack: old messages still visible, new owner has owner powers and the Powers tab, old
+owner refused (and still refused after rejoining and after a server restart), same answer after
+restart. Not yet: a friendly "this server was reset by its host, rejoin" message in old clients
+(today they see "not a member of this server").
+
 Not built yet:
 
 - A pop-up when a takeover starts (the banner for every member IS built).
-- The host-side reset for a server with no recovery key (`farder-server --reset-owner`).
 - The cooling-off period for destructive actions by the everyday key.
 - A way to rotate the recovery key from the app.
