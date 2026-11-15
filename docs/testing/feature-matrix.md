@@ -20,10 +20,10 @@ Last updated: 2026-11-15.
 
 | Tier | What it is | Last result |
 |---|---|---|
-| T1 Rust workspace | `cargo test --workspace --no-fail-fast` | green; the `farder-mls` store tests used to fail in parallel (shared at-rest key) and now hold a lock, fixed 2026-11-14 |
-| T2 Client crate | `cd client/src-tauri && cargo test -- --test-threads=1` | last run green (buddy 6 tests) |
+| T1 Rust workspace | `cargo test --workspace --no-fail-fast` | 1010 pass, 0 fail (2026-11-15); the `farder-mls` store tests used to fail in parallel (shared at-rest key) and now hold a lock, fixed 2026-11-14 |
+| T2 Client crate | `cd client/src-tauri && cargo test -- --test-threads=1` | 250 pass, 0 fail (2026-11-15) |
 | T3 Frontend | `client/scripts/run-unit-tests.sh` + `npx tsc --noEmit` | 91 pass, tsc clean |
-| T4 Audits | `scripts/seam_audit.py`, `reachability_audit.py`, `doc_audit.py` | not re-run this session |
+| T4 Audits | `scripts/seam_audit.py`, `reachability_audit.py`, `doc_audit.py` | all three pass (2026-11-15) |
 | T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-14/15: 15 scenarios, 63/63 checks PASS (core 9, dm 7, buddy 5, edit 3, direct 4, unread 4, popup 3, attach 2, garble 2, admin-garble 5, strip 2, themes 6, relaunch 6, direct-relaunch 3, tray 2); relay and direct servers; run on a build that includes the Android stubs |
 
 ## Core chat (what friends will use)
