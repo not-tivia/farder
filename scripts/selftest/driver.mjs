@@ -161,10 +161,66 @@ async function relaunch() {
   await B.browser.close().catch(() => {});
 }
 
+// Wait until a window whose address matches `re` exists (small windows are separate pages).
+async function pageMatching(c, re, ms = 30000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const p = c.ctx.pages().find((x) => re.test(x.url()));
+    if (p) { p.setDefaultTimeout(15000); return p; }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  throw new Error("no window matching " + re);
+}
+
+// The buddy list and a chat window: run when both clients are up and unlocked
+// (after `core`, or after `relaunch`).
+async function buddy() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  // After a relaunch the PIN screen may be showing.
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  let list, chat;
+  if (!(await check("A: open the buddy list", async () => {
+    await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("open_buddy_list"));
+    list = await pageMatching(A, /[?&]buddy=1/);
+    await list.locator(".channel-item", { hasText: "general" }).first().waitFor({ timeout: 30000 });
+  }))) { if (list) await shot(list, "A-buddy-fail"); return; }
+  await shot(list, "A-buddy");
+  if (!(await check("A: clicking #general opens a chat window that shows the history", async () => {
+    await list.locator(".channel-item", { hasText: "general" }).first().click();
+    chat = await pageMatching(A, /[?&]chat=1/);
+    await chat.locator(".mini-chat-text", { hasText: "hello from A " + stamp }).first().waitFor({ timeout: 30000 });
+  }))) { if (chat) await shot(chat, "A-chat-fail"); return; }
+  await shot(chat, "A-chat");
+  await check("A: the chat window has a visible typing box at the bottom", async () => {
+    const box = await chat.locator(".mini-chat-input").boundingBox();
+    const vp = chat.viewportSize() ?? (await chat.evaluate(() => ({ width: innerWidth, height: innerHeight })));
+    if (!box) throw new Error("no typing box");
+    if (box.y + box.height > vp.height + 1) throw new Error(`box is off screen (y=${Math.round(box.y)} h=${Math.round(box.height)} window h=${vp.height})`);
+  });
+  await check("A: a line typed in the chat window shows there and reaches B", async () => {
+    const box = chat.locator(".mini-chat-input");
+    await box.fill("from the mini window " + stamp);
+    await box.press("Enter");
+    await chat.locator(".mini-chat-text", { hasText: "from the mini window " + stamp }).first().waitFor({ timeout: 30000 });
+    await seesText(B, "from the mini window " + stamp);
+  });
+  await check("A: a line B sends appears live in A's chat window", async () => {
+    await sendText(B, "live to the mini " + stamp);
+    await chat.locator(".mini-chat-text", { hasText: "live to the mini " + stamp }).first().waitFor({ timeout: 30000 });
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
   else if (scenario === "relaunch") await relaunch();
+  else if (scenario === "buddy") await buddy();
   else throw new Error("unknown scenario " + scenario);
 } catch (e) {
   log("FAIL", "driver", String(e.message || e));

@@ -54,9 +54,10 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 | Message density | UNVERIFIED | Part 8 |
 | Edge strip | UNVERIFIED | Part 9 |
 | Small window layout | UNVERIFIED | Part 10 |
-| Buddy list shows people and channels | VERIFIED (by chris, screenshot 2026-11-09) | |
+| Buddy list shows people and channels | VERIFIED | chris 2026-11-09; selftest buddy 2026-11-14 (channels; DM rows not yet) |
 | Chat window opens, shows messages | VERIFIED (by chris, screenshot 2026-11-09) | for the server that opened; others fixed in 28fe65f, chris reports "they work visually" |
-| Chat window: sending updates the window | UNVERIFIED | c3c4c75; relies on the server echoing your own message back |
+| Chat window: sending updates the window, live lines from others appear | VERIFIED (active server) | selftest buddy: typed line shows in the window and reaches B; B's line appears live. Non-active server not yet tested |
+| Chat window: typing box visible | VERIFIED | selftest buddy (box inside the window) |
 | Chat window: DMs | UNVERIFIED | chris: "they work visually" after 28fe65f |
 
 ## Portability (Android / Apple)
