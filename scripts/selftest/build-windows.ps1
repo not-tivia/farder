@@ -14,7 +14,7 @@ $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 
 # A test window left running from an earlier run locks the app file and the build
 # cannot replace it: close the ones that belong to THIS folder (and only those).
-Get-Process farder-client, farder-server -ErrorAction SilentlyContinue |
+Get-Process farder-client, "farder-server*" -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) } |
     ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
