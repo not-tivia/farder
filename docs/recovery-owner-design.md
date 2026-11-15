@@ -1,4 +1,4 @@
-# Recovery owner: design (2026-11-15; log rules and server built, app screens not yet)
+# Recovery owner: design (2026-11-15; built and tested end to end)
 
 Plain words first. Details for whoever builds it after.
 
@@ -121,8 +121,26 @@ Built and tested (no network, no screens):
    thief who is still connected loses owner powers at once and a restart gives the same
    answer; every recovery step goes in the permanent audit log and tells all clients.
 
-Not built yet: the app (create the recovery key and show its 24 words, the take-over screen,
-the countdown every member sees), the command that lets a recovery key holder with no account
-on the server authorize a fresh device, the host-side reset fallback, and the cooling-off
-period for destructive actions. Until the app screens exist the feature can only be driven by
-tests.
+3. **The app** (`RecoveryTab.tsx`, five commands, `lib/recovery.ts`): a Recovery tab in server
+   settings that every member can open. The owner makes the key and is shown the 24 words once
+   (nothing is kept on the computer); anyone sees a pending takeover with its countdown; someone
+   holding the words starts, cancels or finishes a takeover.
+
+**Verified on the real stack** (selftest scenario `recovery`, 7 checks, 2026-11-15): two Windows
+clients and an Ubuntu server run with `--recovery-wait-secs 30`. The owner makes a recovery key;
+a member sees it is set but not the words; the owner (acting as a thief) cannot start a takeover
+with made-up words; the member starts one with the real words and both screens show it with a
+countdown; finishing early is blocked; after the wait the member finishes it and owns the server;
+the old owner, still connected, is refused owner-only actions ("missing MANAGE_CHANNEL
+permission") while the new owner succeeds; the audit log holds `recovery_key_set`,
+`recovery_claim`, `recovery_finalize`.
+
+Not built yet:
+
+- A banner for EVERY member (today the countdown is inside the Recovery tab, which people must
+  open); a pop-up when a takeover starts.
+- The host-side reset for a server with no recovery key (`farder-server --reset-owner`).
+- The cooling-off period for destructive actions by the everyday key.
+- The e2e test only used made-up words for the "thief" case; a VALID phrase that belongs to some
+  other server is refused by a check in the app command, covered by reading, not by a test.
+- A reminder when the owner has not made a recovery key yet, and a way to rotate it from the app.

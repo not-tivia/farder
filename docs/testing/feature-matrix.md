@@ -67,6 +67,15 @@ Last updated: 2026-11-15.
 | Live messages / unread for channels not on screen | VERIFIED | selftest buddy (was broken: app only subscribed to the viewed channel; fixed by useSubscriptions). Unread BADGE rendering itself not asserted yet |
 | Display name shows right after joining | VERIFIED | selftest dm (was "Anonymous" until reconnect; fixed) |
 
+## Recovery owner (cold key that can take the server back)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Log rules: name a key, claim, cancel, finish; owner key cannot cancel; recovery key cannot be banned | VERIFIED | 8 unit tests in `recovery_owner_tests`, 4 deliberate breaks caught |
+| Server: waiting period on the server's clock, owner read per request, audit trail | VERIFIED | handler test (break caught) + real run |
+| App: make key (24 words once), see countdown, start/finish takeover, ownership moves, old owner refused while still connected | VERIFIED | selftest recovery, 7 checks (Windows clients, Ubuntu server, 30 s wait) |
+| Banner for every member, host-side reset, cooling-off on destructive acts, rotate key in the app | UNVERIFIED / NOT BUILT | see docs/recovery-owner-design.md |
+
 ## Hosting on Ubuntu
 
 | Item | Status | Evidence |
