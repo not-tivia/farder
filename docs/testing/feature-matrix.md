@@ -14,7 +14,7 @@ Goal this serves: a chat app friends can use locally, later offered as a free
 alternative to the big clients, and kept portable to Android and Apple
 (see `docs/modules/portability.md`).
 
-Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers only).
+Last updated: 2026-11-15.
 
 ## Test tiers
 
@@ -24,7 +24,7 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 | T2 Client crate | `cd client/src-tauri && cargo test -- --test-threads=1` | last run green (buddy 6 tests) |
 | T3 Frontend | `client/scripts/run-unit-tests.sh` + `npx tsc --noEmit` | 91 pass, tsc clean |
 | T4 Audits | `scripts/seam_audit.py`, `reachability_audit.py`, `doc_audit.py` | not re-run this session |
-| T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-14: 13 scenarios, 55/55 checks PASS in one run (core 9, dm 7, buddy 5, edit 3, direct 4, unread 4, popup 2, attach 2, garble 2, strip 2, themes 6, relaunch 6, direct-relaunch 3); relay and direct servers |
+| T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-14/15: 15 scenarios, 63/63 checks PASS (core 9, dm 7, buddy 5, edit 3, direct 4, unread 4, popup 3, attach 2, garble 2, admin-garble 5, strip 2, themes 6, relaunch 6, direct-relaunch 3, tray 2); relay and direct servers; run on a build that includes the Android stubs |
 
 ## Core chat (what friends will use)
 
