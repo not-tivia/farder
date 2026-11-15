@@ -71,7 +71,8 @@ Last updated: 2026-11-15.
 | Item | Status | Evidence |
 |---|---|---|
 | Shared Rust crates + the app crate type-check for Android (NDK) | VERIFIED | `scripts\portability_check_android.ps1 -Client`, 2026-11-14 |
-| Android app builds, installs, runs | UNVERIFIED | not started (needs `tauri android init`, file-picker plugin, permissions) |
+| Android APK builds | VERIFIED | `scripts\android_apk.ps1` produced app-arm64-debug.apk (2026-11-15) |
+| Android app installs and runs | UNVERIFIED | never installed anywhere; needs an emulator or phone the owner agrees to use (see portability.md) |
 | iOS | UNVERIFIED | pure crates type-check; the rest needs a Mac and the Apple SDK |
 
 See `docs/modules/portability.md`.

@@ -47,6 +47,19 @@ What it took, and what it means for the next steps:
 - `client/src-tauri/tauri.android.conf.json` / `tauri.ios.conf.json` drop the bundled
   server on phones.
 
+**Android APK builds (2026-11-15).** `scripts\android_apk.ps1` produces
+`app-arm64-debug.apk` (about 100 MB debug build): page build, native library compile +
+link with the NDK, Android Studio project (`tauri android init`), Gradle packaging. Tauri's
+own `tauri android build` needs Windows Developer Mode (for a symbolic link), so the
+script does those steps by hand. The app crate is now a library with a mobile entry point
+(see "App layout for mobile").
+
+**Never run on a phone yet.** An APK that builds is not an app that works. Running it needs
+a device or emulator, and the machine's only Android targets are the LDPlayer instance used
+by another project and the owner's own phone, so nothing was installed. Expect first-run
+problems: the desktop-only stubs return "not available" errors, the file picker and
+microphone permissions are not wired, and the layout has never been seen at phone size.
+
 **What is still not done for Android:** type-checking is not a build. Nobody has
 produced an APK, linked the native libraries, or run it. Still open: the mobile entry
 point (`tauri android init`), a system file-picker plugin, microphone/capture
