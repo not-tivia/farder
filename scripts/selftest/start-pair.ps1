@@ -35,30 +35,12 @@ foreach ($who in @(@("a", $PortA), @("b", $PortB))) {
 }
 $pids | Set-Content (Join-Path $DataRoot "pids.txt")
 
-# Put the two windows side by side on the chosen monitor, so the test never covers
-# the screen you are working on.
+# Put the two windows side by side on the chosen monitor (see place-pair.ps1).
+# The app puts itself at its default spot while it finishes starting, so move
+# them once it has settled, and check the move held.
 if ($Monitor -ne "leave") {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type @"
-using System; using System.Runtime.InteropServices;
-public static class FarderWin {
-  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint flags);
-}
-"@
-    [FarderWin]::SetProcessDPIAware() | Out-Null
-    $screens = [System.Windows.Forms.Screen]::AllScreens
-    $target = if ($Monitor -eq "primary") { $screens | Where-Object Primary | Select-Object -First 1 }
-              else { $screens | Where-Object { -not $_.Primary } | Select-Object -First 1 }
-    if (-not $target) { $target = $screens[0]; Write-Host "only one monitor found; using it" }
-    $b = $target.WorkingArea
-    $half = [int]($b.Width / 2)
-    for ($i = 0; $i -lt $pids.Count; $i++) {
-        $proc = Get-Process -Id $pids[$i]
-        for ($t = 0; $t -lt 120 -and $proc.MainWindowHandle -eq 0; $t++) { Start-Sleep -Milliseconds 500; $proc.Refresh() }
-        if ($proc.MainWindowHandle -eq 0) { Write-Host "no window yet for pid $($pids[$i]); not moved"; continue }
-        # SWP_NOZORDER 0x4 | SWP_SHOWWINDOW 0x40
-        [FarderWin]::SetWindowPos($proc.MainWindowHandle, [IntPtr]::Zero, $b.X + $i * $half, $b.Y, $half, $b.Height, 0x44) | Out-Null
-    }
-    Write-Host "windows placed on monitor $($target.DeviceName)"
+    Start-Sleep -Seconds 12
+    & (Join-Path $PSScriptRoot "place-pair.ps1") -DataRoot $DataRoot -Monitor $Monitor
+    Start-Sleep -Seconds 4
+    & (Join-Path $PSScriptRoot "place-pair.ps1") -DataRoot $DataRoot -Monitor $Monitor
 }
