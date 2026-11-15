@@ -22,7 +22,7 @@ $env:RESULTS = Join-Path $DataRoot "results-edit.json"
 node "$here\driver.mjs" edit; if ($LASTEXITCODE -ne 0) { $bad++ }
 $env:RESULTS = Join-Path $DataRoot "results-direct.json"
 node "$here\driver.mjs" direct; if ($LASTEXITCODE -ne 0) { $bad++ }
-foreach ($extra in @("unread", "popup", "attach", "themes")) {
+foreach ($extra in @("unread", "popup", "attach", "garble", "strip", "themes")) {
     $env:RESULTS = Join-Path $DataRoot "results-$extra.json"
     node "$here\driver.mjs" $extra; if ($LASTEXITCODE -ne 0) { $bad++ }
 }

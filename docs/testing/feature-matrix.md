@@ -51,11 +51,11 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 | Tray, start in tray, start with Windows | UNVERIFIED | checklist Parts 1-2 |
 | Notification pop-up (message from another server: shows it, Reply from the pop-up reaches the sender) | VERIFIED | selftest popup. NOT automatable: pop-up when Farder is in the BACKGROUND (the test driver forces "has focus"), position/centring, keyboard focus after use: still checklist Part 3, chris to eyeball. keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
 | Autoplay | UNVERIFIED | Part 4 |
-| Garbler and powers | UNVERIFIED | Part 5; same-account issue |
+| Garbler (own "speak as": B receives garbled words; off restores normal) | VERIFIED | selftest garble. Admin-imposed garble, consent flow and powers: UNVERIFIED (Part 5; same-account issue) |
 | Sound | UNVERIFIED | Part 6 |
 | Message density | UNVERIFIED | Part 8 |
 | Unread markers (dot on another server, highlight on a conversation) | VERIFIED | selftest unread |
-| Edge strip | UNVERIFIED | Part 9 |
+| Edge strip (turn on, window appears, shows an incoming message) | VERIFIED | selftest strip. Found and fixed: turning it on hung the app on Windows (window built inside a synchronous command; now async). NOT checked by machine: docking position, always-visible, reply from the strip, keyboard focus (Part 9) |
 | Small window layout | UNVERIFIED | Part 10 |
 | Buddy list shows people and channels | VERIFIED | chris 2026-11-09; selftest buddy 2026-11-14 (channels; DM rows not yet) |
 | Chat window opens, shows messages | VERIFIED (by chris, screenshot 2026-11-09) | for the server that opened; others fixed in 28fe65f, chris reports "they work visually" |
