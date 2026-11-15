@@ -1158,6 +1158,42 @@ async function ubuntuRestored() {
   await B.browser.close().catch(() => {});
 }
 
+// A server that is DOWN must not lock the app: its history stays readable, a clear banner
+// says what is happening, and the person can still switch to another server and chat there.
+// Run with a server's host switched off (see docs/hosting-on-ubuntu.md); needs `core` + a
+// saved server whose host is off (here "Ubuntu Server" after the restore test).
+async function serverDown() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const down = process.env.UBU_NAME || "Ubuntu Server";
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  await check("the downed server shows a banner and its history is still readable", async () => {
+    await A.page.locator(`.server-icon[title="${down}"]`).click();
+    await A.page.locator(".reconnect-pill").waitFor({ timeout: 90000 });
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await A.page.locator(".message-content").first().waitFor({ timeout: 15000 });
+    await shot(A.page, "A-server-down");
+  });
+  await check("while it is down, A can still switch to another server and chat there", async () => {
+    await A.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click({ timeout: 8000 });
+    await B.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click();
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await sendText(A, "chat while another server is down " + stamp);
+    await seesText(B, "chat while another server is down " + stamp, 30000);
+  });
+  await check("the add-server button still works while a server is down", async () => {
+    await A.page.getByTitle("Add Server").click({ timeout: 8000 });
+    await A.page.getByText("Join a Server").waitFor({ timeout: 8000 });
+    await A.page.keyboard.press("Escape");
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1175,6 +1211,7 @@ try {
   else if (scenario === "powers") await powers();
   else if (scenario === "ubuntu") await ubuntu();
   else if (scenario === "ubuntu-restored") await ubuntuRestored();
+  else if (scenario === "server-down") await serverDown();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();

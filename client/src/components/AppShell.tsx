@@ -167,8 +167,8 @@ export default function AppShell() {
         <ScreenShareStage voice={voice} />
         <DmPanel />
         {activeServer?.connectionLost && (
-          <div className="reconnect-overlay">
-            Connection lost. Reconnecting...
+          <div className="reconnect-overlay" role="status">
+            <span className="reconnect-pill">Connection lost. Reconnecting... You can still read what is here and switch servers.</span>
           </div>
         )}
         {state.kickedBanned && (

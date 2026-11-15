@@ -3718,3 +3718,7 @@ body {
 
 /* chat window: pin to the window edges so the reply box is never pushed out of view */
 .mini-chat { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: auto; height: auto; overflow: hidden; }
+
+/* A lost connection must not lock the window: a slim banner at the top, never a full-screen dimmer, so history stays readable and other servers stay reachable. */
+.reconnect-overlay { background: none; pointer-events: none; align-items: flex-start; padding-top: 12px; z-index: 5; }
+.reconnect-pill { pointer-events: none; max-width: 80%; text-align: center; padding: 5px 14px; border-radius: 12px; background: var(--xp-panel-bg); color: var(--xp-text-normal); border: 1px solid var(--xp-border); box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-size: var(--xp-font-size-small); }

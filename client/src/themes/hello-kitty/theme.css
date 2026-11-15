@@ -3711,3 +3711,7 @@ body {
 
 /* avatar letters: white on the pale sidebar colour was nearly invisible; use the dark accent */
 .message-avatar, .member-avatar-mini { background: var(--xp-blue-dark); color: #ffffff; }
+
+/* A lost connection must not lock the window: a slim banner at the top, never a full-screen dimmer, so history stays readable and other servers stay reachable. */
+.reconnect-overlay { background: none; pointer-events: none; align-items: flex-start; padding-top: 12px; z-index: 5; }
+.reconnect-pill { pointer-events: none; max-width: 80%; text-align: center; padding: 5px 14px; border-radius: 12px; background: var(--xp-panel-bg); color: var(--xp-text-normal); border: 1px solid var(--xp-border); box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-size: var(--xp-font-size-small); }
