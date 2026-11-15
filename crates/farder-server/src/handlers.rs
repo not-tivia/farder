@@ -620,6 +620,26 @@ pub fn content_block_reason(state: &crate::state::ServerState, member: &PublicKe
 // Main dispatch
 // ---------------------------------------------------------------------------
 
+/// What someone is told when they try to change something on a read-only copy.
+pub const READ_ONLY_COPY: &str = "the host of this server is offline, so you are reading a saved copy: you can read the history, but sending and changes wait until the host is back";
+
+/// The requests a read-only copy still answers: reading history, members and info.
+fn is_read_only_request(req: &ServerRequest) -> bool {
+    matches!(
+        req,
+        ServerRequest::GetServerInfo
+            | ServerRequest::GetServerInfoV2
+            | ServerRequest::GetMembers
+            | ServerRequest::GetMemberProfile { .. }
+            | ServerRequest::GetMembershipStatus
+            | ServerRequest::FetchHistory { .. }
+            | ServerRequest::FetchHistoryV2 { .. }
+            | ServerRequest::Search { .. }
+            | ServerRequest::Subscribe { .. }
+            | ServerRequest::NegotiateProtocol { .. }
+    )
+}
+
 /// Changes that destroy something. The bulk-damage brake (`brake.rs`) limits how many of these one
 /// account can make in a short time.
 fn is_destructive(req: &ServerRequest) -> bool {
@@ -643,6 +663,10 @@ pub fn handle_request(
     storage_dir: &str,
     state: &Arc<ServerState>,
 ) -> Result<HandleResult> {
+    // A read-only copy answers reads and refuses everything else, with a plain reason.
+    if state.read_only && !is_read_only_request(&request) {
+        return err(READ_ONLY_COPY);
+    }
     if !is_destructive(&request) {
         return handle_request_inner(conn, member, is_owner, request, storage_dir, state);
     }

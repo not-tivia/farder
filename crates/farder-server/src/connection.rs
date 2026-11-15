@@ -569,6 +569,10 @@ pub(crate) async fn authenticate(
             }
         } else {
             is_new_member = true;
+            if state.read_only {
+                // A saved copy cannot take on new people (the refusal is sent below like any other).
+                Err(crate::handlers::READ_ONLY_COPY.to_string())
+            } else {
             let display_name = format!("vk_{}", hex::encode(&pk_bytes[..4]));
             let active_setup_token = *state.setup_token.lock().unwrap();
             match auth::authenticate_new_member(
@@ -593,6 +597,7 @@ pub(crate) async fn authenticate(
                     Ok(())
                 }
                 Err(reason) => Err(reason),
+            }
             }
         }
     };

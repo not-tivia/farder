@@ -71,6 +71,11 @@ struct Args {
     /// 0 turns it off). Protects the server if an account is stolen. See crates/farder-server/src/brake.rs.
     #[arg(long, default_value_t = farder_server::brake::DEFAULT_BUDGET)]
     destructive_budget: usize,
+
+    /// Serve a COPY of a server read-only (history and members; nothing can be sent or changed). For a
+    /// replica's `latest.db` while the host is down. See docs/mesh-hosting-status.md.
+    #[arg(long)]
+    read_only: bool,
 }
 
 fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -111,6 +116,7 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
 
     let mut state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
     state.recovery_wait_secs = args.recovery_wait_secs;
+    state.read_only = args.read_only;
     state.brake = farder_server::brake::Brake::new(args.destructive_budget, farder_server::brake::DEFAULT_WINDOW_SECS);
     if args.recovery_wait_secs < 24 * 3600 {
         tracing::warn!(
@@ -256,7 +262,7 @@ async fn main() -> Result<()> {
     // Automatic backups: one now, then one every --backup-interval seconds. They use their
     // own database connection (SQLite lets readers and the writer work side by side), so a
     // backup never makes the server wait.
-    if let Some(dir) = args.backup_dir.clone() {
+    if let Some(dir) = args.backup_dir.clone().filter(|_| !args.read_only) {
         let (db_path, storage, data, keep) = (args.db.clone(), args.storage_dir.clone(), args.data_dir.clone(), args.backup_keep);
         let every = std::time::Duration::from_secs(args.backup_interval.max(60));
         info!("Automatic backups to {} every {} seconds, keeping {}", dir.display(), every.as_secs(), keep.max(1));
@@ -280,9 +286,17 @@ async fn main() -> Result<()> {
         });
     }
 
-    let _retention = retention::spawn_retention_task(Arc::clone(&state), args.retention_interval);
-    let _bot_poller = farder_server::bots::spawn_bot_poll_task(Arc::clone(&state));
-    let _widget_sweeper = farder_server::widgets::spawn_widget_sweeper(Arc::clone(&state));
+    // A read-only copy runs none of the background jobs that write (cleanup, bots, widgets), and SQLite
+    // itself is told not to write, which is the guarantee: the copy cannot change.
+    let (_retention, _bot_poller, _widget_sweeper);
+    if args.read_only {
+        state.db.lock().unwrap().pragma_update(None, "query_only", true)?;
+        info!("READ-ONLY copy: history and members can be read; nothing can be sent or changed.");
+    } else {
+        _retention = Some(retention::spawn_retention_task(Arc::clone(&state), args.retention_interval));
+        _bot_poller = Some(farder_server::bots::spawn_bot_poll_task(Arc::clone(&state)));
+        _widget_sweeper = Some(farder_server::widgets::spawn_widget_sweeper(Arc::clone(&state)));
+    }
 
     if let Some(relay_addr) = args.relay {
         let server_id = farder_server::relay::load_or_generate_server_id(&args.data_dir)?;

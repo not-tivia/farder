@@ -120,6 +120,11 @@ pub struct ServerState {
 
     /// Snapshots handed to replicas, fetched in pieces (id -> file, size, when made). See `snapshot.rs`.
     pub snapshots: crate::snapshot::Snapshots,
+
+    /// A read-only COPY of a server (`--read-only`): serves history and members from a replica's copy
+    /// while the host is down, and refuses everything that writes. SQLite itself is also told not to
+    /// write (`query_only`), so the copy cannot change even if a code path forgets to check this.
+    pub read_only: bool,
 }
 
 /// Default waiting period for a recovery takeover: 72 hours.
@@ -153,6 +158,7 @@ impl ServerState {
             recovery_wait_secs: DEFAULT_RECOVERY_WAIT_SECS,
             brake: crate::brake::Brake::default(),
             snapshots: crate::snapshot::Snapshots::default(),
+            read_only: false,
         }
     }
 
