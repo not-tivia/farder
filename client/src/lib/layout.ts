@@ -8,6 +8,24 @@ export const LAYOUTS = ["full", "small"] as const;
 export type Layout = (typeof LAYOUTS)[number];
 
 export const DEFAULT_LAYOUT: Layout = "full";
+
+/** Below this width (CSS pixels) the window cannot hold even the small layout's list
+ *  and chat side by side, so the phone layout takes over: ONE of them at a time. */
+export const PHONE_MAX_WIDTH = 520;
+/** Below this width the small layout is used whatever was chosen (a full layout does not fit). */
+export const NARROW_MAX_WIDTH = 640;
+
+/** The layout actually drawn: a narrow screen (a phone, or a very thin window) always
+ *  gets the small layout, because the full one pushes the chat off the screen. */
+export function effectiveLayout(stored: Layout, width: number): Layout {
+  return width < NARROW_MAX_WIDTH ? "small" : stored;
+}
+
+/** On a phone-width screen, which pane is showing: the list of conversations or one chat. */
+export type PhoneView = "list" | "chat";
+export function setPhoneView(v: PhoneView, root: { dataset: Record<string, string | undefined> } = document.documentElement): void {
+  root.dataset.phoneView = v;
+}
 export const LAYOUT_CHANGED = "farder:layout-changed";
 const KEY = "farder.layout";
 
@@ -55,4 +73,14 @@ html[data-layout="small"] .dm-panel { display: none; }
 html[data-layout="small"] .compact-list { width: 168px; min-width: 168px; }
 html[data-layout="small"] .chat-panel { min-width: 0; }
 html[data-layout="small"] .channel-header-topic { display: none; }
+/* The Back button (only rendered in the small layout) shows on a phone-width screen only. */
+html[data-layout="small"] .phone-back { display: none; }
+@media (max-width: ${PHONE_MAX_WIDTH}px) {
+  /* One pane at a time: the list (default) or the chat. */
+  html[data-layout="small"] .compact-list { width: 100%; min-width: 0; flex: 1 1 auto; }
+  html[data-layout="small"]:not([data-phone-view="chat"]) .chat-panel { display: none; }
+  html[data-layout="small"][data-phone-view="chat"] .compact-list { display: none; }
+  html[data-layout="small"][data-phone-view="chat"] .chat-panel { width: 100%; flex: 1 1 auto; }
+  html[data-layout="small"] .phone-back { display: inline-block; margin-right: 6px; }
+}
 `;

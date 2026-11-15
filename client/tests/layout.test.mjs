@@ -27,8 +27,11 @@ test("the stylesheet hides the wide-layout parts only in the small layout, and k
   assert.ok(css.includes(".channel-sidebar:not(.compact-list)"));
   // Everything is scoped to the small layout: nothing may change the full layout.
   for (const line of css.split("\n").filter((x) => x.includes("{") || x.includes(","))) {
+    if (line.trim().startsWith("@media")) continue;   // the media query only narrows WHEN the rules inside apply
     if (line.trim()) assert.ok(line.includes('html[data-layout="small"]'), line);
   }
+  // On a phone-width screen the chat and the list never show together.
+  assert.ok(css.includes('[data-phone-view="chat"] .compact-list { display: none; }'));
   // Theme-compatibility rule: no literal colours.
   assert.equal(/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(css), false);
 });

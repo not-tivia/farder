@@ -10,9 +10,12 @@ import ThreadPanel from "./ThreadPanel";
 import ActiveWidgetsBar from "./ActiveWidgetsBar";
 import { openMessageSearch } from "./AppShell";
 import { E2eeLeafNotice } from "./E2eeLeafNotice";
+import { setPhoneView } from "../lib/layout";
+import { useLayout } from "../hooks/useLayout";
 
 export default function ChatPanel() {
   const { dispatch } = useApp();
+  const layout = useLayout();
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -162,6 +165,11 @@ export default function ChatPanel() {
   return (
     <div className="chat-panel">
       <div className="channel-header">
+        {/* Phone-width screens show the list OR the chat; this goes back to the list
+            (hidden by lib/layout.ts's stylesheet everywhere else). */}
+        {layout === "small" && (
+          <button className="xp-button phone-back" type="button" aria-label="Back to conversations" onClick={() => setPhoneView("list")}>&#8249;</button>
+        )}
         <span className="channel-header-name">
           {currentChannel?.channel_type === "Dm"
             ? dms.find(d => d.channel.id === currentChannelId)?.participant.display_name ?? "DM"

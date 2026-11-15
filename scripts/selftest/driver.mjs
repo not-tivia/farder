@@ -926,6 +926,62 @@ async function voice() {
   await B.browser.close().catch(() => {});
 }
 
+// Phone-size layout: emulate a 390x844 phone screen on A and look for the things that
+// break at that width (sideways scrolling, controls too small to tap, text cut off).
+// This is a size emulation of the desktop app, not a phone: touch, keyboard and system
+// bars are not simulated. Screenshots are kept for a person to look at. Run after `core`.
+async function phone() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  if (await A.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(A);
+  await A.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+  const cdp = await A.ctx.newCDPSession(A.page);
+  const set = (w, h) => cdp.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 2, mobile: true });
+  const measure = () => A.page.evaluate(() => {
+    const vw = window.innerWidth;
+    const small = [];
+    for (const el of document.querySelectorAll("button, [role=button], input, textarea, select, .channel-item, .server-icon")) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;                      // hidden
+      if (Math.min(r.width, r.height) < 28) small.push((el.className || el.tagName).toString().slice(0, 30) + ` ${Math.round(r.width)}x${Math.round(r.height)}`);
+    }
+    const wide = [...document.querySelectorAll("body *")].filter((el) => { const r = el.getBoundingClientRect(); return r.right > vw + 2 && r.width > 0 && getComputedStyle(el).position !== "fixed"; }).slice(0, 5).map((el) => (el.className || el.tagName).toString().slice(0, 30));
+    return { vw, scrollW: document.documentElement.scrollWidth, small: [...new Set(small)].slice(0, 8), wide };
+  });
+  const inView = async (loc, w, h) => {
+    const b = await loc.first().boundingBox();
+    return !!b && b.x >= -1 && b.y >= -1 && b.x + b.width <= w + 1 && b.y + b.height <= h + 1;
+  };
+  for (const [w, h, label] of [[390, 844, "phone"], [360, 640, "small-phone"]]) {
+    await check(`${label} ${w}x${h}: conversation list fills the screen, then a chat with a working Back button`, async () => {
+      await set(w, h);
+      await new Promise((r) => setTimeout(r, 1500));
+      // 1) The list is showing and the conversation is findable on screen.
+      const item = A.page.locator(".compact-list .channel-item", { hasText: "general" }).first();
+      await item.waitFor({ timeout: 15000 });
+      if (!(await inView(item, w, h))) throw new Error("the conversation list does not fit on the screen");
+      if (await A.page.locator(".chat-panel").first().isVisible()) throw new Error("the chat is showing next to the list (should be one pane at a time)");
+      await shot(A.page, `phone-${w}-list`);
+      // 2) Tapping it shows the chat, with the typing box on screen and a Back button.
+      await item.click();
+      await A.page.locator(".chat-panel").first().waitFor({ state: "visible", timeout: 10000 });
+      const input = A.page.getByPlaceholder(/Type a message/);
+      if (!(await inView(input, w, h))) throw new Error("the typing box is not on the screen");
+      const back = A.page.locator(".phone-back");
+      if (!(await back.first().isVisible())) throw new Error("no Back button in the chat");
+      const m = await measure();
+      await shot(A.page, `phone-${w}-chat`);
+      if (m.scrollW > m.vw + 2) throw new Error(`page is ${m.scrollW}px wide on a ${m.vw}px screen`);
+      // 3) Back returns to the list.
+      await back.first().click();
+      await A.page.locator(".compact-list .channel-item", { hasText: "general" }).first().waitFor({ state: "visible", timeout: 10000 });
+      return `tap targets under 28px: ${m.small.length ? m.small.join("; ") : "none"}`;
+    });
+  }
+  await cdp.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+  await A.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -942,6 +998,7 @@ try {
   else if (scenario === "tray") await tray();
   else if (scenario === "powers") await powers();
   else if (scenario === "voice") await voice();
+  else if (scenario === "phone") await phone();
   else if (scenario === "admin-garble") await adminGarble();
   else if (scenario === "strip") await strip();
   else if (scenario === "direct-relaunch") await directRelaunch();

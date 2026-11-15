@@ -6,6 +6,7 @@ import type { ChannelInfo } from "../lib/types";
 import { selectChannel } from "../lib/selectChannel";
 import { selectServer } from "../lib/selectServer";
 import { changeLayout } from "../lib/layoutWindow";
+import { setPhoneView } from "../lib/layout";
 import type { UseVoice } from "../hooks/useVoice";
 import SettingsModal from "./settings/SettingsModal";
 import AddServerModal from "./AddServerModal";
@@ -42,6 +43,7 @@ export default function CompactList({ voice }: { voice: UseVoice }) {
   function open(ch: ChannelInfo) {
     const dm = dms.find((d) => d.channel.id === ch.id);
     if (serverId) void selectChannel(dispatch, serverId, ch, dm ? publicKeyToString(dm.participant.public_key) : null);
+    setPhoneView("chat");   // on a phone-width screen the chat replaces the list
   }
 
   async function leaveVoice() {
