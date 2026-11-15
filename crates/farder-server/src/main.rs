@@ -32,6 +32,27 @@ struct Args {
     /// Directory for the server's stable relay identity (server_id).
     #[arg(long, default_value = "./server-data")]
     data_dir: std::path::PathBuf,
+
+    /// Keep automatic backups in this folder (a backup is a plain folder you can copy to
+    /// another machine). One is made at start and then every --backup-interval seconds.
+    #[arg(long)]
+    backup_dir: Option<std::path::PathBuf>,
+    /// Seconds between automatic backups (default 6 hours).
+    #[arg(long, default_value = "21600")]
+    backup_interval: u64,
+    /// How many automatic backups to keep; older ones are deleted (default 14, minimum 1).
+    #[arg(long, default_value = "14")]
+    backup_keep: usize,
+    /// Make ONE backup into this folder and exit. Safe to run while the server is running.
+    #[arg(long)]
+    backup_now: Option<std::path::PathBuf>,
+    /// Restore the backup in this folder (verified first) over --db, --storage-dir and
+    /// --data-dir, then exit. The server must not be running.
+    #[arg(long)]
+    restore_from: Option<std::path::PathBuf>,
+    /// With --restore-from: replace an existing server. The old data is moved aside, not deleted.
+    #[arg(long)]
+    force: bool,
 }
 
 fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -102,6 +123,28 @@ async fn main() -> Result<()> {
         .expect("failed to install rustls crypto provider");
 
     let args = Args::parse();
+
+    // One-shot jobs that do not start the server.
+    if let Some(from) = &args.restore_from {
+        let m = farder_server::backup::restore_backup(
+            from,
+            std::path::Path::new(&args.db),
+            std::path::Path::new(&args.storage_dir),
+            &args.data_dir,
+            args.force,
+        )?;
+        info!("Restored the backup made at unix time {} ({} files). Start the server normally now.", m.created_at, m.files_count);
+        return Ok(());
+    }
+    if let Some(out) = &args.backup_now {
+        let conn = db::open_file(&args.db)?;
+        let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&args.storage_dir), &args.data_dir, out)?;
+        let removed = farder_server::backup::prune(out, args.backup_keep)?;
+        info!("Backup written to {} ({} older backup(s) removed)", made.display(), removed);
+        println!("{}", made.display());
+        return Ok(());
+    }
+
     let (server_state, first_run) = init_server(&args).await?;
 
     // Mesh Rung 1: if a genesis already exists in the DB, rebuild the in-memory
@@ -169,6 +212,33 @@ async fn main() -> Result<()> {
         info!("The first user to connect will automatically become the server owner.");
         info!("For headless/remote setup, use this token instead: {}", setup_hex);
         *state.setup_token.lock().unwrap() = Some(setup_token);
+    }
+
+    // Automatic backups: one now, then one every --backup-interval seconds. They use their
+    // own database connection (SQLite lets readers and the writer work side by side), so a
+    // backup never makes the server wait.
+    if let Some(dir) = args.backup_dir.clone() {
+        let (db_path, storage, data, keep) = (args.db.clone(), args.storage_dir.clone(), args.data_dir.clone(), args.backup_keep);
+        let every = std::time::Duration::from_secs(args.backup_interval.max(60));
+        info!("Automatic backups to {} every {} seconds, keeping {}", dir.display(), every.as_secs(), keep.max(1));
+        tokio::spawn(async move {
+            loop {
+                let (d, s2, dt, k, p) = (dir.clone(), storage.clone(), data.clone(), keep, db_path.clone());
+                let r = tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
+                    let conn = db::open_file(&p)?;
+                    let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&s2), &dt, &d)?;
+                    farder_server::backup::prune(&d, k)?;
+                    Ok(made)
+                })
+                .await;
+                match r {
+                    Ok(Ok(made)) => info!("Backup written to {}", made.display()),
+                    Ok(Err(e)) => tracing::warn!("automatic backup failed: {e:#}"),
+                    Err(e) => tracing::warn!("automatic backup task failed: {e}"),
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     let _retention = retention::spawn_retention_task(Arc::clone(&state), args.retention_interval);

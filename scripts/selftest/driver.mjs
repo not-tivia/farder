@@ -1109,6 +1109,40 @@ async function ubuntu() {
   await B.browser.close().catch(() => {});
 }
 
+// After the Linux server was backed up, wiped and restored (see the steps in
+// docs/hosting-on-ubuntu.md): both clients must find the history, still be members, and
+// be able to chat again, with no new invite. Run after `ubuntu` + the restore.
+async function ubuntuRestored() {
+  const name = "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+  }
+  await check("A: the history from before the wipe is back after the restore", async () => {
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await seesText(A, "hello from A to ubuntu " + stamp, 90000);
+    await seesText(A, "hello from B to ubuntu " + stamp, 30000);
+  });
+  await check("B: the same history, and B is still a member (no new invite)", async () => {
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await seesText(B, "hello from A to ubuntu " + stamp, 90000);
+  });
+  await check("both can chat on the restored server", async () => {
+    await sendText(A, "after the restore from A " + stamp);
+    await seesText(B, "after the restore from A " + stamp, 30000);
+    await sendText(B, "after the restore from B " + stamp);
+    await seesText(A, "after the restore from B " + stamp, 30000);
+  });
+  await check("A is still the owner (the server settings button is there)", async () => {
+    await A.page.getByTitle("Server Settings").waitFor({ timeout: 10000 });
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1125,6 +1159,7 @@ try {
   else if (scenario === "tray") await tray();
   else if (scenario === "powers") await powers();
   else if (scenario === "ubuntu") await ubuntu();
+  else if (scenario === "ubuntu-restored") await ubuntuRestored();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();
