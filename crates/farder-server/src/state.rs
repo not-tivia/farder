@@ -114,6 +114,9 @@ pub struct ServerState {
     /// The server enforces it with its OWN clock, because event timestamps are chosen by
     /// their author and cannot be trusted to measure a wait.
     pub recovery_wait_secs: u64,
+
+    /// The bulk-damage brake (see `brake.rs`): a limit on destructive changes per account.
+    pub brake: crate::brake::Brake,
 }
 
 /// Default waiting period for a recovery takeover: 72 hours.
@@ -145,6 +148,7 @@ impl ServerState {
             relay_server_id: std::sync::Mutex::new(None),
             client_protocol: StdRwLock::new(HashMap::new()),
             recovery_wait_secs: DEFAULT_RECOVERY_WAIT_SECS,
+            brake: crate::brake::Brake::default(),
         }
     }
 

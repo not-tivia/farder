@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod backup;
+pub mod brake;
 pub mod commands;
 pub mod webhooks;
 pub mod bots;

@@ -65,6 +65,12 @@ struct Args {
     /// under 24 hours are for testing only and are warned about at start.
     #[arg(long, default_value_t = farder_server::state::DEFAULT_RECOVERY_WAIT_SECS)]
     recovery_wait_secs: u64,
+
+    /// How many destructive changes (deleting channels/categories/roles, kicking, banning, removing
+    /// bots or webhooks) one account may make in 10 minutes before the server says "slow down" (default 5,
+    /// 0 turns it off). Protects the server if an account is stolen. See crates/farder-server/src/brake.rs.
+    #[arg(long, default_value_t = farder_server::brake::DEFAULT_BUDGET)]
+    destructive_budget: usize,
 }
 
 fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -105,6 +111,7 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
 
     let mut state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
     state.recovery_wait_secs = args.recovery_wait_secs;
+    state.brake = farder_server::brake::Brake::new(args.destructive_budget, farder_server::brake::DEFAULT_WINDOW_SECS);
     if args.recovery_wait_secs < 24 * 3600 {
         tracing::warn!(
             "the recovery takeover waiting period is only {} seconds; under 24 hours it gives the real owner little time to notice (fine for testing)",

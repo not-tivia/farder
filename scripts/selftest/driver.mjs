@@ -1468,6 +1468,60 @@ async function guestLink() {
   await B.browser.close().catch(() => {});
 }
 
+// The bulk-damage brake on the real stack: the OWNER (a stolen owner key is the case it exists for)
+// can delete a handful of channels, then the server says "slow down" and the rest survive. Run after
+// `ubuntu`, against a server started with the default budget (5 per 10 minutes).
+async function brake() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const call = (c, cmd, extra) => c.page.evaluate(async ([nm, command, more]) => {
+    const inv = window.__TAURI_INTERNALS__.invoke;
+    const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+    try { return { ok: await inv(command, { serverId: s.id, ...more }) }; } catch (e) { return { err: String(e) }; }
+  }, [name, cmd, extra]);
+  let ids = [];
+  await check("the owner makes 7 throwaway channels", async () => {
+    for (let i = 0; i < 7; i++) {
+      const r = await call(A, "create_channel", { name: `brake-${stamp}-${i}`, channelType: "Text", categoryId: null });
+      if (r.err) throw new Error(r.err);
+    }
+    for (let i = 0; i < 40 && ids.length < 7; i++) {
+      const info = await A.page.evaluate(async (nm) => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+        return (await inv("get_server_info_v2", { serverId: s.id })).channels.map((c) => ({ id: c.id, name: c.name }));
+      }, name);
+      ids = info.filter((c) => c.name.startsWith(`brake-${stamp}-`)).map((c) => c.id);
+      if (ids.length < 7) await new Promise((r) => setTimeout(r, 500));
+    }
+    if (ids.length !== 7) throw new Error("found " + ids.length + " of 7 channels");
+  });
+  await check("the first five deletions are allowed, the sixth gets a plain 'slow down'", async () => {
+    for (let i = 0; i < 5; i++) {
+      const r = await call(A, "delete_channel", { channelId: ids[i] });
+      if (r.err) throw new Error(`deletion ${i + 1} refused: ${r.err}`);
+    }
+    const r = await call(A, "delete_channel", { channelId: ids[5] });
+    if (!r.err || !/slow down/.test(r.err)) throw new Error("the sixth deletion was not stopped: " + JSON.stringify(r));
+    return r.err.slice(0, 90);
+  });
+  await check("the sixth channel is still there on B's screen; ordinary work still goes through", async () => {
+    await B.page.locator(".channel-item", { hasText: `brake-${stamp}-5` }).first().waitFor({ timeout: 20000 });
+    const r = await call(A, "create_channel", { name: `after-brake-${stamp}`, channelType: "Text", categoryId: null });
+    if (r.err) throw new Error(r.err);
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1489,6 +1543,7 @@ try {
   else if (scenario === "recovery") await recovery();
   else if (scenario === "host-reset") await hostReset();
   else if (scenario === "guest-link") await guestLink();
+  else if (scenario === "brake") await brake();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();

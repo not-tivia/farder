@@ -617,7 +617,58 @@ pub fn content_block_reason(state: &crate::state::ServerState, member: &PublicKe
 // Main dispatch
 // ---------------------------------------------------------------------------
 
+/// Changes that destroy something. The bulk-damage brake (`brake.rs`) limits how many of these one
+/// account can make in a short time.
+fn is_destructive(req: &ServerRequest) -> bool {
+    matches!(
+        req,
+        ServerRequest::DeleteChannel { .. }
+            | ServerRequest::DeleteCategory { .. }
+            | ServerRequest::DeleteRole { .. }
+            | ServerRequest::KickMember { .. }
+            | ServerRequest::BanMember { .. }
+            | ServerRequest::RemoveBot { .. }
+            | ServerRequest::DeleteWebhook { .. }
+    )
+}
+
 pub fn handle_request(
+    conn: &Connection,
+    member: &PublicKey,
+    is_owner: bool,
+    request: ServerRequest,
+    storage_dir: &str,
+    state: &Arc<ServerState>,
+) -> Result<HandleResult> {
+    if !is_destructive(&request) {
+        return handle_request_inner(conn, member, is_owner, request, storage_dir, state);
+    }
+    let now = crate::db::now();
+    let who = *member.as_bytes();
+    if let Err(wait) = state.brake.check(&who, now) {
+        // Say so in the audit log, for everyone who manages the server.
+        let events = audit_emit(conn, member, None, "destructive_brake", serde_json::json!({
+            "limit": state.brake.budget, "window_secs": state.brake.window_secs, "retry_in_secs": wait,
+        })).into_iter().collect();
+        return Ok(HandleResult {
+            response: ServerResponse::Error {
+                reason: format!(
+                    "slow down: this account already made {} destructive changes (deleting, banning, removing) in the last {} minutes. This limit protects the server if an account is stolen. Try again in about {} minute(s); the host can change it with --destructive-budget.",
+                    state.brake.budget, state.brake.window_secs / 60, (wait + 59) / 60),
+            },
+            events,
+            orphaned_file_ids: vec![],
+        });
+    }
+    let result = handle_request_inner(conn, member, is_owner, request, storage_dir, state)?;
+    // Only a change that actually happened uses up the budget (a refused request costs nothing).
+    if !matches!(result.response, ServerResponse::Error { .. }) {
+        state.brake.record(&who, now);
+    }
+    Ok(result)
+}
+
+fn handle_request_inner(
     conn: &Connection,
     member: &PublicKey,
     is_owner: bool,
@@ -11925,6 +11976,42 @@ mod tests {
         ] {
             let (_, r) = submit(Some(&da), 2, p);
             assert!(matches!(&r, ServerResponse::Error { reason } if reason.contains("guests can only join and post")), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn the_bulk_damage_brake_stops_a_sixth_destructive_change_and_says_so_in_the_audit_log() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let ids: Vec<u64> = (0..8).map(|i| channels::create_channel(&conn, &format!("c{i}"), ChannelType::Text, None, i).unwrap()).collect();
+        let del = |id: u64| handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: id }, "", &st).unwrap();
+        // A refused request costs nothing: someone with no power over channels is refused again and
+        // again, and their budget is still whole.
+        let bob = add_member(&conn, "Bob");
+        for id in &ids[6..] {
+            let r = handle_request(&conn, &bob, false, ServerRequest::DeleteChannel { channel_id: *id }, "", &st).unwrap();
+            assert!(matches!(r.response, ServerResponse::Error { .. }));
+        }
+        assert!(st.brake.check(bob.as_bytes(), crate::db::now()).is_ok());
+        for id in &ids[..5] {
+            assert!(!matches!(del(*id).response, ServerResponse::Error { .. }), "the first five are allowed");
+        }
+        let r = del(ids[5]);
+        assert!(matches!(&r.response, ServerResponse::Error { reason } if reason.contains("slow down")), "{:?}", r.response);
+        assert!(!r.events.is_empty(), "managers are told through the audit log");
+        assert!(channels::get_channel(&conn, ids[5]).unwrap().is_some(), "the sixth channel is still there");
+        let actions: Vec<String> = audit::list(&conn, None, 50).unwrap().into_iter().map(|e| e.action).collect();
+        assert!(actions.iter().any(|a| a == "destructive_brake"), "{actions:?}");
+        // Ordinary, non-destructive work is untouched.
+        let r = handle_request(&conn, &owner, true, ServerRequest::CreateChannel { name: "after".into(), channel_type: ChannelType::Text, category_id: None, position: None }, "", &st).unwrap();
+        assert!(!matches!(r.response, ServerResponse::Error { .. }));
+        // Turned off by the host (budget 0): no limit.
+        let mut off = ServerState::new_for_test().unwrap();
+        off.brake = crate::brake::Brake::new(0, 600);
+        let off = Arc::new(off);
+        for id in &ids[5..] {
+            let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: *id }, "", &off).unwrap();
+            assert!(!matches!(r.response, ServerResponse::Error { .. }));
         }
     }
 

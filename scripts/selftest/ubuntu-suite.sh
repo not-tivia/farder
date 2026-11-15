@@ -135,13 +135,27 @@ print('server: guest members:', c.execute('select display_name from members wher
   pkill -x farder-server; pkill -x farder-gateway; kill $STATIC_PID 2>/dev/null
 }
 
+suite_brake() {
+  local D="$TMP/brake" PORT=4575; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
+  fresh_pair
+  start_direct $PORT "$D"
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  echo "== bulk-damage brake"; winrun brake
+  python3 -c "
+import sqlite3; c=sqlite3.connect('$D/u.db')
+print('audit log:', [r[0] for r in c.execute(\"select action from audit_events where action in ('destructive_brake') order by id\")])"
+  pkill -x farder-server
+}
+
 case "${1:-all}" in
+  brake) suite_brake ;;
   guestlink) suite_guestlink ;;
   reset) suite_reset ;;
   restore) suite_restore ;;
   relay) suite_relay ;;
   recovery) suite_recovery ;;
   all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
-  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|all]"; exit 2 ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|all]"; exit 2 ;;
 esac
 echo FINISHED
