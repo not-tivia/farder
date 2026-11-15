@@ -2642,6 +2642,18 @@ fn handle_request_inner(
             let enabled = crate::db::get_setting(conn, "guest_links")?.as_deref() == Some("1");
             ok(ServerResponse::GuestLinks { enabled })
         }
+        ServerRequest::FetchLog { after, limit } => {
+            // Owner only: the raw history holds every channel's messages, including ones a member
+            // cannot see through the normal history request.
+            if !is_owner {
+                return err("only the owner can fetch the server's full history");
+            }
+            let Some(genesis) = crate::event_ingest::load_genesis(conn)? else {
+                return err("this server has no signed history yet");
+            };
+            let (events, done) = crate::event_ingest::load_events_page(conn, after, limit)?;
+            ok(ServerResponse::LogPage { genesis, events, done })
+        }
         ServerRequest::GetRecoveryStatus => {
             let guard = state.log_state.lock().unwrap();
             let Some(ls) = guard.as_ref() else {
@@ -10452,6 +10464,7 @@ mod tests {
                 | ServerRequest::CreateGuestInvite { .. }
                 | ServerRequest::SetGuestLinks { .. }
                 | ServerRequest::GetGuestLinks
+                | ServerRequest::FetchLog { .. }
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
@@ -12050,6 +12063,63 @@ mod tests {
         let stranger = Keypair::generate().public_key();
         let r = handle_request(&conn, &stranger, false, ServerRequest::GetMembers, "", &state).unwrap().response;
         assert!(matches!(r, ServerResponse::Error { reason } if reason == "not a member of this server"));
+    }
+
+    #[test]
+    fn the_owner_can_page_through_the_whole_signed_history_and_nobody_else_can() {
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, dev) = (Keypair::generate(), Keypair::generate());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner.public_key(), everyone).unwrap();
+        let friend = add_member(&conn, "Friend");
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        crate::event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let sid = g.server_id();
+        // An owner chain of 7 events: a device, then six invites.
+        let mut last: Option<Event> = None;
+        for n in 0..7u64 {
+            let p = if n == 0 { EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &dev.public_key(), 1) } }
+                    else { EP::InviteCreated { code_hash: format!("h{n}"), max_uses: 1, expires_at: db::now() + 600, requires_approval: false } };
+            let ev = Event::next(&dev, owner.public_key(), sid.clone(), last.as_ref(), n, 10 + n, p);
+            let r = handle_request(&conn, &owner.public_key(), true, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap();
+            assert!(!matches!(r.response, ServerResponse::Error { .. }), "{:?}", r.response);
+            last = Some(ev);
+        }
+        // Page through it, 3 at a time: 3 + 3 + 1, done only at the end.
+        let (mut after, mut got, mut pages) = (0u64, Vec::new(), 0);
+        loop {
+            let r = handle_request(&conn, &owner.public_key(), true, ServerRequest::FetchLog { after, limit: 3 }, "", &state).unwrap().response;
+            let ServerResponse::LogPage { genesis, events, done } = r else { panic!("{r:?}") };
+            assert_eq!(genesis.server_id(), sid, "the copy can check the server's id");
+            pages += 1;
+            assert!(events.len() <= 3);
+            for e in &events { assert!(e.accept_seq > after); }
+            after = events.last().map(|e| e.accept_seq).unwrap_or(after);
+            got.extend(events);
+            if done { break; }
+            assert!(pages < 10, "paging must end");
+        }
+        assert_eq!((got.len(), pages), (7, 3));
+        // Same order they were accepted, and every one still verifies against its own device.
+        for (i, e) in got.iter().enumerate() { assert_eq!(e.event.core.seq, i as u64); }
+        // Nobody but the owner: a friend, and (the same rule) a guest.
+        let r = handle_request(&conn, &friend, false, ServerRequest::FetchLog { after: 0, limit: 10 }, "", &state).unwrap().response;
+        assert!(matches!(&r, ServerResponse::Error { .. }), "{r:?}");   // not even a log member here, so the membership gate answers first
+    }
+
+    #[test]
+    fn fetching_the_log_is_the_owners_alone_even_for_someone_the_membership_gate_lets_through() {
+        // No signed history here, so the membership gate does not answer first: the owner-only rule does.
+        let (conn, _owner) = setup();
+        let st = fake_state();
+        let friend = add_member(&conn, "Friend");
+        let r = handle_request(&conn, &friend, false, ServerRequest::FetchLog { after: 0, limit: 10 }, "", &st).unwrap().response;
+        assert!(matches!(&r, ServerResponse::Error { reason } if reason.contains("only the owner")), "{r:?}");
     }
 
 }

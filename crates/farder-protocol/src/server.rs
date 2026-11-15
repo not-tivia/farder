@@ -794,6 +794,12 @@ pub enum ServerRequest {
     SetGuestLinks { enabled: bool },
     /// Whether guest links are on. Answered with [`ServerResponse::GuestLinks`]. Appended last.
     GetGuestLinks,
+    /// OWNER ONLY. Hand over the server's signed history after position `after` (0 = from the
+    /// start), at most `limit` events (the server may give fewer), so a second machine can keep a
+    /// verified copy (docs/mesh-hosting-status.md, step 1). Owner-only because the raw history holds
+    /// every channel's messages, including ones a member has no access to. Answered with
+    /// [`ServerResponse::LogPage`]. Appended last (positional codec).
+    FetchLog { after: u64, limit: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -945,6 +951,19 @@ pub enum ServerResponse {
     },
     /// Answer to [`ServerRequest::GetGuestLinks`] and [`ServerRequest::SetGuestLinks`].
     GuestLinks { enabled: bool },
+    /// Answer to [`ServerRequest::FetchLog`]: the genesis (so the copy can check the server's id),
+    /// the next events in acceptance order, and whether that is all of them.
+    LogPage { genesis: farder_crypto::event_log::Genesis, events: Vec<StoredEvent>, done: bool },
+}
+
+/// One accepted event with the server's own bookkeeping, as handed to a copy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredEvent {
+    /// The server's acceptance position (a copy resumes after the last one it has).
+    pub accept_seq: u64,
+    /// When the server accepted it (unix seconds, the SERVER's clock: waiting periods use it).
+    pub accepted_at: u64,
+    pub event: farder_crypto::event_log::Event,
 }
 
 /// A takeover started by the recovery key and not yet finished or withdrawn.
