@@ -40,7 +40,8 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 | Quit and relaunch: still joined | VERIFIED (relay and direct) | selftest relaunch + direct-relaunch: B still in the direct server with no re-invite, chat works again. This was chris's reported bug (fixed 8ab9a69, now confirmed on the real path) |
 | Message edit / delete (own message; other person sees both) | VERIFIED | selftest edit. Also fixed: edits/deletes on a server not on screen were ignored and the local readable copy of a deleted message was kept |
 | Second server, and a direct (non-relayed) server | VERIFIED | selftest direct: create, invite (points at 127.0.0.1), B joins, chat both ways |
-| Attachments, voice, screenshare | UNVERIFIED | |
+| Attachments (picture: stage by drop, send, recipient loads it) | VERIFIED | selftest attach (drop event emulated; the native file-picker dialog itself is not drivable) |
+| Voice, screenshare | UNVERIFIED | needs audio/capture hardware paths; not automatable here |
 
 ## Windows added on `features-skins-notify-garble`
 

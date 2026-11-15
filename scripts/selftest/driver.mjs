@@ -578,6 +578,50 @@ async function themes() {
   await A.browser.close().catch(() => {});
 }
 
+// A file attachment: drop a picture on A's window (the same event Windows sends when
+// you drag a file in), send it, and B must receive it AND be able to fetch and show
+// it. Run after `core`.
+async function attach_file() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  // A small real PNG (16x16, solid orange).
+  const { deflateSync } = await import("node:zlib");
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const len = Buffer.alloc(4); len.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const cs = Buffer.alloc(4); cs.writeUInt32BE(crc(td)); return Buffer.concat([len, td, cs]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(16, 0); ihdr.writeUInt32BE(16, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const row = Buffer.concat([Buffer.from([0]), Buffer.concat(Array.from({ length: 16 }, () => Buffer.from([255, 140, 0])))]);
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.concat(Array.from({ length: 16 }, () => row)))), chunk("IEND", Buffer.alloc(0))]);
+  const dir = process.env.SHOTS || "selftest-shots";
+  fs.mkdirSync(dir, { recursive: true });
+  const fileName = `orange-${stamp}.png`;
+  const path = (await import("node:path")).resolve(dir, fileName);
+  fs.writeFileSync(path, png);
+  await check("A: drop a picture on the window, it is staged, then sent with a caption", async () => {
+    await A.page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "tauri://drag-drop", payload: { paths: [p], position: { x: 400, y: 400 } } }), path);
+    await A.page.getByText(fileName).first().waitFor({ timeout: 30000 });
+    await shot(A.page, "A-file-staged");
+    await sendText(A, "with a file " + stamp);
+    await seesText(A, "with a file " + stamp, 30000);
+  });
+  await check("B: receives the message with the file, and the picture actually loads", async () => {
+    await seesText(B, "with a file " + stamp, 30000);
+    const msg = B.page.locator(".message", { hasText: "with a file " + stamp }).first();
+    await msg.locator("img:not(.message-avatar img)").last().waitFor({ timeout: 30000 });
+    const ok = await msg.locator("img").evaluateAll((imgs) => imgs.some((i) => i.naturalWidth >= 8 && !i.classList.contains("message-avatar")));
+    await shot(B.page, "B-file");
+    if (!ok) throw new Error("the picture element is there but did not load (naturalWidth 0)");
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -589,6 +633,7 @@ try {
   else if (scenario === "unread") await unread();
   else if (scenario === "popup") await popup();
   else if (scenario === "themes") await themes();
+  else if (scenario === "attach") await attach_file();
   else if (scenario === "direct-relaunch") await directRelaunch();
   else throw new Error("unknown scenario " + scenario);
 } catch (e) {
