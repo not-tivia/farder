@@ -88,11 +88,32 @@ print('audit log:', [r[0] for r in c.execute(\"select action from audit_events w
   pkill -x farder-server
 }
 
+suite_reset() {
+  local D="$TMP/reset" PORT=4573; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
+  fresh_pair
+  start_direct $PORT "$D"
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  pkill -x farder-server; sleep 2
+  # B's key, as the host would read it from the members list (B joined second).
+  local BKEY; BKEY=$(python3 -c "
+import sqlite3; c=sqlite3.connect('$D/u.db')
+print('vk_'+c.execute('select hex(public_key) from members order by joined_at desc, rowid desc limit 1').fetchone()[0].lower())")
+  echo "== host resets the owner to B ($BKEY)"
+  "$BIN" --reset-owner "$BKEY" --db "$D/u.db" --storage-dir "$D/files" --data-dir "$D/sd" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-200 | tail -4
+  start_direct $PORT "$D"
+  echo "== after the reset"; winrun host-reset
+  echo "== restart the server: same answer"; pkill -x farder-server; sleep 2; start_direct $PORT "$D"
+  winrun host-reset
+  pkill -x farder-server
+}
+
 case "${1:-all}" in
+  reset) suite_reset ;;
   restore) suite_restore ;;
   relay) suite_relay ;;
   recovery) suite_recovery ;;
-  all) suite_restore; suite_relay; suite_recovery ;;
-  *) echo "usage: $0 [restore|relay|recovery|all]"; exit 2 ;;
+  all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|all]"; exit 2 ;;
 esac
 echo FINISHED

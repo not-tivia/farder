@@ -1329,6 +1329,60 @@ async function recovery() {
   await B.browser.close().catch(() => {});
 }
 
+// The host-side owner reset (`farder-server --reset-owner`): run after `ubuntu` and after the
+// host stopped the server, reset the owner to B (a member) and started it again. B must own the
+// server, A (the old owner) must not, and the old messages must still be there. Run it a second
+// time after another restart to prove the answer is the same.
+async function hostReset() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  await check("the old messages are still there after the reset (both screens)", async () => {
+    for (const c of [A, B]) {
+      await seesText(c, "hello from A to ubuntu " + stamp, 90000);
+      await seesText(c, "hello from B to ubuntu " + stamp, 30000);
+    }
+  });
+  const act = (c, cmd, extra) => c.page.evaluate(async ([nm, command, more]) => {
+    const inv = window.__TAURI_INTERNALS__.invoke;
+    const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+    try { await inv(command, { serverId: s.id, ...more }); return "ok"; } catch (e) { return "refused: " + String(e).slice(0, 90); }
+  }, [name, cmd, extra]);
+  const chan = "reset-" + Date.now();
+  await check("the NEW owner (B) can do owner-only things", async () => {
+    let r = "";
+    for (let i = 0; i < 12; i++) {
+      r = await act(B, "create_channel", { name: chan, channelType: "Text", categoryId: null });
+      if (r === "ok") return "ok after " + i + " retries";
+      await new Promise((x) => setTimeout(x, 5000));
+    }
+    throw new Error("B could not act as owner: " + r);
+  });
+  await check("the OLD owner (A) is refused owner-only things", async () => {
+    const r = await act(A, "create_channel", { name: chan + "-a", channelType: "Text", categoryId: null });
+    if (r === "ok") throw new Error("the old owner could still create a channel");
+    return r;
+  });
+  await check("the server settings button is B's, not A's", async () => {
+    await B.page.getByTitle("Server Settings").click();
+    await B.page.locator(".settings-tab", { hasText: "Powers" }).waitFor({ timeout: 30000 });
+    await B.page.locator(".modal-close").first().click();
+    await A.page.getByTitle("Server Settings").click();
+    await new Promise((r) => setTimeout(r, 1500));
+    if (await A.page.locator(".settings-tab", { hasText: "Powers" }).count()) throw new Error("A still sees the owner's Powers tab");
+    await A.page.locator(".modal-close").first().click();
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1348,6 +1402,7 @@ try {
   else if (scenario === "ubuntu-restored") await ubuntuRestored();
   else if (scenario === "server-down") await serverDown();
   else if (scenario === "recovery") await recovery();
+  else if (scenario === "host-reset") await hostReset();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();
