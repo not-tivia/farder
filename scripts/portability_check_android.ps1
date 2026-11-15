@@ -1,0 +1,35 @@
+# Type-checks Farder's shared Rust crates (and, with -Client, the Tauri app crate)
+# for Android using the NDK that Android Studio installed. Run on Windows:
+#   .\scripts\portability_check_android.ps1 [-Client]
+# Uses its own build folder so it never disturbs a normal build.
+param([switch]$Client)
+$ErrorActionPreference = "Continue"
+$sdk = Join-Path $env:LOCALAPPDATA "Android\Sdk\ndk"
+$ndk = Get-ChildItem $sdk -Directory | Sort-Object Name -Descending | Select-Object -First 1
+if (-not $ndk) { throw "no Android NDK under $sdk" }
+$bin = Join-Path $ndk.FullName "toolchains\llvm\prebuilt\windows-x86_64\bin"
+$triple = "aarch64-linux-android"
+$env:CC_aarch64_linux_android = Join-Path $bin "aarch64-linux-android24-clang.cmd"
+$env:CXX_aarch64_linux_android = Join-Path $bin "aarch64-linux-android24-clang++.cmd"
+$env:AR_aarch64_linux_android = Join-Path $bin "llvm-ar.exe"
+$env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+$env:CARGO_TARGET_DIR = Join-Path (Split-Path -Parent $PSScriptRoot) "target-android-check"
+rustup target add $triple | Out-Null
+Set-Location (Split-Path -Parent $PSScriptRoot)
+Write-Host "NDK: $($ndk.Name)"
+$crates = @("farder-protocol", "farder-crypto", "farder-history", "farder-e2ee-client", "farder-mls")
+function Check($name, $dir) {
+    Push-Location $dir
+    $out = cargo check --target $triple 2>&1 | Out-String
+    Pop-Location
+    $errs = ($out -split "`n" | Where-Object { $_ -match "^error" }) -join "`n"
+    if ($errs) { Write-Host "FAIL  $name"; ($errs -split "`n" | Select-Object -First 8) | ForEach-Object { Write-Host "      $_" } }
+    else { Write-Host "ok    $name" }
+}
+if ($Client) { Check "farder-client (the Tauri app)" (Join-Path (Get-Location) "client\src-tauri"); exit }
+foreach ($c in $crates) {
+    $out = cargo check -p $c --target $triple 2>&1 | Out-String
+    $errs = ($out -split "`n" | Where-Object { $_ -match "^error" }) -join "`n"
+    if ($errs) { Write-Host "FAIL  $c"; ($errs -split "`n" | Select-Object -First 4) | ForEach-Object { Write-Host "      $_" } }
+    else { Write-Host "ok    $c" }
+}

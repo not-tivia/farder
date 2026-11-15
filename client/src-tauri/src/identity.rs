@@ -266,20 +266,29 @@ pub async fn save_recovery_image(png_base64: String) -> Result<bool, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(png_base64.as_bytes())
         .map_err(|e| format!("bad image data: {e}"))?;
-    let path = tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .set_file_name("farder-recovery-phrase.png")
-            .add_filter("PNG image", &["png"])
-            .save_file()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    match path {
-        Some(p) => {
-            std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
-            Ok(true)
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let path = tauri::async_runtime::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_file_name("farder-recovery-phrase.png")
+                .add_filter("PNG image", &["png"])
+                .save_file()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        match path {
+            Some(p) => {
+                std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
+                Ok(true)
+            }
+            None => Ok(false),
         }
-        None => Ok(false),
+    }
+    // Phones: no native save dialog here yet; the phrase can still be copied or written down.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = bytes;
+        Err("saving the image is not available on this platform yet; copy the words instead".to_string())
     }
 }
 

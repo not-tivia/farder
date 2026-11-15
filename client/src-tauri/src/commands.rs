@@ -1604,12 +1604,18 @@ pub struct AttachmentCapInput {
 /// Open a native file picker dialog and return the selected file path.
 #[tauri::command]
 pub async fn pick_file() -> Result<Option<String>, String> {
-    let path = tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new().pick_file()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(path.map(|p| p.to_string_lossy().to_string()))
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let path = tauri::async_runtime::spawn_blocking(|| {
+            rfd::FileDialog::new().pick_file()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(path.map(|p| p.to_string_lossy().to_string()))
+    }
+    // Phones: the system file picker is a Tauri plugin that is not wired in yet.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    Err("choosing a file is not available on this platform yet".to_string())
 }
 
 /// Upload a file via a new QUIC bi-stream and return the upload outcome (file_id + cap fields).
