@@ -18,9 +18,15 @@ $env:RESULTS = Join-Path $DataRoot "results-dm.json"
 node "$here\driver.mjs" dm; if ($LASTEXITCODE -ne 0) { $bad++ }
 $env:RESULTS = Join-Path $DataRoot "results-buddy.json"
 node "$here\driver.mjs" buddy; if ($LASTEXITCODE -ne 0) { $bad++ }
+$env:RESULTS = Join-Path $DataRoot "results-edit.json"
+node "$here\driver.mjs" edit; if ($LASTEXITCODE -ne 0) { $bad++ }
+$env:RESULTS = Join-Path $DataRoot "results-direct.json"
+node "$here\driver.mjs" direct; if ($LASTEXITCODE -ne 0) { $bad++ }
 & "$here\stop-pair.ps1" -DataRoot $DataRoot | Out-Null
 & "$here\start-pair.ps1" -DataRoot $DataRoot | Out-Null
 $env:RESULTS = Join-Path $DataRoot "results-relaunch.json"
 node "$here\driver.mjs" relaunch; if ($LASTEXITCODE -ne 0) { $bad++ }
+$env:RESULTS = Join-Path $DataRoot "results-direct-relaunch.json"
+node "$here\driver.mjs" direct-relaunch; if ($LASTEXITCODE -ne 0) { $bad++ }
 & "$here\stop-pair.ps1" -DataRoot $DataRoot | Out-Null
 if ($bad) { Write-Host "SELF-TEST FAILED ($bad scenario(s))"; exit 1 } else { Write-Host "SELF-TEST PASSED" }

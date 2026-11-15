@@ -32,13 +32,14 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 |---|---|---|
 | Create identity, PIN gate | VERIFIED | selftest core + relaunch (unlock with PIN) |
 | Create a server | VERIFIED | selftest core (relay-hosted default) |
-| Create an invite link | VERIFIED (relay) | selftest core; the first-run Translation dialog covers the app until skipped, which may be what chris hit on 2026-11-09. Local-only server not tested |
+| Create an invite link | VERIFIED (relay and direct) | selftest core; the first-run Translation dialog covers the app until skipped, which may be what chris hit on 2026-11-09. |
 | Join from an invite (second identity) | VERIFIED (relay) | selftest core, incl. the "Join it?" confirmation |
 | Send / receive text, both directions | VERIFIED | selftest core |
 | Direct messages (encrypted) | VERIFIED | selftest dm: open from member list, send, recipient gets the conversation and reads it, reply from a small chat window. Found and fixed 3 bugs on the way (server announced every DM to the whole server; recipient never saw the DM; DM history opened from the list showed ciphertext) |
 | Encrypted channels | UNVERIFIED | server-side e2e tests pass (T1); GUI path unseen |
-| Quit and relaunch: still joined | VERIFIED (relay) | selftest relaunch; local-only server not tested |
-| Message edit / delete | UNVERIFIED | edits/deletes for a non-active server are ignored by the main window (known gap) |
+| Quit and relaunch: still joined | VERIFIED (relay and direct) | selftest relaunch + direct-relaunch: B still in the direct server with no re-invite, chat works again. This was chris's reported bug (fixed 8ab9a69, now confirmed on the real path) |
+| Message edit / delete (own message; other person sees both) | VERIFIED | selftest edit. Also fixed: edits/deletes on a server not on screen were ignored and the local readable copy of a deleted message was kept |
+| Second server, and a direct (non-relayed) server | VERIFIED | selftest direct: create, invite (points at 127.0.0.1), B joins, chat both ways |
 | Attachments, voice, screenshare | UNVERIFIED | |
 
 ## Windows added on `features-skins-notify-garble`

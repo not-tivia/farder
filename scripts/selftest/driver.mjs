@@ -333,12 +333,128 @@ async function dm() {
   await B.browser.close().catch(() => {});
 }
 
+// Edit and delete your own message; the other person must see both. Run when both
+// clients are up (after `core`).
+async function edit() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  const orig = "edit me " + stamp, edited = "edited " + stamp;
+  await check("A: send a line to edit", async () => { await sendText(A, orig); await seesText(B, orig); });
+  await check("A: edit it (right-click, Edit Message); both see the new text, B no longer sees the old", async () => {
+    await A.page.locator(".message", { hasText: orig }).first().click({ button: "right" });
+    await A.page.locator(".context-menu-item", { hasText: "Edit Message" }).click();
+    const box = A.page.locator(".message-edit-input");
+    await box.fill(edited);
+    await box.press("Enter");
+    await seesText(A, edited);
+    await seesText(B, edited);
+    await B.page.locator(".message-content", { hasText: orig }).first().waitFor({ state: "detached", timeout: 15000 });
+    await shot(B.page, "B-edited");
+  });
+  await check("A: delete it (right-click, Delete Message); it disappears for both", async () => {
+    await A.page.locator(".message", { hasText: edited }).first().click({ button: "right" });
+    await A.page.locator(".context-menu-item.delete").click();
+    await A.page.locator(".message-content", { hasText: edited }).first().waitFor({ state: "detached", timeout: 20000 });
+    await B.page.locator(".message-content", { hasText: edited }).first().waitFor({ state: "detached", timeout: 20000 });
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// A second server that is NOT relayed ("Direct - same network only"): the kind a
+// friend on the same network would join, and the kind whose port used to move
+// around between launches. A creates it, B joins by the invite, both chat.
+async function direct() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const name = "Direct " + stamp;
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  let link = null;
+  if (!(await check("A: create a second, direct (non-relayed) server", async () => {
+    await A.page.getByTitle("Add Server").click();
+    await A.page.getByText("Create a Server").click();
+    await A.page.getByPlaceholder("My Awesome Server").fill(name);
+    await A.page.getByRole("button", { name: "Next" }).click();
+    await A.page.getByText(/Direct .{1,3} same network only/).click();
+    await A.page.getByRole("button", { name: "Create Server" }).click();
+    await A.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 90000 });
+    await A.page.locator(".channel-item", { hasText: "general" }).first().waitFor({ timeout: 30000 });
+  }))) return shot(A.page, "A-direct-create-fail");
+  if (!(await check("A: create an invite for it (a direct link, not a relay link)", async () => {
+    link = await makeInvite(A);
+    // Web links wrap the real address in base64: decode it to see where it points.
+    const m = link.match(/farder\.xyz\/join\/([A-Za-z0-9_-]+)/);
+    const target = m ? Buffer.from(m[1], "base64url").toString("utf8") : link;
+    if (/relay/.test(target)) throw new Error("expected a direct link, it points at " + target.slice(0, 60));
+    return "points at " + target.slice(0, 30);
+  }))) return shot(A.page, "A-direct-invite-fail");
+  if (!(await check("B: join the direct server from the invite", async () => {
+    await B.page.getByTitle("Add Server").click();
+    await B.page.getByText("Join a Server").click();
+    await B.page.getByPlaceholder("farder://server/invite-code").fill(link);
+    await B.page.getByRole("button", { name: "Join", exact: true }).click();
+    const confirm = B.page.getByText(/Join it\?/);
+    if (await confirm.waitFor({ timeout: 8000 }).then(() => true, () => false)) await B.page.getByRole("button", { name: "Join", exact: true }).last().click();
+    await B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 90000 });
+  }))) return shot(B.page, "B-direct-join-fail");
+  await check("A and B chat on the direct server", async () => {
+    await A.page.locator(`.server-icon[title="${name}"]`).click();
+    await B.page.locator(`.server-icon[title="${name}"]`).click();
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await sendText(A, "direct hi from A " + stamp);
+    await seesText(B, "direct hi from A " + stamp, 30000);
+    await sendText(B, "direct hi from B " + stamp);
+    await seesText(A, "direct hi from B " + stamp, 30000);
+  });
+  await shot(B.page, "B-direct");
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// After a restart (same data): the direct server must still be there for both, with
+// no new invite, and chat must work again.
+async function directRelaunch() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const name = "Direct " + stamp;
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 20000 }).then(() => true, () => false)) await unlock(c);
+  }
+  await check("A: the direct server is still in the list after a restart", () => A.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 60000 }));
+  await check("B: the direct server is still in the list after a restart (no re-invite)", () => B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 60000 }));
+  await check("A and B chat on the direct server after the restart", async () => {
+    await A.page.locator(`.server-icon[title="${name}"]`).click();
+    await B.page.locator(`.server-icon[title="${name}"]`).click();
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await seesText(A, "direct hi from B " + stamp, 60000);
+    await sendText(A, "direct after restart " + stamp);
+    await seesText(B, "direct after restart " + stamp, 60000);
+  });
+  await shot(A.page, "A-direct-relaunch");
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
   else if (scenario === "relaunch") await relaunch();
   else if (scenario === "buddy") await buddy();
   else if (scenario === "dm") await dm();
+  else if (scenario === "edit") await edit();
+  else if (scenario === "direct") await direct();
+  else if (scenario === "direct-relaunch") await directRelaunch();
   else throw new Error("unknown scenario " + scenario);
 } catch (e) {
   log("FAIL", "driver", String(e.message || e));
