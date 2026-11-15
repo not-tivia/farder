@@ -288,7 +288,7 @@ export function useServerEvents(): void {
     listen("server:message_edited", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
-      if (serverId !== activeRef.current) return;
+      // Every server, not just the one on screen: a chat window may show it.
       dispatch({ type: "MESSAGE_EDITED", serverId, payload: {
         channelId: data.channel_id as number,
         messageId: data.message_id as number,
@@ -300,7 +300,9 @@ export function useServerEvents(): void {
     listen("server:message_deleted", (e) => {
       const data = e.payload as MessageDeletedPayload;
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      // Every server: the local decrypted copy must be dropped even when this is
+      // not the server on screen (a delete that only worked on screen would leave
+      // the readable text behind everywhere else).
       dispatch({
         type: "MESSAGE_DELETED",
         serverId,
@@ -320,7 +322,7 @@ export function useServerEvents(): void {
     listen("server:sealed_message", (e) => {
       const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      if (serverId !== activeRef.current && !stateRef.current.servers[serverId]?.messages[data.channel_id]) return;
       const message = flattenMessageInfoV2([data.message])[0];
       dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
     }).then(safePush);
@@ -328,7 +330,7 @@ export function useServerEvents(): void {
     listen("server:sealed_message_edited", (e) => {
       const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      if (serverId !== activeRef.current && !stateRef.current.servers[serverId]?.messages[data.channel_id]) return;
       const message = flattenMessageInfoV2([data.message])[0];
       dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
     }).then(safePush);
@@ -336,7 +338,7 @@ export function useServerEvents(): void {
     listen("server:message_tombstoned", (e) => {
       const data = e.payload as { server_id: string; channel_id: number; message_id: number };
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      // Every server (see message_deleted): the local readable copy must go.
       dispatch({
         type: "MESSAGE_DELETED",
         serverId,
