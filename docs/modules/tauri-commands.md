@@ -3401,6 +3401,21 @@ never stored.
 
 ---
 
+### `set_replica(state, server_id, member, enabled) -> Result<Vec<String>, String>`
+
+**What it does:** owner only: allow (or stop allowing) a member to keep a full copy of the server (`SetReplica`). A replica
+sees EVERYTHING the host sees. Returns the replicas afterwards as `vk_...` keys.
+**invoke name:** `"set_replica"` -> `setReplica()`.
+
+---
+
+### `list_replicas(state, server_id) -> Result<Vec<String>, String>`
+
+**What it does:** owner only: who may keep a full copy (`ListReplicas`).
+**invoke name:** `"list_replicas"` -> `listReplicas()`.
+
+---
+
 ### `get_fallback_addresses(address) -> Vec<String>`
 
 **What it does:** this device's backup addresses for a saved server (where to read a saved copy when the host

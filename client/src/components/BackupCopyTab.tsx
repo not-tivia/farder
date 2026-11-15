@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
 import * as api from "../lib/tauri-bridge";
+import { useActiveServer } from "../context/ServerContext";
+import { publicKeyToString, memberDisplayName } from "../lib/types";
 
 interface Props {
   serverId: string;
+  /** This account is the owner right now (only the owner decides who keeps a copy). */
+  isOwner?: boolean;
 }
 
 /**
@@ -10,7 +14,9 @@ interface Props {
  * host's computer is off. A member who runs a replica (see docs/mesh-hosting-status.md) tells friends its
  * address; each friend types it here. The app tries the host first, then these, in order.
  */
-export default function BackupCopyTab({ serverId }: Props) {
+export default function BackupCopyTab({ serverId, isOwner }: Props) {
+  const server = useActiveServer();
+  const [replicas, setReplicas] = useState<string[]>([]);
   const [text, setText] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -19,6 +25,17 @@ export default function BackupCopyTab({ serverId }: Props) {
   useEffect(() => {
     api.getFallbackAddresses(serverId).then((a) => setText(a.join("\n"))).catch((e) => setError(String(e)));
   }, [serverId]);
+
+  useEffect(() => {
+    if (isOwner) api.listReplicas(serverId).then(setReplicas).catch((e) => setError(String(e)));
+  }, [serverId, isOwner]);
+
+  async function toggleReplica(pk: string, on: boolean) {
+    setBusy(true); setError(null);
+    try { setReplicas(await api.setReplica(serverId, pk, on)); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  }
 
   async function save() {
     setBusy(true); setError(null); setNote(null);
@@ -42,6 +59,27 @@ export default function BackupCopyTab({ serverId }: Props) {
           onChange={(e) => setText(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontFamily: "monospace" }} />
       </div>
       <button className="xp-button" disabled={busy} onClick={save}>Save</button>
+      {isOwner && (
+        <div className="connect-section" style={{ marginTop: 16 }}>
+          <label className="connect-label">Who may keep a full copy of this server</label>
+          <div style={{ fontSize: 11, marginBottom: 6 }}>
+            A machine that keeps a copy sees <b>everything the host sees</b>, including channels others cannot open and
+            invite codes. Only allow computers you trust as much as the host. The copy program is <code>farder-replica</code>.
+          </div>
+          {(server?.members ?? []).filter((m) => !m.is_bot).map((m) => {
+            const pk = publicKeyToString(m.public_key);
+            if (pk === (server?.ownerPublicKey ?? null)) return null;
+            return (
+              <label key={pk} style={{ display: "block" }}>
+                <input type="checkbox" checked={replicas.includes(pk)} disabled={busy}
+                  aria-label={`${memberDisplayName(m.display_name)} keeps a copy`}
+                  onChange={(e) => toggleReplica(pk, e.target.checked)} />
+                {" "}{memberDisplayName(m.display_name)}
+              </label>
+            );
+          })}
+        </div>
+      )}
       {note && <div style={{ marginTop: 8 }}>{note}</div>}
       {error && <div className="error-text" style={{ marginTop: 8 }}>{error}</div>}
     </div>

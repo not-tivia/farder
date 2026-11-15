@@ -1310,6 +1310,28 @@ fn spawn_host_probe(address: String, conn: Arc<ServerConnection>, keypair: Keypa
     });
 }
 
+/// Owner only: allow (or stop allowing) a member to keep a full copy of this server. A replica sees
+/// EVERYTHING the host sees (all channels, invite codes). Returns who is a replica afterwards.
+#[tauri::command]
+pub async fn set_replica(state: State<'_, Arc<AppState>>, server_id: String, member: String, enabled: bool) -> Result<Vec<String>, String> {
+    let member = parse_public_key(&member)?;
+    match bridge::send_request(&state, &server_id, ServerRequest::SetReplica { member, enabled }).await.map_err(|e| e.to_string())? {
+        ServerResponse::Replicas { members } => Ok(members.iter().map(|m| m.to_string()).collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Owner only: which members are allowed to keep a full copy.
+#[tauri::command]
+pub async fn list_replicas(state: State<'_, Arc<AppState>>, server_id: String) -> Result<Vec<String>, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ListReplicas).await.map_err(|e| e.to_string())? {
+        ServerResponse::Replicas { members } => Ok(members.iter().map(|m| m.to_string()).collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
 /// Backup addresses for a saved server (this device only).
 #[tauri::command]
 pub fn get_fallback_addresses(address: String) -> Vec<String> {

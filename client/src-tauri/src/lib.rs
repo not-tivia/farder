@@ -232,6 +232,8 @@ pub fn run() {
             commands::create_thread,
             commands::search_messages,
             commands::create_invite,
+            commands::set_replica,
+            commands::list_replicas,
             commands::get_fallback_addresses,
             commands::set_fallback_addresses,
             commands::get_connection_route,

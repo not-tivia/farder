@@ -350,7 +350,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
             <PowersTab serverId={serverId} logServerId={logServerId} />
           )}
           {activeTab === "backup" && serverId && (
-            <BackupCopyTab serverId={serverId} />
+            <BackupCopyTab serverId={serverId} isOwner={!!ownPk && ownPk === (activeServer?.ownerPublicKey ?? null)} />
           )}
           {activeTab === "recovery" && serverId && logServerId && (
             <RecoveryTab

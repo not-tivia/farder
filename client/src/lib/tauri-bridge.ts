@@ -25,6 +25,17 @@ export async function connectServer(address: string, inviteCode?: string, setupT
   });
 }
 
+/** Owner only: allow or stop a member keeping a full copy of the server. A replica sees EVERYTHING the
+ *  host sees. Returns the replicas (as `vk_...` keys) afterwards. */
+export async function setReplica(serverId: string, member: string, enabled: boolean): Promise<string[]> {
+  return invoke<string[]>("set_replica", { serverId, member, enabled });
+}
+
+/** Owner only: who may keep a full copy. */
+export async function listReplicas(serverId: string): Promise<string[]> {
+  return invoke<string[]>("list_replicas", { serverId });
+}
+
 /** Backup addresses (host:port) tried in order when the host does not answer: a replica serving a
  *  read-only saved copy. Kept on this device only. */
 export async function getFallbackAddresses(address: string): Promise<string[]> {
