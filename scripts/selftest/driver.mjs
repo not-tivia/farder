@@ -1497,7 +1497,7 @@ async function brake() {
       const info = await A.page.evaluate(async (nm) => {
         const inv = window.__TAURI_INTERNALS__.invoke;
         const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
-        return (await inv("get_server_info_v2", { serverId: s.id })).channels.map((c) => ({ id: c.id, name: c.name }));
+        return (await inv("get_server_info_v2", { serverId: s.id })).channels.map((c) => ({ id: (c.base || c).id, name: (c.base || c).name }));
       }, name);
       ids = info.filter((c) => c.name.startsWith(`brake-${stamp}-`)).map((c) => c.id);
       if (ids.length < 7) await new Promise((r) => setTimeout(r, 500));
