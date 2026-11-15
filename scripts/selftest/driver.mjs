@@ -219,7 +219,13 @@ async function buddy() {
     await box.fill("from the mini window " + stamp);
     await box.press("Enter");
     const t0 = Date.now();
-    await chat.locator(".mini-chat-text", { hasText: "from the mini window " + stamp }).first().waitFor({ timeout: 90000 });
+    try { await chat.locator(".mini-chat-text", { hasText: "from the mini window " + stamp }).first().waitFor({ timeout: 20000 }); }
+    catch (e) {
+      await shot(chat, "A-chat-after-send");
+      const lines = await chat.locator(".mini-chat-line").allInnerTexts();
+      const notes = await chat.locator(".mini-chat-note").allInnerTexts();
+      throw new Error("the chat window shows " + JSON.stringify(lines) + " notes " + JSON.stringify(notes) + " (wanted: from the mini window " + stamp + ")");
+    }
     const t1 = Date.now();
     await seesText(B, "from the mini window " + stamp, 90000);
     return `shown in the chat window after ${Math.round((t1 - t0) / 1000)}s, in B after ${Math.round((Date.now() - t0) / 1000)}s`;
