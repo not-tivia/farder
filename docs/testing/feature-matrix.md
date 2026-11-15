@@ -24,7 +24,7 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 | T2 Client crate | `cd client/src-tauri && cargo test -- --test-threads=1` | last run green (buddy 6 tests) |
 | T3 Frontend | `client/scripts/run-unit-tests.sh` + `npx tsc --noEmit` | 91 pass, tsc clean |
 | T4 Audits | `scripts/seam_audit.py`, `reachability_audit.py`, `doc_audit.py` | not re-run this session |
-| T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-14: core 9, dm 7, buddy 5, edit 3, direct 4, relaunch 6, direct-relaunch 3 = 37/37 PASS in one run (relay and direct servers) |
+| T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-14: 13 scenarios, 55/55 checks PASS in one run (core 9, dm 7, buddy 5, edit 3, direct 4, unread 4, popup 2, attach 2, garble 2, strip 2, themes 6, relaunch 6, direct-relaunch 3); relay and direct servers |
 
 ## Core chat (what friends will use)
 
