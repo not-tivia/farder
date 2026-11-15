@@ -22,9 +22,11 @@ $env:ANDROID_NDK_ROOT = $ndk.FullName
 $sdkCmake = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Android\Sdk\cmake") -Directory | Sort-Object Name -Descending | Select-Object -First 1
 if ($sdkCmake) { $env:PATH = (Join-Path $sdkCmake.FullName "bin") + ";" + $env:PATH }
 $env:CMAKE_GENERATOR = "Ninja"
-$env:CMAKE_TOOLCHAIN_FILE_aarch64_linux_android = Join-Path $ndk.FullName "build\cmake\android.toolchain.cmake"
+$env:CMAKE_TOOLCHAIN_FILE_aarch64_linux_android = Join-Path $PSScriptRoot "android-toolchain.cmake"
 $env:CARGO_TARGET_DIR = Join-Path (Split-Path -Parent $PSScriptRoot) "target-android-check"
 rustup target add $triple | Out-Null
+# A leftover CMake cache from a run with a different generator makes CMake refuse to continue.
+Get-ChildItem (Join-Path $env:CARGO_TARGET_DIR "$triple\debug\build") -Directory -Filter "audiopus_sys-*" -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -Recurse -Force (Join-Path $_.FullName "out") -ErrorAction SilentlyContinue }
 Set-Location (Split-Path -Parent $PSScriptRoot)
 Write-Host "NDK: $($ndk.Name)"
 $crates = @("farder-protocol", "farder-crypto", "farder-history", "farder-e2ee-client", "farder-mls")

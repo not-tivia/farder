@@ -92,6 +92,7 @@ pub fn start_minimized_setting() -> bool {
     crate::commands::settings_get("start_minimized").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Bring the main window forward from wherever it is (hidden, minimised, behind).
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -99,6 +100,11 @@ pub fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn show_main(app: &AppHandle) {
+    
 }
 
 /// Quit for real: stop hosted servers, then exit the whole process (including the
@@ -111,6 +117,7 @@ pub fn quit_app(app: &AppHandle) {
     app.exit(0);
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// The main window's close handler.
 pub fn handle_main_close(window: &Window, api: &tauri::CloseRequestApi) {
     let app = window.app_handle();
@@ -125,6 +132,11 @@ pub fn handle_main_close(window: &Window, api: &tauri::CloseRequestApi) {
             quit_app(app);
         }
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn handle_main_close(window: &Window, api: &tauri::CloseRequestApi) {
+    
 }
 
 /// The first time the window hides to the tray, say so (once, ever) -- otherwise
@@ -179,6 +191,7 @@ pub fn plan_layout(small: bool, cur_w: f64, cur_h: f64) -> LayoutPlan {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Switch the main window between the full and the small layout: change its
 /// minimum size and, if needed, its size. The page changes what it draws.
 #[tauri::command]
@@ -198,6 +211,12 @@ pub fn set_window_layout(app: AppHandle, small: bool) -> Result<(), String> {
     if let Some((w, h)) = plan.size {
         main.set_size(tauri::LogicalSize::new(w, h)).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn set_window_layout(app: AppHandle, small: bool) -> Result<(), String> {
     Ok(())
 }
 

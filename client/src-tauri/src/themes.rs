@@ -342,6 +342,7 @@ pub fn rename_user_theme(id: String, new_name: String) -> Result<(), String> {
     std::fs::write(&meta_path, pretty).map_err(|e| format!("write theme.json failed: {}", e))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
     use std::process::Command;
@@ -386,6 +387,12 @@ pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| format!("explorer failed: {}", e));
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("not available on this platform".to_string())
 }
 
 #[cfg(target_os = "linux")]

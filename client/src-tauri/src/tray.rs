@@ -1,9 +1,11 @@
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle,
 };
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Build the system-tray icon. Returns an error if it could not be created, in
 /// which case the app must NOT start hidden or hide on close (see
 /// `window_behavior`): with no tray there would be no way back in.
@@ -38,5 +40,11 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.icon(icon.clone());
     }
     let _tray = builder.build(app)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn setup_tray(_app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    // Phones have no system tray.
     Ok(())
 }

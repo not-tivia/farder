@@ -105,6 +105,7 @@ pub fn layout_for(s: &StripSettings, work_x: i32, work_y: i32, work_w: u32, work
     Layout { x, y, width, height: HEIGHT }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Build the window if it does not exist. Hidden and unfocusable from birth so it
 /// can never steal a keystroke. Opaque (not transparent): the strip has no
 /// see-through padding, so there is nothing for Windows to outline.
@@ -132,11 +133,22 @@ pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Destroy the window, freeing its browser process. Safe if it is not there.
 pub fn close_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(LABEL) {
         let _ = w.destroy();
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn close_window(app: &AppHandle) {
+    
 }
 
 /// The strip settings, for the settings screen and the strip's own page.
@@ -161,6 +173,7 @@ pub async fn set_edge_strip(app: AppHandle, settings: StripSettings) -> Result<S
     Ok(s)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// The page says whether it has anything to show; place the window and show or
 /// hide it. Called whenever the page's content changes.
 #[tauri::command]
@@ -187,6 +200,13 @@ pub fn strip_layout(app: AppHandle, has_content: bool) -> Result<(), String> {
     win.show().map_err(|e| e.to_string())
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn strip_layout(app: AppHandle, has_content: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// The strip normally NEVER takes focus. Typing a reply is the one time it must:
 /// the page asks for focus when the reply box opens and gives it up again after.
 #[tauri::command]
@@ -201,12 +221,19 @@ pub fn strip_focus(app: AppHandle, focusable: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn strip_focus(app: AppHandle, focusable: bool) -> Result<(), String> {
+    Ok(())
+}
+
 #[derive(Serialize, Clone)]
 struct OpenPayload {
     server_id: Option<String>,
     channel_id: Option<u64>,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// A chip or the preview was clicked: bring the real app forward and ask it to
 /// show that conversation (`strip:open`, handled in `useServerEvents.ts`). With no
 /// target it just opens the app.
@@ -219,6 +246,12 @@ pub fn strip_open(app: AppHandle, server_id: Option<String>, channel_id: Option<
     let _ = main.show();
     let _ = app.emit_to("main", "strip:open", OpenPayload { server_id, channel_id });
     main.set_focus().map_err(|e| e.to_string())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn strip_open(app: AppHandle, server_id: Option<String>, channel_id: Option<u64>) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(test)]

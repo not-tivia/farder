@@ -79,6 +79,7 @@ struct PushPayload {
     reply: Option<ReplyTarget>,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Build the window if it does not exist. Hidden and unfocusable from birth so
 /// it can never steal a keystroke from whatever the person is typing into.
 pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
@@ -105,6 +106,11 @@ pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn ensure_window(app: &AppHandle) -> Result<bool, String> {
+    Ok(false)
+}
+
 /// Windows 11 draws a 1px accent-coloured line around even a borderless window,
 /// which showed up as a pink rectangle 8px outside the card (the window is the
 /// card plus transparent padding). Ask DWM for "no border". Best-effort: Windows
@@ -126,11 +132,17 @@ pub(crate) fn hide_system_border(win: &tauri::WebviewWindow) {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Destroy the pop-up window, freeing its browser process. Safe if it is not there.
 pub fn close_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(LABEL) {
         let _ = w.destroy();
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn close_window(app: &AppHandle) {
+    
 }
 
 /// Hand a notification to the pop-up window.
@@ -157,6 +169,7 @@ pub fn push(
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Called by the pop-up page whenever what it shows changes: `count` cards taking
 /// `height` logical pixels in total (0 cards hides the window).
 #[tauri::command]
@@ -188,6 +201,13 @@ pub fn notify_layout(app: AppHandle, count: u32, height: f64) -> Result<(), Stri
     win.show().map_err(|e| e.to_string())
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn notify_layout(app: AppHandle, count: u32, height: f64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// The pop-up normally NEVER takes focus (it must not steal keystrokes from
 /// whatever you are typing into). Typing a reply is the one time it must: the
 /// page asks for focus when a reply box opens and gives it up again when it
@@ -204,6 +224,13 @@ pub fn notify_focus(app: AppHandle, focusable: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn notify_focus(app: AppHandle, focusable: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// A card was clicked: bring the real app forward.
 #[tauri::command]
 pub fn notify_activate(app: AppHandle) -> Result<(), String> {
@@ -213,6 +240,12 @@ pub fn notify_activate(app: AppHandle) -> Result<(), String> {
     let _ = main.unminimize();
     let _ = main.show();
     main.set_focus().map_err(|e| e.to_string())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn notify_activate(app: AppHandle) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(test)]

@@ -68,6 +68,7 @@ fn clean_title(raw: &str) -> String {
     if t.is_empty() { "Farder chat".to_string() } else { t.to_string() }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Build the buddy list window if it is not there; otherwise bring it forward.
 pub fn open_buddy_window(app: &AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(BUDDY_LABEL) {
@@ -84,6 +85,11 @@ pub fn open_buddy_window(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn open_buddy_window(app: &AppHandle) -> Result<(), String> {
+    Err("not available on this platform".to_string())
 }
 
 #[tauri::command]
@@ -105,6 +111,7 @@ pub async fn open_buddy_list(app: AppHandle) -> Result<(), String> {
     open_buddy_window(&app)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Open (or bring forward) the chat window for one conversation. `title` only
 /// names the window; what it shows comes from the main window, which checks that
 /// the conversation exists.
@@ -135,6 +142,12 @@ pub async fn chat_open(app: AppHandle, server_id: String, channel_id: u64, title
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn chat_open(app: AppHandle, server_id: String, channel_id: u64, title: String) -> Result<(), String> {
+    Err("not available on this platform".to_string())
 }
 
 /// Percent-encode everything except unreserved characters.
