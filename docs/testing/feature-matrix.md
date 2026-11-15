@@ -20,7 +20,7 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 
 | Tier | What it is | Last result |
 |---|---|---|
-| T1 Rust workspace | `cargo test --workspace --no-fail-fast` | 1 flake: `farder-mls` store tests (2) fail in parallel, pass with `--test-threads=1` (a shared at-rest key leaks between tests; test isolation, not product) |
+| T1 Rust workspace | `cargo test --workspace --no-fail-fast` | green; the `farder-mls` store tests used to fail in parallel (shared at-rest key) and now hold a lock, fixed 2026-11-14 |
 | T2 Client crate | `cd client/src-tauri && cargo test -- --test-threads=1` | last run green (buddy 6 tests) |
 | T3 Frontend | `client/scripts/run-unit-tests.sh` + `npx tsc --noEmit` | 91 pass, tsc clean |
 | T4 Audits | `scripts/seam_audit.py`, `reachability_audit.py`, `doc_audit.py` | not re-run this session |
@@ -48,11 +48,12 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 |---|---|---|
 | Themes (6) | UNVERIFIED | |
 | Tray, start in tray, start with Windows | UNVERIFIED | checklist Parts 1-2 |
-| Notification pop-up | UNVERIFIED | checklist Part 3; keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
+| Notification pop-up (message from another server: shows it, Reply from the pop-up reaches the sender) | VERIFIED | selftest popup. NOT automatable: pop-up when Farder is in the BACKGROUND (the test driver forces "has focus"), position/centring, keyboard focus after use: still checklist Part 3, chris to eyeball. keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
 | Autoplay | UNVERIFIED | Part 4 |
 | Garbler and powers | UNVERIFIED | Part 5; same-account issue |
 | Sound | UNVERIFIED | Part 6 |
 | Message density | UNVERIFIED | Part 8 |
+| Unread markers (dot on another server, highlight on a conversation) | VERIFIED | selftest unread |
 | Edge strip | UNVERIFIED | Part 9 |
 | Small window layout | UNVERIFIED | Part 10 |
 | Buddy list shows people and channels | VERIFIED | chris 2026-11-09; selftest buddy 2026-11-14 (channels; DM rows not yet) |

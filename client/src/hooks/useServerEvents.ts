@@ -164,7 +164,7 @@ function notifyIfWanted(serverId: string, message: MessageInfo, text: string): v
 /** True when Farder is minimised, behind another program, or on another desktop. */
 function appIsInBackground(): boolean {
   const bg = typeof document !== "undefined" && !document.hasFocus();
-  if (!bg) console.log("[notify] no pop-up: Farder has keyboard focus and the message is in the channel you are viewing");
+  if (!bg) console.log("[notify] no pop-up: Farder is the window in front, so the unread marker shows it instead");
   return bg;
 }
 

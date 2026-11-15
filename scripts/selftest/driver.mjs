@@ -56,7 +56,7 @@ async function attach1(port, who) {
   page.on("pageerror", (e) => console.log(`[${who}] page error: ${e.message.split("\n")[0]}`));
   // Keep the app's own [chat]/[buddy] log lines so a failure can show what it did.
   const logs = [];
-  page.on("console", (m) => { const t = m.text(); if (/^\[(chat|buddy)\]/.test(t)) logs.push(`${new Date().toISOString().slice(11, 19)} ${t.slice(0, 160)}`); });
+  page.on("console", (m) => { const t = m.text(); if (/^\[(chat|buddy|notify)\]/.test(t)) logs.push(`${new Date().toISOString().slice(11, 19)} ${t.slice(0, 160)}`); });
   return { browser, ctx, page, who, logs };
 }
 
@@ -451,6 +451,80 @@ async function directRelaunch() {
   await B.browser.close().catch(() => {});
 }
 
+// Unread markers: the dot on a server you are not looking at, and the highlight on
+// a conversation you are not looking at. Run after `direct` (needs two servers + a DM).
+async function unread() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const first = `.server-icon[title="SelfTest ${stamp}"]`;
+  const second = `.server-icon[title="Direct ${stamp}"]`;
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  await check("B looks at the direct server; A posts in the first one; B's first server shows an unread dot", async () => {
+    await B.page.locator(second).click();
+    await A.page.locator(first).click();
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await sendText(A, "unread ping " + stamp);
+    await B.page.locator(`${first} .server-unread-dot`).waitFor({ timeout: 30000 });
+    await shot(B.page, "B-unread-dot");
+  });
+  await check("B opens that server: the dot goes away and the line is there", async () => {
+    await B.page.locator(first).click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await seesText(B, "unread ping " + stamp, 20000);
+    await B.page.locator(`${first} .server-unread-dot`).waitFor({ state: "detached", timeout: 15000 });
+  });
+  await check("A messages B in their DM while B reads #general: B's DM entry is highlighted as unread", async () => {
+    await A.page.locator(".channel-item.dm-item", { hasText: "Bob" }).first().click();
+    await A.page.getByRole("button", { name: "Pop Out" }).waitFor({ timeout: 20000 });
+    await sendText(A, "dm unread " + stamp);
+    await B.page.locator(".channel-item.dm-item.unread", { hasText: "Alice" }).waitFor({ timeout: 30000 });
+    await shot(B.page, "B-dm-unread");
+  });
+  await check("B opens the DM: the highlight goes away and the message is readable", async () => {
+    await B.page.locator(".channel-item.dm-item", { hasText: "Alice" }).first().click();
+    await seesText(B, "dm unread " + stamp, 20000);
+    await B.page.locator(".channel-item.dm-item.unread").waitFor({ state: "detached", timeout: 15000 });
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// The notification pop-up (a separate window): a message arrives while B is not
+// looking at that channel; the pop-up must show it, and a reply typed in the pop-up
+// must reach A. Run after `core`.
+async function popup() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const first = `.server-icon[title="SelfTest ${stamp}"]`;
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  await A.page.locator(first).click().catch(() => {});
+  await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+  // B looks at the other (direct) server, so a line in the first one is not what B is viewing.
+  await B.page.locator(`.server-icon[title="Direct ${stamp}"]`).click();
+  let pop;
+  if (!(await check("a message arrives: B's pop-up window shows it", async () => {
+    await sendText(A, "popup ping " + stamp);
+    pop = await pageMatching(B, /[?&]notify=1/, 30000);
+    await pop.locator(".notify-popup-card", { hasText: "popup ping " + stamp }).first().waitFor({ timeout: 30000 });
+    await shot(pop, "B-popup");
+  }))) return;
+  await check("the pop-up has a Reply button, and a reply typed there reaches A", async () => {
+    await pop.locator(".notify-popup-reply-btn").first().click();
+    const box = pop.locator(".notify-popup-reply-input");
+    await box.fill("popup reply " + stamp);
+    await box.press("Enter");
+    await seesText(A, "popup reply " + stamp, 30000);
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -459,6 +533,8 @@ try {
   else if (scenario === "dm") await dm();
   else if (scenario === "edit") await edit();
   else if (scenario === "direct") await direct();
+  else if (scenario === "unread") await unread();
+  else if (scenario === "popup") await popup();
   else if (scenario === "direct-relaunch") await directRelaunch();
   else throw new Error("unknown scenario " + scenario);
 } catch (e) {
