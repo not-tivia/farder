@@ -10,14 +10,27 @@ import { setLastChannel } from "./lastChannel";
  * its history and mark it read. Shared by the channel list in the full layout and
  * the conversation list in the small-window layout.
  */
-export async function selectChannel(dispatch: Dispatch<AppAction>, serverId: string, channel: ChannelInfo): Promise<void> {
+export async function selectChannel(
+  dispatch: Dispatch<AppAction>,
+  serverId: string,
+  channel: ChannelInfo,
+  /** For a direct message: the other person's key, so the history is decrypted. */
+  peerPk?: string | null,
+): Promise<void> {
   dispatch({ type: "SELECT_CHANNEL", serverId, payload: channel.id });
   setLastChannel(serverId, channel.id);
   try {
     const msgs = isE2eeChannel(channel)
       ? flattenMessageInfoV2(await api.fetchHistoryV2(serverId, channel.id))
       : await api.fetchHistory(serverId, channel.id);
-    const reversed = msgs.reverse();
+    // A direct message is stored encrypted: without this the conversation opened
+    // from the list showed raw ciphertext (the open-from-profile path decrypts).
+    const readable = peerPk
+      ? await Promise.all(msgs.map(async (m) => {
+          try { return { ...m, content: await api.dmDecrypt(peerPk, m.content) }; } catch { return m; }
+        }))
+      : msgs;
+    const reversed = readable.reverse();
     dispatch({ type: "SET_MESSAGES", serverId, payload: { channelId: channel.id, messages: reversed } });
     if (reversed.length > 0) {
       const latestId = Math.max(...reversed.map((m) => m.id));

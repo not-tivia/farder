@@ -40,7 +40,8 @@ export default function CompactList({ voice }: { voice: UseVoice }) {
   const unread = (id: number) => id !== currentChannelId && (messages[id] ?? []).some((m) => m.id > (readState[id] ?? 0));
 
   function open(ch: ChannelInfo) {
-    if (serverId) void selectChannel(dispatch, serverId, ch);
+    const dm = dms.find((d) => d.channel.id === ch.id);
+    if (serverId) void selectChannel(dispatch, serverId, ch, dm ? publicKeyToString(dm.participant.public_key) : null);
   }
 
   async function leaveVoice() {

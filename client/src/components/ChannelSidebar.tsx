@@ -370,7 +370,8 @@ export default function ChannelSidebar({ voice }: { voice: UseVoice }) {
 
   async function handleSelectChannel(channel: ChannelInfo) {
     if (!serverId) return;
-    await selectChannel(dispatch, serverId, channel);
+    const dm = dms.find((d) => d.channel.id === channel.id);
+    await selectChannel(dispatch, serverId, channel, dm ? publicKeyToString(dm.participant.public_key) : null);
   }
 
   async function handleMoveChannel(channelId: number, targetCategoryId: number | null, targetPosition: number) {

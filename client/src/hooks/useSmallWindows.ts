@@ -4,6 +4,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useApp } from "../context/ServerContext";
 import { getOwnPk } from "./useServerEvents";
 import * as api from "../lib/tauri-bridge";
+import { setWatched, subscriptionIds } from "../lib/watchedChannels";
 import { flattenMessageInfoV2, isE2eeChannel, publicKeyToString } from "../lib/types";
 import {
   BUDDY_READY_EVENT, BUDDY_STATE_EVENT, CHAT_READ_EVENT, CHAT_READY_EVENT, CHAT_STATE_EVENT,
@@ -37,6 +38,23 @@ export function useSmallWindows(): void {
     }
   }
 
+  /** Tell the server we want live messages for every channel a chat window shows. */
+  function syncWatched() {
+    const bySrv = new Map<string, number[]>();
+    for (const r of chats.current.values()) bySrv.set(r.serverId, [...(bySrv.get(r.serverId) ?? []), r.channelId]);
+    const servers = new Set<string>([...bySrv.keys(), ...Object.keys(stateRef.current.servers)]);
+    for (const sid of servers) {
+      const ids = bySrv.get(sid) ?? [];
+      // For the server on screen, AppShell does the subscribing (it listens for this change).
+      setWatched(sid, ids);
+      const sv = stateRef.current.servers[sid];
+      if (sid !== stateRef.current.activeServerId && sv?.connected && ids.length > 0) {
+        const all = subscriptionIds([sv.currentChannelId], sid);
+        api.subscribeChannels(sid, all).catch((e) => console.warn("[chat] could not subscribe for the chat window:", e));
+      }
+    }
+  }
+
   async function publish() {
     const st = stateRef.current;
     const own = await getOwnPk();
@@ -54,7 +72,7 @@ export function useSmallWindows(): void {
     }
     // Each open chat window gets its own conversation, addressed by label.
     for (const [label, ref] of [...chats.current]) {
-      if (!(await exists(label))) { chats.current.delete(label); lastSent.current.delete(label); continue; }
+      if (!(await exists(label))) { chats.current.delete(label); lastSent.current.delete(label); syncWatched(); continue; }
       const cs = buildChatState(st.servers[ref.serverId], ref.serverId, ref.channelId, own);
       const json = JSON.stringify(cs);
       if (lastSent.current.get(label) === json) continue;
@@ -112,6 +130,7 @@ export function useSmallWindows(): void {
       if (!ref) return;
       chats.current.set(ref.label, ref);
       console.log("[chat] window asked for its conversation:", ref.label);
+      syncWatched();
       void loadHistory(ref);
       lastSent.current.delete(ref.label);
       schedule();
