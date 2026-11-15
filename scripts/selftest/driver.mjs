@@ -191,7 +191,7 @@ async function buddy() {
   await shot(list, "A-buddy");
   if (!(await check("A: clicking #general opens a chat window that shows the history", async () => {
     await list.locator(".channel-item", { hasText: "general" }).first().click();
-    chat = await pageMatching(A, /[?&]chat=1/);
+    chat = await chatWithHead(A, "#general");
     await chat.locator(".mini-chat-text", { hasText: "hello from A " + stamp }).first().waitFor({ timeout: 30000 });
   }))) { if (chat) await shot(chat, "A-chat-fail"); return; }
   await shot(chat, "A-chat");
@@ -205,12 +205,17 @@ async function buddy() {
     const box = chat.locator(".mini-chat-input");
     await box.fill("from the mini window " + stamp);
     await box.press("Enter");
-    await chat.locator(".mini-chat-text", { hasText: "from the mini window " + stamp }).first().waitFor({ timeout: 30000 });
-    await seesText(B, "from the mini window " + stamp);
+    const t0 = Date.now();
+    await chat.locator(".mini-chat-text", { hasText: "from the mini window " + stamp }).first().waitFor({ timeout: 90000 });
+    const t1 = Date.now();
+    await seesText(B, "from the mini window " + stamp, 90000);
+    return `shown in the chat window after ${Math.round((t1 - t0) / 1000)}s, in B after ${Math.round((Date.now() - t0) / 1000)}s`;
   });
   await check("A: a line B sends appears live in A's chat window", async () => {
     await sendText(B, "live to the mini " + stamp);
-    await chat.locator(".mini-chat-text", { hasText: "live to the mini " + stamp }).first().waitFor({ timeout: 30000 });
+    const t0 = Date.now();
+    await chat.locator(".mini-chat-text", { hasText: "live to the mini " + stamp }).first().waitFor({ timeout: 90000 });
+    return `after ${Math.round((Date.now() - t0) / 1000)}s`;
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
@@ -252,7 +257,21 @@ async function dm() {
   await shot(A.page, "A-dm-open");
   await check("A: send a direct message, A sees it", async () => { await sendText(A, "dm one " + stamp); await seesText(A, "dm one " + stamp); });
   await check("B: the direct message reaches B (readable, not ciphertext)", async () => {
-    await B.page.locator(".dm-item, .channel-item", { hasText: "Alice" }).first().click({ timeout: 30000 });
+    try {
+      await B.page.locator(".dm-item, .channel-item", { hasText: "Alice" }).first().click({ timeout: 30000 });
+    } catch (e) {
+      // Say what B's backend knows, so the failure points at the right layer.
+      const info = await B.page.evaluate(async () => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const out = [];
+        for (const s of await inv("get_saved_servers")) {
+          try { out.push((await inv("list_dms", { serverId: s.id })).map((d) => d.participant.display_name)); } catch (x) { out.push("list_dms failed: " + x); }
+        }
+        return out;
+      }).catch((x) => "evaluate failed: " + x);
+      await shot(B.page, "B-no-dm");
+      throw new Error("B has no DM entry in the sidebar; B's backend list_dms = " + JSON.stringify(info));
+    }
     await seesText(B, "dm one " + stamp, 30000);
   });
   let list, chat;

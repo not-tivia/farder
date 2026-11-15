@@ -242,6 +242,29 @@ export function useServerEvents(): void {
       const serverId = data.server_id as string;
       const message = data.message as MessageInfo;
 
+      // A message for a conversation this window has never heard of is almost
+      // always the first message of a NEW direct message (the "new DM" event can be
+      // missed): ask for the DM list again so it appears instead of staying hidden.
+      {
+        const known = stateRef.current.servers[serverId];
+        if (known && !known.channels.some((c) => c.id === message.channel_id) && !known.dms.some((d) => d.channel.id === message.channel_id)) {
+          const channelId = message.channel_id;
+          api.listDms(serverId).then(async (dms) => {
+            dispatch({ type: "SET_DMS", serverId, payload: dms });
+            // This very message was just stored as raw ciphertext (the DM was not
+            // known yet): load the conversation again, decrypted, to replace it.
+            const dm = dms.find((d) => d.channel.id === channelId);
+            if (!dm) return;
+            const peer = publicKeyToString(dm.participant.public_key);
+            const raw = await api.fetchHistory(serverId, channelId);
+            const plain = await Promise.all(raw.map(async (m) => {
+              try { return { ...m, content: await api.dmDecrypt(peer, m.content) }; } catch { return m; }
+            }));
+            dispatch({ type: "SET_MESSAGES", serverId, payload: { channelId, messages: plain.reverse() } });
+          }).catch(() => {});
+        }
+      }
+
       // Check if this is a DM channel so we can decrypt the content
       const serverState = stateRef.current.servers[serverId];
       const dmEntry = serverState?.dms.find(d => d.channel.id === message.channel_id);
@@ -801,7 +824,7 @@ export function useServerEvents(): void {
     listen("server:dm_created", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
-      if (serverId !== activeRef.current) return;
+      // Every server, not only the one on screen: the buddy list shows them all.
       dispatch({ type: "DM_CREATED", serverId, payload: { channel: data.channel, participant: data.participant } });
     }).then(safePush);
 
