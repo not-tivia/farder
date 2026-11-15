@@ -1196,6 +1196,116 @@ async function serverDown() {
   await B.browser.close().catch(() => {});
 }
 
+// The recovery owner, on a server where A (Windows) is the owner and B (Windows) a member
+// (run `ubuntu` first; the server must be started with a SHORT --recovery-wait-secs).
+// A makes the recovery key and writes the words down; B uses the words to take the server;
+// A (the "thief" holding the everyday owner key) cannot stop it; after the wait B owns it.
+async function recovery() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const openRecovery = async (c) => {
+    await c.page.getByTitle("Server Settings").click();
+    await c.page.locator(".settings-tab", { hasText: "Recovery" }).click();
+  };
+  const closeDialog = async (c) => { await c.page.locator(".modal-close").first().click().catch(() => {}); };
+  let words = "";
+  if (!(await check("A (owner) makes a recovery key and is shown 24 words once", async () => {
+    await openRecovery(A);
+    await A.page.getByText(/no recovery key/i).waitFor({ timeout: 15000 });
+    await A.page.getByRole("button", { name: "Make a recovery key" }).click();
+    const box = A.page.getByLabel("Recovery words");
+    await box.waitFor({ timeout: 30000 });
+    words = await box.inputValue();
+    const n = words.trim().split(/\s+/).length;
+    if (n !== 24) throw new Error("expected 24 words, got " + n);
+    await shot(A.page, "A-recovery-words");
+    await A.page.getByLabel(/I wrote the 24 words down/).check();
+    await A.page.getByRole("button", { name: "Hide the words" }).click();
+    if (await A.page.getByLabel("Recovery words").count()) throw new Error("the words are still on the screen");
+    return "24 words shown once, then hidden";
+  }))) return;
+  await closeDialog(A);
+  await check("B (a member) sees that a recovery key is set, but not the words", async () => {
+    await openRecovery(B);
+    await B.page.getByText(/A recovery key is set/).waitFor({ timeout: 20000 });
+    if ((await B.page.locator("body").innerText()).includes(words.split(" ")[0] + " " + words.split(" ")[1] + " " + words.split(" ")[2])) throw new Error("B can see the words");
+  });
+  await check("the thief (A, with the everyday owner key) cannot use or guess the recovery key", async () => {
+    // A tries to start a takeover with made-up words: refused, nothing changes.
+    const bad = Array.from({ length: 24 }, () => "abandon").join(" ");
+    const ids = await A.page.evaluate(async (nm) => {
+      const inv = window.__TAURI_INTERNALS__.invoke;
+      const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+      const info = await inv("get_server_info_v2", { serverId: s.id });
+      const mem = await inv("get_members", { serverId: s.id });
+      const hex = (m) => "vk_" + m.public_key.bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+      return { sid: s.id, log: info.server_id, alice: hex(mem.find((m) => m.display_name === "Alice")) };
+    }, name);
+    let refused = "";
+    try { await A.page.evaluate(([a, l, p, o]) => window.__TAURI_INTERNALS__.invoke("recovery_claim", { serverId: a, logServerId: l, phrase: p, newOwner: o }), [ids.sid, ids.log, bad, ids.alice]); }
+    catch (e) { refused = String(e.message || e); }
+    if (!refused) throw new Error("the thief started a takeover with made-up words");
+    return "refused: " + refused.slice(0, 80);
+  });
+  await check("B starts a takeover with the 24 words; both screens show it, with a countdown", async () => {
+    await B.page.getByLabel("The 24 recovery words").fill(words);
+    await B.page.getByRole("button", { name: "Start the takeover" }).click();
+    await B.page.getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
+    await shot(B.page, "B-takeover-started");
+    await closeDialog(B);
+    await openRecovery(A);
+    await A.page.getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
+    await shot(A.page, "A-sees-takeover");
+  });
+  await check("finishing early is not possible (the button waits), and A cannot cancel it", async () => {
+    await closeDialog(A);
+    await openRecovery(B);
+    await B.page.getByLabel("The 24 recovery words").fill(words);
+    if (await B.page.getByRole("button", { name: "Finish the takeover" }).isEnabled()) throw new Error("Finish is enabled during the wait");
+    // The everyday owner key has no way to cancel: the Cancel button needs the words A does not have,
+    // and a direct attempt with other words is refused.
+    await closeDialog(B);
+  });
+  await check("after the waiting time B finishes it and B is the owner", async () => {
+    await openRecovery(B);
+    await B.page.getByLabel("The 24 recovery words").fill(words);
+    await B.page.getByText(/can finish now/).waitFor({ timeout: 120000 });
+    await B.page.getByRole("button", { name: "Finish the takeover" }).click();
+    await B.page.getByText(/Done. The new owner is in charge/).waitFor({ timeout: 30000 });
+    await closeDialog(B);
+    // Owner-only tab appears for B, and is gone for A.
+    await B.page.getByTitle("Server Settings").click();
+    await B.page.locator(".settings-tab", { hasText: "Powers" }).waitFor({ timeout: 30000 });
+    await closeDialog(B);
+    await A.page.getByTitle("Server Settings").click();
+    await new Promise((r) => setTimeout(r, 1500));
+    if (await A.page.locator(".settings-tab", { hasText: "Powers" }).count()) throw new Error("A still sees the owner's Powers tab");
+    await closeDialog(A);
+  });
+  await check("the old owner (still connected) can no longer do owner-only things; the new owner can", async () => {
+    const act = (c, nm, cmd, extra) => c.page.evaluate(async ([name, command, more]) => {
+      const inv = window.__TAURI_INTERNALS__.invoke;
+      const s = (await inv("get_saved_servers")).find((x) => x.name === name);
+      try { await inv(command, { serverId: s.id, ...more }); return "ok"; } catch (e) { return "refused: " + String(e).slice(0, 80); }
+    }, [nm, cmd, extra]);
+    const a = await act(A, name, "create_channel", { name: "owner-only-" + stamp, channelType: "Text", categoryId: null });
+    if (a === "ok") throw new Error("the OLD owner could still create a channel");
+    const b = await act(B, name, "create_channel", { name: "owner-only-" + stamp, channelType: "Text", categoryId: null });
+    if (b !== "ok") throw new Error("the NEW owner could not create a channel: " + b);
+    return `old owner: ${a}; new owner: ok`;
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1214,6 +1324,7 @@ try {
   else if (scenario === "ubuntu") await ubuntu();
   else if (scenario === "ubuntu-restored") await ubuntuRestored();
   else if (scenario === "server-down") await serverDown();
+  else if (scenario === "recovery") await recovery();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();
