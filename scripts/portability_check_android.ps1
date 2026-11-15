@@ -2,7 +2,7 @@
 # for Android using the NDK that Android Studio installed. Run on Windows:
 #   .\scripts\portability_check_android.ps1 [-Client]
 # Uses its own build folder so it never disturbs a normal build.
-param([switch]$Client)
+param([switch]$Client, [switch]$Link)
 $ErrorActionPreference = "Continue"
 $sdk = Join-Path $env:LOCALAPPDATA "Android\Sdk\ndk"
 $ndk = Get-ChildItem $sdk -Directory | Sort-Object Name -Descending | Select-Object -First 1
