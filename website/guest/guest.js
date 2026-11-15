@@ -79,9 +79,7 @@ async function openChannel(id) {
 
 async function enter() {
   $("status").textContent = "loading...";
-  const info = body(await ask('"GetServerInfo"')).ServerInfo;
-  $("server-name").textContent = info.name;
-  document.title = `${info.name} (guest) - Farder`;
+  let info = body(await ask('"GetServerInfo"')).ServerInfo;
   // On a server with a signed history, a guest also becomes a member of it (their own key signs that).
   if (info.server_id && !joined) {
     body(await askBytes((id) => key.begin_join(id, info.server_id, Date.now() / 1000)));
@@ -90,6 +88,10 @@ async function enter() {
     body(await askBytes((id) => key.finish_join(id, info.server_id, resolved.invite_event, Date.now() / 1000)));
     joined = true; store.set("joined", "1");
   }
+  // Until the guest is a member the server shows no channels, so ask again now.
+  info = body(await ask('"GetServerInfo"')).ServerInfo;
+  $("server-name").textContent = info.name;
+  document.title = `${info.name} (guest) - Farder`;
   send(key.profile_request(nextId++, store.get("name") || "Guest"));
   const list = body(await ask('"GetMembers"')).Members?.members || [];
   for (const m of list) members.set(keyOf(m.public_key), m.display_name);

@@ -61,6 +61,16 @@ unchanged.
 stream, a dumb frame pump with a route table, certificate pin, per-address cap, size and idle limits; tested
 against a fake server and against the real server (a guest joins with its own key, with limits).
 
+**Steps 3-5, the browser side (built and verified 2026-11-15, `docs/modules/web-guest.md`):**
+`crates/farder-web` (the real protocol and signing as WebAssembly), the guest page `website/guest/`,
+and the Caddy routes (`/<name>/t#<code>` and `/ws/*`). Verified in a real Edge browser against a real
+server through the gateway, 9 checks (`bash scripts/selftest/guest-suite.sh`): a guest joins with the
+link using its OWN key (also joining the server's signed history), reads history, writes, sees live
+messages, text is never rendered as HTML, a refresh keeps the same guest, a second person joins with the
+same link, a wrong code gets a plain explanation. A guest may only join and post through the signed
+history (server guard, tested with a deliberate break). The owner's side in this test is a Rust fixture
+that does what the app must do; the in-app screen is not built.
+
 **Known gaps in step 1:** on a server with a signed history a guest must also become a LOG member
 (`MemberJoined` citing the invite), which only the browser client can sign, so the end-to-end guest
 join is step 3/4; no owner screen for the switch yet; direct messages, uploads and reactions are not

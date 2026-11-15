@@ -55,6 +55,6 @@ expired" instead of "connection lost".
 
 ## Not done
 
-The browser side (crypto in WebAssembly, the guest screens, the `farder.xyz/<name>/t` route), a
-Caddy example, and joining a server that has a signed history (the guest must also become a log
-member, which only the browser client can sign).
+A Caddy install of the routes in `deploy/website/Caddyfile` (written, not run: no Caddy here), TLS
+(`wss://`) end to end, and a certificate pin for a server on another machine (tested only with the
+fake server and on one machine).

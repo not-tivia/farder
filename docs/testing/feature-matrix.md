@@ -110,4 +110,8 @@ See `docs/modules/portability.md`.
 | Server: guest invite type, owner switch (off by default), expiry, permission cap | VERIFIED (unit) | 2 tests, cap break caught |
 | Gateway: WebSocket to the real server, guest joins with its own key, limited | VERIFIED | `cargo test -p farder-gateway`, 6 tests incl. real server; pin break caught |
 | Refusal reasons reach a refused login (expired link etc.) | VERIFIED | same real-server test |
-| Browser crypto (WebAssembly), guest screens, `farder.xyz/<name>/t` route, joining a server with a signed history | NOT BUILT | |
+| Browser guest page: WebAssembly crypto, joins a server with a signed history with its OWN key, reads, writes, live messages, text-not-HTML, refresh keeps the guest, wrong code refused | VERIFIED | `bash scripts/selftest/guest-suite.sh`: real Edge, real server, via gateway, 9 checks |
+| A guest cannot use the signed history for anything but join/post | VERIFIED (unit) | test + deliberate break caught |
+| Caddy routes `/<name>/t` and `/ws/*` over real TLS | UNVERIFIED | written in `deploy/website/Caddyfile`, never run |
+| Owner's in-app screen for guest links (switch, make link) | NOT BUILT | |
+| Guest page on a phone browser | UNVERIFIED | responsive CSS only |

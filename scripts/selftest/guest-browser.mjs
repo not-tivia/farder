@@ -26,8 +26,8 @@ await check("the join screen loads (WebAssembly starts) and explains what a gues
   await page.goto(BASE + "#" + code);
   await page.locator("#join").waitFor({ timeout: 20000 });
   await page.locator("#name").waitFor();
-  const text = await page.locator("#join").innerText();
-  if (!/gateway|see the messages/i.test(text)) throw new Error("the privacy note is missing");
+  const text = await page.locator("#join").textContent();      // includes the folded-away details
+  if (!/gateway/i.test(text) || !/can see the messages/i.test(text)) throw new Error("the privacy note is missing");
   await page.screenshot({ path: `${SHOTS}/guest-join.png` });
 });
 await check("with a name and the guest link the guest gets into the chat", async () => {
