@@ -69,3 +69,11 @@ history under `events_before_reset_<time>` in the database, and starts a new his
 member. Start the server again. Channels and plain messages stay; everyone except the new owner
 rejoins with a fresh invite. End-to-end encrypted channels lose their membership. If the server
 HAS a recovery key, use the takeover in Server Settings > Recovery instead (`--force` overrides).
+
+## Protection against a stolen account: the bulk-damage brake
+
+By default one account (the owner too) can make 5 destructive changes (deleting channels, categories or
+roles, kicking or banning, removing bots or webhooks) in 10 minutes; the next one is refused with "slow
+down" and recorded in the audit log. If you really need to clean up in bulk, wait it out, or start the
+server with `--destructive-budget 50` (and back to the default afterwards); `--destructive-budget 0` turns
+it off. It is kept in memory, so restarting the server gives everyone a fresh budget.

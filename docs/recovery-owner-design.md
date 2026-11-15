@@ -154,7 +154,16 @@ restart. Not yet: a friendly "this server was reset by its host, rejoin" message
 
 **Rotation (verified 2026-11-15, recovery scenario now 10 checks):** with the current 24 words, "Replace the recovery key" makes a new key and shows its new words once; the old words are then refused ("not the recovery key of this server"), the new ones carry a takeover through. The audit log shows two `recovery_key_set` entries. The everyday owner key cannot rotate (rule pinned by unit tests).
 
+**Bulk-damage brake (built, verified 2026-11-15):** one account (the owner included) may make 5 destructive
+changes (delete a channel, category or role; kick or ban; remove a bot or webhook) in 10 minutes; the
+next is refused with a plain "slow down" and written to the audit log (`destructive_brake`) for everyone who
+manages the server. Only changes that actually happened use up the budget. Kept in memory, so a thief cannot
+reset it by restarting the server. The host changes it with `--destructive-budget N` (0 = off). It limits the
+RATE of damage by a stolen key (the thief gets 5 actions, not a wiped server); it does not undo anything or
+involve the recovery key. Verified: unit tests (a deliberate break was caught) and `ubuntu-suite.sh brake`
+on the real stack (Windows app owner, Ubuntu server).
+
 Not built yet:
 
 - A pop-up when a takeover starts (the banner for every member IS built).
-- The cooling-off period for destructive actions by the everyday key.
+- The cancellable waiting period for destructive actions by the everyday key (a pending-action system). What IS built instead is the bulk-damage brake below.
