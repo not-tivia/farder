@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="darkreader-lock">
+  <meta name="referrer" content="no-referrer">
+  <title>Farder guest</title>
+  <meta name="description" content="Join a Farder server from your browser as a guest, with no install and no account.">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="guest.css">
+</head>
+<body>
+  <main id="app">
+    <section id="join" class="card" hidden>
+      <h1 id="join-title">Join as a guest</h1>
+      <p class="plain">You were invited to chat on a Farder server. No install and no account: this page makes a
+        throwaway key in your browser. The link works for a short time, and your guest session ends with it.</p>
+      <label for="name">What should people call you?</label>
+      <input id="name" maxlength="32" autocomplete="off" placeholder="Your name">
+      <button id="go" type="button">Join the chat</button>
+      <p id="join-error" class="error" role="alert"></p>
+      <details class="plain">
+        <summary>What can this page see and do?</summary>
+        <ul>
+          <li>Guests can read and write in the server's normal text channels. No encrypted channels, no voice, no file uploads, no inviting.</li>
+          <li>The gateway that connects this page to the server can see the messages in those normal channels, the same way a relay can. Do not share secrets here.</li>
+          <li>Your key stays in this browser. Clearing site data ends your guest identity.</li>
+          <li>For all of that and more, <a href="../index.html#download">get the app</a>.</li>
+        </ul>
+      </details>
+    </section>
+
+    <section id="chat" class="chat" hidden>
+      <header>
+        <strong id="server-name">Farder</strong>
+        <span id="status" role="status">connecting...</span>
+      </header>
+      <div class="body">
+        <nav id="channels" aria-label="Channels"></nav>
+        <div class="pane">
+          <div id="messages" aria-live="polite"></div>
+          <form id="composer" autocomplete="off">
+            <input id="text" maxlength="2000" placeholder="Write a message" aria-label="Message">
+            <button type="submit">Send</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section id="problem" class="card" hidden>
+      <h1 id="problem-title">Could not join</h1>
+      <p id="problem-text" class="plain"></p>
+    </section>
+  </main>
+  <script type="module" src="guest.js"></script>
+</body>
+</html>

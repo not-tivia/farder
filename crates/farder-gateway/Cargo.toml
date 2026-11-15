@@ -22,3 +22,4 @@ rcgen = "0.13"
 farder-crypto = { workspace = true }
 farder-protocol = { workspace = true }
 tempfile = "3"
+futures-util = "0.3"

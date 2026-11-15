@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 farder-crypto = { workspace = true }
 farder-protocol = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 wasm-bindgen = "0.2"
 # The browser's random source (a guest's key is made from it). Only affects the wasm build.
 getrandom = { version = "0.2", features = ["js"] }

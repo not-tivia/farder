@@ -19,6 +19,15 @@
 	# and take the token with it.
 	rewrite /join/* /invite/index.html
 
+	# Browser guest links: https://<domain>/<server name>/t#<code>. The code is after the # so it is
+	# never sent to the web server or written in its logs. The page itself is one static file.
+	@guestlink path_regexp guestlink ^/[A-Za-z0-9_-]+/t/?$
+	rewrite @guestlink /guest/index.html
+
+	# The WebSocket the guest page talks to. The gateway (farder-gateway) listens on localhost only
+	# and only reaches the servers the host listed with --route.
+	reverse_proxy /ws/* 127.0.0.1:8480
+
 	file_server
 
 	# Nothing here is user content and nothing is uploaded; the site is four

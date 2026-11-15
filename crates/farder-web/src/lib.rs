@@ -7,6 +7,7 @@
 //!
 //! The logic is plain Rust functions (tested natively); the `#[wasm_bindgen]` layer is a thin wrapper.
 
+use farder_crypto::event_log::{DeviceCert, Event, EventPayload};
 use farder_crypto::identity::Keypair;
 use farder_protocol::{
     codec,
@@ -18,6 +19,8 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct GuestKey {
     kp: Keypair,
+    /// The first event of this guest's chain, kept between the two join steps.
+    first: Option<Event>,
 }
 
 #[wasm_bindgen]
@@ -25,13 +28,13 @@ impl GuestKey {
     /// A new random key (from the browser's secure random source).
     #[wasm_bindgen(constructor)]
     pub fn new() -> GuestKey {
-        GuestKey { kp: Keypair::generate() }
+        GuestKey { kp: Keypair::generate(), first: None }
     }
 
     /// Rebuild a key the page saved earlier (so a refresh does not log the guest out).
     pub fn from_secret(secret: &[u8]) -> Result<GuestKey, JsError> {
         let arr: [u8; 32] = secret.try_into().map_err(|_| JsError::new("a key is 32 bytes"))?;
-        Ok(GuestKey { kp: Keypair::from_signing_key_bytes(&arr) })
+        Ok(GuestKey { kp: Keypair::from_signing_key_bytes(&arr), first: None })
     }
 
     /// The secret, for the page to keep in the browser's own storage. Never send it anywhere.
@@ -42,6 +45,27 @@ impl GuestKey {
     /// The public key as the app shows it (`vk_` and 64 hex characters).
     pub fn public_key(&self) -> String {
         self.kp.public_key().to_string()
+    }
+
+    /// Join step 1 on a server with a signed history: the request frame that authorizes this guest's
+    /// device (a key made from the guest's own, so only one secret is kept). `now` is seconds since 1970.
+    pub fn begin_join(&mut self, id: u32, log_server_id: &str, now: f64) -> Result<Vec<u8>, JsError> {
+        let (ev, bytes) = begin_join(&self.kp, id, log_server_id, now as u64).map_err(|e| JsError::new(&e))?;
+        self.first = Some(ev);
+        Ok(bytes)
+    }
+
+    /// Join step 2: the request frame saying "I joined with this invite" (`invite_event` is what the
+    /// server answered to ResolveInvite). Call after step 1 was accepted.
+    pub fn finish_join(&self, id: u32, log_server_id: &str, invite_event: &str, now: f64) -> Result<Vec<u8>, JsError> {
+        let first = self.first.as_ref().ok_or_else(|| JsError::new("call begin_join first"))?;
+        finish_join(&self.kp, id, log_server_id, invite_event, first, now as u64).map_err(|e| JsError::new(&e))
+    }
+
+    /// The request frame that sets this guest's display name (signed by the guest's key).
+    pub fn profile_request(&self, id: u32, display_name: &str) -> Result<Vec<u8>, JsError> {
+        let profile = farder_crypto::profile::SignedProfile::create(&self.kp, display_name.to_string(), None, None).to_bytes();
+        codec::encode(&ClientFrame::Request { id, body: ServerRequest::UpdateProfile { profile } }).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Answer the server's Challenge frame: returns the Authenticate frame to send. The guest's own
@@ -65,6 +89,33 @@ pub fn decode_server_frame(bytes: &[u8]) -> Result<String, JsError> {
 }
 
 // ---- plain Rust, tested natively ----
+
+/// The guest's device key is derived from the guest's own with SHA-256 and a fixed label, so the page
+/// keeps one secret, the device key is stable across refreshes, and knowing the device key says
+/// nothing about the identity key.
+fn device_key(identity: &Keypair) -> Keypair {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"farder-guest-device-v1");
+    h.update(identity.signing_key_bytes());
+    let out: [u8; 32] = h.finalize().into();
+    Keypair::from_signing_key_bytes(&out)
+}
+
+pub fn begin_join(kp: &Keypair, id: u32, log_server_id: &str, now: u64) -> Result<(Event, Vec<u8>), String> {
+    let dev = device_key(kp);
+    let cert = DeviceCert::create(kp, &dev.public_key(), now);
+    let ev = Event::next(&dev, kp.public_key(), log_server_id.to_string(), None, 0, now, EventPayload::DeviceAuthorized { cert });
+    let bytes = codec::encode(&ClientFrame::Request { id, body: ServerRequest::SubmitEvent { event: ev.clone() } }).map_err(|e| e.to_string())?;
+    Ok((ev, bytes))
+}
+
+pub fn finish_join(kp: &Keypair, id: u32, log_server_id: &str, invite_event: &str, first: &Event, now: u64) -> Result<Vec<u8>, String> {
+    let dev = device_key(kp);
+    let ev = Event::next(&dev, kp.public_key(), log_server_id.to_string(), Some(first), first.core.lamport, now,
+        EventPayload::MemberJoined { member: kp.public_key(), invite: invite_event.to_string() });
+    codec::encode(&ClientFrame::Request { id, body: ServerRequest::SubmitEvent { event: ev } }).map_err(|e| e.to_string())
+}
 
 pub fn answer_challenge(kp: &Keypair, challenge_frame: &[u8], invite: &str) -> Result<Vec<u8>, String> {
     let frame: ServerFrame = codec::decode(challenge_frame).map_err(|e| format!("not a server frame: {e}"))?;
@@ -106,6 +157,25 @@ mod tests {
         // A returning guest sends no invite.
         let b2 = answer_challenge(&kp, &challenge, "").unwrap();
         assert!(matches!(codec::decode::<ClientFrame>(&b2).unwrap(), ClientFrame::Authenticate { invite_code: None, .. }));
+    }
+
+    #[test]
+    fn the_two_join_events_form_one_signed_chain() {
+        let kp = Keypair::generate();
+        let (first, b1) = begin_join(&kp, 1, "srv", 1000).unwrap();
+        let b2 = finish_join(&kp, 2, "srv", "invitehash", &first, 1001).unwrap();
+        let ClientFrame::Request { body: ServerRequest::SubmitEvent { event: e1 }, .. } = codec::decode(&b1).unwrap() else { panic!() };
+        let ClientFrame::Request { id, body: ServerRequest::SubmitEvent { event: e2 } } = codec::decode(&b2).unwrap() else { panic!() };
+        assert_eq!((e1.core.seq, e2.core.seq, id), (0, 1, 2));
+        assert_eq!(e2.core.prev, Some(e1.hash()));
+        assert!(e2.core.lamport > e1.core.lamport);
+        assert_eq!(e1.core.author, kp.public_key());
+        let EventPayload::DeviceAuthorized { cert } = &e1.core.payload else { panic!() };
+        assert_ne!(cert.core.device_pubkey, kp.public_key(), "the device key is not the identity key");
+        // The same secret always gives the same device (a refresh keeps the guest's chain valid).
+        assert_eq!(device_key(&kp).public_key(), device_key(&Keypair::from_signing_key_bytes(kp.signing_key_bytes())).public_key());
+        let EventPayload::MemberJoined { member, invite } = &e2.core.payload else { panic!() };
+        assert_eq!((member, invite.as_str()), (&kp.public_key(), "invitehash"));
     }
 
     #[test]
