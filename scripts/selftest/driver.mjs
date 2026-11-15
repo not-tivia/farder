@@ -195,6 +195,9 @@ async function buddy() {
   for (const c of [A, B]) {
     if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
   }
+  // A stays on whatever it was showing (after the DM scenario that is the DM, which
+  // is the interesting case for live updates); B looks at #general to read it.
+  await B.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
   let list, chat;
   if (!(await check("A: open the buddy list", async () => {
     await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("open_buddy_list"));
