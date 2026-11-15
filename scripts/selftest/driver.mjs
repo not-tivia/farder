@@ -1221,7 +1221,7 @@ async function recovery() {
     await openRecovery(A);
     await A.page.getByText(/no recovery key/i).waitFor({ timeout: 15000 });
     await A.page.getByRole("button", { name: "Make a recovery key" }).click();
-    const box = A.page.getByLabel("Recovery words");
+    const box = A.page.getByLabel("Recovery words", { exact: true });
     await box.waitFor({ timeout: 30000 });
     words = await box.inputValue();
     const n = words.trim().split(/\s+/).length;
@@ -1229,7 +1229,7 @@ async function recovery() {
     await shot(A.page, "A-recovery-words");
     await A.page.getByLabel(/I wrote the 24 words down/).check();
     await A.page.getByRole("button", { name: "Hide the words" }).click();
-    if (await A.page.getByLabel("Recovery words").count()) throw new Error("the words are still on the screen");
+    if (await A.page.getByLabel("Recovery words", { exact: true }).count()) throw new Error("the words are still on the screen");
     return "24 words shown once, then hidden";
   }))) return;
   await closeDialog(A);
