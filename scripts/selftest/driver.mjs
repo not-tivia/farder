@@ -525,6 +525,59 @@ async function popup() {
   await B.browser.close().catch(() => {});
 }
 
+// Every theme: switch to it on A, check it really applied, that the message text and
+// the sidebar text are readable against their background, that nothing sticks out
+// sideways, and keep a screenshot to look at. Run after `core` (needs messages on screen).
+async function themes() {
+  const A = await attach(PORT_A, "A");
+  if (await A.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(A);
+  await A.page.locator(".server-icon:not(.add-server)").first().click().catch(() => {});
+  await A.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  const list = await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("list_themes"));
+  const original = await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_active_theme").then((t) => t.id));
+  console.log("themes:", list.map((t) => t.id).join(", "));
+  for (const t of list) {
+    await check(`theme ${t.id}: applies, readable, nothing sticks out`, async () => {
+      await A.page.evaluate(async (id) => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const css = await inv("load_theme_css", { id });
+        document.getElementById("active-theme").textContent = css;
+        document.documentElement.dataset.theme = id;
+      }, t.id);
+      await new Promise((r) => setTimeout(r, 600));
+      const r = await A.page.evaluate((id) => {
+        const lum = (rgb) => { const m = rgb.match(/[\d.]+/g).map(Number); const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]); };
+        const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { if (getComputedStyle(e).backgroundImage !== "none") return null; /* a gradient or picture: cannot be measured here, look at the screenshot */ const c = getComputedStyle(e).backgroundColor; const m = c.match(/[\d.]+/g); if (m && (m.length < 4 || Number(m[3]) > 0.5)) return c; } return "rgb(255, 255, 255)"; };
+        const contrast = (el) => { const bg = bgOf(el); if (bg === null) return null; const a = lum(getComputedStyle(el).color), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+        const msg = document.querySelector(".message-content");
+        const side = document.querySelector(".channel-item:not(.active)");
+        const av = document.querySelector(".message-avatar");
+        return {
+          css: document.getElementById("active-theme").textContent.length,
+          dataset: document.documentElement.dataset.theme === id,
+          msg: msg ? contrast(msg) : null,
+          side: side ? contrast(side) : null,
+          avatar: av ? contrast(av) : null,
+          overflow: document.documentElement.scrollWidth > window.innerWidth + 2,
+        };
+      }, t.id);
+      await shot(A.page, "theme-" + t.id);
+      if (!r.dataset || r.css < 2000) throw new Error("theme did not apply: " + JSON.stringify(r));
+      if (r.msg !== null && r.msg < 3) throw new Error("message text hard to read, contrast " + r.msg.toFixed(1));
+      if (r.side !== null && r.side < 3) throw new Error("sidebar text hard to read, contrast " + r.side.toFixed(1));
+      if (r.avatar !== null && r.avatar < 3) throw new Error("avatar letters hard to see, contrast " + r.avatar.toFixed(1));
+      if (r.overflow) throw new Error("page is wider than the window");
+      return `contrast message ${r.msg?.toFixed(1)}, sidebar ${r.side?.toFixed(1)}, avatar ${r.avatar?.toFixed(1)}`;
+    });
+  }
+  await A.page.evaluate(async (id) => {
+    const css = await window.__TAURI_INTERNALS__.invoke("load_theme_css", { id });
+    document.getElementById("active-theme").textContent = css;
+    document.documentElement.dataset.theme = id;
+  }, original);
+  await A.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -535,6 +588,7 @@ try {
   else if (scenario === "direct") await direct();
   else if (scenario === "unread") await unread();
   else if (scenario === "popup") await popup();
+  else if (scenario === "themes") await themes();
   else if (scenario === "direct-relaunch") await directRelaunch();
   else throw new Error("unknown scenario " + scenario);
 } catch (e) {

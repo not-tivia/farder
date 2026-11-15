@@ -3708,3 +3708,6 @@ body {
 
 /* chat window: pin to the window edges so the reply box is never pushed out of view */
 .mini-chat { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: auto; height: auto; overflow: hidden; }
+
+/* avatar letters: white on the pale sidebar colour was nearly invisible; use the dark accent */
+.message-avatar, .member-avatar-mini { background: var(--xp-blue-dark); color: #ffffff; }
