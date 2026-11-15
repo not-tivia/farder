@@ -26,6 +26,24 @@ knows where the work is, and the rules to follow so new code does not make it wo
 | Hotkeys, window position, click-through | parts of `window_behavior.rs` | No equivalent. |
 | File dialogs | `rfd` | Mobile uses system pickers. |
 
+## What has been checked (2026-11-14)
+
+`bash scripts/portability_check.sh` type-checks the shared crates for
+`aarch64-linux-android` and `aarch64-apple-ios`:
+
+| Crate | Android | iOS | Note |
+|---|---|---|---|
+| `farder-protocol`, `farder-crypto` | compiles | compiles | pure Rust, nothing to do |
+| `farder-history`, `farder-e2ee-client`, `farder-mls` | needs toolchain | needs toolchain | they bundle SQLite (C): the C step needs the Android NDK / Xcode, which are not installed on the dev machine. Not a code failure; install the toolchain to settle it |
+| `farder-client` (the Tauri app) | not tried | not tried | see below |
+
+`client/src-tauri/tauri.android.conf.json` and `tauri.ios.conf.json` are Tauri's
+per-platform config overrides. They drop the bundled-server sidecar
+(`externalBin`) on phones, where a child server process cannot run. They have no
+effect on desktop builds. A phone build still needs a mobile `main`/lib entry point
+and the desktop-only modules below behind `cfg`; that is the real port and has not
+been started.
+
 ## Rules for new code
 
 1. Put decisions (what to show, what is allowed, what counts as unread) in `client/src/lib`
