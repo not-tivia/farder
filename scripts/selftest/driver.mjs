@@ -1260,7 +1260,13 @@ async function recovery() {
     try { await A.page.evaluate(([a, l, p, o]) => window.__TAURI_INTERNALS__.invoke("recovery_claim", { serverId: a, logServerId: l, phrase: p, newOwner: o }), [ids.sid, ids.log, bad, ids.alice]); }
     catch (e) { refused = String(e.message || e); }
     if (!refused) throw new Error("the thief started a takeover with made-up words");
-    return "refused: " + refused.slice(0, 80);
+    // A VALID phrase (correct spelling and checksum) that is not this server's key must also be refused.
+    const valid = "alpha deal scrub asthma idea logic bright thought alpha deal scrub asthma idea logic bright thought alpha deal scrub asthma idea logic bright truly";
+    let refused2 = "";
+    try { await A.page.evaluate(([a, l, p, o]) => window.__TAURI_INTERNALS__.invoke("recovery_claim", { serverId: a, logServerId: l, phrase: p, newOwner: o }), [ids.sid, ids.log, valid, ids.alice]); }
+    catch (e) { refused2 = String(e.message || e); }
+    if (!/not the recovery key of this server/.test(refused2)) throw new Error("a valid but wrong phrase was not refused as wrong-server: " + refused2);
+    return "refused: " + refused.slice(0, 60) + " | valid-but-wrong: " + refused2.slice(0, 60);
   });
   await check("B starts a takeover with the 24 words; both screens show it, with a countdown", async () => {
     await B.page.getByLabel("The 24 recovery words").fill(words);
