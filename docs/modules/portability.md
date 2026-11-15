@@ -58,6 +58,12 @@ default on phones (the small-window layout, checklist Part 10, is the starting p
 which exists only on a Mac, so iOS cannot be checked from this machine. The same
 `cfg` split above applies to iOS, and the platform stubs already cover it.
 
+## App layout for mobile
+
+The app code is in `client/src-tauri/src/lib.rs` (`pub fn run()`, marked as the mobile
+entry point for Android/iOS); `main.rs` is a one-line desktop wrapper. Cargo builds the
+library as `rlib` (desktop), `cdylib` (Android loads it) and `staticlib` (iOS).
+
 ## Rules for new code
 
 1. Put decisions (what to show, what is allowed, what counts as unread) in `client/src/lib`

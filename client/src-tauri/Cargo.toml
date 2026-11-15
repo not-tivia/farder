@@ -5,6 +5,16 @@ name = "farder-client"
 version = "0.1.0"
 edition = "2021"
 
+# The app code is a library so Android and iOS can load it; the desktop program
+# (src/main.rs) is a one-line wrapper around it.
+[lib]
+name = "farder_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "farder-client"
+path = "src/main.rs"
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }

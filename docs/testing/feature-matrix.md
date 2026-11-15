@@ -41,7 +41,7 @@ Last updated: 2026-11-15.
 | Message edit / delete (own message; other person sees both) | VERIFIED | selftest edit. Also fixed: edits/deletes on a server not on screen were ignored and the local readable copy of a deleted message was kept |
 | Second server, and a direct (non-relayed) server | VERIFIED | selftest direct: create, invite (points at 127.0.0.1), B joins, chat both ways |
 | Attachments (picture: stage by drop, send, recipient loads it) | VERIFIED | selftest attach (drop event emulated; the native file-picker dialog itself is not drivable) |
-| Voice, screenshare | UNVERIFIED | needs audio/capture hardware paths; not automatable here |
+| Voice channels: create, both join, rosters agree, leave | VERIFIED (signalling only) | selftest voice. Found and fixed: new servers gave members no CONNECT/SPEAK, so only the owner could join voice. NOT covered: microphone, speakers, audio quality, mute/deafen, screenshare (need hardware and a person) |
 
 ## Windows added on `features-skins-notify-garble`
 
@@ -52,7 +52,7 @@ Last updated: 2026-11-15.
 | Notification pop-up (message from another server: shows it, Reply from the pop-up reaches the sender) | VERIFIED | selftest popup. Background pop-up (focus simulated by overriding the one "has focus" answer) also VERIFIED. NOT automatable: pop-up position/centring, keyboard focus after use: checklist Part 3, chris to eyeball. keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
 | Autoplay | UNVERIFIED | Part 4 |
 | Garbler (own "speak as": B receives garbled words; off restores normal) | VERIFIED | selftest garble |
-| Admin garble (moderation) and consent garble | VERIFIED | selftest admin-garble: author keeps own words, others see garbled; stop works; a consensual garble is refused without consent and works after. Delegated powers screens (grant "garble" etc.): UNVERIFIED (Part 5) |
+| Admin garble (moderation) and consent garble | VERIFIED | selftest admin-garble: author keeps own words, others see garbled; stop works; a consensual garble is refused without consent and works after. Delegated powers (grant/revoke "invite" and "garble", enforced on the other side): VERIFIED by selftest powers via the commands; the on-screen powers dialogs themselves not clicked |
 | Sound | UNVERIFIED | Part 6 |
 | Message density | UNVERIFIED | Part 8 |
 | Unread markers (dot on another server, highlight on a conversation) | VERIFIED | selftest unread |
