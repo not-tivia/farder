@@ -274,6 +274,8 @@ WebRTC session.
 | `ServerRequest` variant | What it does |
 |---|---|
 | `CreateInvite` | Generate an invite code; requires `CREATE_INVITES` (base). Returns `InviteCreated { code }`. No events. |
+| `CreateGuestInvite` | Guest invite (24 h default, 7 d max); refused when the `guest_links` setting is not `1`; needs `CREATE_INVITES`. Returns `InviteCreated`. |
+| `SetGuestLinks` / `GetGuestLinks` | Owner-only switch (stored in `server_settings.guest_links`, off by default) and its read-back. Return `GuestLinks`. |
 | `GetServerInfo` | Return channel list, category list, roles, and member count. No permission check. `name` and `owner_public_key` fields are patched by `connection.rs` after this returns. |
 | `GetMembers` | Return full `MemberInfo` list including role IDs and active timeout data. Sourced from `members::list_members_visible` — the server's own system identity is filtered out in SQL, **before** the mesh `is_bot ||` whitelist below can re-admit it. No permission check. `MemberInfo` now includes `profile_hash: Option<String>` (the SHA-256 hex of the member's last pushed profile, or `null` if none). |
 | `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs` (`subscriptions::apply_subscribe`), which **filters the requested channel ids** — see the `EventTarget` note below. |

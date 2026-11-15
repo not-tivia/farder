@@ -200,7 +200,13 @@ pub fn resolve_member_server_perms(
         channel_overrides: vec![],
         is_owner,
     };
-    Ok(permissions::resolve(ctx))
+    Ok(cap_guest(conn, member, permissions::resolve(ctx)))
+}
+
+/// A guest (browser-link joiner) never holds more than `GUEST_ALLOWED`, whatever roles or
+/// overrides say. Normal members pass through untouched.
+fn cap_guest(conn: &Connection, member: &PublicKey, perms: u64) -> u64 {
+    if members::guest_expiry(conn, member).is_some() { perms & permissions::GUEST_ALLOWED } else { perms }
 }
 
 fn resolve_member_perms(
@@ -264,7 +270,7 @@ fn resolve_member_perms(
         is_owner,
     };
 
-    Ok(permissions::resolve(ctx))
+    Ok(cap_guest(conn, member, permissions::resolve(ctx)))
 }
 
 fn resolve_base_perms(conn: &Connection, member: &PublicKey, is_owner: bool) -> Result<u64> {
@@ -283,7 +289,7 @@ fn resolve_base_perms(conn: &Connection, member: &PublicKey, is_owner: bool) -> 
     for rp in &role_perms {
         base |= rp;
     }
-    Ok(base)
+    Ok(cap_guest(conn, member, base))
 }
 
 fn require_base_perm(
@@ -2546,6 +2552,27 @@ pub fn handle_request(
                     },
                 }],
             )
+        }
+        ServerRequest::CreateGuestInvite { max_uses, expires_in_secs } => {
+            if crate::db::get_setting(conn, "guest_links")?.as_deref() != Some("1") {
+                return err("guest links are turned off; the owner can turn them on in Server Settings");
+            }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::CREATE_INVITES, "CREATE_INVITES")? {
+                return Ok(denied);
+            }
+            let code = invites::create_guest_invite(conn, member, max_uses, expires_in_secs)?;
+            ok(ServerResponse::InviteCreated { code })
+        }
+        ServerRequest::SetGuestLinks { enabled } => {
+            if !is_owner {
+                return err("only the owner can turn guest links on or off");
+            }
+            crate::db::set_setting(conn, "guest_links", if enabled { "1" } else { "0" })?;
+            ok(ServerResponse::GuestLinks { enabled })
+        }
+        ServerRequest::GetGuestLinks => {
+            let enabled = crate::db::get_setting(conn, "guest_links")?.as_deref() == Some("1");
+            ok(ServerResponse::GuestLinks { enabled })
         }
         ServerRequest::GetRecoveryStatus => {
             let guard = state.log_state.lock().unwrap();
@@ -10344,6 +10371,9 @@ mod tests {
                 | ServerRequest::GetGarbleState
                 | ServerRequest::GetCapabilities
                 | ServerRequest::GetRecoveryStatus
+                | ServerRequest::CreateGuestInvite { .. }
+                | ServerRequest::SetGuestLinks { .. }
+                | ServerRequest::GetGuestLinks
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
@@ -11770,5 +11800,79 @@ mod tests {
             .query_map([], |row| row.get(0)).unwrap().flatten().collect();
         assert_eq!(actions, vec!["recovery_key_set", "recovery_claim", "recovery_finalize"]);
     }
+
+    // -----------------------------------------------------------------------
+    // Guest links (docs/web-guest-join-design.md, step 1)
+    // -----------------------------------------------------------------------
+
+    fn guest_join(conn: &Connection, code: &str) -> (Keypair, Result<Result<bool, String>>) {
+        let kp = Keypair::generate();
+        let r = crate::auth::authenticate_new_member(conn, &kp.public_key(), "Guest", Some(code), None, None);
+        (kp, r)
+    }
+
+    #[test]
+    fn guest_links_are_off_until_the_owner_turns_them_on_and_only_the_owner_can() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let make = |c: &Connection| handle_request(c, &owner, true, ServerRequest::CreateGuestInvite { max_uses: None, expires_in_secs: None }, "", &st).unwrap().response;
+        assert!(matches!(make(&conn), ServerResponse::Error { .. }), "off by default");
+        let other = Keypair::generate().public_key();
+        members::register_member(&conn, &other, "Friend").unwrap();
+        let r = handle_request(&conn, &other, false, ServerRequest::SetGuestLinks { enabled: true }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { .. }), "a non-owner cannot turn them on");
+        let r = handle_request(&conn, &owner, true, ServerRequest::SetGuestLinks { enabled: true }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::GuestLinks { enabled: true }));
+        match make(&conn) {
+            ServerResponse::InviteCreated { code } => {
+                let info = invites::validate_invite(&conn, &code).unwrap().unwrap();
+                assert!(info.guest);
+                let left = info.expires_at.unwrap() - db::now();
+                assert!(left <= invites::GUEST_DEFAULT_SECS && left > invites::GUEST_DEFAULT_SECS - 10, "defaults to a day");
+            }
+            other => panic!("expected an invite, got {other:?}"),
+        }
+        // An absurdly long request is clamped to a week.
+        let r = handle_request(&conn, &owner, true, ServerRequest::CreateGuestInvite { max_uses: Some(3), expires_in_secs: Some(10_000_000_000) }, "", &st).unwrap().response;
+        let ServerResponse::InviteCreated { code } = r else { panic!("no invite") };
+        assert!(invites::validate_invite(&conn, &code).unwrap().unwrap().expires_at.unwrap() <= db::now() + invites::GUEST_MAX_SECS);
+    }
+
+    #[test]
+    fn a_guest_joins_with_the_link_is_limited_and_expires_but_a_normal_invite_makes_a_normal_member() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let code = invites::create_guest_invite(&conn, &owner, None, Some(3600)).unwrap();
+        // Links turned off: the join is refused, and the use is not consumed as a member.
+        let (_, r) = guest_join(&conn, &code);
+        assert!(r.unwrap().unwrap_err().contains("turned off"));
+        crate::db::set_setting(&conn, "guest_links", "1").unwrap();
+        let (g, r) = guest_join(&conn, &code);
+        assert!(r.unwrap().is_ok());
+        let gpk = g.public_key();
+        let end = members::guest_expiry(&conn, &gpk).expect("marked as a guest");
+        assert!(end > db::now() && end <= db::now() + 3600);
+        // Whatever roles a guest is given, they never hold more than read and send.
+        let admin = members::create_role(&conn, "Admin", permissions::ALL_PERMISSIONS, None, 5, false, false).unwrap();
+        members::assign_role(&conn, &gpk, admin).unwrap();
+        let perms = resolve_member_server_perms(&conn, &gpk, false).unwrap();
+        assert_eq!(perms & !permissions::GUEST_ALLOWED, 0, "a guest holds nothing beyond read and send: {perms:b}");
+        assert!(permissions::has(perms, permissions::SEND_MESSAGES));
+        let r = handle_request(&conn, &gpk, false, ServerRequest::CreateInvite { max_uses: None, expires_in_secs: None, target_channel: None }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { .. }), "a guest cannot make invites");
+        let r = handle_request(&conn, &gpk, false, ServerRequest::CreateGuestInvite { max_uses: None, expires_in_secs: None }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { .. }), "a guest cannot make guest links either");
+        // A normal invite makes a normal member (no expiry, no cap).
+        let normal = invites::create_invite(&conn, &owner, None, None, None).unwrap();
+        let (n, r) = guest_join(&conn, &normal);
+        assert!(r.unwrap().is_ok());
+        assert!(members::guest_expiry(&conn, &n.public_key()).is_none());
+        assert!(permissions::has(resolve_member_server_perms(&conn, &n.public_key(), false).unwrap(), permissions::CREATE_INVITES));
+        // The guest's session ends with the link.
+        assert!(crate::auth::authenticate_existing_member(&conn, &gpk).unwrap().is_ok());
+        members::set_guest_expiry(&conn, &gpk, db::now() - 1).unwrap();
+        assert!(crate::auth::authenticate_existing_member(&conn, &gpk).unwrap().unwrap_err().contains("expired"));
+    }
+
 
 }

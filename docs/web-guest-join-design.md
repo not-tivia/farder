@@ -1,4 +1,4 @@
-# Joining from a browser (guest links): design notes (2026-11-15, not built)
+# Joining from a browser (guest links): design notes (2026-11-15; step 1 built, rest not)
 
 chris asked for this: people should be able to join a server from a web page such as
 `farder.xyz/<server name>/t` with a temporary invite, the way Curse Voice temporary invites
@@ -47,3 +47,18 @@ worked and the way people use Discord in a browser without installing it.
 6. Voice and a fuller web client, later.
 
 Steps 1 and 2 are valuable on their own: the gateway is also what a future web app needs.
+
+## Build status
+
+**Step 1, server side (built 2026-11-15, unit-tested, one deliberate break caught):**
+`CreateGuestInvite` / `SetGuestLinks` / `GetGuestLinks` (appended to the protocol); guest links are OFF
+until the owner turns them on; a guest invite always expires (default 24 h, at most 7 days);
+a joiner with one is marked a guest (`members.guest_expires_at`), is capped to view/read/send whatever
+roles they get, cannot make invites, and cannot reconnect after the link expires. Normal invites are
+unchanged.
+
+**Known gaps in step 1:** a guest who is already connected is not cut off the instant the link
+expires (only on reconnect); on a server with a signed history a guest must also become a LOG member
+(`MemberJoined` citing the invite), which only the browser client can sign, so the end-to-end guest
+join is step 3/4; no owner screen for the switch yet; direct messages, uploads and reactions are not
+yet specifically limited for guests beyond the permission cap.

@@ -32,6 +32,18 @@ pub fn register_member(conn: &Connection, pk: &PublicKey, display_name: &str) ->
     Ok(())
 }
 
+/// Mark a member as a guest whose session ends at `expires_at` (unix seconds).
+pub fn set_guest_expiry(conn: &Connection, pk: &PublicKey, expires_at: u64) -> Result<()> {
+    conn.execute("UPDATE members SET guest_expires_at = ?2 WHERE public_key = ?1", params![pk.as_bytes().as_slice(), expires_at as i64])?;
+    Ok(())
+}
+
+/// `Some(expiry)` if this member joined as a guest, `None` for a normal member.
+pub fn guest_expiry(conn: &Connection, pk: &PublicKey) -> Option<u64> {
+    conn.query_row("SELECT guest_expires_at FROM members WHERE public_key = ?1", params![pk.as_bytes().as_slice()], |r| r.get::<_, Option<i64>>(0))
+        .ok().flatten().map(|v| v as u64)
+}
+
 /// Register a server-managed bot as a member (is_bot = 1).
 pub fn register_bot_member(conn: &Connection, pk: &PublicKey, display_name: &str) -> Result<()> {
     conn.execute(

@@ -786,6 +786,14 @@ pub enum ServerRequest {
     /// SEEN by everyone. Answered with [`ServerResponse::RecoveryStatus`]. Appended last
     /// (positional codec).
     GetRecoveryStatus,
+    /// A temporary GUEST invite (for a browser link): short-lived, limited to reading and
+    /// sending in channels, no invites, no powers. Refused unless the owner turned guest links
+    /// on. Answered with [`ServerResponse::InviteCreated`]. Appended last (positional codec).
+    CreateGuestInvite { max_uses: Option<u32>, expires_in_secs: Option<u64> },
+    /// Owner only: turn guest links on or off (off by default). Appended last.
+    SetGuestLinks { enabled: bool },
+    /// Whether guest links are on. Answered with [`ServerResponse::GuestLinks`]. Appended last.
+    GetGuestLinks,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -935,6 +943,8 @@ pub enum ServerResponse {
         wait_secs: u64,
         pending: Option<RecoveryPendingInfo>,
     },
+    /// Answer to [`ServerRequest::GetGuestLinks`] and [`ServerRequest::SetGuestLinks`].
+    GuestLinks { enabled: bool },
 }
 
 /// A takeover started by the recovery key and not yet finished or withdrawn.

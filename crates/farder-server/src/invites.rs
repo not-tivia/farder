@@ -23,6 +23,10 @@ fn random_code() -> String {
 pub struct InviteInfo {
     pub code: String,
     pub target_channel: Option<u64>,
+    /// A temporary guest invite (browser link): the member it admits is limited and expires.
+    pub guest: bool,
+    /// When the invite stops working (unix seconds), if it has an expiry.
+    pub expires_at: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +68,23 @@ pub fn create_invite_with_expires(
     Ok(code)
 }
 
+/// How long a guest link lives when the creator gave no expiry, and the longest it may live.
+pub const GUEST_DEFAULT_SECS: u64 = 24 * 3600;
+pub const GUEST_MAX_SECS: u64 = 7 * 24 * 3600;
+
+/// Create a temporary GUEST invite. It always expires (default 24 hours, at most 7 days).
+pub fn create_guest_invite(
+    conn: &Connection,
+    created_by: &PublicKey,
+    max_uses: Option<u32>,
+    expires_in_secs: Option<u64>,
+) -> Result<String> {
+    let secs = expires_in_secs.unwrap_or(GUEST_DEFAULT_SECS).clamp(60, GUEST_MAX_SECS);
+    let code = create_invite_with_expires(conn, created_by, max_uses, Some(now() + secs), None)?;
+    conn.execute("UPDATE invites SET guest = 1 WHERE code = ?1", params![&code])?;
+    Ok(code)
+}
+
 /// Check whether an invite code is currently valid.
 ///
 /// Returns:
@@ -73,7 +94,7 @@ pub fn create_invite_with_expires(
 pub fn validate_invite(conn: &Connection, code: &str) -> Result<Result<InviteInfo, String>> {
     let row = conn
         .query_row(
-            "SELECT code, max_uses, use_count, expires_at, target_channel \
+            "SELECT code, max_uses, use_count, expires_at, target_channel, guest \
              FROM invites WHERE code = ?1",
             params![code],
             |row| {
@@ -82,12 +103,13 @@ pub fn validate_invite(conn: &Connection, code: &str) -> Result<Result<InviteInf
                 let use_count: i64 = row.get(2)?;
                 let expires_at: Option<i64> = row.get(3)?;
                 let target_channel: Option<i64> = row.get(4)?;
-                Ok((code, max_uses, use_count, expires_at, target_channel))
+                let guest: i64 = row.get(5)?;
+                Ok((code, max_uses, use_count, expires_at, target_channel, guest != 0))
             },
         )
         .optional()?;
 
-    let (code, max_uses, use_count, expires_at, target_channel) = match row {
+    let (code, max_uses, use_count, expires_at, target_channel, guest) = match row {
         None => return Ok(Err("invite not found".to_string())),
         Some(r) => r,
     };
@@ -109,6 +131,8 @@ pub fn validate_invite(conn: &Connection, code: &str) -> Result<Result<InviteInf
     Ok(Ok(InviteInfo {
         code,
         target_channel: target_channel.map(|v| v as u64),
+        guest,
+        expires_at: expires_at.map(|v| v as u64),
     }))
 }
 

@@ -38,6 +38,10 @@ pub const ALL_PERMISSIONS: u64 = VIEW_CHANNEL
 /// the permissions stored when they were created.
 pub const DEFAULT_EVERYONE: u64 = VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES | CREATE_INVITES | CONNECT | SPEAK;
 
+/// The ONLY powers a guest (a browser-link joiner) can ever hold, whatever roles they are
+/// given: look at channels, read, and send. No invites, no voice, no moderation, no management.
+pub const GUEST_ALLOWED: u64 = VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES;
+
 /// A permission override that can allow or deny specific bits.
 pub struct Override {
     pub allow: u64,

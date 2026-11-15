@@ -278,6 +278,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Guest links: an invite can be marked guest, and a member who joined with one has an
+    // expiry (NULL = a normal member).
+    let has_guest_col = |table: &str, col: &str| -> anyhow::Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?.filter_map(|r| r.ok()).collect();
+        Ok(cols.iter().any(|c| c == col))
+    };
+    if !has_guest_col("invites", "guest")? {
+        conn.execute("ALTER TABLE invites ADD COLUMN guest INTEGER NOT NULL DEFAULT 0", [])?;
+    }
+    if !has_guest_col("members", "guest_expires_at")? {
+        conn.execute("ALTER TABLE members ADD COLUMN guest_expires_at INTEGER NULL", [])?;
+    }
+
     // Members: add timeout_until + timeout_reason columns (Phase 2 moderation).
     let has_timeout_until: bool = {
         let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
