@@ -1659,6 +1659,12 @@ export async function recoveryCreate(serverId: string, logServerId: string): Pro
   return invoke("recovery_create", { serverId, logServerId });
 }
 
+/** Replace the recovery key using the CURRENT 24 words; returns the NEW words ONCE. The old
+ *  words stop working. Only the recovery key can do this (not the everyday owner key). */
+export async function recoveryRotate(serverId: string, logServerId: string, phrase: string): Promise<{ phrase: string; recovery_key: string }> {
+  return invoke("recovery_rotate", { serverId, logServerId, phrase });
+}
+
 /** Start a takeover with the recovery key's 24 words; `newOwner` must be a member. */
 export async function recoveryClaim(serverId: string, logServerId: string, phrase: string, newOwner: string): Promise<void> {
   await invoke("recovery_claim", { serverId, logServerId, phrase, newOwner });

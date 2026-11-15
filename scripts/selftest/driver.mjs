@@ -1268,6 +1268,31 @@ async function recovery() {
     if (!/not the recovery key of this server/.test(refused2)) throw new Error("a valid but wrong phrase was not refused as wrong-server: " + refused2);
     return "refused: " + refused.slice(0, 60) + " | valid-but-wrong: " + refused2.slice(0, 60);
   });
+  await check("B rotates the recovery key with the words; the OLD words stop working, the NEW ones are shown once", async () => {
+    const old = words;
+    await B.page.getByLabel("The 24 recovery words").fill(old);
+    await B.page.getByRole("button", { name: "Replace the recovery key" }).click();
+    const box = B.page.getByLabel("Recovery words", { exact: true });
+    await box.waitFor({ timeout: 30000 });
+    const fresh = await box.inputValue();
+    if (fresh.trim().split(/\s+/).length !== 24) throw new Error("expected 24 new words");
+    if (fresh === old) throw new Error("the new words are the same as the old");
+    await B.page.getByLabel(/I wrote the 24 words down/).check();
+    await B.page.getByRole("button", { name: "Hide the words" }).click();
+    // The OLD words are now refused as "not this server's recovery key".
+    const res = await B.page.evaluate(async ([nm, p]) => {
+      const inv = window.__TAURI_INTERNALS__.invoke;
+      const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+      const info = await inv("get_server_info_v2", { serverId: s.id });
+      const mem = await inv("get_members", { serverId: s.id });
+      const hex = (m) => "vk_" + m.public_key.bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+      try { await inv("recovery_claim", { serverId: s.id, logServerId: info.server_id, phrase: p, newOwner: hex(mem.find((m) => m.display_name === "Bob")) }); return "accepted"; }
+      catch (e) { return String(e); }
+    }, [name, old]);
+    if (!/not the recovery key of this server/.test(res)) throw new Error("the old words were not refused: " + res.slice(0, 100));
+    words = fresh;
+    return "old words refused after the rotation";
+  });
   await check("B starts a takeover with the 24 words; both screens show it, with a countdown", async () => {
     await B.page.getByLabel("The 24 recovery words").fill(words);
     await B.page.getByRole("button", { name: "Start the takeover" }).click();

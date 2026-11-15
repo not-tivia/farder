@@ -8360,6 +8360,25 @@ pub async fn recovery_claim(
     ).await
 }
 
+/// Replace the recovery key with a new one, using the CURRENT words (the everyday owner key
+/// cannot: otherwise a thief would swap in their own). Returns the new 24 words, shown once.
+#[tauri::command]
+pub async fn recovery_rotate(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+) -> Result<RecoveryCreatedView, String> {
+    let seed: [u8; 32] = rand::random();
+    let new_phrase = farder_crypto::recovery::phrase_from_key(&seed).map_err(|e| e.to_string())?;
+    let new_key = Keypair::from_signing_key_bytes(&seed);
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryKeySet { recovery: new_key.public_key() },
+    ).await?;
+    Ok(RecoveryCreatedView { phrase: new_phrase, recovery_key: new_key.public_key().to_string() })
+}
+
 /// Withdraw the takeover that is waiting.
 #[tauri::command]
 pub async fn recovery_cancel(

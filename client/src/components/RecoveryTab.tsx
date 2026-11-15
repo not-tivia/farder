@@ -173,6 +173,13 @@ export default function RecoveryTab({ serverId, logServerId, isOwner, ownPk }: P
               onClick={() => run("Takeover cancelled.", () => api.recoveryCancel(serverId, logServerId, normalizePhrase(words)))}>
               Cancel the takeover
             </button>
+            <button className="xp-button" disabled={busy || !phraseOk || !!status.pending}
+              onClick={() => run("New recovery key made. Write the new words down; the old ones no longer work.", async () => {
+                const r = await api.recoveryRotate(serverId, logServerId, normalizePhrase(words));
+                setWords(""); setShownPhrase(r.phrase); setWroteItDown(false);
+              })}>
+              Replace the recovery key
+            </button>
           </div>
           {!phraseOk && words.trim() !== "" && <div style={{ fontSize: 11, marginTop: 4 }}>That is not 24 words yet.</div>}
         </div>

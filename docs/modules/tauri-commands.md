@@ -3401,6 +3401,16 @@ never stored.
 
 ---
 
+### `recovery_rotate(state, server_id, log_server_id, phrase) -> Result<RecoveryCreatedView, String>`
+
+**What it does:** replaces the recovery key. Needs the CURRENT 24 words (the everyday owner key
+cannot do this, or a thief could swap in their own key). Makes a new key, submits
+`RecoveryKeySet { recovery: new }` as the old recovery key (throwaway device, as for a claim) and
+returns the NEW words once. The old words stop working. The server refuses it while a takeover waits.
+**invoke name:** `"recovery_rotate"` -> `recoveryRotate()`.
+
+---
+
 ### `recovery_cancel(state, server_id, log_server_id, phrase) -> Result<EventAcceptedResult, String>`
 
 **What it does:** the recovery key withdraws the takeover that is waiting

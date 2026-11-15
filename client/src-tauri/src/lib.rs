@@ -255,6 +255,7 @@ pub fn run() {
             commands::recovery_status,
             commands::recovery_claim,
             commands::recovery_cancel,
+            commands::recovery_rotate,
             commands::recovery_finalize,
             commands::upload_sealed_file,
             commands::download_sealed_file,
