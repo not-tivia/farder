@@ -25,6 +25,22 @@ export async function connectServer(address: string, inviteCode?: string, setupT
   });
 }
 
+/** Backup addresses (host:port) tried in order when the host does not answer: a replica serving a
+ *  read-only saved copy. Kept on this device only. */
+export async function getFallbackAddresses(address: string): Promise<string[]> {
+  return invoke<string[]>("get_fallback_addresses", { address });
+}
+
+export async function setFallbackAddresses(address: string, addresses: string[]): Promise<void> {
+  await invoke("set_fallback_addresses", { address, addresses });
+}
+
+/** The backup address this server is currently reached through (a read-only saved copy), or null when
+ *  connected to the host (or not connected). */
+export async function getConnectionRoute(serverId: string): Promise<string | null> {
+  return invoke<string | null>("get_connection_route", { serverId });
+}
+
 export async function disconnectServer(serverId: string): Promise<void> {
   return invoke<void>("disconnect_server", { serverId });
 }

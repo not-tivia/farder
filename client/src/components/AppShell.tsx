@@ -13,6 +13,7 @@ import KickedBannedDialog from "./KickedBannedDialog";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { useVoice } from "../hooks/useVoice";
 import RecoveryBanner from "./RecoveryBanner";
+import SavedCopyBanner from "./SavedCopyBanner";
 import * as api from "../lib/tauri-bridge";
 
 let openSearchRef: (() => void) | null = null;
@@ -168,6 +169,7 @@ export default function AppShell() {
         <ScreenShareStage voice={voice} />
         <DmPanel />
         <RecoveryBanner />
+        <SavedCopyBanner />
         {activeServer?.connectionLost && (
           <div className="reconnect-overlay" role="status">
             <span className="reconnect-pill">Connection lost. Reconnecting... You can still read what is here and switch servers.</span>

@@ -52,6 +52,9 @@ pub struct ConnectResult {
     pub owner_public_key: Option<farder_crypto::identity::PublicKey>,
     pub relayed: bool,
     pub server_id: Option<String>,
+    /// Set when the host did not answer and this is a backup address (a read-only saved copy).
+    #[serde(default)]
+    pub on_fallback: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1061,6 +1064,10 @@ pub struct ServerEntry {
     pub name: String,
     #[serde(default)]
     pub local: Option<LocalServerConfig>,
+    /// Backup addresses to try, in order, when the host does not answer (a replica serving a saved
+    /// read-only copy). Kept on this device only.
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
 }
 
 fn servers_list_path() -> std::path::PathBuf {
@@ -1081,7 +1088,7 @@ fn save_server_entry(address: &str, name: &str) {
 fn save_server_entry_with_config(address: &str, name: &str, local: Option<LocalServerConfig>) {
     let mut entries = load_server_entries();
     if !entries.iter().any(|e| e.id == address) {
-        entries.push(ServerEntry { id: address.to_string(), name: name.to_string(), local });
+        entries.push(ServerEntry { id: address.to_string(), name: name.to_string(), local, fallbacks: Vec::new() });
         let _ = std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap());
     }
 }
@@ -1156,26 +1163,29 @@ pub async fn connect_server(
         }
     };
 
-    let (endpoint, conn, send, recv, session_token, relayed) =
-        if let Some(target) = crate::connection::parse_relay_target(&address) {
-            let endpoint = crate::tls::make_pinned_relay_endpoint(target.cert_fp.clone())
-                .map_err(|e| e.to_string())?;
-            let (conn, send, recv, token) =
-                connect_via_relay(endpoint.clone(), &target, &keypair, setup_token)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            (endpoint, conn, send, recv, token, true)
-        } else {
-            let addr: std::net::SocketAddr = address
-                .parse()
-                .map_err(|e: std::net::AddrParseError| e.to_string())?;
-            let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
-            let (conn, send, recv, token) =
-                connect_and_authenticate(endpoint.clone(), addr, &keypair, invite_code, setup_token)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            (endpoint, conn, send, recv, token, false)
-        };
+    // Try the host first; if it does not answer, try this device's backup addresses in order (a replica
+    // serving a read-only saved copy). The invite code / setup token only make sense for the host itself.
+    let fallbacks: Vec<String> = load_server_entries().into_iter().find(|e| e.id == address).map(|e| e.fallbacks).unwrap_or_default();
+    let patience = if fallbacks.is_empty() { None } else { Some(std::time::Duration::from_secs(5)) };
+    let mut on_fallback: Option<String> = None;
+    let primary = connect_one(&address, &keypair, invite_code.clone(), setup_token.clone(), patience).await;
+    let (endpoint, conn, send, recv, session_token, relayed) = match primary {
+        Ok(t) => t,
+        Err(primary_err) => {
+            let mut found = None;
+            for fb in &fallbacks {
+                if let Ok(t) = connect_one(fb, &keypair, None, None, patience).await {
+                    on_fallback = Some(fb.clone());
+                    found = Some(t);
+                    break;
+                }
+            }
+            match found {
+                Some(t) => t,
+                None => return Err(primary_err),
+            }
+        }
+    };
 
     let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
     // Voice datagrams flow over BOTH direct and relayed connections: the relay
@@ -1209,6 +1219,7 @@ pub async fn connect_server(
         media_dispatcher,
         session_token,
         relayed,
+        on_fallback: on_fallback.clone(),
     });
 
     let handle = bridge::spawn_event_reader(app, address.clone(), Arc::clone(&server_conn), recv);
@@ -1244,11 +1255,91 @@ pub async fn connect_server(
             // `UPGRADE_REQUIRED` unless this connection has already negotiated.
             negotiate_protocol(&state, &address).await;
 
-            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed, server_id })
+            if on_fallback.is_some() {
+                spawn_host_probe(address.clone(), Arc::clone(&server_conn), Keypair::from_signing_key_bytes(keypair.signing_key_bytes()));
+            }
+
+            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed, server_id, on_fallback })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }
+}
+
+/// One connection attempt to `address` (a relay link or host:port), optionally giving up after `patience`.
+async fn connect_one(
+    address: &str,
+    keypair: &Keypair,
+    invite_code: Option<String>,
+    setup_token: Option<String>,
+    patience: Option<std::time::Duration>,
+) -> Result<(quinn::Endpoint, quinn::Connection, quinn::SendStream, quinn::RecvStream, Vec<u8>, bool), String> {
+    let attempt = async {
+        if let Some(target) = crate::connection::parse_relay_target(address) {
+            let endpoint = crate::tls::make_pinned_relay_endpoint(target.cert_fp.clone()).map_err(|e| e.to_string())?;
+            let (conn, send, recv, token) = connect_via_relay(endpoint.clone(), &target, keypair, setup_token)
+                .await.map_err(|e| e.to_string())?;
+            Ok::<_, String>((endpoint, conn, send, recv, token, true))
+        } else {
+            let addr: std::net::SocketAddr = address.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+            let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
+            let (conn, send, recv, token) = connect_and_authenticate(endpoint.clone(), addr, keypair, invite_code, setup_token)
+                .await.map_err(|e| e.to_string())?;
+            Ok((endpoint, conn, send, recv, token, false))
+        }
+    };
+    match patience {
+        Some(d) => tokio::time::timeout(d, attempt).await.map_err(|_| format!("{address} did not answer in {} seconds", d.as_secs()))?,
+        None => attempt.await,
+    }
+}
+
+/// While connected to a backup copy, keep asking the host (every 20 s). When it answers, close the
+/// backup connection: the app's normal reconnect then connects to the host first and the copy is left.
+fn spawn_host_probe(address: String, conn: Arc<ServerConnection>, keypair: Keypair) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            if conn.connection.close_reason().is_some() { return; }
+            if let Ok((_e, probe, _s, _r, _t, _rel)) = connect_one(&address, &keypair, None, None, Some(std::time::Duration::from_secs(5))).await {
+                probe.close(0u32.into(), b"probe");
+                conn.connection.close(0u32.into(), b"the host is back");
+                return;
+            }
+        }
+    });
+}
+
+/// Backup addresses for a saved server (this device only).
+#[tauri::command]
+pub fn get_fallback_addresses(address: String) -> Vec<String> {
+    load_server_entries().into_iter().find(|e| e.id == address).map(|e| e.fallbacks).unwrap_or_default()
+}
+
+/// Set the backup addresses for a saved server (host:port, one per entry; at most 4). They are tried in
+/// order when the host does not answer.
+#[tauri::command]
+pub fn set_fallback_addresses(address: String, addresses: Vec<String>) -> Result<(), String> {
+    let mut clean = Vec::new();
+    for a in addresses {
+        let a = a.trim().to_string();
+        if a.is_empty() { continue; }
+        a.parse::<std::net::SocketAddr>().map_err(|_| format!("\"{a}\" is not an address like 192.168.1.20:4435"))?;
+        if a == address { continue; }
+        if !clean.contains(&a) { clean.push(a); }
+    }
+    if clean.len() > 4 { return Err("at most 4 backup addresses".to_string()); }
+    let mut entries = load_server_entries();
+    let Some(e) = entries.iter_mut().find(|e| e.id == address) else { return Err("unknown server".to_string()) };
+    e.fallbacks = clean;
+    std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap()).map_err(|e| e.to_string())
+}
+
+/// `Some(address)` when this server is currently reached through a backup address (a read-only saved
+/// copy), `None` when through the host or not connected.
+#[tauri::command]
+pub fn get_connection_route(state: State<'_, Arc<AppState>>, server_id: String) -> Option<String> {
+    state.servers.lock().unwrap().get(&server_id).and_then(|c| c.on_fallback.clone())
 }
 
 /// Disconnect from a specific server and remove it from the map.
@@ -1278,6 +1369,7 @@ pub fn list_servers(state: State<'_, Arc<AppState>>) -> Vec<ServerEntry> {
         id: addr.clone(),
         name: conn.server_name.lock().unwrap().clone(),
         local: None,
+        fallbacks: Vec::new(),
     }).collect()
 }
 
@@ -1292,7 +1384,7 @@ pub async fn get_server_info(
         .map_err(|e| e.to_string())?;
     match response {
         ServerResponse::ServerInfo { name, member_count, channels, categories, roles, owner_public_key, server_id } => {
-            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed: false, server_id })
+            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed: false, server_id, on_fallback: None })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
@@ -4610,6 +4702,7 @@ pub async fn create_local_server(
         media_dispatcher,
         session_token,
         relayed,
+        on_fallback: None,
     });
 
     let handle = bridge::spawn_event_reader(app.clone(), address.clone(), Arc::clone(&server_conn), recv);
@@ -4826,6 +4919,7 @@ pub fn restart_local_servers(
                         id: new_id,
                         name: entry.name.clone(),
                         local: entry.local.clone(),
+                        fallbacks: entry.fallbacks.clone(),
                     });
                 }
                 Err(e) => {

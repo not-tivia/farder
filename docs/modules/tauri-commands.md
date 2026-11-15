@@ -3401,6 +3401,33 @@ never stored.
 
 ---
 
+### `get_fallback_addresses(address) -> Vec<String>`
+
+**What it does:** this device's backup addresses for a saved server (where to read a saved copy when the host
+does not answer), in the order they are tried. Stored in `servers.json` (`ServerEntry.fallbacks`).
+**invoke name:** `"get_fallback_addresses"` -> `getFallbackAddresses()`.
+
+---
+
+### `set_fallback_addresses(address, addresses) -> Result<(), String>`
+
+**What it does:** sets that list (host:port entries, at most 4, the host's own address and duplicates dropped);
+anything that is not an address is refused. `connect_server` then tries the host first (giving it 5 seconds when
+backups exist) and these after it, keeping the connection under the host's address so everything else is unchanged.
+While on a backup, a probe asks the host every 20 seconds and, when it answers, closes the backup connection so the
+app's normal reconnect returns to the host.
+**invoke name:** `"set_fallback_addresses"` -> `setFallbackAddresses()`.
+
+---
+
+### `get_connection_route(state, server_id) -> Option<String>`
+
+**What it does:** the backup address this server is currently reached through (a read-only saved copy), or `None`
+when connected to the host or not connected. Drives the "reading a saved copy" banner.
+**invoke name:** `"get_connection_route"` -> `getConnectionRoute()`.
+
+---
+
 ### `get_guest_links(state, server_id) -> Result<bool, String>`
 
 **What it does:** whether guest links (browser joins) are turned on for this server (`GetGuestLinks`).

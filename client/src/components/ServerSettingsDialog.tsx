@@ -8,6 +8,7 @@ import BannedMembersTab from "./BannedMembersTab";
 import AuditLogTab from "./AuditLogTab";
 import BotsTab from "./BotsTab";
 import PowersTab from "./PowersTab";
+import BackupCopyTab from "./BackupCopyTab";
 import RecoveryTab from "./RecoveryTab";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 
@@ -56,7 +57,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newRoleColor, setNewRoleColor] = useState("#3169C6");
   const [error, setError] = useState<string | null>(null);
   const [serverAvatarUrl, setServerAvatarUrl] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"general" | "banned" | "reports" | "audit" | "bots" | "powers" | "recovery">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "banned" | "reports" | "audit" | "bots" | "powers" | "recovery" | "backup">("general");
   // -- Retire this device (sub-5b G4) -------------------------------------
   const logServerId = activeServer?.logServerId ?? null;
   const [showRetire, setShowRetire] = useState(false);
@@ -324,6 +325,12 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               Recovery
             </button>
           )}
+          <button
+            className={`settings-tab${activeTab === "backup" ? " active" : ""}`}
+            onClick={() => setActiveTab("backup")}
+          >
+            Backup copy
+          </button>
         </div>
 
         <div className="modal-body" style={{ overflowY: "auto", flex: 1 }}>
@@ -341,6 +348,9 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           )}
           {activeTab === "powers" && serverId && logServerId && (
             <PowersTab serverId={serverId} logServerId={logServerId} />
+          )}
+          {activeTab === "backup" && serverId && (
+            <BackupCopyTab serverId={serverId} />
           )}
           {activeTab === "recovery" && serverId && logServerId && (
             <RecoveryTab
