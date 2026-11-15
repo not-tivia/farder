@@ -22,7 +22,7 @@ $env:RESULTS = Join-Path $DataRoot "results-edit.json"
 node "$here\driver.mjs" edit; if ($LASTEXITCODE -ne 0) { $bad++ }
 $env:RESULTS = Join-Path $DataRoot "results-direct.json"
 node "$here\driver.mjs" direct; if ($LASTEXITCODE -ne 0) { $bad++ }
-foreach ($extra in @("unread", "popup", "attach", "garble", "strip", "themes")) {
+foreach ($extra in @("unread", "popup", "attach", "garble", "admin-garble", "strip", "themes")) {
     $env:RESULTS = Join-Path $DataRoot "results-$extra.json"
     node "$here\driver.mjs" $extra; if ($LASTEXITCODE -ne 0) { $bad++ }
 }
@@ -32,5 +32,9 @@ $env:RESULTS = Join-Path $DataRoot "results-relaunch.json"
 node "$here\driver.mjs" relaunch; if ($LASTEXITCODE -ne 0) { $bad++ }
 $env:RESULTS = Join-Path $DataRoot "results-direct-relaunch.json"
 node "$here\driver.mjs" direct-relaunch; if ($LASTEXITCODE -ne 0) { $bad++ }
+# Last, because it hides B's window to the tray and nothing here clicks the tray back.
+$env:DATAROOT = $DataRoot
+$env:RESULTS = Join-Path $DataRoot "results-tray.json"
+node "$here\driver.mjs" tray; if ($LASTEXITCODE -ne 0) { $bad++ }
 & "$here\stop-pair.ps1" -DataRoot $DataRoot | Out-Null
 if ($bad) { Write-Host "SELF-TEST FAILED ($bad scenario(s))"; exit 1 } else { Write-Host "SELF-TEST PASSED" }

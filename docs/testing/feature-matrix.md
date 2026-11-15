@@ -48,10 +48,11 @@ Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers onl
 | Feature | Status | Evidence / note |
 |---|---|---|
 | Themes (6) apply, text readable, nothing overflows | VERIFIED | selftest themes (screenshots in the results folder). Found and fixed: avatar letters nearly invisible in Candy and Hello Kitty. NOT judged by a machine: whether they look good, and gradient sidebars (contrast not measurable) |
-| Tray, start in tray, start with Windows | UNVERIFIED | checklist Parts 1-2 |
-| Notification pop-up (message from another server: shows it, Reply from the pop-up reaches the sender) | VERIFIED | selftest popup. NOT automatable: pop-up when Farder is in the BACKGROUND (the test driver forces "has focus"), position/centring, keyboard focus after use: still checklist Part 3, chris to eyeball. keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
+| Close to tray (app survives closing its window, receives messages, pop-up shows) | VERIFIED | selftest tray (the pop-up part with focus simulated). Tray icon/menu clicks, start in tray, start with Windows: UNVERIFIED (Parts 1-2) |
+| Notification pop-up (message from another server: shows it, Reply from the pop-up reaches the sender) | VERIFIED | selftest popup. Background pop-up (focus simulated by overriding the one "has focus" answer) also VERIFIED. NOT automatable: pop-up position/centring, keyboard focus after use: checklist Part 3, chris to eyeball. keyboard stops working in the main window after pop-up testing, pop-up not centred first try, Reply button possibly clipped |
 | Autoplay | UNVERIFIED | Part 4 |
-| Garbler (own "speak as": B receives garbled words; off restores normal) | VERIFIED | selftest garble. Admin-imposed garble, consent flow and powers: UNVERIFIED (Part 5; same-account issue) |
+| Garbler (own "speak as": B receives garbled words; off restores normal) | VERIFIED | selftest garble |
+| Admin garble (moderation) and consent garble | VERIFIED | selftest admin-garble: author keeps own words, others see garbled; stop works; a consensual garble is refused without consent and works after. Delegated powers screens (grant "garble" etc.): UNVERIFIED (Part 5) |
 | Sound | UNVERIFIED | Part 6 |
 | Message density | UNVERIFIED | Part 8 |
 | Unread markers (dot on another server, highlight on a conversation) | VERIFIED | selftest unread |

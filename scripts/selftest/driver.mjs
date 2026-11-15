@@ -521,6 +521,20 @@ async function popup() {
     await box.press("Enter");
     await seesText(A, "popup reply " + stamp, 30000);
   });
+  await check("B is looking at the SAME channel but Farder is in the background (focus simulated): the pop-up still shows", async () => {
+    // The driver makes every page report "has focus", so the one answer the app asks
+    // (document.hasFocus) is overridden to say "no". Everything after that is real.
+    await B.page.locator(first).click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await B.page.evaluate(() => { document.hasFocus = () => false; });
+    try {
+      await sendText(A, "background ping " + stamp);
+      await pop.locator(".notify-popup-card", { hasText: "background ping " + stamp }).first().waitFor({ timeout: 30000 });
+    } finally {
+      await B.page.evaluate(() => { delete document.hasFocus; });
+    }
+  });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
 }
@@ -700,6 +714,111 @@ async function strip() {
   await B.browser.close().catch(() => {});
 }
 
+// A moderator garbling someone else (a moderation garble, as the server owner A):
+// B's next lines are drawn garbled for OTHER people, while B keeps their own words.
+// Then the owner stops it and B is normal again. Run after `core`.
+async function adminGarble() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  const ids = await A.page.evaluate(async () => {
+    const inv = window.__TAURI_INTERNALS__.invoke;
+    const s = (await inv("get_saved_servers"))[0];
+    const info = await inv("get_server_info_v2", { serverId: s.id });
+    const members = await inv("get_members", { serverId: s.id });
+    const bob = members.find((m) => m.display_name === "Bob");
+    const hex = bob.public_key.bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+    return { serverId: s.id, logServerId: info.server_id, bob: "vk_" + hex };
+  });
+  const call = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
+  await check("owner A starts a moderation garble on Bob (next 2 messages)", async () => {
+    await call(A.page, "garble_set", { serverId: ids.serverId, logServerId: ids.logServerId, target: ids.bob, mode: "bark", phrase: "", messages: 2, consensual: false });
+  });
+  await check("Bob types a line: Bob still sees his own words, A sees it garbled", async () => {
+    await sendText(B, "moderated words " + stamp);
+    await seesText(B, "moderated words " + stamp, 30000);                 // the author keeps their own copy
+    await new Promise((r) => setTimeout(r, 4000));
+    const texts = await A.page.locator(".message-content").allInnerTexts();
+    const last = texts[texts.length - 1] || "";
+    await shot(A.page, "A-sees-garbled");
+    if (/moderated|words/.test(last)) throw new Error("A still sees the original words: " + last.slice(0, 60));
+    return "A sees: " + last.slice(0, 40);
+  });
+  await check("owner A stops it: Bob's next line is normal for A", async () => {
+    await call(A.page, "garble_clear", { serverId: ids.serverId, logServerId: ids.logServerId, target: ids.bob });
+    await new Promise((r) => setTimeout(r, 1500));
+    await sendText(B, "after the stop " + stamp);
+    await seesText(A, "after the stop " + stamp, 30000);
+  });
+  // The consent version: A may only garble Bob if Bob agreed first.
+  const alice = await A.page.evaluate(async (sid) => {
+    const m = (await window.__TAURI_INTERNALS__.invoke("get_members", { serverId: sid })).find((x) => x.display_name === "Alice");
+    return "vk_" + m.public_key.bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  }, ids.serverId);
+  await check("without Bob's consent, a consensual garble is refused", async () => {
+    let refused = false;
+    try { await call(A.page, "garble_set", { serverId: ids.serverId, logServerId: ids.logServerId, target: ids.bob, mode: "bark", phrase: "", messages: 1, consensual: true }); }
+    catch (e) { refused = true; }
+    if (!refused) throw new Error("it was accepted without consent");
+  });
+  await check("Bob consents (up to 3 messages); then A can garble him, and his next line shows garbled to A", async () => {
+    // B reaches the same server under its own address string (it joined by a different link form).
+    const bServer = await B.page.evaluate(async (name) => (await window.__TAURI_INTERNALS__.invoke("get_saved_servers")).find((x) => x.name === name)?.id, "SelfTest " + stamp);
+    await call(B.page, "garble_consent", { serverId: bServer, logServerId: ids.logServerId, controller: alice, maxMessages: 3 });
+    await new Promise((r) => setTimeout(r, 2000));
+    await call(A.page, "garble_set", { serverId: ids.serverId, logServerId: ids.logServerId, target: ids.bob, mode: "bark", phrase: "", messages: 1, consensual: true });
+    await sendText(B, "consented words " + stamp);
+    await new Promise((r) => setTimeout(r, 4000));
+    const texts = await A.page.locator(".message-content").allInnerTexts();
+    const last = texts[texts.length - 1] || "";
+    if (/consented|words/.test(last)) throw new Error("A still sees the original: " + last.slice(0, 60));
+    return "A sees: " + last.slice(0, 40);
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// Close-to-tray: closing B's window must NOT quit the app (it is a messenger: it stays
+// in the tray), B must still receive messages while hidden, and a pop-up must show.
+// DESTRUCTIVE for B (no tray click is automated), so the runner puts it last.
+async function tray() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const { execFileSync } = await import("node:child_process");
+  const root = process.env.DATAROOT || `${process.env.USERPROFILE}\\farder-selftest-data`;
+  const pids = fs.readFileSync(`${root}\\pids.txt`, "utf8").split(/\r?\n/).filter(Boolean);
+  const bPid = pids[1];
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  await A.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+  await A.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  const ps = (cmd) => execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" }).trim();
+  await check("closing B's window leaves the app running (hidden in the tray, not quit)", async () => {
+    ps(`(Get-Process -Id ${bPid}).CloseMainWindow() | Out-Null`);
+    await new Promise((r) => setTimeout(r, 4000));
+    const alive = ps(`if (Get-Process -Id ${bPid} -ErrorAction SilentlyContinue) { 'alive' } else { 'gone' }`);
+    if (alive !== "alive") throw new Error("the app quit when its window was closed");
+    const vis = await B.page.evaluate(() => document.visibilityState).catch(() => "unreachable");
+    return "process " + alive + ", page " + vis;
+  });
+  await check("while hidden in the tray, B still receives a message and its pop-up shows (focus simulated)", async () => {
+    await B.page.evaluate(() => { document.hasFocus = () => false; });   // the driver forces "has focus"; the real window is hidden
+    await sendText(A, "while hidden " + stamp);
+    await seesText(B, "while hidden " + stamp, 30000);                     // it arrived while B's window is hidden
+    const pop = await pageMatching(B, /[?&]notify=1/, 30000);
+    await pop.locator(".notify-popup-card", { hasText: "while hidden " + stamp }).first().waitFor({ timeout: 40000 });
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -713,6 +832,8 @@ try {
   else if (scenario === "themes") await themes();
   else if (scenario === "attach") await attach_file();
   else if (scenario === "garble") await garble();
+  else if (scenario === "tray") await tray();
+  else if (scenario === "admin-garble") await adminGarble();
   else if (scenario === "strip") await strip();
   else if (scenario === "direct-relaunch") await directRelaunch();
   else throw new Error("unknown scenario " + scenario);
