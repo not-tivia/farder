@@ -1265,11 +1265,11 @@ async function recovery() {
   await check("B starts a takeover with the 24 words; both screens show it, with a countdown", async () => {
     await B.page.getByLabel("The 24 recovery words").fill(words);
     await B.page.getByRole("button", { name: "Start the takeover" }).click();
-    await B.page.getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
+    await B.page.locator(".modal-body").getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
     await shot(B.page, "B-takeover-started");
     await closeDialog(B);
     await openRecovery(A);
-    await A.page.getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
+    await A.page.locator(".modal-body").getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
     await shot(A.page, "A-sees-takeover");
     await closeDialog(A);
     // Every member sees it on the main screen, without opening any settings.
