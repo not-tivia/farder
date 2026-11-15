@@ -3912,8 +3912,11 @@ pub async fn play_audio_file(path: String) -> Result<(), String> {
 
 /// Show a desktop notification using notify-send (Linux) or equivalent.
 /// Falls back silently on unsupported platforms or when notify-send is absent.
+// async on purpose (also `save_notification_prefs`, `set_edge_strip`, `chat_open`):
+// these can BUILD a window, and on Windows a window built inside a plain
+// synchronous command can hang and stay blank. Found by the two-client self-test.
 #[tauri::command]
-pub fn show_notification(
+pub async fn show_notification(
     app: tauri::AppHandle,
     title: String,
     body: String,
@@ -4013,7 +4016,7 @@ pub fn get_notification_prefs() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn save_notification_prefs(app: tauri::AppHandle, prefs: serde_json::Value) -> Result<(), String> {
+pub async fn save_notification_prefs(app: tauri::AppHandle, prefs: serde_json::Value) -> Result<(), String> {
     let path = farder_data_dir().join("notifications.json");
     std::fs::write(&path, prefs.to_string()).map_err(|e| e.to_string())?;
     // The pop-up window is a whole extra browser process. Keep it only while the

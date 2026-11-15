@@ -622,6 +622,84 @@ async function attach_file() {
   await B.browser.close().catch(() => {});
 }
 
+// The sender's own garbler: with it on, what A types reaches B as garbled words.
+// Run after `core`.
+async function garble() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  const setG = (enabled) => A.page.evaluate((en) => {
+    localStorage.setItem("farder.garble", JSON.stringify({ enabled: en, mode: "bark", phrase: "" }));
+    window.dispatchEvent(new CustomEvent("farder:garble-changed"));
+  }, enabled);
+  try {
+    await setG(true);
+    await check("garbler on: what A types reaches B as garbled words, not the original", async () => {
+      await sendText(A, "secret plan quietly " + stamp);
+      // The newest message in B's channel is A's; it must exist and differ from what was typed.
+      await B.page.waitForFunction(() => document.querySelectorAll(".message-content").length > 0);
+      await new Promise((r) => setTimeout(r, 4000));
+      const texts = await B.page.locator(".message-content").allInnerTexts();
+      const last = texts[texts.length - 1] || "";
+      await shot(B.page, "B-garbled");
+      if (/secret|plan|quietly/.test(last)) throw new Error("B still sees the original words: " + last.slice(0, 60));
+      if (last.trim().length === 0) throw new Error("B sees an empty message");
+      return "B sees: " + last.slice(0, 40);
+    });
+  } finally {
+    await setG(false);
+  }
+  await check("garbler off again: a normal line arrives unchanged", async () => {
+    await sendText(A, "plain again " + stamp);
+    await seesText(B, "plain again " + stamp, 30000);
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// The edge strip (a one-line bar docked to the screen edge, replaces the pop-up when on).
+// Run after `direct` (B watches the second server). Turns the strip back off at the end.
+async function strip() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const first = `.server-icon[title="SelfTest ${stamp}"]`;
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+  }
+  // A call that never comes back is a finding, not a reason to hang the whole run.
+  const setStrip = (enabled) => Promise.race([
+    B.page.evaluate((en) => window.__TAURI_INTERNALS__.invoke("set_edge_strip", { settings: { enabled: en, dock: "bottom", align: "center", width: 700, always_visible: true } }), enabled),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("set_edge_strip did not answer in 25s (the app is hung)")), 25000)),
+  ]);
+  try {
+    await A.page.locator(first).click();
+    await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await B.page.locator(`.server-icon[title="Direct ${stamp}"]`).click();
+    let st;
+    if (!(await check("strip on: the strip window appears", async () => {
+      await setStrip(true);
+      st = await pageMatching(B, /[?&]strip=1/, 30000);
+      await st.locator(".edge-strip").waitFor({ timeout: 20000 });
+      await shot(st, "B-strip-idle");
+    }))) return;
+    await check("a message arrives: the strip shows it (and who/where from)", async () => {
+      await sendText(A, "strip ping " + stamp);
+      await st.locator(".edge-strip", { hasText: "strip ping " + stamp }).waitFor({ timeout: 30000 });
+      await shot(st, "B-strip-message");
+    });
+  } finally {
+    await setStrip(false).catch(() => {});
+  }
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -634,6 +712,8 @@ try {
   else if (scenario === "popup") await popup();
   else if (scenario === "themes") await themes();
   else if (scenario === "attach") await attach_file();
+  else if (scenario === "garble") await garble();
+  else if (scenario === "strip") await strip();
   else if (scenario === "direct-relaunch") await directRelaunch();
   else throw new Error("unknown scenario " + scenario);
 } catch (e) {

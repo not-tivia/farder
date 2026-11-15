@@ -148,7 +148,7 @@ pub fn get_edge_strip() -> StripSettings {
 /// Save the settings, create or destroy the window to match, and tell the strip's
 /// page (`strip:settings-changed`) so it re-places itself.
 #[tauri::command]
-pub fn set_edge_strip(app: AppHandle, settings: StripSettings) -> Result<StripSettings, String> {
+pub async fn set_edge_strip(app: AppHandle, settings: StripSettings) -> Result<StripSettings, String> {
     let s = normalize(settings);
     let value = serde_json::to_value(&s).map_err(|e| e.to_string())?;
     crate::commands::settings_set(SETTINGS_KEY, value)?;
