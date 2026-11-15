@@ -1216,6 +1216,10 @@ async function recovery() {
     await c.page.locator(".settings-tab", { hasText: "Recovery" }).click();
   };
   const closeDialog = async (c) => { await c.page.locator(".modal-close").first().click().catch(() => {}); };
+  await check("A (the owner) is nudged that this server has no recovery key", async () => {
+    await A.page.locator(".recovery-banner.nudge", { hasText: "no recovery key" }).waitFor({ timeout: 30000 });
+    await shot(A.page, "A-recovery-nudge");
+  });
   let words = "";
   if (!(await check("A (owner) makes a recovery key and is shown 24 words once", async () => {
     await openRecovery(A);
@@ -1233,6 +1237,9 @@ async function recovery() {
     return "24 words shown once, then hidden";
   }))) return;
   await closeDialog(A);
+  await check("the nudge goes away once the key exists", async () => {
+    await A.page.locator(".recovery-banner.nudge").waitFor({ state: "detached", timeout: 30000 });
+  });
   await check("B (a member) sees that a recovery key is set, but not the words", async () => {
     await openRecovery(B);
     await B.page.getByText(/A recovery key is set/).waitFor({ timeout: 20000 });
@@ -1264,6 +1271,11 @@ async function recovery() {
     await openRecovery(A);
     await A.page.getByText(/Ownership of this server is moving to/).waitFor({ timeout: 30000 });
     await shot(A.page, "A-sees-takeover");
+    await closeDialog(A);
+    // Every member sees it on the main screen, without opening any settings.
+    await A.page.locator(".recovery-banner", { hasText: "Ownership of this server is moving" }).waitFor({ timeout: 30000 });
+    await B.page.locator(".recovery-banner", { hasText: "Ownership of this server is moving" }).waitFor({ timeout: 30000 });
+    await shot(A.page, "A-banner");
   });
   await check("finishing early is not possible (the button waits), and A cannot cancel it", async () => {
     await closeDialog(A);
@@ -1289,6 +1301,9 @@ async function recovery() {
     await new Promise((r) => setTimeout(r, 1500));
     if (await A.page.locator(".settings-tab", { hasText: "Powers" }).count()) throw new Error("A still sees the owner's Powers tab");
     await closeDialog(A);
+    // And the banner is gone for everyone.
+    await A.page.locator(".recovery-banner").waitFor({ state: "detached", timeout: 30000 });
+    await B.page.locator(".recovery-banner").waitFor({ state: "detached", timeout: 30000 });
   });
   await check("the old owner (still connected) can no longer do owner-only things; the new owner can", async () => {
     const act = (c, nm, cmd, extra) => c.page.evaluate(async ([name, command, more]) => {
