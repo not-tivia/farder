@@ -14,7 +14,7 @@ Goal this serves: a chat app friends can use locally, later offered as a free
 alternative to the big clients, and kept portable to Android and Apple
 (see `docs/modules/portability.md`).
 
-Last updated: 2026-11-14 (baseline only; no real-path run recorded yet).
+Last updated: 2026-11-14 (first real-path run recorded; relay-hosted servers only).
 
 ## Test tiers
 
@@ -24,20 +24,20 @@ Last updated: 2026-11-14 (baseline only; no real-path run recorded yet).
 | T2 Client crate | `cd client/src-tauri && cargo test -- --test-threads=1` | last run green (buddy 6 tests) |
 | T3 Frontend | `client/scripts/run-unit-tests.sh` + `npx tsc --noEmit` | 91 pass, tsc clean |
 | T4 Audits | `scripts/seam_audit.py`, `reachability_audit.py`, `doc_audit.py` | not re-run this session |
-| T5 Real path | two Windows instances, driven over WebView2 DevTools | NOT BUILT YET |
+| T5 Real path | two Windows instances, driven over WebView2 DevTools: `scripts/selftest/run-selftest.ps1` | 2026-11-14: core 9/9 and relaunch 6/6 PASS (relay-hosted server, build 5ec95826) |
 
 ## Core chat (what friends will use)
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Create identity, PIN gate | UNVERIFIED | |
-| Create a server | UNVERIFIED | |
-| Create an invite link | UNVERIFIED | chris reported "cannot even create an invite" (2026-11-09), cause never confirmed |
-| Join from an invite (second identity) | UNVERIFIED | |
-| Send / receive text, both directions | UNVERIFIED | |
+| Create identity, PIN gate | VERIFIED | selftest core + relaunch (unlock with PIN) |
+| Create a server | VERIFIED | selftest core (relay-hosted default) |
+| Create an invite link | VERIFIED (relay) | selftest core; the first-run Translation dialog covers the app until skipped, which may be what chris hit on 2026-11-09. Local-only server not tested |
+| Join from an invite (second identity) | VERIFIED (relay) | selftest core, incl. the "Join it?" confirmation |
+| Send / receive text, both directions | VERIFIED | selftest core |
 | Direct messages (encrypted) | UNVERIFIED | |
 | Encrypted channels | UNVERIFIED | server-side e2e tests pass (T1); GUI path unseen |
-| Quit and relaunch: still joined | UNVERIFIED | fix 8ab9a69 (server keeps its port, orphan server reaped); chris to confirm |
+| Quit and relaunch: still joined | VERIFIED (relay) | selftest relaunch; local-only server not tested |
 | Message edit / delete | UNVERIFIED | edits/deletes for a non-active server are ignored by the main window (known gap) |
 | Attachments, voice, screenshare | UNVERIFIED | |
 
