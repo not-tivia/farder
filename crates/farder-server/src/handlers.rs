@@ -2547,6 +2547,34 @@ pub fn handle_request(
                 }],
             )
         }
+        ServerRequest::GetRecoveryStatus => {
+            let guard = state.log_state.lock().unwrap();
+            let Some(ls) = guard.as_ref() else {
+                return err("this server has no signed history, so it has no recovery key");
+            };
+            let pending = match ls.pending_claim() {
+                Some(p) => {
+                    let accepted: Option<i64> = conn
+                        .query_row("SELECT created_at FROM events WHERE event_hash = ?1", rusqlite::params![p.claim], |r| r.get(0))
+                        .optional()?;
+                    let accepted_at = accepted.unwrap_or(0) as u64;
+                    Some(RecoveryPendingInfo {
+                        claim: p.claim.clone(),
+                        new_owner: p.new_owner.clone(),
+                        accepted_at,
+                        ready_at: accepted_at.saturating_add(state.recovery_wait_secs),
+                    })
+                }
+                None => None,
+            };
+            ok(ServerResponse::RecoveryStatus {
+                key_set: ls.recovery_key().is_some(),
+                recovery_key: ls.recovery_key().cloned(),
+                wait_secs: state.recovery_wait_secs,
+                pending,
+            })
+        }
+
         ServerRequest::SubmitEvent { event } => {
             // 1. The server must be in log mode (genesis established).
             let mut ls_guard = state.log_state.lock().unwrap();
@@ -10315,6 +10343,7 @@ mod tests {
                 | ServerRequest::ListBlocked
                 | ServerRequest::GetGarbleState
                 | ServerRequest::GetCapabilities
+                | ServerRequest::GetRecoveryStatus
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
@@ -11695,7 +11724,15 @@ mod tests {
         let _ = inv;
         let invite_hash = o.last.as_ref().unwrap().hash();
         n.submit(&conn, &state, &sid, false, EP::MemberJoined { member: newo.public_key(), invite: invite_hash }).unwrap();
+        let status = |conn: &Connection| match handle_request(conn, &newo.public_key(), false, ServerRequest::GetRecoveryStatus, "", &state).unwrap().response {
+            ServerResponse::RecoveryStatus { key_set, recovery_key, wait_secs, pending } => (key_set, recovery_key, wait_secs, pending),
+            other => panic!("unexpected answer: {other:?}"),
+        };
+        let (set0, ..) = status(&conn);
+        assert!(!set0, "no recovery key yet");
         o.submit(&conn, &state, &sid, true, EP::RecoveryKeySet { recovery: rec.public_key() }).unwrap();
+        let (set1, key1, wait1, pending1) = status(&conn);
+        assert!(set1 && key1 == Some(rec.public_key()) && wait1 == 3600 && pending1.is_none());
 
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         assert!(rt.block_on(state.is_current_owner(&owner.public_key())));
@@ -11704,6 +11741,12 @@ mod tests {
         let claim = r.submit(&conn, &state, &sid, false, EP::RecoveryClaim { new_owner: newo.public_key() }).unwrap();
         assert!(claim.events.iter().any(|b| matches!(&b.event, ServerEvent::MembershipChanged { .. })), "everyone is told");
         let claim_hash = r.last.as_ref().unwrap().hash();
+        // Every member can see the takeover and when it can finish: the countdown.
+        let (_, _, _, pend) = status(&conn);
+        let pend = pend.expect("the takeover is visible");
+        assert_eq!(pend.claim, claim_hash);
+        assert_eq!(pend.new_owner, newo.public_key());
+        assert_eq!(pend.ready_at, pend.accepted_at + 3600);
         let early = r.submit(&conn, &state, &sid, false, EP::RecoveryFinalize { claim: claim_hash.clone() }).err().expect("an early finish must be refused");
         assert!(early.contains("waiting period"), "{early}");
         assert!(rt.block_on(state.is_current_owner(&owner.public_key())), "nothing changed");
@@ -11718,6 +11761,8 @@ mod tests {
         // from the stored history.
         assert!(rt.block_on(state.is_current_owner(&newo.public_key())));
         assert!(!rt.block_on(state.is_current_owner(&owner.public_key())));
+        let (set2, _, _, pend2) = status(&conn);
+        assert!(!set2 && pend2.is_none(), "the recovery key is spent and nothing is pending");
         let rebuilt = event_ingest::build_log_state(&conn).unwrap().expect("history rebuilds");
         assert_eq!(rebuilt.owner(), &newo.public_key());
         // Every recovery step was written to the permanent audit log.

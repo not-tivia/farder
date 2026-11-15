@@ -781,6 +781,11 @@ pub enum ServerRequest {
     /// is told only their own. Answered with [`ServerResponse::Capabilities`].
     /// Appended last (positional codec).
     GetCapabilities,
+    /// Whether a recovery key is set and whether a takeover is waiting, with the times
+    /// the app needs for a countdown. Any member may ask: a takeover is meant to be
+    /// SEEN by everyone. Answered with [`ServerResponse::RecoveryStatus`]. Appended last
+    /// (positional codec).
+    GetRecoveryStatus,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -922,6 +927,27 @@ pub enum ServerResponse {
     /// Answer to [`ServerRequest::GetCapabilities`]: explicit grants only (the
     /// owner holds everything implicitly and is not listed).
     Capabilities { holders: Vec<CapabilityHolder> },
+    /// Answer to [`ServerRequest::GetRecoveryStatus`]. `wait_secs` is how long a takeover
+    /// must wait on this server; `pending` is the takeover in progress, if any.
+    RecoveryStatus {
+        key_set: bool,
+        recovery_key: Option<PublicKey>,
+        wait_secs: u64,
+        pending: Option<RecoveryPendingInfo>,
+    },
+}
+
+/// A takeover started by the recovery key and not yet finished or withdrawn.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RecoveryPendingInfo {
+    /// Hash of the claim record (what a cancel or finish must cite).
+    pub claim: String,
+    /// Who becomes the owner when it completes.
+    pub new_owner: PublicKey,
+    /// When THIS server recorded the claim (unix seconds, the server's clock).
+    pub accepted_at: u64,
+    /// The earliest moment the server will accept its completion.
+    pub ready_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
