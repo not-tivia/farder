@@ -194,7 +194,8 @@ suite_e2ee() {
   export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
   echo "== claim, invite, chat"; winrun ubuntu
   export E2EE_WORD="zebracodeword$(date +%s)"
-  echo "== encrypted channel through the apps (marker $E2EE_WORD)"; winrun e2ee
+  echo "== encrypted channel through the apps (marker $E2EE_WORD)"; winrun e2ee | tee "$D/e2ee.out"
+  grep -q "^FAIL" "$D/e2ee.out" && { echo "== diagnosis"; winrun e2ee-diag; }
   pkill -x farder-server; sleep 1
   # The proof is in the bytes the SERVER kept: every file it wrote (database, WAL, stored files, logs).
   local hits; hits=$(grep -r -a -l -F "$E2EE_WORD" "$D" 2>/dev/null)

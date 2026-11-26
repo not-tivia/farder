@@ -1678,7 +1678,7 @@ async function e2ee() {
   const sendUntilSeen = async (from, to, text) => {
     const t0 = Date.now();
     for (let i = 0; i < 18; i++) {
-      const box = from.page.getByPlaceholder(/Type a message/);
+      const box = from.page.getByPlaceholder(/Type a message|Encrypted message/);
       if (await box.isEnabled().catch(() => false)) {
         await box.fill(text); await box.press("Enter");
         if (await to.page.locator(".message-content", { hasText: text }).first().waitFor({ timeout: 10000 }).then(() => true, () => false)) return Math.round((Date.now() - t0) / 1000);
@@ -1699,6 +1699,42 @@ async function e2ee() {
     await shot(A.page, "A-reads-encrypted");
     return `after ${t}s`;
   });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// Diagnosis for a failing encrypted channel (run after `e2ee` on the same stack): per app, what the
+// screen says and what the channel's encryption state is; then the owner's add, with its skip reasons.
+async function e2eeDiag() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const chan = `secret-${stamp}`.toLowerCase();
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  const probe = (c, doAdd) => c.page.evaluate(async ([nm, ch, add]) => {
+    const inv = window.__TAURI_INTERNALS__.invoke;
+    const out = {};
+    try {
+      const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+      const info = await inv("get_server_info_v2", { serverId: s.id });
+      out.logServerId = info.server_id ?? info.log_server_id ?? null;
+      const c = info.channels.map((x) => ({ ...(x.base || x), class: x.class })).find((x) => x.name === ch);
+      out.channel = c ? { id: c.id, class: c.class } : null;
+      if (c && out.logServerId) {
+        try { out.leaves = await inv("e2ee_channel_leaves", { logServerId: out.logServerId, channelId: c.id }); } catch (e) { out.leavesErr = String(e); }
+        try { out.process = await inv("process_mls_control_events", { serverId: s.id, logServerId: out.logServerId, channelId: c.id }); } catch (e) { out.processErr = String(e); }
+        if (add) { try { out.add = await inv("add_members_to_e2ee_channel", { serverId: s.id, logServerId: out.logServerId, channelId: c.id }); } catch (e) { out.addErr = String(e); } }
+      }
+    } catch (e) { out.err = String(e); }
+    out.screen = (document.querySelector(".chat-panel")?.innerText || "").slice(0, 600);
+    return out;
+  }, [name, chan, doAdd]);
+  for (const [c, add] of [[A, true], [B, false], [A, false]]) {
+    await c.page.locator(".channel-item", { hasText: chan }).first().click().catch(() => {});
+    await new Promise((r) => setTimeout(r, 3000));
+    await shot(c.page, `${c.who}-e2ee-diag`);
+    console.log(`=== ${c.who}${add ? " (with owner add)" : ""}: ` + JSON.stringify(await probe(c, add), null, 1).slice(0, 3000));
+  }
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
 }
@@ -1727,6 +1763,7 @@ try {
   else if (scenario === "brake") await brake();
   else if (scenario === "failover") await failover();
   else if (scenario === "e2ee") await e2ee();
+  else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();
