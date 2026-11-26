@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { useDensity } from "../hooks/useDensity";
 import { foldsRepeatedAuthors, shortClock } from "../lib/density";
 import type { MessageInfo, AttachmentInfo, SealedDecryptEntry, SealedAttachmentRef } from "../lib/types";
-import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
+import { publicKeyToString, isDeletedUser, memberDisplayName, isSealedBeforeJoined } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
 import * as bookApi from "../lib/book/client";
@@ -721,13 +721,17 @@ export default function Message({ message, memberNames, grouped: groupedProp = f
       {/* Attachment-only messages (voice notes, captionless images) have empty
           content — the body must still render so the attachments do. */}
       {(deleted || isSealed || undecryptable || displayContent || message.attachments.length > 0) && !showWidget && (
-        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed || undecryptable ? " sealed-content" : ""}${undecryptable ? " sealed-undecryptable" : ""}`}>
+        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed || undecryptable ? " sealed-content" : ""}${undecryptable && !isSealedBeforeJoined(sealedDecrypt) ? " sealed-undecryptable" : ""}`}>
           {deleted ? (
             <em>This message has been deleted.</em>
           ) : isSealed ? (
             <em title="Encrypted message — awaiting decryption">🔒 Encrypted message</em>
           ) : undecryptable ? (
-            <em title={sealedDecrypt?.kind === "undecryptable" ? sealedDecrypt.reason : undefined}>🔒 Encrypted message — couldn't decrypt</em>
+            isSealedBeforeJoined(sealedDecrypt) ? (
+              <em title={sealedDecrypt?.kind === "undecryptable" ? sealedDecrypt.reason : undefined}>🔒 Sent before you could read this channel</em>
+            ) : (
+              <em title={sealedDecrypt?.kind === "undecryptable" ? sealedDecrypt.reason : undefined}>🔒 Encrypted message — couldn't decrypt</em>
+            )
           ) : editing ? (
             <div className="message-edit-area">
               <textarea

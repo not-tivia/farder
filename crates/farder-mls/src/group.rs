@@ -572,8 +572,20 @@ impl MlsChannelGroup {
         let protocol_message = message
             .try_into_protocol_message()
             .map_err(|e| anyhow!("sealed message is not a protocol message: {e}"))?;
-        let processed = process_message_contained(&mut self.inner, provider, protocol_message)
-            .context("open message")?;
+        // The epoch is in the clear header. Read it before processing so a failure can say WHY: a message
+        // from an epoch older than this device's group was sealed before this device was added (MLS gives a
+        // newcomer no keys for the past), which is expected and must not look like tampering.
+        let msg_epoch = protocol_message.epoch().as_u64();
+        let our_epoch = self.epoch();
+        let processed = match process_message_contained(&mut self.inner, provider, protocol_message) {
+            Ok(p) => p,
+            Err(e) if msg_epoch < our_epoch => {
+                return Err(e.context(format!(
+                    "{BEFORE_JOINED}: message epoch {msg_epoch}, this device's group is at {our_epoch}"
+                )));
+            }
+            Err(e) => return Err(e.context("open message")),
+        };
         let ProcessedMessageContent::ApplicationMessage(app) = processed.into_content() else {
             bail!("message is not an application message");
         };
@@ -867,6 +879,30 @@ mod tests {
             b_join,
             c_join,
         )
+    }
+
+    #[test]
+    fn a_message_sealed_before_a_device_joined_says_so_and_later_ones_open() {
+        // Seen live 2026-11-26: the first message in a new encrypted channel was sealed a moment before the
+        // second member was added, and showed as "couldn't decrypt". MLS is right to refuse it; the error
+        // must say WHY so the app can label it calmly instead of looking like tampering.
+        let (a_id, a_dev, a_prov) = member();
+        let (b_id, b_dev, b_prov) = member();
+        let mut alice = MlsChannelGroup::create(&a_prov, &DeviceSigner(&a_dev), credential_with_key(&a_dev, &a_id.public_key()), b"before-joined").unwrap();
+        let env = |t: &str| MessageEnvelope { content: t.into(), attachment_keys: vec![], filenames: vec![], mimes: vec![] };
+        let early = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &env("before bob")).unwrap();
+        let b_bundle = generate_key_package(&b_prov, &b_dev, &b_id.public_key()).unwrap();
+        let add = alice.add_members(&a_prov, &DeviceSigner(&a_dev), &[b_bundle.key_package().clone()]).unwrap();
+        let (mut bob, _) = MlsChannelGroup::join_from_welcome(&b_prov, &add.welcome_bytes.clone().unwrap()).unwrap();
+        let err = format!("{:#}", bob.open_message(&b_prov, &early).unwrap_err());
+        assert!(err.contains(BEFORE_JOINED), "{err}");
+        let later = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &env("after bob")).unwrap();
+        assert_eq!(bob.open_message(&b_prov, &later).unwrap().content, "after bob");
+        // A damaged message from the CURRENT epoch is not dressed up as "before joined".
+        let mut bad = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &env("tampered")).unwrap();
+        let n = bad.len(); bad[n - 5] ^= 0xFF;
+        let err = format!("{:#}", bob.open_message(&b_prov, &bad).unwrap_err());
+        assert!(!err.contains(BEFORE_JOINED), "{err}");
     }
 
     #[test]
@@ -1347,3 +1383,8 @@ mod tests {
         assert_eq!(carol.epoch_authenticator(), alice.epoch_authenticator());
     }
 }
+
+/// Prefix of the error `MlsChannelGroup::open_message` gives for a message sealed in an epoch older than
+/// this device's group: it was sent before this device could read the channel (MLS gives a newcomer no
+/// keys for the past). The client matches it to show a calm label instead of "couldn't decrypt".
+pub const BEFORE_JOINED: &str = "sent before this device could read the channel";

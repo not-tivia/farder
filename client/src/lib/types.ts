@@ -287,6 +287,14 @@ export interface SealedAttachmentRef {
   mimeType: string;
 }
 
+/** The `farder_mls::group::BEFORE_JOINED` reason: the message was sealed before this device was added to
+ *  the channel. Expected (MLS gives a newcomer no keys for the past), so it is shown calmly and is not
+ *  counted as "could not be verified". Keep in sync with the Rust constant. */
+export const SEALED_BEFORE_JOINED = "sent before this device could read the channel";
+export function isSealedBeforeJoined(e: SealedDecryptEntry | undefined): boolean {
+  return e?.kind === "undecryptable" && e.reason.includes(SEALED_BEFORE_JOINED);
+}
+
 export type SealedDecryptEntry =
   | { kind: "decrypted"; content: string; eventHash: string | null; attachments?: SealedAttachmentRef[] }
   | { kind: "undecryptable"; reason: string; eventHash: string | null };

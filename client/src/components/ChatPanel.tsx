@@ -3,7 +3,7 @@ import SavedCopyBanner from "./SavedCopyBanner";
 import React, { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
-import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel, isSealedBeforeJoined } from "../lib/types";
 import type { MessageInfo } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
@@ -54,7 +54,12 @@ export default function ChatPanel() {
     : null;
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
-  const undecryptableCount = channelMessages.filter((m) => activeServer?.sealedDecrypts?.[m.id]?.kind === "undecryptable").length;
+  // Messages sealed before this device joined are expected, not suspicious: they get their own calm label
+  // in the message and are not counted here.
+  const undecryptableCount = channelMessages.filter((m) => {
+    const d = activeServer?.sealedDecrypts?.[m.id];
+    return d?.kind === "undecryptable" && !isSealedBeforeJoined(d);
+  }).length;
   // Leaf-change transparency notices for this channel (G1), oldest-first.
   const channelNotices = (currentChannelId !== null ? activeServer?.notices?.[currentChannelId] : undefined) ?? [];
 

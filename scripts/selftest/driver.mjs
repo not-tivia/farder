@@ -1703,10 +1703,15 @@ async function e2ee() {
   // first message after B was added arrived before B's Welcome and was cached as unreadable forever.
   await check("no message in the encrypted channel is shown as 'couldn't decrypt' on either side", async () => {
     await new Promise((r) => setTimeout(r, 5000));
+    const early = [];
     for (const c of [A, B]) {
       const bad = await c.page.locator("em", { hasText: "couldn't decrypt" }).evaluateAll((els) => els.map((e) => e.title));
       if (bad.length) { await shot(c.page, `${c.who}-undecryptable`); throw new Error(`${c.who}: ${bad.length} unreadable: ${bad[0]}`); }
+      const n = await c.page.locator("em", { hasText: "Sent before you could read this channel" }).count();
+      if (n) { early.push(`${c.who}: ${n} sent before it could read`); await shot(c.page, `${c.who}-before-joined`); }
+      if (await c.page.locator(".e2ee-unverified-marker").count()) throw new Error(`${c.who}: the 'could not be verified' warning shows`);
     }
+    return early.join("; ") || "every message opened";
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
