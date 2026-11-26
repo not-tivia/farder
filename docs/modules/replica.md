@@ -5,11 +5,12 @@ host's computer is off. Design and status: `docs/mesh-hosting-status.md`.
 
 ## Program
 
-`farder-replica [--server host:port] [--invite LINK] [--dir DIR] [--interval SECS] [--once] [--cert-fp HEX]`
+`farder-replica [--server host:port] [--invite LINK] [--dir DIR] [--name NAME] [--interval SECS] [--once] [--cert-fp HEX]`
 
 - First run needs `--invite`: the link from the app's invite dialog (`https://farder.xyz/join/...`), a
   `farder://host:port/CODE` link, or a bare code. When the link carries the address, `--server` can be left out.
   Relay links are refused (a replica connects directly).
+- Names itself `--name` (default "Backup copy") in the member list, so members do not see an unexplained "Anonymous".
 - Prints `replica key: vk_...`; the owner allows that key in Server Settings > Backup copy (the list shows each member's
   short key). Until then `--once` exits with code 3.
 - Each pull writes `latest.db` (and keeps `previous.db`) only after SHA-256, SQLite integrity and history replay checks.
@@ -31,6 +32,7 @@ Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir 
 | `verify_copy(path, size, sha)` | The checks a copy must pass before it replaces `latest.db`. |
 | `load_or_create_key(path)` | The replica's own identity key (file mode 0600 on Unix). |
 | `sync_files(session, out_dir) -> FileSync` | Make `out_dir/files` match the attachments `latest.db` lists (fetch, check, remove). |
+| `Session::set_name(key, name)` | Signed profile with that name (what the member list shows). |
 | `Session::download(file_id)` | One file on its own stream; `None` when the server says "not available". |
 | `invite_from_link(s) -> (Option<SocketAddr>, code)` | Parse the three invite forms above. |
 | `state_path(dir)` | Where the "joined" flag is kept. |

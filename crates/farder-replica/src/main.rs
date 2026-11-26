@@ -26,6 +26,9 @@ struct Args {
     /// Seconds between copies (default 15 minutes).
     #[arg(long, default_value_t = 900)]
     interval: u64,
+    /// The name members see for this machine in the member list.
+    #[arg(long, default_value = "Backup copy")]
+    name: String,
     /// Pull once and exit. Exit code 3 means "waiting for the owner to allow this replica".
     #[arg(long)]
     once: bool,
@@ -61,6 +64,7 @@ async fn main() -> Result<()> {
             joined = true;
             println!("joined the server as a member");
         }
+        if let Err(e) = s.set_name(&key, &a.name).await { eprintln!("{e:#}"); }
         match pull_once(&mut s, &a.dir).await {
             Ok(info) => {
                 println!("copy saved: {} bytes, {} signed events, history {}", info.size, info.events, info.history_id);

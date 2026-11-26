@@ -65,6 +65,10 @@ async fn a_replica_is_refused_until_allowed_then_pulls_a_verified_copy_of_the_re
     assert!(fresh);
     let mut r = Session::connect(srv.addr, None, &rkey, Some(code.clone()), None).await.unwrap();
     r.join_history(&rkey, &code).await.unwrap();
+    // It names itself, so members see "Backup copy" in the member list rather than "Anonymous".
+    r.set_name(&rkey, "Backup copy").await.unwrap();
+    let ServerResponse::Members { members } = o.ask(ServerRequest::GetMembers).await.unwrap() else { panic!("members") };
+    assert!(members.iter().any(|m| m.public_key == rkey.public_key() && m.display_name == "Backup copy"), "{members:?}");
     let out = work.path().join("copies");
     // Not allowed yet.
     match pull_once(&mut r, &out).await {

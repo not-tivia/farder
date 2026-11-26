@@ -119,6 +119,16 @@ impl Session {
         }
     }
 
+    /// Give this replica a name members can recognise (its signed profile), instead of "Anonymous".
+    pub async fn set_name(&mut self, key: &Keypair, name: &str) -> Result<()> {
+        let p = farder_crypto::profile::SignedProfile::create(key, name.to_string(), None, Some("keeps a copy of this server for when the host is off".into()));
+        match self.ask(ServerRequest::UpdateProfile { profile: p.to_bytes() }).await? {
+            ServerResponse::Ok => Ok(()),
+            ServerResponse::Error { reason } => bail!("could not set the name: {reason}"),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
     /// The underlying QUIC connection (tests use it to upload a file on its own stream).
     pub fn connection(&self) -> &quinn::Connection { &self.conn }
 
