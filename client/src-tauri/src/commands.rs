@@ -5412,7 +5412,12 @@ pub struct SkippedE2eeMember {
 #[derive(serde::Serialize)]
 pub struct PublishOwnKeyPackageResult {
     pub channel_id: u64,
+    /// Empty when `skipped`.
     pub event_hash: String,
+    /// True when nothing was published because this device is already a confirmed member (or the channel
+    /// is frozen after an equivocation): publishing would have reset that state.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 /// Authorize this device on the server (one `DeviceAuthorized` event) the first
@@ -5864,6 +5869,16 @@ async fn run_publish_own_key_package(
     let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
     let data_dir = farder_data_dir();
 
+    // Never publish over a confirmed or poisoned state: the save below resets it to `confirmed: false` /
+    // epoch 0. The frontend checks this too, but between its `process` and this call the lock is released,
+    // and a Welcome can be applied in that gap (more likely since members publish as soon as a channel
+    // appears). Checked HERE, under the device-chain lock `run_e2ee` holds, so no interleaving can reset a member.
+    if let Some(existing) = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)? {
+        if existing.confirmed || existing.poisoned.is_some() {
+            return Ok(PublishOwnKeyPackageResult { channel_id, event_hash: String::new(), skipped: true });
+        }
+    }
+
     // Create-once or resume the joiner store: the KeyPackage's private material
     // must live in the same store that later joins from the Welcome (the store
     // lifecycle contract in `join.rs`).
@@ -5905,6 +5920,7 @@ async fn run_publish_own_key_package(
     Ok(PublishOwnKeyPackageResult {
         channel_id,
         event_hash: published.event_hash,
+        skipped: false,
     })
 }
 

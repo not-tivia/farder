@@ -282,7 +282,7 @@ export async function addMembersToE2eeChannel(serverId: string, logServerId: str
   return invoke("add_members_to_e2ee_channel", { serverId, logServerId, channelId });
 }
 
-export async function publishOwnKeyPackage(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; event_hash: string }> {
+export async function publishOwnKeyPackage(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; event_hash: string; skipped: boolean }> {
   return invoke("publish_own_key_package", { serverId, logServerId, channelId });
 }
 

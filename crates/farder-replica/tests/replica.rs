@@ -238,6 +238,11 @@ async fn attachments_come_with_the_copy_are_checked_and_the_copy_serves_them_whi
     assert_eq!(sync_files(&mut r, &out).await.unwrap().fetched, 1);
     assert_eq!(std::fs::read(&posted_path).unwrap(), b"an attachment that must survive");
 
+    // Revoking the replica takes its file access away again (the unposted file is owner-only once more).
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: false }).await.unwrap(), ServerResponse::Replicas { .. }));
+    assert!(r.download(unposted).await.unwrap().is_none(), "a revoked replica may not fetch an owner-only file");
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+
     // The host goes away; the copy serves the file to an existing member.
     drop(o); drop(r); drop(srv);
     tokio::time::sleep(Duration::from_millis(500)).await;

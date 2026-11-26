@@ -1713,6 +1713,23 @@ async function e2ee() {
     }
     return early.join("; ") || "every message opened";
   });
+  // A member's channel state must survive all of the above: publishing a key package over a confirmed state
+  // resets it (the command now refuses to; this would catch a regression).
+  await check("both apps end as confirmed members at the same epoch", async () => {
+    const st = [];
+    for (const c of [A, B]) {
+      st.push(await c.page.evaluate(async ([nm, ch]) => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+        const info = await inv("get_server_info_v2", { serverId: s.id });
+        const c = info.channels.map((x) => x.base || x).find((x) => x.name === ch);
+        const r = await inv("process_mls_control_events", { serverId: s.id, logServerId: info.server_id, channelId: c.id });
+        return { confirmed: r.confirmed, epoch: r.epoch, outcome: r.outcome };
+      }, [name, chan]));
+    }
+    if (!st.every((x) => x.confirmed && x.outcome === "advanced") || st[0].epoch !== st[1].epoch) throw new Error(JSON.stringify(st));
+    return `epoch ${st[0].epoch} on both`;
+  });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
 }

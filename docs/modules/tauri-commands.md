@@ -429,7 +429,11 @@ publishes via the crate's `publish_key_package`, and records a
 `confirmed: false` resume point. A member calls this when it opens an E2EE
 channel it is not yet a confirmed member of (T9/T10 wire the trigger).
 **Parameters:** as `add_members_to_e2ee_channel`.
-**Returns:** `PublishOwnKeyPackageResult { channel_id, event_hash }`.
+**Returns:** `PublishOwnKeyPackageResult { channel_id, event_hash, skipped }`. `skipped: true` (and an
+empty `event_hash`) when this device is already a confirmed member or the channel is poisoned: the
+command refuses to publish over that state, checked under the device-chain lock (2026-11-26; callers
+include the steward and the new-channel early publish in `useServerEvents.ts`, and a Welcome can land
+between their `process` and this call).
 **Side effects:** advances + persists the device chain; persists
 `servers/<log_server_id>/mls/<channel_id>.mls_state.json` with
 `{ generation: 0, epoch: 0, store_instance_hash, confirmed: false }`.

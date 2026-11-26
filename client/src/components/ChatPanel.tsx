@@ -1,5 +1,4 @@
-import RecoveryBanner from "./RecoveryBanner";
-import SavedCopyBanner from "./SavedCopyBanner";
+import ChatNotices from "./ChatNotices";
 import React, { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
@@ -126,6 +125,7 @@ export default function ChatPanel() {
   if (currentChannelId === null) {
     return (
       <div className="chat-panel">
+        <ChatNotices />
         <div className="message-list-placeholder">
           Select a channel to start chatting.
         </div>
@@ -146,6 +146,7 @@ export default function ChatPanel() {
           <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
           <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
         </div>
+        <ChatNotices />
         <div className="e2ee-interstitial">
           <div className="e2ee-interstitial-heading">Waiting for keys</div>
           <div className="e2ee-interstitial-text">
@@ -210,10 +211,7 @@ export default function ChatPanel() {
       </div>
       {/* Server-wide notices sit in the page flow under the header, pushing the messages down rather than
           covering the channel name or the first message. */}
-      <div className="chat-notices">
-        <RecoveryBanner />
-        <SavedCopyBanner />
-      </div>
+      <ChatNotices />
       {equivocated && (
         <div className="e2ee-equivocation-banner">
           <strong>Channel state could not be confirmed.</strong>{" "}This channel's encryption keys failed verification{mlsState && mlsState.reason ? `: ${mlsState.reason}` : ""}. It has been frozen to protect you.
