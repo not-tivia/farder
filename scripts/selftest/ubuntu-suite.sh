@@ -33,7 +33,7 @@ winrun() { # winrun <scenario>   (UBU_* come from the environment)
 fresh_pair() {
   $PS "$WIN_PATH\\scripts\\selftest\\stop-pair.ps1" >/dev/null
   $PS "$WIN_PATH\\scripts\\selftest\\start-pair.ps1" -Fresh >/dev/null 2>&1
-  UBU_ADDR= UBU_TOKEN= UBU_LINK= UBU_NAME= winrun core | tail -1
+  UBU_ADDR= UBU_TOKEN= UBU_LINK= UBU_NAME= winrun core | grep -E "^FAIL|passed,"
 }
 wait_for() { for _ in $(seq 1 90); do grep -q "$2" "$1" 2>/dev/null && return 0; sleep 1; done; return 1; }
 token_of() { grep -o "token instead: [0-9a-f]*" "$1" | awk '{print $3}'; }
