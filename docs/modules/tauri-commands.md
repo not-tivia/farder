@@ -520,10 +520,14 @@ group and calls the crate's `receive_sealed` **exactly once**; the ciphertext is
 taken by value and the returned `SealedOutcome` carries the bytes in neither
 variant, so a re-open is structurally impossible (the ratchet is consumed on
 open — 4a). Returns a tag-discriminated `DecryptSealedMessageResult`: either
-`{ kind: "decrypted", envelope: MessageEnvelope }` or
-`{ kind: "undecryptable", reason: String }`. A missing store / no local group /
-poisoned group surface as `undecryptable`, never a command error, so the
-frontend renders a fail-closed state rather than garbage. Deliberately NOT
+`{ kind: "decrypted", envelope: MessageEnvelope }`,
+`{ kind: "undecryptable", reason: String }` or `{ kind: "not_ready", reason: String }`.
+A missing store / poisoned group surface as `undecryptable`, never a command error, so the
+frontend renders a fail-closed state rather than garbage. **No local group YET** (this device's
+Welcome not processed) is `not_ready`: nothing was opened and no key consumed, so
+`useSealedDecrypt` does not cache it and opens the row again when the channel's `mlsStates`
+entry changes (2026-11-26: seen live, the first message after a member was added arrived a
+moment before that member's Welcome and used to show "couldn't decrypt" forever). Deliberately NOT
 `run_e2ee`: decryption is a local, read-only open that needs only the device
 subkey + on-disk store (not device authorization). **Since sub-7a H1 it DOES
 require the identity to be unlocked**, because the device subkey is now wrapped

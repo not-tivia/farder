@@ -6793,10 +6793,16 @@ pub enum DecryptSealedMessageResult {
     Decrypted {
         envelope: farder_mls::envelope::MessageEnvelope,
     },
-    /// The ciphertext could not be opened — tampered, wrong group/epoch, no
-    /// local group yet, or a poisoned group. The generation's decryption key is
-    /// already consumed; a retry on the same bytes is impossible and pointless.
+    /// The ciphertext could not be opened — tampered, wrong group/epoch, or a
+    /// poisoned group. The generation's decryption key is already consumed; a
+    /// retry on the same bytes is impossible and pointless.
     Undecryptable { reason: String },
+    /// This device has no group for the channel YET (its Welcome has not been
+    /// processed). Nothing was opened and no key was consumed, so the caller
+    /// must NOT cache this as final: the same bytes open once the group exists.
+    /// Seen live: the first message after a member is added arrived a moment
+    /// before that member's Welcome, and was shown as "couldn't decrypt" forever.
+    NotReady { reason: String },
 }
 
 #[tauri::command]
@@ -6870,8 +6876,8 @@ pub async fn decrypt_sealed_message(
     ) {
         Ok(Some(group)) => group,
         Ok(None) => {
-            return Ok(DecryptSealedMessageResult::Undecryptable {
-                reason: format!("no MLS group for channel {channel_id} on {server_id}"),
+            return Ok(DecryptSealedMessageResult::NotReady {
+                reason: format!("no MLS group for channel {channel_id} on {server_id} yet"),
             });
         }
         Err(e) => return Err(e.to_string()),

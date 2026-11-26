@@ -354,10 +354,13 @@ export async function downloadSealedFile(serverId: string, fileId: number, keyHe
 
 /** The wire shape of `decrypt_sealed_message`: a tag-discriminated result.
  *  `decrypted` carries the opened `MessageEnvelope`; `undecryptable` is the
- *  fail-closed marker (the ratchet is consumed on open — never retry). */
+ *  fail-closed marker (the ratchet is consumed on open — never retry);
+ *  `not_ready` means this device has no group for the channel YET (nothing was
+ *  opened): do not cache it, try again once the channel's state advances. */
 export type SealedDecryptResult =
   | { kind: "decrypted"; envelope: { content: string; attachment_keys: number[][]; filenames: string[]; mimes: string[] } }
-  | { kind: "undecryptable"; reason: string };
+  | { kind: "undecryptable"; reason: string }
+  | { kind: "not_ready"; reason: string };
 
 /** Open ONE sealed ciphertext (T10). The frontend must call this exactly once
  *  per sealed message and cache the result — a second open is impossible (the

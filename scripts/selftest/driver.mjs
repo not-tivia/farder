@@ -1681,7 +1681,7 @@ async function e2ee() {
       const box = from.page.getByPlaceholder(/Type a message|Encrypted message/);
       if (await box.isEnabled().catch(() => false)) {
         await box.fill(text); await box.press("Enter");
-        if (await to.page.locator(".message-content", { hasText: text }).first().waitFor({ timeout: 10000 }).then(() => true, () => false)) return Math.round((Date.now() - t0) / 1000);
+        if (await to.page.locator(".message-content", { hasText: text }).first().waitFor({ timeout: 10000 }).then(() => true, () => false)) return `${Math.round((Date.now() - t0) / 1000)}s, try ${i + 1}`;
       } else await new Promise((r) => setTimeout(r, 5000));
     }
     const err = await from.page.locator(".error-text").first().innerText().catch(() => "");
@@ -1692,12 +1692,21 @@ async function e2ee() {
     await B.page.locator(".channel-item", { hasText: chan }).first().click();
     const t = await sendUntilSeen(A, B, `${word} from A`);
     await shot(B.page, "B-reads-encrypted");
-    return `after ${t}s`;
+    return `after ${t}`;
   });
   await check("B answers in the encrypted channel and A reads it", async () => {
     const t = await sendUntilSeen(B, A, `${word} from B`);
     await shot(A.page, "A-reads-encrypted");
-    return `after ${t}s`;
+    return `after ${t}`;
+  });
+  // Every message in the channel must open on both sides. A "couldn't decrypt" here was a real bug: the
+  // first message after B was added arrived before B's Welcome and was cached as unreadable forever.
+  await check("no message in the encrypted channel is shown as 'couldn't decrypt' on either side", async () => {
+    await new Promise((r) => setTimeout(r, 5000));
+    for (const c of [A, B]) {
+      const bad = await c.page.locator("em", { hasText: "couldn't decrypt" }).evaluateAll((els) => els.map((e) => e.title));
+      if (bad.length) { await shot(c.page, `${c.who}-undecryptable`); throw new Error(`${c.who}: ${bad.length} unreadable: ${bad[0]}`); }
+    }
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
