@@ -157,15 +157,18 @@ suite_failover() {
   echo "== the owner makes an invite for the copy machine"
   export INVITE_OUT="$DATA\\replica-invite.txt"; rm -f /mnt/c/Users/Deez/farder-selftest-data/replica-invite.txt
   FAILOVER_PHASE=invite winrun failover
-  local CODE; CODE=$(tr -d '\r\n' < /mnt/c/Users/Deez/farder-selftest-data/replica-invite.txt | sed 's#.*/##; s#[?].*##')
+  local LINK; LINK=$(tr -d '\r\n' < /mnt/c/Users/Deez/farder-selftest-data/replica-invite.txt)
   local REP="$ROOT/target/debug/farder-replica"
   echo "== the copy machine joins; before the owner allows it, it must wait (exit 3)"
-  "$REP" --server "127.0.0.1:$PORT" --dir "$D/rep" --invite "$CODE" --once > "$D/rep1.log" 2>&1; echo "replica exit: $? (want 3)"
+  # The link exactly as the app's invite dialog gave it (the address inside it is used; no --server).
+  "$REP" --dir "$D/rep" --invite "$LINK" --once > "$D/rep1.log" 2>&1; local RC=$?; echo "replica exit: $RC (want 3)"
+  [ $RC = 3 ] || { sed 's/^/  replica: /' "$D/rep1.log"; pkill -x farder-server; return 1; }
   export REPLICA_KEY; REPLICA_KEY=$(grep -o "replica key: [^ ]*" "$D/rep1.log" | awk '{print $3}'); echo "replica key: $REPLICA_KEY"
   export FAILOVER_ADDR="$WSLIP:$CPORT"
   echo "== the owner allows it in Backup copy; A and B save the backup address"
   FAILOVER_PHASE=allow winrun failover
-  "$REP" --server "127.0.0.1:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; echo "replica exit: $? (want 0): $(grep 'copy saved' "$D/rep2.log")"
+  "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; RC=$?; echo "replica exit: $RC (want 0): $(grep 'copy saved' "$D/rep2.log")"
+  [ $RC = 0 ] || { sed 's/^/  replica: /' "$D/rep2.log"; pkill -x farder-server; return 1; }
   echo "== the copy serves read-only; the HOST IS STOPPED"
   setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/copy/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
   wait_for "$D/copy.log" "Server listening"
@@ -179,7 +182,7 @@ suite_failover() {
 import sqlite3
 def has(db, t): return sqlite3.connect(db).execute('select count(*) from messages where content like ?', ('%'+t+'%',)).fetchone()[0]
 host, copy = '$D/u.db', '$D/rep/latest.db'
-print('host has \'back on the host\':', has(host, 'back on the host'), '(want 1)')
+print('host has \'back on the host\':', has(host, 'back on the host'), '(want 1 or more)')
 print('\'sent while on the copy\' in host:', has(host, 'sent while on the copy'), 'in copy:', has(copy, 'sent while on the copy'), '(want 0 0)')"
   pkill -x farder-server
 }

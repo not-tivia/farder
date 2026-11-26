@@ -49,9 +49,12 @@ export default function BackupCopyTab({ serverId, isOwner }: Props) {
   return (
     <div style={{ padding: 8 }}>
       <div className="connect-section" style={{ fontSize: "var(--xp-font-size)" }}>
-        If the computer that hosts this server is switched off, you can still <b>read</b> the history from a saved
-        copy kept by another machine. Ask whoever runs one for its address (like 192.168.1.20:4435) and put it
-        here, one per line. You can read, but sending waits until the host is back. This is only on this device.
+        {/* One element: .connect-section is a flex column, so loose text and <b> would each become a row. */}
+        <div>
+          If the computer that hosts this server is switched off, you can still <b>read</b> the history from a saved
+          copy kept by another machine. Ask whoever runs one for its address (like 192.168.1.20:4435) and put it
+          here, one per line. You can read, but sending waits until the host is back. This is only on this device.
+        </div>
       </div>
       <div className="connect-section">
         <label className="connect-label" htmlFor="backup-addresses">Backup addresses</label>

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use farder_replica::{load_or_create_key, pull_once, state_path, PullError, Session};
+use farder_replica::{invite_from_link, load_or_create_key, pull_once, state_path, PullError, Session};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -10,16 +10,17 @@ use std::path::PathBuf;
 /// every --interval seconds into --out (latest.db, previous.db, latest.json).
 #[derive(Parser)]
 struct Args {
-    /// The server to copy (host:port, direct QUIC).
+    /// The server to copy (host:port, direct QUIC). Not needed when --invite is a link with the address in it.
     #[arg(long)]
-    server: SocketAddr,
+    server: Option<SocketAddr>,
     /// SHA-256 (hex) of the server's certificate, to be sure it is the right machine.
     #[arg(long)]
     cert_fp: Option<String>,
     /// Folder for this replica's key, state and copies.
     #[arg(long, default_value = "farder-replica")]
     dir: PathBuf,
-    /// A normal invite code, needed only the first time.
+    /// A normal invite, needed only the first time: the link from the app's invite dialog
+    /// (https://farder.xyz/join/...), a farder://host:port/CODE link, or just the code.
     #[arg(long)]
     invite: Option<String>,
     /// Seconds between copies (default 15 minutes).
@@ -33,7 +34,14 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
-    let a = Args::parse();
+    let mut a = Args::parse();
+    let mut server = a.server;
+    if let Some(link) = a.invite.clone() {
+        let (addr, code) = invite_from_link(&link)?;
+        if server.is_none() { server = addr; }
+        a.invite = Some(code);
+    }
+    let Some(server) = server else { anyhow::bail!("give --server host:port (or an --invite link that holds the address)") };
     std::fs::create_dir_all(&a.dir)?;
     let (key, fresh) = load_or_create_key(&a.dir.join("replica.key"))?;
     println!("replica key: {}", key.public_key());
@@ -42,7 +50,7 @@ async fn main() -> Result<()> {
     let st = state_path(&a.dir);
     let mut joined = std::fs::read_to_string(&st).map(|t| t.contains("\"joined\":true")).unwrap_or(false);
     loop {
-        let mut s = match Session::connect(a.server, fp.clone(), &key, if joined { None } else { a.invite.clone() }, None).await {
+        let mut s = match Session::connect(server, fp.clone(), &key, if joined { None } else { a.invite.clone() }, None).await {
             Ok(s) => s,
             Err(e) => { eprintln!("could not connect: {e:#}"); if a.once { std::process::exit(2); } tokio::time::sleep(std::time::Duration::from_secs(30)).await; continue; }
         };

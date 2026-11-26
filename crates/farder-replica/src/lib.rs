@@ -208,3 +208,56 @@ pub fn load_or_create_key(path: &Path) -> Result<(Keypair, bool)> {
 }
 
 pub fn state_path(dir: &Path) -> PathBuf { dir.join("replica-state.json") }
+
+/// What `--invite` may be: a bare invite code, a direct link `farder://host:port/CODE`, or the
+/// `https://farder.xyz/join/<base64url>` link the app's invite dialog hands out (it wraps the direct link).
+/// Returns the server address when the link carries one, and the code. Relay links are refused: a replica
+/// connects to the host directly.
+pub fn invite_from_link(s: &str) -> Result<(Option<SocketAddr>, String)> {
+    use base64::Engine;
+    let t = s.trim();
+    let no_scheme = t.strip_prefix("https://").or_else(|| t.strip_prefix("http://")).unwrap_or(t);
+    let inner = match no_scheme.split_once("/join/") {
+        Some((_host, enc)) => {
+            let enc = enc.split(['?', '#']).next().unwrap_or(enc);
+            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(enc.trim_end_matches('='))
+                .context("that join link is damaged (it did not decode)")?;
+            String::from_utf8(bytes).context("that join link is damaged")?
+        }
+        None => t.to_string(),
+    };
+    let body = inner.strip_prefix("farder://").unwrap_or(&inner);
+    if body.starts_with("relayd/") || body.starts_with("relay/") {
+        bail!("that invite goes through a relay; a replica needs the host's direct address (host:port)");
+    }
+    match body.rsplit_once('/') {
+        Some((addr, code)) if !code.is_empty() => {
+            let addr: SocketAddr = addr.parse().with_context(|| format!("not a host:port address in the invite: {addr}"))?;
+            Ok((Some(addr), code.to_string()))
+        }
+        Some(_) => bail!("the invite has no code after the address"),
+        None if !body.is_empty() => Ok((None, body.to_string())),
+        None => bail!("empty invite"),
+    }
+}
+
+#[cfg(test)]
+mod invite_link_tests {
+    use super::invite_from_link;
+
+    #[test]
+    fn accepts_a_bare_code_a_direct_link_and_the_apps_join_link() {
+        assert_eq!(invite_from_link("Za6nY8nx").unwrap(), (None, "Za6nY8nx".into()));
+        let addr = Some("172.21.207.201:4576".parse().unwrap());
+        assert_eq!(invite_from_link("farder://172.21.207.201:4576/Za6nY8nx").unwrap(), (addr, "Za6nY8nx".into()));
+        // The exact form the app's invite dialog produced in the failover self-test.
+        assert_eq!(invite_from_link("https://farder.xyz/join/MTcyLjIxLjIwNy4yMDE6NDU3Ni9aYTZuWThueA").unwrap(), (addr, "Za6nY8nx".into()));
+    }
+
+    #[test]
+    fn refuses_relay_links_and_garbage_plainly() {
+        assert!(format!("{:#}", invite_from_link("farder://relayd/abcd/tok").unwrap_err()).contains("relay"));
+        assert!(invite_from_link("https://farder.xyz/join/!!!").is_err());
+        assert!(invite_from_link("farder://not-an-address/x").is_err());
+    }
+}

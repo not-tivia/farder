@@ -168,8 +168,12 @@ export default function AppShell() {
         <MemberSidebar />
         <ScreenShareStage voice={voice} />
         <DmPanel />
-        <RecoveryBanner />
-        <SavedCopyBanner />
+        {/* Below the channel header (never over the channel name), stacked when both show. */}
+        <div style={{ position: "absolute", top: 52, left: "50%", transform: "translateX(-50%)", zIndex: 6, maxWidth: "70%",
+          display: "flex", flexDirection: "column", gap: 6, alignItems: "center", pointerEvents: "none" }}>
+          <RecoveryBanner />
+          <SavedCopyBanner />
+        </div>
         {activeServer?.connectionLost && (
           <div className="reconnect-overlay" role="status">
             <span className="reconnect-pill">Connection lost. Reconnecting... You can still read what is here and switch servers.</span>

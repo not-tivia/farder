@@ -3724,5 +3724,5 @@ body {
 .reconnect-pill { pointer-events: none; max-width: 80%; text-align: center; padding: 5px 14px; border-radius: 12px; background: var(--xp-panel-bg); color: var(--xp-text-normal); border: 1px solid var(--xp-border); box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-size: var(--xp-font-size-small); }
 
 /* Recovery owner: a takeover that is waiting is shown to every member, and the owner of a server with no recovery key gets a one-line nudge. Neither blocks the window. */
-.recovery-banner { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6; max-width: 80%; text-align: center; pointer-events: none; padding: 6px 12px; border-radius: 6px; background: var(--xp-e2ee-error-soft); color: var(--xp-text-normal); border: 1px solid var(--xp-e2ee-error); font-size: var(--xp-font-size-small); box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
+.recovery-banner { text-align: center; pointer-events: none; padding: 6px 12px; border-radius: 6px; background: var(--xp-e2ee-error-soft); color: var(--xp-text-normal); border: 1px solid var(--xp-e2ee-error); font-size: var(--xp-font-size-small); box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
 .recovery-banner.nudge { background: var(--xp-panel-bg); border-color: var(--xp-border); }
