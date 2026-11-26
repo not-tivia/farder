@@ -1,3 +1,5 @@
+import RecoveryBanner from "./RecoveryBanner";
+import SavedCopyBanner from "./SavedCopyBanner";
 import React, { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
@@ -200,6 +202,12 @@ export default function ChatPanel() {
         >
           🔍
         </button>
+      </div>
+      {/* Server-wide notices sit in the page flow under the header, pushing the messages down rather than
+          covering the channel name or the first message. */}
+      <div className="chat-notices">
+        <RecoveryBanner />
+        <SavedCopyBanner />
       </div>
       {equivocated && (
         <div className="e2ee-equivocation-banner">
