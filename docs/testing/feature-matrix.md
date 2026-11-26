@@ -14,7 +14,7 @@ Goal this serves: a chat app friends can use locally, later offered as a free
 alternative to the big clients, and kept portable to Android and Apple
 (see `docs/modules/portability.md`).
 
-Last updated: 2026-11-15.
+Last updated: 2026-11-26.
 
 ## Test tiers
 
@@ -127,4 +127,9 @@ See `docs/modules/portability.md`.
 | Owner allows replicas; verified database snapshots in pieces; replica cannot make replicas | VERIFIED (unit) | handler test + snapshot tests |
 | `farder-replica` against the real server: refused until allowed, verified copy with data, bad copy rejected, revoke stops copies | VERIFIED | `cargo test -p farder-replica` |
 | Attachments (files) copied | NOT BUILT | |
-| Serving the copy read-only while the host is down; client tries a second address; promotion; allow-a-replica screen in the app | NOT BUILT | |
+| Owner allows a copy machine from the app (Server Settings > Backup copy, matched by its short key) | VERIFIED | `ubuntu-suite.sh failover` (2026-11-26) |
+| `farder-replica --invite <the app's join link>` (address taken from the link) | VERIFIED | same suite: exit 3 before allowed, exit 0 + copy after; unit tests for the link forms |
+| Read-only copy keeps the host's server name (name saved in the database) | VERIFIED | `cargo test -p farder-replica` (proven to fail without the fix) + suite |
+| Host killed (`kill -9`): the app moves to the backup address, shows the banner, reads history FROM the copy, sending refused with the plain reason | VERIFIED | same suite: on the copy after 36 s; route + history checked through the connection, not the screen; nothing written to either database |
+| Host back: the app leaves the copy by itself and sends to the host | VERIFIED | same suite: banner gone after 11 s, A sees B's message |
+| Promotion (a copy becomes the host) | NOT BUILT | |

@@ -82,5 +82,12 @@ signed history, so a copy built from the log alone would lose them. So a replica
 Tested (`cargo test -p farder-replica`, real server): refused until allowed; after allowing, the copy holds the messages and a channel
 that exists only in the database; a second pull keeps `previous.db`; a corrupted file is rejected; revoking stops further copies.
 
-Not done: attachments (files) are not copied yet (database only), serving a copy while the host is down (read-only mode), clients trying
-a second address (failover), promotion, running the replica as a service on the Beelink, and a screen in the app to allow a replica.
+**Step 3, reading the copy while the host is off (verified end to end 2026-11-26):** `farder-server --read-only --db latest.db` serves
+the copy (it shows the host's name, saved in the database); each friend types the copy's address in Server Settings > Backup copy; the
+owner ticks the copy machine there (shown by its short key, the one `farder-replica` prints). `bash scripts/selftest/ubuntu-suite.sh
+failover` runs all of it on the real stack: host killed with `kill -9`, B on the copy after 36 s (banner, history fetched from the copy,
+send refused with the plain "saved copy" reason), host restarted, B back on the host after 11 s and sending. `farder-replica --invite`
+takes the link straight from the app's invite dialog.
+
+Not done: attachments (files) are not copied yet (database only), promotion (a copy becomes the host), and running the replica plus
+its read-only server as a service on the Beelink.
