@@ -1663,7 +1663,8 @@ async function e2ee() {
     await A.page.getByPlaceholder("Channel name").fill(chan);
     await A.page.locator("label", { hasText: "Encrypted" }).locator('input[type="checkbox"]').check();
     await A.page.getByText(/Whoever runs this server cannot read/).waitFor({ timeout: 5000 });
-    await A.page.getByRole("button", { name: "Add", exact: true }).click();
+    // The "Add" next to the channel name (the page also has Add buttons for categories and roles).
+    await A.page.getByPlaceholder("Channel name").locator("xpath=ancestor::div[2]").getByRole("button", { name: "Add", exact: true }).click();
     await A.page.locator(".organizer-name", { hasText: chan }).first().waitFor({ timeout: 30000 });
     await A.page.locator(".modal-close").first().click();
   }))) return;
