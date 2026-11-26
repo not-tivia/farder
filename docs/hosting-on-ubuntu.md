@@ -24,7 +24,9 @@ Windows connects to it the same way it connects to a server on another Windows P
 
 1. Build: `cargo build --release -p farder-server`
 2. Run: `./target/release/farder-server --bind 0.0.0.0:4435 --name "My Server"`
-   (the port is UDP; open it with `sudo ufw allow 4435/udp`).
+   (the port is UDP; open it with `sudo ufw allow 4435/udp`). The name is saved in the database, so later
+   starts keep it without `--name` (giving `--name` again renames the server), and a `--read-only` copy made
+   from this database shows the same name.
 3. First run prints `use this token instead: <64 characters>`. In the Farder app choose
    **Add Server, Join a Server** and paste `farder://<server address>:4435/setup:<token>`.
    Whoever does this first becomes the owner, so do it yourself before telling anyone else
