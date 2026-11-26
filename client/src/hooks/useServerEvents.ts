@@ -384,6 +384,28 @@ export function useServerEvents(): void {
       if (serverId !== activeRef.current) return;
       const channel = flattenChannelInfoV2([data.channel])[0];
       dispatch({ type: "CHANNEL_CREATED", serverId, payload: channel });
+      // A new ENCRYPTED channel: make this device addable right away instead of waiting until the channel
+      // is opened. The owner's app adds a member when its KeyPackage appears (MlsKeyPackagePublished above),
+      // so publishing now means the member is in the group before anyone writes. Seen live 2026-11-26: the
+      // first message in a new encrypted channel was sealed before the friend was added, so they never got
+      // it. Same steps and guards as the steward (useMlsSteward): never publish over a confirmed or
+      // equivocated state, because publishing resets this device's channel state.
+      const logServerId = stateRef.current.servers[serverId]?.logServerId ?? null;
+      if (isE2eeChannel(channel) && logServerId) {
+        api.processMlsControlEvents(serverId, logServerId, channel.id)
+          .then((result) => {
+            dispatch({
+              type: "MLS_STATE",
+              serverId,
+              payload: { channelId: result.channel_id, confirmed: result.confirmed, outcome: result.outcome as ("advanced" | "equivocation"), reason: result.reason },
+            });
+            if (!result.confirmed && result.outcome !== "equivocation") {
+              return api.publishOwnKeyPackage(serverId, logServerId, channel.id);
+            }
+            return undefined;
+          })
+          .catch((e) => console.warn("[e2ee] early key package for new channel failed:", e));
+      }
     }).then(safePush);
 
     listen("server:mls_control_event", (e) => {
