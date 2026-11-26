@@ -1717,18 +1717,28 @@ async function e2ee() {
   // resets it (the command now refuses to; this would catch a regression).
   await check("both apps end as confirmed members at the same epoch", async () => {
     const st = [];
-    for (const c of [A, B]) {
+    // A, B, then A again: one side's own processing may commit (advance the epoch); the other must follow.
+    for (const c of [A, B, A]) {
       st.push(await c.page.evaluate(async ([nm, ch]) => {
         const inv = window.__TAURI_INTERNALS__.invoke;
         const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
         const info = await inv("get_server_info_v2", { serverId: s.id });
         const c = info.channels.map((x) => x.base || x).find((x) => x.name === ch);
         const r = await inv("process_mls_control_events", { serverId: s.id, logServerId: info.server_id, channelId: c.id });
-        return { confirmed: r.confirmed, epoch: r.epoch, outcome: r.outcome };
+        const leaves = await inv("e2ee_channel_leaves", { logServerId: info.server_id, channelId: c.id });
+        return { confirmed: r.confirmed, epoch: r.epoch, outcome: r.outcome, processed: r.processed, leaves: leaves.length };
       }, [name, chan]));
     }
-    if (!st.every((x) => x.confirmed && x.outcome === "advanced") || st[0].epoch !== st[1].epoch) throw new Error(JSON.stringify(st));
-    return `epoch ${st[0].epoch} on both`;
+    const [a1, b1, a2] = st;
+    if (!st.every((x) => x.confirmed && x.outcome === "advanced") || a2.epoch !== b1.epoch || a2.leaves !== b1.leaves) throw new Error(JSON.stringify(st));
+    return `epoch ${b1.epoch} on both, ${b1.leaves} leaves (A first saw epoch ${a1.epoch})`;
+  });
+  // Whatever the epoch numbers say, messages must still flow both ways afterwards.
+  await check("after all that, a further message each way still opens", async () => {
+    const a = await sendUntilSeen(B, A, `${word} later from B`);
+    const b = await sendUntilSeen(A, B, `${word} later from A`);
+    for (const c of [A, B]) if (await c.page.locator("em", { hasText: "couldn't decrypt" }).count()) throw new Error(`${c.who} shows couldn't decrypt`);
+    return `B->A ${a}, A->B ${b}`;
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
