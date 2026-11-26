@@ -1643,6 +1643,65 @@ async function failover() {
   await B.browser.close().catch(() => {});
 }
 
+// An ENCRYPTED channel through the real app (run after `ubuntu`): the owner makes it in Server Settings, B is
+// added by the app on its own, both send and read. Whether the server ever held the words is checked by
+// ubuntu-suite.sh `e2ee` on the server's raw database bytes afterwards (E2EE_WORD is the secret marker).
+async function e2ee() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const word = process.env.E2EE_WORD || ("sealed" + stamp);
+  const chan = `secret-${stamp}`.toLowerCase();
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+  }
+  if (!(await check("A (owner) makes an encrypted channel in Server Settings", async () => {
+    await A.page.getByTitle("Server Settings").click();
+    await A.page.getByPlaceholder("Channel name").fill(chan);
+    await A.page.locator("label", { hasText: "Encrypted" }).locator('input[type="checkbox"]').check();
+    await A.page.getByText(/Whoever runs this server cannot read/).waitFor({ timeout: 5000 });
+    await A.page.getByRole("button", { name: "Add", exact: true }).click();
+    await A.page.locator(".organizer-name", { hasText: chan }).first().waitFor({ timeout: 30000 });
+    await A.page.locator(".modal-close").first().click();
+  }))) return;
+  await check("both apps show the channel with the lock", async () => {
+    for (const c of [A, B]) {
+      const item = c.page.locator(".channel-item", { hasText: chan }).first();
+      await item.waitFor({ timeout: 60000 });
+      await item.locator(".channel-e2ee-lock").waitFor({ timeout: 10000 });
+    }
+  });
+  const sendUntilSeen = async (from, to, text) => {
+    const t0 = Date.now();
+    for (let i = 0; i < 18; i++) {
+      const box = from.page.getByPlaceholder(/Type a message/);
+      if (await box.isEnabled().catch(() => false)) {
+        await box.fill(text); await box.press("Enter");
+        if (await to.page.locator(".message-content", { hasText: text }).first().waitFor({ timeout: 10000 }).then(() => true, () => false)) return Math.round((Date.now() - t0) / 1000);
+      } else await new Promise((r) => setTimeout(r, 5000));
+    }
+    const err = await from.page.locator(".error-text").first().innerText().catch(() => "");
+    throw new Error("not seen within 3 minutes" + (err ? "; sender shows: " + err.slice(0, 120) : ""));
+  };
+  await check("A writes in the encrypted channel and B reads it", async () => {
+    await A.page.locator(".channel-item", { hasText: chan }).first().click();
+    await B.page.locator(".channel-item", { hasText: chan }).first().click();
+    const t = await sendUntilSeen(A, B, `${word} from A`);
+    await shot(B.page, "B-reads-encrypted");
+    return `after ${t}s`;
+  });
+  await check("B answers in the encrypted channel and A reads it", async () => {
+    const t = await sendUntilSeen(B, A, `${word} from B`);
+    await shot(A.page, "A-reads-encrypted");
+    return `after ${t}s`;
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1666,6 +1725,7 @@ try {
   else if (scenario === "guest-link") await guestLink();
   else if (scenario === "brake") await brake();
   else if (scenario === "failover") await failover();
+  else if (scenario === "e2ee") await e2ee();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();

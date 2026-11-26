@@ -28,7 +28,7 @@ WSLIP=$(hostname -I | awk '{print $1}')
 PS="powershell.exe -NoProfile -ExecutionPolicy Bypass -File"
 
 winrun() { # winrun <scenario>   (UBU_* come from the environment)
-  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; \$env:GUEST_PHASE='${GUEST_PHASE:-make}'; \$env:GUEST_ROUTE='${GUEST_ROUTE:-ubuntu}'; \$env:GUEST_LINK_OUT='${GUEST_LINK_OUT:-}'; \$env:RESET_PASS='${RESET_PASS:-1}'; \$env:FAILOVER_PHASE='${FAILOVER_PHASE:-}'; \$env:FAILOVER_ADDR='${FAILOVER_ADDR:-}'; \$env:REPLICA_KEY='${REPLICA_KEY:-}'; \$env:INVITE_OUT='${INVITE_OUT:-}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
+  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; \$env:GUEST_PHASE='${GUEST_PHASE:-make}'; \$env:GUEST_ROUTE='${GUEST_ROUTE:-ubuntu}'; \$env:GUEST_LINK_OUT='${GUEST_LINK_OUT:-}'; \$env:RESET_PASS='${RESET_PASS:-1}'; \$env:FAILOVER_PHASE='${FAILOVER_PHASE:-}'; \$env:FAILOVER_ADDR='${FAILOVER_ADDR:-}'; \$env:REPLICA_KEY='${REPLICA_KEY:-}'; \$env:INVITE_OUT='${INVITE_OUT:-}'; \$env:E2EE_WORD='${E2EE_WORD:-}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
 }
 fresh_pair() {
   $PS "$WIN_PATH\\scripts\\selftest\\stop-pair.ps1" >/dev/null
@@ -187,15 +187,37 @@ print('\'sent while on the copy\' in host:', has(host, 'sent while on the copy')
   pkill -x farder-server
 }
 
+suite_e2ee() {
+  local D="$TMP/e2ee" PORT=4578; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
+  fresh_pair
+  start_direct $PORT "$D"
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  export E2EE_WORD="zebracodeword$(date +%s)"
+  echo "== encrypted channel through the apps (marker $E2EE_WORD)"; winrun e2ee
+  pkill -x farder-server; sleep 1
+  # The proof is in the bytes the SERVER kept: every file it wrote (database, WAL, stored files, logs).
+  local hits; hits=$(grep -r -a -l -F "$E2EE_WORD" "$D" 2>/dev/null)
+  local plain; plain=$(grep -r -a -l -F "hello from A to ubuntu" "$D" 2>/dev/null | head -1)
+  echo "server files holding the encrypted words: ${hits:-none} (want none)"
+  echo "control: a normal-channel line IS readable in: ${plain:-NOWHERE (the check is blind)}"
+  python3 -c "
+import sqlite3; c=sqlite3.connect('$D/u.db')
+for t in ('messages','events'):
+    try: print(t, c.execute('select count(*) from '+t).fetchone()[0])
+    except Exception as e: pass"
+}
+
 case "${1:-all}" in
   brake) suite_brake ;;
   failover) suite_failover ;;
+  e2ee) suite_e2ee ;;
   guestlink) suite_guestlink ;;
   reset) suite_reset ;;
   restore) suite_restore ;;
   relay) suite_relay ;;
   recovery) suite_recovery ;;
   all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
-  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|all]"; exit 2 ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|e2ee|all]"; exit 2 ;;
 esac
 echo FINISHED
