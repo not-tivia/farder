@@ -126,3 +126,21 @@ any feature complete, run this checklist:
 
 When auditing or onboarding, prefer reading these docs first; if a doc is
 missing or stale for an area you touch, writing/fixing it IS part of the task.
+
+## Autonomous issue runs (GitHub Action)
+
+`.github/workflows/claude.yml` runs this agent automatically on every newly opened
+issue (no `@claude` mention needed). When you are triggered that way:
+
+- Work on a branch named `claude/issue-<n>`, open a PR against `main`, and put
+  `Closes #<n>` in the PR body.
+- **Everything above still applies** — especially the verify-before-done rule and the
+  seam/reachability/doc discipline. Before opening the PR, run what you can headlessly:
+  `cargo test --workspace`, `cd client && npx tsc --noEmit`, and the audits
+  (`python3 scripts/seam_audit.py`, `scripts/reachability_audit.py`,
+  `scripts/doc_audit.py`). Report in the PR exactly what you ran and saw.
+- CI has **no display and no audio**, so the desktop client cannot run. Any UI or
+  runtime behaviour is UNVERIFIED in CI — say so in the PR; never imply it works.
+- If the issue is vague, risky, or out of scope, **do not guess**: comment on the
+  issue with what you need and open no PR.
+- Keep the diff minimal and update the matching `docs/modules/*` doc in the same PR.
