@@ -1531,6 +1531,99 @@ async function brake() {
   await B.browser.close().catch(() => {});
 }
 
+// Reading a saved copy while the host is off (mesh step 2 + client failover). Run after `ubuntu`, in
+// phases driven by ubuntu-suite.sh `failover` (FAILOVER_PHASE):
+//   invite  A makes an invite for the copy machine (written to INVITE_OUT)
+//   allow   A ticks the copy machine (REPLICA_KEY) in Server Settings > Backup copy; A and B type the
+//           copy's address (FAILOVER_ADDR) as their backup address
+//   down    (host stopped, copy running) B reaches the copy: banner, old messages, sending refused
+//   back    (host started again) B switches back by itself and can send; A sees it
+async function failover() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const phase = process.env.FAILOVER_PHASE || "invite";
+  const backup = process.env.FAILOVER_ADDR || "";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+  }
+  const setBackup = async (c) => {
+    await c.page.getByTitle("Server Settings").click();
+    await c.page.getByRole("button", { name: "Backup copy", exact: true }).click();
+    await c.page.getByLabel("Backup addresses").fill(backup);
+    await c.page.getByRole("button", { name: "Save", exact: true }).click();
+    await c.page.getByText(/If the host does not answer, the app will try these/).waitFor({ timeout: 10000 });
+  };
+  if (phase === "invite") {
+    await check("A makes an invite for the copy machine", async () => {
+      const link = await makeInvite(A);
+      fs.writeFileSync(process.env.INVITE_OUT, link);
+      return link.slice(0, 48);
+    });
+  } else if (phase === "allow") {
+    const key = process.env.REPLICA_KEY || "";
+    await check("A (owner) sees the copy machine by its key in Backup copy and allows it", async () => {
+      await A.page.getByTitle("Server Settings").click();
+      await A.page.getByRole("button", { name: "Backup copy", exact: true }).click();
+      const box = A.page.getByLabel(new RegExp(`\\(${key.slice(0, 11)}\\) keeps a copy`));
+      await box.waitFor({ timeout: 20000 });
+      await box.check();
+      await A.page.waitForFunction((k) => document.querySelector(`label[data-key="${k}"] input`)?.checked === true, key, { timeout: 15000 });
+      await shot(A.page, "A-backup-copy-allowed");
+      await A.page.getByLabel("Backup addresses").fill(backup);
+      await A.page.getByRole("button", { name: "Save", exact: true }).click();
+      await A.page.getByText(/If the host does not answer, the app will try these/).waitFor({ timeout: 10000 });
+      await A.page.locator(".modal-close").first().click();
+    });
+    await check("B (member) saves the copy's address as a backup address", async () => {
+      await setBackup(B);
+      await B.page.locator(".modal-close").first().click();
+    });
+  } else if (phase === "down") {
+    await check("with the host off, B ends up on the saved copy: the banner names the backup address", async () => {
+      const t0 = Date.now();
+      await B.page.locator(".recovery-banner", { hasText: "reading a saved copy" }).waitFor({ timeout: 120000 });
+      const txt = await B.page.locator(".recovery-banner", { hasText: "reading a saved copy" }).innerText();
+      if (!txt.includes(backup)) throw new Error("banner does not name " + backup + ": " + txt.slice(0, 120));
+      await shot(B.page, "B-on-saved-copy");
+      return `after ${Math.round((Date.now() - t0) / 1000)}s`;
+    });
+    await check("B reads the old messages from the copy", async () => {
+      await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+      await seesText(B, "hello from A to ubuntu " + stamp, 30000);
+      await seesText(B, "hello from B to ubuntu " + stamp, 10000);
+    });
+    await check("B's send on the copy is refused with the plain 'saved copy' reason", async () => {
+      await sendText(B, "sent while on the copy " + stamp);
+      await B.page.locator(".error-text", { hasText: /saved copy/ }).waitFor({ timeout: 20000 });
+      await shot(B.page, "B-send-refused");
+      return (await B.page.locator(".error-text", { hasText: /saved copy/ }).first().innerText()).slice(0, 90);
+    });
+  } else {
+    await check("with the host back, B leaves the copy by itself (the banner goes away)", async () => {
+      const t0 = Date.now();
+      await B.page.locator(".recovery-banner", { hasText: "reading a saved copy" }).waitFor({ state: "detached", timeout: 120000 });
+      return `after ${Math.round((Date.now() - t0) / 1000)}s`;
+    });
+    await check("B can send on the host again and A sees it", async () => {
+      const text = "back on the host " + stamp;
+      for (let i = 0; i < 12; i++) {
+        const box = B.page.getByPlaceholder(/Type a message/);
+        if (await box.isEnabled().catch(() => false)) {
+          await box.fill(text); await box.press("Enter");
+          if (await A.page.locator(".message-content", { hasText: text }).first().waitFor({ timeout: 5000 }).then(() => true, () => false)) return;
+        } else await new Promise((r) => setTimeout(r, 5000));
+      }
+      throw new Error("A never saw B's message");
+    });
+  }
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 const scenario = process.argv[2] || "core";
 try {
   if (scenario === "core") await core();
@@ -1553,6 +1646,7 @@ try {
   else if (scenario === "host-reset") await hostReset();
   else if (scenario === "guest-link") await guestLink();
   else if (scenario === "brake") await brake();
+  else if (scenario === "failover") await failover();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
   else if (scenario === "phone") await phone();

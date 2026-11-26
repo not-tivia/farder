@@ -70,11 +70,14 @@ export default function BackupCopyTab({ serverId, isOwner }: Props) {
             const pk = publicKeyToString(m.public_key);
             if (pk === (server?.ownerPublicKey ?? null)) return null;
             return (
-              <label key={pk} style={{ display: "block" }}>
+              // The key is shown because a copy machine (farder-replica) has no name of its own: it prints its
+              // key when it starts, and the owner matches that key here.
+              <label key={pk} style={{ display: "block" }} data-key={pk}>
                 <input type="checkbox" checked={replicas.includes(pk)} disabled={busy}
-                  aria-label={`${memberDisplayName(m.display_name)} keeps a copy`}
+                  aria-label={`${memberDisplayName(m.display_name)} (${pk.slice(0, 11)}) keeps a copy`}
                   onChange={(e) => toggleReplica(pk, e.target.checked)} />
-                {" "}{memberDisplayName(m.display_name)}
+                {" "}{memberDisplayName(m.display_name)}{" "}
+                <code style={{ fontSize: 10, opacity: 0.7 }}>{pk.slice(0, 11)}...</code>
               </label>
             );
           })}

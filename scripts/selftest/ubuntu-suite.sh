@@ -28,7 +28,7 @@ WSLIP=$(hostname -I | awk '{print $1}')
 PS="powershell.exe -NoProfile -ExecutionPolicy Bypass -File"
 
 winrun() { # winrun <scenario>   (UBU_* come from the environment)
-  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; \$env:GUEST_PHASE='${GUEST_PHASE:-make}'; \$env:GUEST_ROUTE='${GUEST_ROUTE:-ubuntu}'; \$env:GUEST_LINK_OUT='${GUEST_LINK_OUT:-}'; \$env:RESET_PASS='${RESET_PASS:-1}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
+  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-ubuntu'; \$env:STATE='$DATA\\state.json'; \$env:RESULTS='$DATA\\r.json'; \$env:UBU_ADDR='${UBU_ADDR:-}'; \$env:UBU_TOKEN='${UBU_TOKEN:-}'; \$env:UBU_LINK='${UBU_LINK:-}'; \$env:UBU_NAME='${UBU_NAME:-}'; \$env:GUEST_PHASE='${GUEST_PHASE:-make}'; \$env:GUEST_ROUTE='${GUEST_ROUTE:-ubuntu}'; \$env:GUEST_LINK_OUT='${GUEST_LINK_OUT:-}'; \$env:RESET_PASS='${RESET_PASS:-1}'; \$env:FAILOVER_PHASE='${FAILOVER_PHASE:-}'; \$env:FAILOVER_ADDR='${FAILOVER_ADDR:-}'; \$env:REPLICA_KEY='${REPLICA_KEY:-}'; \$env:INVITE_OUT='${INVITE_OUT:-}'; node scripts\\selftest\\driver.mjs $1 2>&1" | cut -c1-300
 }
 fresh_pair() {
   $PS "$WIN_PATH\\scripts\\selftest\\stop-pair.ps1" >/dev/null
@@ -148,14 +148,46 @@ print('audit log:', [r[0] for r in c.execute(\"select action from audit_events w
   pkill -x farder-server
 }
 
+suite_failover() {
+  local D="$TMP/failover" PORT=4576 CPORT=4577; rm -rf "$D"; mkdir -p "$D/rep" "$D/copy"; pkill -x farder-server; pkill -x farder-replica
+  fresh_pair
+  start_direct $PORT "$D"; local HOSTPID=$!
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  echo "== the owner makes an invite for the copy machine"
+  export INVITE_OUT="$DATA\\replica-invite.txt"; rm -f /mnt/c/Users/Deez/farder-selftest-data/replica-invite.txt
+  FAILOVER_PHASE=invite winrun failover
+  local CODE; CODE=$(tr -d '\r\n' < /mnt/c/Users/Deez/farder-selftest-data/replica-invite.txt | sed 's#.*/##; s#[?].*##')
+  local REP="$ROOT/target/debug/farder-replica"
+  echo "== the copy machine joins; before the owner allows it, it must wait (exit 3)"
+  "$REP" --server "127.0.0.1:$PORT" --dir "$D/rep" --invite "$CODE" --once > "$D/rep1.log" 2>&1; echo "replica exit: $? (want 3)"
+  export REPLICA_KEY; REPLICA_KEY=$(grep -o "replica key: [^ ]*" "$D/rep1.log" | awk '{print $3}'); echo "replica key: $REPLICA_KEY"
+  export FAILOVER_ADDR="$WSLIP:$CPORT"
+  echo "== the owner allows it in Backup copy; A and B save the backup address"
+  FAILOVER_PHASE=allow winrun failover
+  "$REP" --server "127.0.0.1:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; echo "replica exit: $? (want 0): $(grep 'copy saved' "$D/rep2.log")"
+  echo "== the copy serves read-only; the HOST IS STOPPED"
+  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/copy/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
+  wait_for "$D/copy.log" "Server listening"
+  kill "$HOSTPID"; sleep 1; kill -0 "$HOSTPID" 2>/dev/null && echo "WARNING: host still running"
+  FAILOVER_PHASE=down winrun failover
+  echo "== the HOST IS STARTED again"
+  start_direct $PORT "$D"
+  FAILOVER_PHASE=back winrun failover
+  python3 -c "
+import sqlite3; c=sqlite3.connect('$D/u.db'); print('host messages:', c.execute('select count(*) from messages').fetchone()[0])"
+  pkill -x farder-server
+}
+
 case "${1:-all}" in
   brake) suite_brake ;;
+  failover) suite_failover ;;
   guestlink) suite_guestlink ;;
   reset) suite_reset ;;
   restore) suite_restore ;;
   relay) suite_relay ;;
   recovery) suite_recovery ;;
   all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
-  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|all]"; exit 2 ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|all]"; exit 2 ;;
 esac
 echo FINISHED
