@@ -155,8 +155,11 @@ async fn while_the_host_is_down_the_copy_serves_history_read_only_and_cannot_cha
     let (mut child, addr, _d) = start_read_only(&out.join("latest.db")).await;
     // The owner, an existing member, signs in on the copy with the SAME key and reads the history.
     let mut c = Session::connect(addr, None, &owner, None, None).await.expect("an existing member can sign in to the copy");
-    let ServerResponse::ServerInfo { server_id, channels, .. } = c.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let ServerResponse::ServerInfo { name, server_id, channels, .. } = c.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
     assert_eq!(server_id.as_deref(), Some(sid.as_str()), "it is the same server (same history id)");
+    // Started without --name: the copy shows the name the host saved, so a friend's app that falls back to
+    // it does not rename the server to the default.
+    assert_eq!(name, "Replica Test", "the copy keeps the host's name");
     let general = channels.iter().find(|c| c.name == "general").unwrap().id;
     let ServerResponse::History { messages } = c.ask(ServerRequest::FetchHistory { channel_id: general, before_id: None, limit: 50 }).await.unwrap() else { panic!("history") };
     assert!(messages.iter().any(|m| m.content == "history that must survive"), "the saved history is readable");

@@ -169,13 +169,18 @@ suite_failover() {
   echo "== the copy serves read-only; the HOST IS STOPPED"
   setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/copy/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
   wait_for "$D/copy.log" "Server listening"
-  kill "$HOSTPID"; sleep 1; kill -0 "$HOSTPID" 2>/dev/null && echo "WARNING: host still running"
+  # kill -9: a PC that is switched off sends no goodbye, so the apps must notice by themselves.
+  kill -9 "$HOSTPID"; sleep 1; echo "servers running now: $(pgrep -x farder-server | wc -l) (want 1, the copy)"
   FAILOVER_PHASE=down winrun failover
   echo "== the HOST IS STARTED again"
   start_direct $PORT "$D"
   FAILOVER_PHASE=back winrun failover
   python3 -c "
-import sqlite3; c=sqlite3.connect('$D/u.db'); print('host messages:', c.execute('select count(*) from messages').fetchone()[0])"
+import sqlite3
+def has(db, t): return sqlite3.connect(db).execute('select count(*) from messages where content like ?', ('%'+t+'%',)).fetchone()[0]
+host, copy = '$D/u.db', '$D/rep/latest.db'
+print('host has \'back on the host\':', has(host, 'back on the host'), '(want 1)')
+print('\'sent while on the copy\' in host:', has(host, 'sent while on the copy'), 'in copy:', has(copy, 'sent while on the copy'), '(want 0 0)')"
   pkill -x farder-server
 }
 

@@ -11,8 +11,10 @@ use tracing::info;
 struct Args {
     #[arg(long, default_value = "0.0.0.0:4435")]
     bind: SocketAddr,
-    #[arg(long, default_value = "My Farder Server")]
-    name: String,
+    /// The server's name. Saved in the database, so later starts (and a read-only copy made from the
+    /// database) keep it without the flag; giving the flag again renames the server.
+    #[arg(long)]
+    name: Option<String>,
     #[arg(long, default_value = "farder-server.db")]
     db: String,
     #[arg(long, default_value = "blank")]
@@ -97,6 +99,19 @@ fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
     Ok(Endpoint::server(server_config, bind_addr)?)
 }
 
+/// The name this server shows. A copy (`--read-only`) uses the name the host saved, so friends who fall
+/// back to it still see the same server, and never writes. Otherwise the flag wins and is saved.
+fn server_name(conn: &rusqlite::Connection, flag: Option<&str>, read_only: bool) -> Result<String> {
+    let saved = db::get_setting(conn, "server_name")?;
+    if read_only {
+        return Ok(saved.or_else(|| flag.map(str::to_string)).unwrap_or_else(|| DEFAULT_NAME.to_string()));
+    }
+    let name = flag.map(str::to_string).or(saved).unwrap_or_else(|| DEFAULT_NAME.to_string());
+    db::set_setting(conn, "server_name", &name)?;
+    Ok(name)
+}
+const DEFAULT_NAME: &str = "My Farder Server";
+
 async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
     let conn = db::open_file(&args.db)?;
     let member_count: i64 = conn.query_row("SELECT count(*) FROM members", [], |row| row.get(0))?;
@@ -114,7 +129,8 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
         }
     }
 
-    let mut state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
+    let name = server_name(&conn, args.name.as_deref(), args.read_only)?;
+    let mut state = ServerState::new(conn, name, args.storage_dir.clone(), args.max_file_size);
     state.recovery_wait_secs = args.recovery_wait_secs;
     state.read_only = args.read_only;
     state.brake = farder_server::brake::Brake::new(args.destructive_budget, farder_server::brake::DEFAULT_WINDOW_SECS);

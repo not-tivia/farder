@@ -1570,7 +1570,7 @@ async function failover() {
       await A.page.getByRole("button", { name: "Backup copy", exact: true }).click();
       const box = A.page.getByLabel(new RegExp(`\\(${key.slice(0, 11)}\\) keeps a copy`));
       await box.waitFor({ timeout: 20000 });
-      await box.check();
+      await box.click();     // flips once the server confirms, so not .check()
       await A.page.waitForFunction((k) => document.querySelector(`label[data-key="${k}"] input`)?.checked === true, key, { timeout: 15000 });
       await shot(A.page, "A-backup-copy-allowed");
       await A.page.getByLabel("Backup addresses").fill(backup);
@@ -1591,10 +1591,29 @@ async function failover() {
       await shot(B.page, "B-on-saved-copy");
       return `after ${Math.round((Date.now() - t0) / 1000)}s`;
     });
-    await check("B reads the old messages from the copy", async () => {
+    // The screen alone would pass with NO server at all (the app keeps history on the device), so ask the
+    // connection itself: it must be routed to the backup and the history must come FROM it.
+    await check("B's connection is on the backup address and the old messages come from the copy", async () => {
+      const r = await B.page.evaluate(async (nm) => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+        if (!s) return { err: "no saved server named " + nm };
+        const route = await inv("get_connection_route", { serverId: s.id });
+        const info = await inv("get_server_info_v2", { serverId: s.id });
+        const general = info.channels.map((c) => c.base || c).find((c) => c.name === "general");
+        const msgs = await inv("fetch_history", { serverId: s.id, channelId: general.id, beforeId: null, limit: 50 });
+        return { route, contents: msgs.map((m) => m.content) };
+      }, name);
+      if (r.err) throw new Error(r.err);
+      if (r.route !== backup) throw new Error(`route is ${r.route}, not ${backup}`);
+      for (const t of ["hello from A to ubuntu " + stamp, "hello from B to ubuntu " + stamp])
+        if (!r.contents.some((c) => c.includes(t))) throw new Error("the copy did not return: " + t);
       await B.page.locator(".channel-item", { hasText: "general" }).first().click();
       await seesText(B, "hello from A to ubuntu " + stamp, 30000);
-      await seesText(B, "hello from B to ubuntu " + stamp, 10000);
+      return `route ${r.route}, ${r.contents.length} messages from the copy`;
+    });
+    await check("the server keeps its own name on the copy (not renamed to the default)", async () => {
+      await B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 5000 });
     });
     await check("B's send on the copy is refused with the plain 'saved copy' reason", async () => {
       await sendText(B, "sent while on the copy " + stamp);
