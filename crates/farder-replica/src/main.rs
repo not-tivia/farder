@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use farder_replica::{invite_from_link, load_or_create_key, pull_once, state_path, PullError, Session};
+use farder_replica::{invite_from_link, load_or_create_key, sync_files, pull_once, state_path, PullError, Session};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -62,7 +62,13 @@ async fn main() -> Result<()> {
             println!("joined the server as a member");
         }
         match pull_once(&mut s, &a.dir).await {
-            Ok(info) => println!("copy saved: {} bytes, {} signed events, history {}", info.size, info.events, info.history_id),
+            Ok(info) => {
+                println!("copy saved: {} bytes, {} signed events, history {}", info.size, info.events, info.history_id);
+                match sync_files(&mut s, &a.dir).await {
+                    Ok(f) => println!("files: {} fetched, {} already here, {} removed, {} not available", f.fetched, f.already_had, f.removed, f.unavailable),
+                    Err(e) => { eprintln!("files: sync stopped (the database copy is saved): {e:#}"); if a.once { std::process::exit(1); } }
+                }
+            }
             Err(PullError::NotAllowed(why)) => {
                 println!("waiting: the owner has not allowed this key as a replica yet ({why}). Allow {}", key.public_key());
                 if a.once { std::process::exit(3); }

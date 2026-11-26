@@ -89,5 +89,9 @@ failover` runs all of it on the real stack: host killed with `kill -9`, B on the
 send refused with the plain "saved copy" reason), host restarted, B back on the host after 11 s and sending. `farder-replica --invite`
 takes the link straight from the app's invite dialog.
 
-Not done: attachments (files) are not copied yet (database only), promotion (a copy becomes the host), and running the replica plus
+**Attachments (2026-11-26):** after each database pull the replica fetches every file the copy lists (checked against its SHA-256)
+and removes files the host redacted or deleted; the read-only copy serves them with `--storage-dir`. Tested in
+`cargo test -p farder-replica` against the real server (and proven to fail without the server's replica download rule).
+
+Not done: promotion (a copy becomes the host), and running the replica plus
 its read-only server as a service on the Beelink.

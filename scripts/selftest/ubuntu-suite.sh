@@ -170,7 +170,7 @@ suite_failover() {
   "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; RC=$?; echo "replica exit: $RC (want 0): $(grep 'copy saved' "$D/rep2.log")"
   [ $RC = 0 ] || { sed 's/^/  replica: /' "$D/rep2.log"; pkill -x farder-server; return 1; }
   echo "== the copy serves read-only; the HOST IS STOPPED"
-  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/copy/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
+  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
   wait_for "$D/copy.log" "Server listening"
   # kill -9: a PC that is switched off sends no goodbye, so the apps must notice by themselves.
   kill -9 "$HOSTPID"; sleep 1; echo "servers running now: $(pgrep -x farder-server | wc -l) (want 1, the copy)"

@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use farder_crypto::identity::Keypair;
 use farder_protocol::{
     codec,
-    server::{ClientFrame, ServerFrame, ServerRequest, ServerResponse},
+    server::{ClientFrame, DownloadRequest, DownloadResponse, ServerFrame, ServerRequest, ServerResponse},
 };
 use quinn::{ClientConfig, Endpoint, RecvStream, SendStream};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const CHUNK: u32 = 512 * 1024;
+/// Largest attachment a replica will take (the server's own upload limit is lower by default).
+pub const MAX_FILE: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 struct PinVerifier(Option<Vec<u8>>);
@@ -43,7 +45,7 @@ impl rustls::client::danger::ServerCertVerifier for PinVerifier {
 
 /// A logged-in connection to one server.
 pub struct Session {
-    _conn: quinn::Connection,
+    conn: quinn::Connection,
     send: SendStream,
     recv: RecvStream,
     next_id: u32,
@@ -82,7 +84,7 @@ impl Session {
             ServerFrame::AuthError { reason } => bail!("the server refused this replica: {reason}"),
             other => bail!("unexpected {other:?}"),
         }
-        Ok(Session { _conn: conn, send, recv, next_id: 100 })
+        Ok(Session { conn, send, recv, next_id: 100 })
     }
 
     pub async fn ask(&mut self, body: ServerRequest) -> Result<ServerResponse> {
@@ -99,6 +101,26 @@ impl Session {
             }
         }
     }
+
+    /// Fetch one stored file (attachment) by id on its own stream. `Ok(None)` when the server answers "not
+    /// available" (redacted, missing, or this key may not read it). Returns the hash the server announced and
+    /// the bytes; the caller checks the bytes against the hash.
+    pub async fn download(&mut self, file_id: u64) -> Result<Option<(String, Vec<u8>)>> {
+        let (mut send, mut recv) = self.conn.open_bi().await.context("open a download stream")?;
+        write_frame(&mut send, &codec::encode(&DownloadRequest { file_id })?).await?;
+        let _ = send.finish();
+        match codec::decode::<DownloadResponse>(&read_frame(&mut recv).await?)? {
+            DownloadResponse::Start { hash, file_size, .. } => {
+                let data = recv.read_to_end(MAX_FILE as usize).await.context("read the file")?;
+                if data.len() as u64 != file_size { bail!("file {file_id}: got {} of {file_size} bytes", data.len()); }
+                Ok(Some((hash, data)))
+            }
+            DownloadResponse::Error { .. } => Ok(None),
+        }
+    }
+
+    /// The underlying QUIC connection (tests use it to upload a file on its own stream).
+    pub fn connection(&self) -> &quinn::Connection { &self.conn }
 
     /// A pre-encoded request (from the browser crate's join helpers) with the id it was built for.
     async fn raw(&mut self, id: u32, bytes: Vec<u8>) -> Result<ServerResponse> {
@@ -260,4 +282,61 @@ mod invite_link_tests {
         assert!(invite_from_link("https://farder.xyz/join/!!!").is_err());
         assert!(invite_from_link("farder://not-an-address/x").is_err());
     }
+}
+
+/// What one attachment sync did.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FileSync { pub fetched: u64, pub already_had: u64, pub removed: u64, pub unavailable: u64 }
+
+/// Make `out/files` hold exactly the attachments `out/latest.db` refers to: fetch the ones missing (each
+/// checked against its SHA-256 before it is kept), and delete the ones the copy no longer lists, so a file
+/// the host redacted (or that was deleted) disappears from the copy too. Layout is the server's own
+/// content-addressed one, so `farder-server --read-only --storage-dir out/files` serves them.
+pub async fn sync_files(s: &mut Session, out: &Path) -> Result<FileSync> {
+    let files_dir = out.join("files");
+    let wanted: Vec<(u64, String)> = {
+        let db = rusqlite::Connection::open_with_flags(out.join("latest.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let redact_col = db.prepare("SELECT 1 FROM pragma_table_info('files') WHERE name = 'redacted_by'")?.exists([])?;
+        let sql = if redact_col { "SELECT id, hash FROM files WHERE redacted_by IS NULL" } else { "SELECT id, hash FROM files" };
+        let rows = db.prepare(sql)?.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut r = FileSync::default();
+    let mut keep = std::collections::HashSet::new();
+    for (id, hash) in wanted {
+        // The hash becomes a path: only accept a plain SHA-256 so a damaged database cannot point outside.
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) { r.unavailable += 1; continue; }
+        let path = farder_server::attachments::content_path(&files_dir.to_string_lossy(), &hash);
+        keep.insert(path.clone());
+        if path.exists() && crate::sha256_hex_file(&path).ok().as_deref() == Some(hash.as_str()) { r.already_had += 1; continue; }
+        match s.download(id).await? {
+            Some((_announced, data)) => {
+                if hex::encode(Sha256::digest(&data)) != hash { bail!("file {id} does not match its hash; the copy keeps what it had"); }
+                std::fs::create_dir_all(path.parent().unwrap())?;
+                let tmp = path.with_extension("partial");
+                std::fs::write(&tmp, &data)?;
+                std::fs::rename(&tmp, &path)?;
+                r.fetched += 1;
+            }
+            None => r.unavailable += 1,
+        }
+    }
+    // Remove what the copy no longer lists (redacted or deleted on the host).
+    if files_dir.exists() {
+        let mut stack = vec![files_dir.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d)? {
+                let p = e?.path();
+                if p.is_dir() { stack.push(p); } else if !keep.contains(&p) { std::fs::remove_file(&p)?; r.removed += 1; }
+            }
+        }
+    }
+    Ok(r)
+}
+
+fn sha256_hex_file(p: &Path) -> Result<String> {
+    let mut h = Sha256::new();
+    let mut f = std::fs::File::open(p)?;
+    std::io::copy(&mut f, &mut h)?;
+    Ok(hex::encode(h.finalize()))
 }

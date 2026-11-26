@@ -3,7 +3,7 @@
 use farder_crypto::event_log::{invite_code_hash, DeviceCert, Event, EventPayload};
 use farder_crypto::identity::Keypair;
 use farder_protocol::server::*;
-use farder_replica::{load_or_create_key, pull_once, verify_copy, PullError, Session};
+use farder_replica::{load_or_create_key, pull_once, sync_files, verify_copy, FileSync, PullError, Session};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -180,4 +180,94 @@ async fn while_the_host_is_down_the_copy_serves_history_read_only_and_cannot_cha
     let _ = child.kill(); let _ = child.wait();
     // The copy itself did not change: every row of every table is exactly as it was pulled.
     assert_eq!(logical_hash(&out.join("latest.db")), before, "a read-only copy must not change");
+}
+
+async fn read_upload(r: &mut quinn::RecvStream) -> UploadResponse {
+    let mut len = [0u8; 4]; r.read_exact(&mut len).await.unwrap();
+    let mut b = vec![0u8; u32::from_be_bytes(len) as usize]; r.read_exact(&mut b).await.unwrap();
+    farder_protocol::codec::decode::<UploadResponse>(&b).unwrap()
+}
+
+/// Upload `data` as the session's member into `channel_id` (the app's upload stream). Returns the file id.
+async fn upload(s: &Session, channel_id: u64, name: &str, data: &[u8]) -> u64 {
+    use sha2::{Digest, Sha256};
+    let (mut send, mut recv) = s.connection().open_bi().await.unwrap();
+    let req = UploadRequest { channel_id, file_name: name.into(), file_size: data.len() as u64, hash: hex::encode(Sha256::digest(data)),
+        mime_type: "text/plain".into(), width: None, height: None, duration_secs: None };
+    let frame = |b: Vec<u8>| { let mut v = (b.len() as u32).to_be_bytes().to_vec(); v.extend(b); v };
+    send.write_all(&frame(farder_protocol::codec::encode(&req).unwrap())).await.unwrap();
+    match read_upload(&mut recv).await { UploadResponse::Ready => {}, other => panic!("upload: {other:?}") }
+    send.write_all(data).await.unwrap();
+    let _ = send.finish();
+    match read_upload(&mut recv).await { UploadResponse::Complete { file_id } => file_id, other => panic!("upload: {other:?}") }
+}
+
+#[tokio::test]
+async fn attachments_come_with_the_copy_are_checked_and_the_copy_serves_them_while_the_host_is_down() {
+    let Seeded { srv, owner, mut o, sid: _, code } = seeded().await;
+    let ServerResponse::ServerInfo { channels, .. } = o.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+    // One file on a message in #general, and one the owner uploaded but never posted (no channel can see it).
+    let posted = upload(&o, general, "posted.txt", b"an attachment that must survive").await;
+    assert!(matches!(o.ask(ServerRequest::SendMessage { channel_id: general, content: "see file".into(), reply_to: None, attachment_ids: vec![posted] }).await.unwrap(), ServerResponse::MessageSent { .. }));
+    let unposted = upload(&o, general, "owner-only.txt", b"only the owner and a replica may fetch this").await;
+
+    let work = tempfile::tempdir().unwrap();
+    let (rkey, _) = load_or_create_key(&work.path().join("replica.key")).unwrap();
+    let mut r = Session::connect(srv.addr, None, &rkey, Some(code.clone()), None).await.unwrap();
+    r.join_history(&rkey, &code).await.unwrap();
+    // As a plain member it can fetch the posted file but not the unposted one.
+    assert!(r.download(posted).await.unwrap().is_some(), "a member who can read #general may fetch its file");
+    assert!(r.download(unposted).await.unwrap().is_none(), "a plain member may not fetch a file no channel shows");
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let out = work.path().join("copies");
+    pull_once(&mut r, &out).await.unwrap();
+    let f = sync_files(&mut r, &out).await.unwrap();
+    assert_eq!(f, FileSync { fetched: 2, already_had: 0, removed: 0, unavailable: 0 }, "an allowed replica takes every file");
+    // A second sync downloads nothing again.
+    assert_eq!(sync_files(&mut r, &out).await.unwrap(), FileSync { fetched: 0, already_had: 2, removed: 0, unavailable: 0 });
+    // A file that was tampered with on the copy's disk is fetched again (the hash is checked, not just the name).
+    let posted_hash: String = rusqlite::Connection::open(out.join("latest.db")).unwrap()
+        .query_row("SELECT hash FROM files WHERE id = ?1", [posted as i64], |r| r.get(0)).unwrap();
+    let posted_path = farder_server::attachments::content_path(&out.join("files").to_string_lossy(), &posted_hash);
+    std::fs::write(&posted_path, b"tampered").unwrap();
+    assert_eq!(sync_files(&mut r, &out).await.unwrap().fetched, 1);
+    assert_eq!(std::fs::read(&posted_path).unwrap(), b"an attachment that must survive");
+
+    // The host goes away; the copy serves the file to an existing member.
+    drop(o); drop(r); drop(srv);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (mut child, addr, _d) = start_read_only_with_files(&out.join("latest.db"), &out.join("files")).await;
+    let mut c = Session::connect(addr, None, &owner, None, None).await.expect("the owner signs in to the copy");
+    let (_, bytes) = c.download(posted).await.unwrap().expect("the copy serves the attachment");
+    assert_eq!(bytes, b"an attachment that must survive");
+    drop(c);
+    let _ = child.kill(); let _ = child.wait();
+
+    // A file the host redacted (marked in the next copy) is deleted from the copy's disk.
+    rusqlite::Connection::open(out.join("latest.db")).unwrap()
+        .execute("UPDATE files SET redacted_by = x'00' WHERE id = ?1", [posted as i64]).unwrap();
+    let srv2 = real_server().await;      // any reachable server: nothing is fetched, only removed
+    let k = Keypair::generate();
+    let mut s2 = Session::connect(srv2.addr, None, &k, None, Some(srv2.token.clone())).await.unwrap();
+    let f = sync_files(&mut s2, &out).await.unwrap();
+    assert_eq!((f.removed, f.already_had), (1, 1), "{f:?}");
+    assert!(!posted_path.exists(), "a redacted file must not stay on the copy");
+}
+
+async fn start_read_only_with_files(copy: &std::path::Path, files: &std::path::Path) -> (std::process::Child, SocketAddr, tempfile::TempDir) {
+    let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/farder-server");
+    let port = { let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap(); s.local_addr().unwrap().port() };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ro.log");
+    let out = std::fs::File::create(&log).unwrap();
+    let child = std::process::Command::new(&bin)
+        .args(["--bind", &format!("127.0.0.1:{port}"), "--read-only", "--db"]).arg(copy)
+        .arg("--storage-dir").arg(files).arg("--data-dir").arg(dir.path().join("sd"))
+        .stdout(out.try_clone().unwrap()).stderr(out).spawn().unwrap();
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::fs::read_to_string(&log).unwrap_or_default().contains("Server listening") { return (child, format!("127.0.0.1:{port}").parse().unwrap(), dir); }
+    }
+    panic!("read-only server did not start: {}", std::fs::read_to_string(&log).unwrap_or_default());
 }

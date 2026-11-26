@@ -13,10 +13,13 @@ host's computer is off. Design and status: `docs/mesh-hosting-status.md`.
 - Prints `replica key: vk_...`; the owner allows that key in Server Settings > Backup copy (the list shows each member's
   short key). Until then `--once` exits with code 3.
 - Each pull writes `latest.db` (and keeps `previous.db`) only after SHA-256, SQLite integrity and history replay checks.
+- Then the attachments: `files/` is made to hold exactly the files `latest.db` lists (fetched ones are checked against
+  their SHA-256; a file on disk that no longer matches is fetched again; files the host redacted or deleted are removed).
+  An allowed replica may fetch every file, like the owner (server: `handle_download_stream` in `connection.rs`).
 - Exit codes with `--once`: 0 copied, 1 copy failed (old copy kept), 2 could not connect / not joined, 3 not allowed yet.
 
-Serve the copy with `farder-server --read-only --db DIR/latest.db --bind 0.0.0.0:PORT` (no `--name` needed: the name
-the host saved is used).
+Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir DIR/files --bind 0.0.0.0:PORT` (no
+`--name` needed: the name the host saved is used).
 
 ## Library (`farder_replica`)
 
@@ -27,6 +30,8 @@ the host saved is used).
 | `pull_once(session, out_dir) -> CopyInfo` | One verified snapshot pull; `PullError::NotAllowed` until the owner allows it. |
 | `verify_copy(path, size, sha)` | The checks a copy must pass before it replaces `latest.db`. |
 | `load_or_create_key(path)` | The replica's own identity key (file mode 0600 on Unix). |
+| `sync_files(session, out_dir) -> FileSync` | Make `out_dir/files` match the attachments `latest.db` lists (fetch, check, remove). |
+| `Session::download(file_id)` | One file on its own stream; `None` when the server says "not available". |
 | `invite_from_link(s) -> (Option<SocketAddr>, code)` | Parse the three invite forms above. |
 | `state_path(dir)` | Where the "joined" flag is kept. |
 

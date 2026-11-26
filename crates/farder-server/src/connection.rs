@@ -252,7 +252,9 @@ async fn handle_download_stream(
     //    that this file is attached to via a message.
     let has_access = {
         let db = state.db.lock().unwrap();
-        if is_owner {
+        // An allowed replica keeps the WHOLE server (its database copy already holds every channel), so it
+        // may fetch every file too: that is what lets a saved copy show attachments while the host is off.
+        if is_owner || crate::members::is_replica(&db, member_key) {
             true
         } else {
             let channel_ids: Vec<u64> = {

@@ -126,7 +126,7 @@ See `docs/modules/portability.md`.
 | `FetchLog` (owner/replica only, paged, with genesis) | VERIFIED (unit) | 2 tests |
 | Owner allows replicas; verified database snapshots in pieces; replica cannot make replicas | VERIFIED (unit) | handler test + snapshot tests |
 | `farder-replica` against the real server: refused until allowed, verified copy with data, bad copy rejected, revoke stops copies | VERIFIED | `cargo test -p farder-replica` |
-| Attachments (files) copied | NOT BUILT | |
+| Attachments (files) copied, checked against their hash, redacted ones removed; the read-only copy serves them | VERIFIED (real server, no app) | `cargo test -p farder-replica` (2026-11-26); not yet clicked in the app on a copy |
 | Owner allows a copy machine from the app (Server Settings > Backup copy, matched by its short key) | VERIFIED | `ubuntu-suite.sh failover` (2026-11-26) |
 | `farder-replica --invite <the app's join link>` (address taken from the link) | VERIFIED | same suite: exit 3 before allowed, exit 0 + copy after; unit tests for the link forms |
 | Read-only copy keeps the host's server name (name saved in the database) | VERIFIED | `cargo test -p farder-replica` (proven to fail without the fix) + suite |
