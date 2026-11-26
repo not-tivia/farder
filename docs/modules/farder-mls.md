@@ -153,7 +153,11 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
   via OpenMLS (`process_message`) → strict `unpad` → decode. Fails for
   tampered ciphertext, non-application messages, wrong groups, removed
   members (post-removal epochs), and joiners on pre-join epochs (forward
-  secrecy — covered by observation tests).
+  secrecy — covered by observation tests). When the message's header epoch is
+  OLDER than this device's group, the error contains `BEFORE_JOINED`
+  ("sent before this device could read the channel"), which the client shows as
+  a calm label rather than "couldn't decrypt" (`isSealedBeforeJoined` in
+  `client/src/lib/types.ts`; keep the two strings in sync).
 
 Free functions:
 
