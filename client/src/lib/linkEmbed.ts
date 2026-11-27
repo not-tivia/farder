@@ -26,14 +26,15 @@ export interface LinkEmbed {
 export type EmbedOutcome = { Embed: LinkEmbed } | "Unsupported" | "Unavailable";
 
 // Allowlist host detection — MUST match the relay's ALLOWLIST (embed.rs).
-// User-facing hosts only: fxtwitter.com/api.fxtwitter.com are internal API
-// hosts used by the relay, never posted by users, so they are excluded.
+// The tweet-fixing sites (fxtwitter, fixupx, vxtwitter, fixvx) are links people
+// paste too; the relay reads only their path and asks api.fxtwitter.com.
 // Direct-image hosts (i.imgur.com, etc.) are intentionally NOT here: Farder
 // already inlines posted image URLs via the auto-attach path (MessageInput ->
 // fetch_url), so an image embed would render the picture twice.
 const ALLOWLIST_HOSTS = [
   "twitter.com", "x.com", "youtube.com", "youtu.be",
   "reddit.com", "redd.it", "open.spotify.com",
+  "fxtwitter.com", "fixupx.com", "vxtwitter.com", "fixvx.com",
 ];
 
 function hostAllowed(host: string): boolean {

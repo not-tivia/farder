@@ -34,18 +34,22 @@ provider) for hosts under `i.redd.it`.
 |---|---|
 | `twitter.com` | Twitter |
 | `x.com` | Twitter |
-| `fxtwitter.com` | Twitter (internal API relay rewrite target) |
+| `fxtwitter.com`, `fixupx.com`, `vxtwitter.com`, `fixvx.com` | Twitter (tweet-fixing sites people paste; only the path is used, the relay asks `api.fxtwitter.com`) |
 | `youtube.com` | YouTube |
 | `youtu.be` | YouTube |
 | `reddit.com` | Reddit |
 | `redd.it` | Reddit |
 | `open.spotify.com` | Spotify |
-| `i.redd.it` | Image |
-| `i.imgur.com` | Image |
+Direct-image hosts (`i.redd.it`, `i.imgur.com`) are NOT on the list: the app already shows a
+posted picture link inline, so a card would show it twice.
 
-`fxtwitter.com` is listed because the Twitter adapter rewrites `x.com` / `twitter.com`
-status URLs to `api.fxtwitter.com` — a user never posts an `fxtwitter.com` URL;
-the relay hits it internally.
+The Twitter adapter rewrites every tweet link (x.com, twitter.com or a tweet-fixing site) to
+`api.fxtwitter.com` by its `/<user>/status/<id>` path, so the relay never fetches the pasted host.
+The app's list (`client/src/lib/linkEmbed.ts` `ALLOWLIST_HOSTS`) must match this one.
+
+**Owner decision (2026-11-27):** embeds come only from this short list of sites and the
+tweet-fixing sites. A link to a video file on any other site gets no card: the relay does not
+fetch arbitrary sites.
 
 ---
 
