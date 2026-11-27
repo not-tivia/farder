@@ -2522,7 +2522,7 @@ chain.
 - `log_server_id: String` — genesis hash — stamps `EventCore.server_id` and keys the device chain.
 - `channel_id: u64` — target channel.
 - `content: String` — message text.
-- `reply_to: Option<String>` — event-hash of the event being replied to, or `null`.
+- `reply_to: Option<String>` — event-hash of the event being replied to, or `null`. `MessageInput` takes it from the target message's `event_hash` (`MessageInfo.event_hash`) via `chooseReplyTarget` (`client/src/lib/replyTarget.ts`); a target with no hash (pre-log row) is posted top-level with a "too old to reply to" toast. Sealed (E2EE) replies are still dropped — TODO(#19).
 - `attachments: Vec<AttachmentCapInput>` — cap descriptors for staged-file attachments; each is `{ contentHash: String, declaredType: String, size: u64 }`. The command stamps `uploader` from the caller's unlocked identity before embedding the caps in the event. Pass `[]` for messages with no file attachments.
 
 **`AttachmentCapInput` struct** (defined in `commands.rs`, deserializable from camelCase JSON):

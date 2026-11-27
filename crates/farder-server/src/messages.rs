@@ -8,9 +8,9 @@ use crate::db::now;
 
 /// Shared SELECT column list for messages — must match `row_to_message_info` index order.
 /// author_name_override is at index 8; author_badge at index 9; widget is appended last
-/// (index 10) so all prior indices stay stable; `garble` follows at index 11.
+/// (index 10) so all prior indices stay stable; `garble` follows at index 11; `event_hash` at 12.
 pub const MSG_SELECT: &str =
-    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned, author_name_override, author_badge, widget, garble";
+    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned, author_name_override, author_badge, widget, garble, event_hash";
 
 pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo> {
     let id: i64 = row.get(0)?;
@@ -28,6 +28,8 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
     let garble: Option<farder_crypto::event_log::GarbleMark> = row
         .get::<_, Option<String>>(11)?
         .and_then(|s| serde_json::from_str(&s).ok());
+
+    let event_hash: Option<String> = row.get(12)?;
 
     let arr: [u8; 32] = author_bytes
         .try_into()
@@ -50,6 +52,7 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
         author_badge,
         widget,
         garble,
+        event_hash,
     })
 }
 
@@ -329,7 +332,7 @@ pub fn get_message_v2(
             params![id as i64],
             |row| {
                 let base = row_to_message_info(row)?;
-                let n = 12; // MSG_SELECT's column count; the three v2 columns follow it.
+                let n = 13; // MSG_SELECT's column count; the three v2 columns follow it.
                 let is_e2ee: i64 = row.get(n)?;
                 Ok(MessageInfoV2 {
                     base,
@@ -551,7 +554,7 @@ pub fn fetch_history_v2(
     };
     let row_to_v2 = |row: &rusqlite::Row| -> rusqlite::Result<MessageInfoV2> {
         let base = row_to_message_info(row)?;
-        let n = 12; // MSG_SELECT's column count; the three v2 columns follow it.
+        let n = 13; // MSG_SELECT's column count; the three v2 columns follow it.
         let is_e2ee: i64 = row.get(n)?;
         Ok(MessageInfoV2 {
             base,
@@ -1011,6 +1014,21 @@ mod tests {
         // Other messages untouched.
         let other = insert_message(&conn, channel_id, &pk, "plain", None).unwrap();
         assert_eq!(get_message(&conn, other, &pk).unwrap().unwrap().widget, None);
+    }
+
+    #[test]
+    fn a_pre_log_row_has_no_event_hash_and_survives_the_real_codec() {
+        // A row from before the log carries no hash; through the REAL wire codec
+        // (named maps) it comes back unchanged. (The old serde_json stand-in proved
+        // nothing about msgpack; see farder-protocol's compat tests.)
+        let (conn, channel_id, pk) = setup();
+        let id = insert_message(&conn, channel_id, &pk, "old frame", None).unwrap();
+        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
+        assert_eq!(msg.event_hash, None, "a pre-log row has no hash");
+        let bytes = farder_protocol::codec::encode(&msg).unwrap();
+        let back: MessageInfo = farder_protocol::codec::decode(&bytes).unwrap();
+        assert_eq!(back.event_hash, None);
+        assert_eq!(back.content, "old frame");
     }
 
     #[test]
