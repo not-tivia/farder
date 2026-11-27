@@ -1322,6 +1322,18 @@ pub async fn connect_server(
             } else if best_n > reported_n {
                 let to = best.as_ref().map(|t| t.addresses.join(", ")).unwrap_or_default();
                 *server_conn.moved_to.lock().unwrap() = Some(if to.is_empty() { "a new host".into() } else { to });
+                // Tell the replaced host (#29): it verifies the term and goes read-only for EVERYONE,
+                // including apps that never saw the move. Best effort; this app fences itself anyway.
+                if let Some(t) = best.clone() {
+                    let st = Arc::clone(state.inner());
+                    let addr = address.clone();
+                    tokio::spawn(async move {
+                        match bridge::send_request(&st, &addr, ServerRequest::NotifyHostTerm { term: t }).await {
+                            Ok(ServerResponse::Ok) => eprintln!("[promotion] told the replaced host at {addr} about the newer term"),
+                            other => eprintln!("[promotion] the replaced host at {addr} did not take the newer term: {other:?}"),
+                        }
+                    });
+                }
             }
 
             let stale = server_conn.moved_to.lock().unwrap().is_some();

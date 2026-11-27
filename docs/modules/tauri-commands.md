@@ -3474,6 +3474,8 @@ app's normal reconnect returns to the host.
 (promotion: the machine holds a lower hosting term than one this device has verified). `None` otherwise.
 **Fencing:** while set, `bridge::send_request` refuses every request that is not `ServerRequest::is_read_only()`,
 so an old host that comes back can never collect writes (the history would fork).
+The app also sends the replaced host the newer term (`NotifyHostTerm`, #29/#30): it verifies it and goes read-only
+for everyone, including apps that never saw the move.
 **Where terms come from:** `connect_to_server` asks every machine it reaches for `GetHostTerm`, verifies the term
 against the server's owner and log id (`verified_term`), and keeps the highest per saved server
 (`ServerEntry.host_term`, servers.json). That term's addresses are tried FIRST on every connect. The host probe
