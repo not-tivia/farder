@@ -269,6 +269,7 @@ mod tests {
     // race if split. Everything filesystem-dependent lives here.
     #[test]
     fn test_override_resolution_and_pushed_map() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-profile-sync-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

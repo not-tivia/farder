@@ -439,6 +439,7 @@ mod tests {
 
     #[test]
     fn builtin_xp_luna_blue_is_registered() {
+        let _env = crate::test_env::lock();
         let themes = list_themes();
         assert!(
             themes.iter().any(|t| t.id == "xp-luna-blue"),
@@ -462,6 +463,7 @@ mod tests {
 
     #[test]
     fn fork_theme_creates_new_user_theme() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-fork-test-{}", std::process::id()));
         std::env::set_var("FARDER_DATA", &tmp);
 
@@ -492,6 +494,7 @@ mod tests {
 
     #[test]
     fn fork_theme_refuses_to_overwrite() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-fork-overwrite-{}", std::process::id()));
         std::env::set_var("FARDER_DATA", &tmp);
 
@@ -504,6 +507,7 @@ mod tests {
 
     #[test]
     fn fork_theme_rejects_unknown_base() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-fork-unknown-{}", std::process::id()));
         std::env::set_var("FARDER_DATA", &tmp);
 
@@ -528,6 +532,7 @@ mod tests {
 
     #[test]
     fn save_user_theme_writes_css_to_disk() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let id = fork_theme("xp-luna-blue".into(), "save-test".into(), "Save Test".into()).unwrap();
         save_user_theme(id.clone(), "/* hello */".to_string()).unwrap();
@@ -540,6 +545,7 @@ mod tests {
 
     #[test]
     fn save_user_theme_refuses_builtin() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let result = save_user_theme("xp-luna-blue".to_string(), "/* x */".to_string());
         assert!(result.is_err());
@@ -548,6 +554,7 @@ mod tests {
 
     #[test]
     fn add_theme_asset_copies_file() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let id = fork_theme("xp-luna-blue".into(), "asset-test".into(), "Asset Test".into()).unwrap();
 
@@ -566,6 +573,7 @@ mod tests {
 
     #[test]
     fn add_theme_asset_sanitizes_target_filename() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let id = fork_theme("xp-luna-blue".into(), "asset-san".into(), "Asset San".into()).unwrap();
         let source = tmp.join("source.png");
@@ -580,6 +588,7 @@ mod tests {
 
     #[test]
     fn delete_user_theme_removes_folder() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let id = fork_theme("xp-luna-blue".into(), "del-test".into(), "Del Test".into()).unwrap();
 
@@ -594,6 +603,7 @@ mod tests {
 
     #[test]
     fn delete_user_theme_refuses_builtin() {
+        let _env = crate::test_env::lock();
         let tmp = fresh_tmp_data_dir();
         let result = delete_user_theme("xp-luna-blue".to_string());
         assert!(result.is_err());

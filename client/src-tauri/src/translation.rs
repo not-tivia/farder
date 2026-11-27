@@ -534,6 +534,7 @@ mod tests {
     // explicit base dir.
     #[test]
     fn list_local_models_skips_invalid_dirs() {
+        let _env = crate::test_env::lock();
         // Set up a temp models dir
         let tmp = std::env::temp_dir().join(format!("farder-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
