@@ -144,3 +144,9 @@ issue (no `@claude` mention needed). When you are triggered that way:
 - If the issue is vague, risky, or out of scope, **do not guess**: comment on the
   issue with what you need and open no PR.
 - Keep the diff minimal and update the matching `docs/modules/*` doc in the same PR.
+- **Preserve each file's line endings.** Several files are CRLF (for example `crates/farder-protocol/src/server.rs`; check with
+  `git ls-files --eol <file>`). Rewriting a whole file to LF turns a 100-line change into a 4000-line diff and wipes
+  `git blame`. Before opening the PR, `git diff --stat` and `git diff --stat --ignore-cr-at-eol` must show the same counts.
+- **Start from the newest `main`**, and if `main` moved while you worked, merge it in and resolve before opening the PR.
+- **Wire compatibility:** `docs/modules/protocol.md` § Compatibility. Append fields and variants (`#[serde(default)]`), never
+  rename or remove them; signed bytes stay positional (`rmp_serde::to_vec`), never the wire codec.
