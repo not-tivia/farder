@@ -438,7 +438,7 @@ export function useServerEvents(): void {
           getOwnPk().then((ownPk) => {
             if (!ownPk || ownPk !== serverState?.ownerPublicKey) return;
             for (const channelId of e2eeChannelIds) {
-              api.addMembersToE2eeChannel(data.server_id, logServerId, channelId).catch(() => {});
+              api.addMembersWithCatchUp(data.server_id, logServerId, channelId).catch(() => {});
             }
           }).catch(() => {});
         }
@@ -635,7 +635,7 @@ export function useServerEvents(): void {
       getOwnPk().then((ownPk) => {
         if (!ownPk || ownPk !== serverState?.ownerPublicKey) return;
         for (const channelId of e2eeChannelIds) {
-          api.addMembersToE2eeChannel(serverId, logServerId, channelId).catch(() => {});
+          api.addMembersWithCatchUp(serverId, logServerId, channelId).catch(() => {});
         }
       }).catch(() => {});
     }).then(safePush);

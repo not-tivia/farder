@@ -278,8 +278,17 @@ export async function createE2eeChannel(serverId: string, logServerId: string, n
   return invoke("create_e2ee_channel", { serverId, logServerId, name });
 }
 
-export async function addMembersToE2eeChannel(serverId: string, logServerId: string, channelId: number): Promise<{ added: Array<{ identity: string; device: string; epoch: number }>; skipped: Array<{ identity: string; device: string | null; reason: string }> }> {
+export async function addMembersToE2eeChannel(serverId: string, logServerId: string, channelId: number): Promise<{ added: Array<{ identity: string; device: string; epoch: number }>; skipped: Array<{ identity: string; device: string | null; reason: string }>; catch_up_needed: boolean }> {
   return invoke("add_members_to_e2ee_channel", { serverId, logServerId, channelId });
+}
+
+/** Add whoever is addable; if another commit won the epoch (the add was refused and
+ *  nothing changed), apply the winner and try once more. Never loops. */
+export async function addMembersWithCatchUp(serverId: string, logServerId: string, channelId: number) {
+  const first = await addMembersToE2eeChannel(serverId, logServerId, channelId);
+  if (!first.catch_up_needed) return first;
+  await processMlsControlEvents(serverId, logServerId, channelId);
+  return addMembersToE2eeChannel(serverId, logServerId, channelId);
 }
 
 export async function publishOwnKeyPackage(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; event_hash: string; skipped: boolean }> {

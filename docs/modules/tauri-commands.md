@@ -411,11 +411,17 @@ Also invoked automatically at the end of `create_e2ee_channel`.
 **Parameters:** `server_id` — the connection key (address); `log_server_id` —
 the genesis hash keying the device chain; `channel_id` — the E2EE channel id.
 **Returns:** `AddMembersResult { added: [{ identity, device, epoch }], skipped:
-[{ identity, device, reason }] }`. A member with no key package (or a
-non-farder one) is skipped, not an error; a `stale-epoch` divergence aborts.
+[{ identity, device, reason }], catch_up_needed }`. A member with no key package (or a
+non-farder one) is skipped, not an error. Adds are staged and applied only once the
+server accepts them, so a refused add (`CommitRefused`, usually another commit won the
+epoch) changes nothing: the pass stops there with `catch_up_needed: true`, and the
+frontend's `addMembersWithCatchUp` applies the winning commit
+(`process_mls_control_events`) and runs the add once more. It never loops. Known gap:
+if an add's ANSWER is lost and the log later shows it was accepted, the steward applies
+it but the Welcome was never sent, so that member waits for a new add.
 **Side effects:** advances + persists the device chain and
 `servers/<log_server_id>/mls/<channel_id>.mls_state.json` after each accepted
-commit.
+commit (updating the record, never rebuilding it).
 **invoke name:** `"add_members_to_e2ee_channel"` →
 `addMembersToE2eeChannel()` in `client/src/lib/tauri-bridge.ts`.
 
