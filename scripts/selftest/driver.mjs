@@ -2224,6 +2224,58 @@ async function autoplay() {
   await B.browser.close().catch(() => {});
 }
 
+// Reply (run after `ubuntu`): B answers A's message with right-click > Reply; the answer must be linked
+// to it (not posted as a plain message) on both screens and in the server's history.
+async function reply() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await c.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const target = `reply target ${stamp}`, answer = `reply answer ${stamp}`;
+  await check("A posts a message; B answers it with right-click > Reply", async () => {
+    await sendText(A, target);
+    await seesText(B, target, 30000);
+    await B.page.locator(".message", { hasText: target }).first().click({ button: "right" });
+    await B.page.locator(".context-menu .context-menu-item", { hasText: "Reply" }).first().click();
+    await B.page.locator(".reply-preview", { hasText: target }).waitFor({ timeout: 5000 });
+    await sendText(B, answer);
+    await seesText(A, answer, 30000);
+  });
+  for (const c of [A, B]) {
+    await check(`${c.who} sees the answer linked to A's message (not a plain message)`, async () => {
+      const row = c.page.locator(".message", { hasText: answer }).first();
+      const ctx = row.locator(".message-reply-context");
+      await ctx.waitFor({ timeout: 10000 });
+      const txt = await ctx.innerText();
+      if (!txt.includes("Alice") || !txt.includes("reply target")) throw new Error("the reply does not say who/what it answers: " + txt);
+      await ctx.click();   // jumps to and highlights the message it answers
+      await c.page.locator(".message.search-highlight", { hasText: target }).waitFor({ timeout: 5000 });
+      await shot(c.page, `${c.who}-reply`);
+      return txt.slice(0, 80);
+    });
+  }
+  await check("the server's history links the answer to the message it answers", async () => {
+    const r = await A.page.evaluate(async ([nm, t, a]) => {
+      const inv = window.__TAURI_INTERNALS__.invoke;
+      const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+      const info = await inv("get_server_info_v2", { serverId: s.id });
+      const general = info.channels.map((c) => c.base || c).find((c) => c.name === "general");
+      const msgs = await inv("fetch_history", { serverId: s.id, channelId: general.id, beforeId: null, limit: 50 });
+      const tm = msgs.find((m) => m.content.includes(t)), am = msgs.find((m) => m.content.includes(a));
+      return { target: tm?.id, replyTo: am?.reply_to ?? null };
+    }, [name, target, answer]);
+    if (r.replyTo !== r.target) throw new Error(`answer.reply_to is ${r.replyTo}, the target is ${r.target}`);
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // An ENCRYPTED channel through the real app (run after `ubuntu`): the owner makes it in Server Settings, B is
 // added by the app on its own, both send and read. Whether the server ever held the words is checked by
 // ubuntu-suite.sh `e2ee` on the server's raw database bytes afterwards (E2EE_WORD is the secret marker).
@@ -2388,6 +2440,7 @@ try {
   else if (scenario === "density") await density();
   else if (scenario === "smallwin") await smallwin();
   else if (scenario === "autoplay") await autoplay();
+  else if (scenario === "reply") await reply();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();

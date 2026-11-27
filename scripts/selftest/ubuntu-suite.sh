@@ -207,6 +207,7 @@ suite_ui() {  # layout features measured in the real apps
   echo "== message density"; winrun density
   echo "== small window"; winrun smallwin
   echo "== autoplay (needs the internet: the public relay fetches the video)"; winrun autoplay
+  echo "== reply"; winrun reply
   pkill -x farder-server
 }
 
