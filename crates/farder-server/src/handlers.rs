@@ -655,7 +655,52 @@ fn is_destructive(req: &ServerRequest) -> bool {
     )
 }
 
+/// The channel an event addresses, when its payload names one (ids only; never content).
+fn payload_channel(payload: &EventPayload) -> Option<u64> {
+    match payload {
+        EventPayload::MessagePosted { channel_id, .. }
+        | EventPayload::ChannelCreated { channel_id, .. }
+        | EventPayload::MlsCommit { channel_id, .. }
+        | EventPayload::MlsWelcome { channel_id, .. }
+        | EventPayload::MlsLeafConfirmed { channel_id, .. }
+        | EventPayload::MlsGroupReset { channel_id, .. }
+        | EventPayload::MessagePostedE2ee { channel_id, .. }
+        | EventPayload::MessageEditedE2ee { channel_id, .. }
+        | EventPayload::MessageDeleted { channel_id, .. } => Some(*channel_id),
+        _ => None,
+    }
+}
+
+/// Entry point. Wraps the dispatcher so every refused `SubmitEvent` leaves exactly one
+/// `info` line for the server operator: payload type, author key prefix (8 hex chars),
+/// device id, channel id (if any) and the refusal reason. Never the event body,
+/// message content, sealed/MLS bytes or a full key. Accepted events log nothing.
 pub fn handle_request(
+    conn: &Connection,
+    member: &PublicKey,
+    is_owner: bool,
+    request: ServerRequest,
+    storage_dir: &str,
+    state: &Arc<ServerState>,
+) -> Result<HandleResult> {
+    let meta = match &request {
+        ServerRequest::SubmitEvent { event } => Some((
+            crate::event_ingest::payload_type(&event.core.payload),
+            hex::encode(&event.core.author.as_bytes()[..4]),
+            event.core.device.to_string(),
+            payload_channel(&event.core.payload),
+        )),
+        _ => None,
+    };
+    let result = handle_request_dispatch(conn, member, is_owner, request, storage_dir, state)?;
+    if let (Some((kind, author, device, channel)), ServerResponse::Error { reason }) = (meta, &result.response) {
+        let channel = channel.map(|c| c.to_string()).unwrap_or_else(|| "-".into());
+        tracing::info!("refused event: type={kind} author={author} device={device} channel={channel} reason={reason}");
+    }
+    Ok(result)
+}
+
+fn handle_request_dispatch(
     conn: &Connection,
     member: &PublicKey,
     is_owner: bool,
@@ -12213,4 +12258,104 @@ mod tests {
         assert!(matches!(ask(&replica, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
     }
 
+    // -----------------------------------------------------------------------
+    // Refusal logging: one info line per refused SubmitEvent, never content.
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    impl LogBuf {
+        fn text(&self) -> String { String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned() }
+        fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+            let buf = LogBuf::default();
+            let w = buf.clone();
+            let sub = tracing_subscriber::fmt()
+                .with_writer(move || w.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            (buf, tracing::subscriber::set_default(sub))
+        }
+    }
+
+    #[test]
+    fn refused_stale_epoch_and_permission_each_log_one_line() {
+        let (log, _g) = LogBuf::capture();
+        let mut f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 7;
+        let created = f.channel_created(ch, ChannelClass::E2ee);
+        f.accept(&conn, &created);
+        // Accepted events so far logged nothing.
+        assert_eq!(log.text(), "", "accepted events must not log");
+
+        let stale = f.sign(now_ts(), EP::MessagePostedE2ee {
+            channel_id: ch, generation: 3, epoch: 9, ciphertext: vec![1, 2, 3],
+            reply_to: None, attachments: vec![], authz_head: f.head.hash(),
+        });
+        assert_eq!(err_reason(&f.submit(&conn, &stale)), "stale-epoch");
+        let text = log.text();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("MessagePostedE2ee") && text.contains("stale-epoch"), "{text}");
+        assert!(text.contains(&format!("channel={ch}")), "{text}");
+        let author = hex::encode(&f.owner.public_key().as_bytes()[..4]);
+        assert!(text.contains(&format!("author={author}")), "{text}");
+        assert!(!text.contains(&hex::encode(f.owner.public_key().as_bytes())), "full key leaked: {text}");
+
+        // Permission refusal: a stranger (device registered, not a member) grants themselves a power.
+        let stranger = Keypair::generate();
+        let sdev = Keypair::generate();
+        let sda = Event::next(&sdev, stranger.public_key(), f.g.server_id(), None, 0, 1,
+            EP::DeviceAuthorized { cert: DeviceCert::create(&stranger, &sdev.public_key(), 1) });
+        let submit_as_stranger = |e: &Event| handle_request(
+            &conn, &stranger.public_key(), false,
+            ServerRequest::SubmitEvent { event: e.clone() }, "", &state).unwrap();
+        assert!(matches!(submit_as_stranger(&sda).response, ServerResponse::EventAccepted { .. }));
+        assert_eq!(log.text().lines().count(), 1, "accepted stranger device must not log");
+        let grant = Event::next(&sdev, stranger.public_key(), f.g.server_id(), Some(&sda), 1, 2,
+            EP::PermissionGranted { member: stranger.public_key(), capability: "ManageServer".into() });
+        let reason = err_reason(&submit_as_stranger(&grant));
+        let text = log.text();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        let last = text.lines().last().unwrap();
+        assert!(last.contains("PermissionGranted") && last.contains(&reason), "{last}");
+    }
+
+    #[test]
+    fn refused_events_never_log_content() {
+        let (log, _g) = LogBuf::capture();
+        let f = LogFixture::new();
+        let state = f.state.clone();
+        let conn = state.db.lock().unwrap();
+        let ch = E2EE_CHANNEL_ID_FLOOR + 9;
+
+        let mut sealed = b"SEALED-MARKER-XYZ".to_vec();
+        sealed.extend_from_slice(&[7u8; 32]);
+        let e2ee = f.sign(now_ts(), EP::MessagePostedE2ee {
+            channel_id: ch, generation: 0, epoch: 0, ciphertext: sealed,
+            reply_to: None, attachments: vec![], authz_head: f.head.hash(),
+        });
+        let reason_e = err_reason(&f.submit(&conn, &e2ee));
+
+        let plain = f.sign(now_ts(), EP::MessagePosted {
+            channel_id: 424242, content: "PLAIN-MARKER-XYZ".into(), reply_to: None, attachments: vec![],
+        });
+        let reason_p = err_reason(&f.submit(&conn, &plain));
+
+        let text = log.text();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        // Control: capture works and the reasons ARE there.
+        assert!(text.contains(&reason_e) && text.contains(&reason_p), "{text}");
+        assert!(!text.contains("SEALED-MARKER") && !text.contains("PLAIN-MARKER"), "content leaked: {text}");
+        assert!(!text.contains(&hex::encode(b"SEALED-MARKER-XYZ")), "{text}");
+        assert!(!text.contains("53454c4544") && !text.to_lowercase().contains("sealed-marker"), "{text}");
+    }
 }
