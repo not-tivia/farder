@@ -146,6 +146,14 @@ pub enum E2eeError {
     /// whatever won the epoch and carry on; when to refresh again is the
     /// cadence policy's call, never a retry loop.
     RekeyRefused { reason: String },
+    /// The server definitively refused our add or remove commit
+    /// (`add_member` / `discharge_drift`): another member's commit won the
+    /// epoch (`stale-epoch`), the commit-rate rule said no, or another fold
+    /// refusal. The commit was only STAGED, never applied, and has been
+    /// discarded: the local group is unchanged and still in step with the
+    /// server. NOT a divergence. Apply whatever won the epoch (catch up) and,
+    /// if the add/removal is still wanted, try again once.
+    CommitRefused { reason: String },
     /// A `channel_id` below `E2EE_CHANNEL_ID_FLOOR` — the id must stay clear
     /// of the legacy DB `channels` AUTOINCREMENT space.
     ChannelIdBelowFloor { channel_id: u64 },
@@ -219,6 +227,12 @@ impl E2eeError {
         matches!(self, Self::RekeyRefused { .. })
     }
 
+    /// True iff the server refused an add/remove commit and nothing changed
+    /// locally (see [`E2eeError::CommitRefused`]).
+    pub fn is_commit_refused(&self) -> bool {
+        matches!(self, Self::CommitRefused { .. })
+    }
+
     /// True iff a sealed send was rejected because the freshness ceiling was
     /// reached — the fold's guarantee that a rekey is now permitted, so the
     /// caller should rekey and retry. Keys on the `"freshness ceiling reached"`
@@ -285,6 +299,11 @@ impl fmt::Display for E2eeError {
             Self::RekeyRefused { reason } => write!(
                 f,
                 "the server refused our key refresh ({reason}); it was never applied, so \
+                 nothing changed on this device"
+            ),
+            Self::CommitRefused { reason } => write!(
+                f,
+                "the server refused our add/remove commit ({reason}); it was never applied, so \
                  nothing changed on this device"
             ),
             Self::ChannelIdBelowFloor { channel_id } => write!(

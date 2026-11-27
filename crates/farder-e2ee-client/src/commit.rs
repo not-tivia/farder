@@ -155,13 +155,16 @@ pub struct AddMemberOutcome {
 /// add and the real chaining values) followed by the `MlsWelcome` that cites
 /// the commit's event hash.
 ///
-/// # Divergence contract
+/// # No divergence on refusal
 ///
-/// `MlsChannelGroup::add_members` merges **locally and immediately**, so if the
-/// `MlsCommit` submit is rejected with the bare `"stale-epoch"`, this returns
-/// [`E2eeError::StaleEpochDiverged`] and the local group is one epoch ahead of
-/// the server — the caller must resync from the log, never keep using the
-/// group. This is never silently swallowed and never reported as success.
+/// The add is STAGED ([`MlsChannelGroup::add_members_staged`]), not merged,
+/// until the server accepts the commit. ANY server refusal (`"stale-epoch"`
+/// because another member's commit won the epoch, the commit-rate rule, a
+/// declared add that is not live, ...) discards it and returns
+/// [`E2eeError::CommitRefused`]: the group is unchanged and still in step
+/// (`is_diverged()` is false), so the caller catches up and may try again. A
+/// transport failure with no answer leaves the add staged;
+/// [`crate::rekey::settle_staged_commit`] resolves it from the log.
 pub async fn add_member<T: E2eeTransport + Sync>(
     transport: &T,
     actor: &Actor<'_>,
@@ -204,16 +207,17 @@ pub async fn add_member<T: E2eeTransport + Sync>(
     }
     let key_package_event_hash = kp_event.hash();
 
-    // 2. Add locally (merges immediately).
-    let outcome = group
-        .add_members(ctx.store, &DeviceSigner(actor.device), &[key_package])
+    // 2. Build and sign the add, but only STAGE it: the group stays in its
+    //    current epoch until the server accepts the commit.
+    let staged = group
+        .add_members_staged(ctx.store, &DeviceSigner(actor.device), &[key_package])
         .map_err(|e| E2eeError::Mls(e.context("add member")))?;
+    let outcome = staged.outcome;
     debug_assert_eq!(outcome.adds.as_slice(), std::slice::from_ref(member));
     let welcome_bytes = outcome.welcome_bytes.clone().ok_or_else(|| {
         E2eeError::Mls(anyhow::anyhow!("add_members produced no welcome for a single add"))
     })?;
-    let post_epoch_authenticator = group.epoch_authenticator();
-    debug_assert_eq!(group.epoch(), outcome.epoch + 1);
+    let post_epoch_authenticator = staged.post_epoch_authenticator;
 
     // 3. Build the MlsCommit from the real CommitOutcome. The declared add
     //    cites the key-package event we consumed; removes are the actual
@@ -255,26 +259,22 @@ pub async fn add_member<T: E2eeTransport + Sync>(
         },
     );
 
-    // 4. Submit the commit. `add_members` already merged locally, so EVERY
-    //    rejection here diverges the group (finding F3) — a stale-epoch bounce
-    //    gets its named variant, and any other fold refusal (e.g. "declared add
-    //    of a device that is not live") surfaces as `CommitRejectedDiverged`
-    //    rather than a plain transport error the caller would keep going after.
+    // 4. Submit the commit. Accepted: apply. ANY refusal: throw the staged add
+    //    away so the group is exactly where it was. No answer at all: we
+    //    cannot know, so it STAYS staged for `settle_staged_commit`.
     let accepted = match transport.submit_event(&commit_event).await {
         Ok(a) => a,
-        Err(e) if e.is_stale_epoch() => {
-            return Err(E2eeError::StaleEpochDiverged {
-                local_epoch: group.epoch(),
-            });
-        }
         Err(crate::transport::TransportError::ServerRejected { reason }) => {
-            return Err(E2eeError::CommitRejectedDiverged {
-                reason,
-                local_epoch: group.epoch(),
-            });
+            group
+                .discard_staged_own_commit(ctx.store)
+                .map_err(|e| E2eeError::Mls(e.context("discard refused add")))?;
+            return Err(E2eeError::CommitRefused { reason });
         }
         Err(e) => return Err(e.into()),
     };
+    group
+        .merge_staged_own_commit(ctx.store)
+        .map_err(|e| E2eeError::Mls(e.context("apply accepted add")))?;
     chain.advance(&commit_event);
 
     // 5. Submit the Welcome citing the accepted commit's event hash. The fold
@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_member_stale_commit_surfaces_as_diverged_not_success() {
+    async fn add_member_stale_commit_is_refused_and_leaves_the_group_unchanged() {
         let transport = FakeTransport::new();
         let (alice_id, alice_dev, k, mut group, store, hash, mut chain) =
             stewarded_channel(&transport, 1 << 51).await;
@@ -756,24 +756,23 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.is_stale_epoch_diverged(), "expected divergence, got {err}");
+        assert!(!err.is_diverged(), "a refused add is not a divergence, got {err}");
         match err {
-            E2eeError::StaleEpochDiverged { local_epoch } => {
-                // The add merged locally before the rejection.
-                assert_eq!(local_epoch, 2);
-            }
-            other => panic!("expected StaleEpochDiverged, got {other:?}"),
+            E2eeError::CommitRefused { reason } => assert!(reason.contains("stale-epoch")),
+            other => panic!("expected CommitRefused, got {other:?}"),
         }
+        // Nothing was applied: still at the bootstrap epoch, nothing staged.
+        assert_eq!(group.epoch(), 1);
+        assert!(!group.has_staged_own_commit());
     }
 
-    /// Finding F3: `add_members` merges locally BEFORE the submit, so a fold
-    /// refusal that is not the stale-epoch bounce diverges the group exactly the
-    /// same way. The reachable case is a revoked device — the fold answers
+    /// Finding F3, now closed by staging: a fold refusal that is not the
+    /// stale-epoch bounce is ALSO a clean refusal (group unchanged). The reachable case is a revoked device — the fold answers
     /// "declared add of a device that is not live". Before F3 this surfaced as a
     /// plain `Transport` error, `is_diverged()` was false, and the caller kept
     /// using a group one epoch ahead of the server.
     #[tokio::test]
-    async fn add_member_a_non_stale_fold_refusal_also_surfaces_as_diverged() {
+    async fn add_member_a_non_stale_fold_refusal_is_also_a_clean_refusal() {
         let transport = FakeTransport::new();
         let (alice_id, alice_dev, k, mut group, store, hash, mut chain) =
             stewarded_channel(&transport, 1 << 57).await;
@@ -825,15 +824,15 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.is_diverged(), "a post-merge refusal must be divergence, got {err}");
+        assert!(!err.is_diverged(), "a refused add is not a divergence, got {err}");
         match err {
-            E2eeError::CommitRejectedDiverged { reason, local_epoch } => {
+            E2eeError::CommitRefused { reason } => {
                 assert!(reason.contains("not live"), "fold reason preserved: {reason}");
-                // The add merged locally before the rejection.
-                assert_eq!(local_epoch, 2);
             }
-            other => panic!("expected CommitRejectedDiverged, got {other:?}"),
+            other => panic!("expected CommitRefused, got {other:?}"),
         }
+        assert_eq!(group.epoch(), 1);
+        assert!(!group.has_staged_own_commit());
     }
 
     #[tokio::test]

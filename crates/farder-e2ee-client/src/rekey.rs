@@ -312,12 +312,12 @@ pub async fn rekey_channel<T: E2eeTransport + Sync>(
     })
 }
 
-/// What [`settle_staged_refresh`] did.
+/// What [`settle_staged_commit`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StagedRefreshSettled {
+pub enum StagedCommitSettled {
     /// Nothing was staged.
     NothingStaged,
-    /// The log holds our refresh: the server had accepted it, so it is now
+    /// The log holds our commit: the server had accepted it, so it is now
     /// applied. The caller should advance its device chain past `event`.
     WasAccepted,
     /// Someone else's commit holds that epoch: ours lost and was dropped. The
@@ -327,22 +327,38 @@ pub enum StagedRefreshSettled {
     NeverArrived,
 }
 
+/// The old name of [`StagedCommitSettled`], from when only refreshes were staged.
+pub type StagedRefreshSettled = StagedCommitSettled;
+
 /// Settle a key refresh left staged because the server's answer never arrived
-/// (see [`rekey_channel`]). `events` must be the channel's control events
-/// fetched AFTER that submit (from the caller's cursor, which is never past an
-/// unfetched event). Our device's commit in the staged epoch means the server
-/// took it; anyone else's means ours lost; none means it never got there.
-///
-/// Returns the accepted event too when ours was accepted, so the caller can
-/// advance its device chain past it.
+/// (see [`rekey_channel`]). Alias of [`settle_staged_commit`].
 pub fn settle_staged_refresh<'e>(
     store: &FarderMlsStore,
     group: &mut MlsChannelGroup,
     events: &'e [farder_crypto::event_log::Event],
     my_device: &str,
-) -> Result<(StagedRefreshSettled, Option<&'e farder_crypto::event_log::Event>), E2eeError> {
+) -> Result<(StagedCommitSettled, Option<&'e farder_crypto::event_log::Event>), E2eeError> {
+    settle_staged_commit(store, group, events, my_device)
+}
+
+/// Settle ANY own commit (refresh, add or remove) left staged because the
+/// server's answer never arrived (see [`rekey_channel`],
+/// [`crate::commit::add_member`], [`crate::drift::discharge_drift`]). `events` must be the channel's control events
+/// fetched AFTER that submit (from the caller's cursor, which is never past an
+/// unfetched event). Our device's commit in the staged epoch means the server
+/// took it; anyone else's means ours lost; none means it never got there.
+///
+/// Returns the accepted event too when ours was accepted, so the caller can
+/// advance its device chain past it. For an add the caller must also submit
+/// the `MlsWelcome` it never got to send.
+pub fn settle_staged_commit<'e>(
+    store: &FarderMlsStore,
+    group: &mut MlsChannelGroup,
+    events: &'e [farder_crypto::event_log::Event],
+    my_device: &str,
+) -> Result<(StagedCommitSettled, Option<&'e farder_crypto::event_log::Event>), E2eeError> {
     let Some(epoch) = group.staged_own_commit_epoch() else {
-        return Ok((StagedRefreshSettled::NothingStaged, None));
+        return Ok((StagedCommitSettled::NothingStaged, None));
     };
     let holder = events.iter().find(|e| {
         matches!(&e.core.payload, EventPayload::MlsCommit { epoch: ce, .. } if *ce == epoch)
@@ -352,19 +368,19 @@ pub fn settle_staged_refresh<'e>(
             group
                 .merge_staged_own_commit(store)
                 .map_err(|e| E2eeError::Mls(e.context("apply accepted rekey")))?;
-            Ok((StagedRefreshSettled::WasAccepted, Some(e)))
+            Ok((StagedCommitSettled::WasAccepted, Some(e)))
         }
         Some(_) => {
             group
                 .discard_staged_own_commit(store)
-                .map_err(|e| E2eeError::Mls(e.context("drop losing rekey")))?;
-            Ok((StagedRefreshSettled::LostTheEpoch, None))
+                .map_err(|e| E2eeError::Mls(e.context("drop losing commit")))?;
+            Ok((StagedCommitSettled::LostTheEpoch, None))
         }
         None => {
             group
                 .discard_staged_own_commit(store)
-                .map_err(|e| E2eeError::Mls(e.context("drop unsent rekey")))?;
-            Ok((StagedRefreshSettled::NeverArrived, None))
+                .map_err(|e| E2eeError::Mls(e.context("drop unsent commit")))?;
+            Ok((StagedCommitSettled::NeverArrived, None))
         }
     }
 }
@@ -629,7 +645,7 @@ mod tests {
 
         // Nothing in the log yet: the server never took it -> dropped.
         let (how, _) = settle_staged_refresh(&b.store, &mut b.group, &[], &me).unwrap();
-        assert_eq!(how, StagedRefreshSettled::NeverArrived);
+        assert_eq!(how, StagedCommitSettled::NeverArrived);
         assert!(!b.group.has_staged_own_commit());
         assert_eq!(b.group.epoch(), before);
 
@@ -638,7 +654,7 @@ mod tests {
         rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group).await.unwrap_err();
         let theirs = commit_by(&ours, "someone-elses-device", before);
         let (how, _) = settle_staged_refresh(&b.store, &mut b.group, &[theirs], &me).unwrap();
-        assert_eq!(how, StagedRefreshSettled::LostTheEpoch);
+        assert_eq!(how, StagedCommitSettled::LostTheEpoch);
         assert!(!b.group.has_staged_own_commit());
         assert_eq!(b.group.epoch(), before);
 
@@ -647,13 +663,13 @@ mod tests {
         rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group).await.unwrap_err();
         let ours = b.transport.submitted().into_iter().last().unwrap();
         let (how, event) = settle_staged_refresh(&b.store, &mut b.group, std::slice::from_ref(&ours), &me).unwrap();
-        assert_eq!(how, StagedRefreshSettled::WasAccepted);
+        assert_eq!(how, StagedCommitSettled::WasAccepted);
         assert_eq!(event, Some(&ours), "handed back so the caller can advance its chain");
         assert_eq!(b.group.epoch(), before + 1);
 
         // Nothing staged: a no-op.
         let (how, _) = settle_staged_refresh(&b.store, &mut b.group, &[], &me).unwrap();
-        assert_eq!(how, StagedRefreshSettled::NothingStaged);
+        assert_eq!(how, StagedCommitSettled::NothingStaged);
     }
 
     #[tokio::test]
