@@ -86,7 +86,7 @@ export default function MediaPlayer({ player }: { player: MediaPlayerInfo }) {
   const media = player.kind === "video"
     ? (videoUrl
         ? <video ref={videoRef} className="mp-media" src={videoUrl} controls autoPlay muted={player.quiet && !userTookOver}
-                 playsInline onVolumeChange={onVolume} onPointerDown={() => setUserTookOver(true)} />
+                 playsInline onVolumeChange={onVolume} onPointerDown={() => { setUserTookOver(true); if (player.quiet) updatePlayer(player.id, { quiet: false }); }} />
         : <div className="mp-state">Couldn&rsquo;t load video</div>)
     : <iframe className="mp-media" src={player.src} title={player.title}
         sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"

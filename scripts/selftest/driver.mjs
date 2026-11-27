@@ -2020,6 +2020,147 @@ async function smallwin() {
   await B.browser.close().catch(() => {});
 }
 
+// Autoplay (run after `ubuntu`; needs the internet). In the chat only allowlisted providers get a video
+// card (the relay never fetches arbitrary hosts, so a direct .mp4 link on any other site shows NO card),
+// and of those only a tweet's video plays inline. So a public tweet with a short (9 s, 3 MB) video is used.
+// A is the viewer, B the sender.
+async function autoplay() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const VIDEO = process.env.AUTOPLAY_VIDEO || "https://x.com/elonmusk/status/1585341984679469056";
+  const YT = "https://www.youtube.com/watch?v=aqz-KE-bpKQ";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await c.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const tag = "ap" + stamp;
+  // The video card inside the message with `label`: is there a poster, a player, and what is it doing?
+  const card = (label) => A.page.evaluate((label) => {
+    const m = [...document.querySelectorAll(".message")].find((x) => (x.querySelector(".message-content")?.innerText || "").includes(label));
+    if (!m) return { msg: false };
+    const slot = m.querySelector(".media-slot");
+    const v = slot?.querySelector("video.mp-media");
+    const wrap = v?.closest(".mp-docked, .mp-float, .mp-mini");
+    return {
+      msg: true, slot: !!slot, poster: !!slot?.querySelector(".media-slot-poster"), iframe: !!slot?.querySelector("iframe"),
+      video: !!v, paused: v ? v.paused : null, muted: v ? v.muted : null, t: v ? v.currentTime : 0,
+      where: wrap ? wrap.className.split(" ")[0] : null, floating: document.querySelectorAll(".mp-float").length,
+    };
+  }, label);
+  const until = async (label, pred, ms, what) => {
+    const t0 = Date.now(); let last;
+    while (Date.now() - t0 < ms) { last = await card(label); if (pred(last)) return last; await new Promise((r) => setTimeout(r, 1000)); }
+    throw new Error(`${what}: ${JSON.stringify(last)}`);
+  };
+  const post = async (c, label, extra) => { await sendText(c, `${label} ${extra}`); await seesText(A, label, 30000); };
+  const openSettings = async (section) => {
+    await A.page.getByRole("button", { name: "Your settings" }).click();
+    await A.page.locator(".settings-nav-item", { hasText: section }).click();
+  };
+  const closeDialogs = async () => { for (let i = 0; i < 3 && (await A.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await A.page.locator(".modal-dialog:visible .modal-close").first().click(); };
+  try {
+    await check("setup: enough messages that the video can be scrolled out of view", async () => {
+      for (let i = 0; i < 14; i++) await sendText(B, `${tag} filler ${i}`);
+      await seesText(A, `${tag} filler 13`, 30000);
+    });
+    await check("off by default: B's video link shows a poster with Play, nothing starts", async () => {
+      await post(B, `${tag} first`, VIDEO);
+      const r = await until(`${tag} first`, (x) => x.slot, 45000, "no video card under the link (preview through the relay)");
+      await new Promise((r) => setTimeout(r, 6000));
+      const after = await card(`${tag} first`);
+      if (after.video) throw new Error("a player opened by itself: " + JSON.stringify(after));
+      if (!after.poster) throw new Error("no Play poster: " + JSON.stringify(after));
+      return "poster shown, no player";
+    });
+    await check("right-click Bob > Autoplay their media: autoplay turns on and Bob is on the list in Settings", async () => {
+      await A.page.locator(".member-item", { hasText: "Bob" }).first().click({ button: "right" });
+      await A.page.getByText("Autoplay their media", { exact: true }).click();
+      await openSettings("Autoplay");
+      const panel = A.page.locator(".settings-content");
+      await panel.getByText("People I trust (1)").waitFor({ timeout: 5000 });
+      const on = await panel.locator("label", { hasText: "Autoplay media from the people below" }).locator("input").isChecked();
+      const listed = await panel.innerText();
+      await shot(A.page, "autoplay-settings");
+      await closeDialogs();
+      if (!on) throw new Error("the switch is still off");
+      if (!listed.includes("Bob")) throw new Error("Bob is not on the list");
+    });
+    await check("a new video from Bob starts by itself, muted, in the chat (not floating)", async () => {
+      await post(B, `${tag} second`, VIDEO);
+      const r = await until(`${tag} second`, (x) => x.video && x.paused === false && x.t > 0.2, 60000, "did not start playing");
+      await shot(A.page, "autoplay-playing");
+      if (r.muted !== true) throw new Error("it is playing with sound");
+      if (r.where !== "mp-docked" || r.floating) throw new Error(`it is ${r.where}, ${r.floating} floating`);
+      return `playing at ${r.t.toFixed(1)}s, muted, in the message`;
+    });
+    await check("scrolled out of view it pauses and does not float; scrolled back it plays again", async () => {
+      await A.page.evaluate(() => { const l = document.querySelector(".message-list"); l.scrollTop = 0; });
+      const away = await until(`${tag} second`, (x) => x.paused === true, 10000, "kept playing out of view");
+      if (away.floating) throw new Error("it floated over the chat");
+      await A.page.evaluate(() => { const l = document.querySelector(".message-list"); l.scrollTop = l.scrollHeight; });
+      const back = await until(`${tag} second`, (x) => x.paused === false, 10000, "did not resume");
+      return `paused at ${away.t.toFixed(1)}s, resumed`;
+    });
+    await check("pressing on the video hands it to you: the sound is no longer forced off", async () => {
+      const v = A.page.locator(".message", { hasText: `${tag} second` }).locator("video.mp-media");
+      await v.dispatchEvent("pointerdown");
+      const r = await until(`${tag} second`, (x) => x.muted === false, 5000, "still muted after taking over");
+      return "unmuted";
+    });
+    await check("the same video from someone NOT on the list does not start (A's own)", async () => {
+      await post(A, `${tag} mine`, VIDEO);
+      await until(`${tag} mine`, (x) => x.slot, 45000, "no video card");
+      await new Promise((r) => setTimeout(r, 6000));
+      const r = await card(`${tag} mine`);
+      if (r.video) throw new Error("it started: " + JSON.stringify(r));
+    });
+    await check("a YouTube link from Bob does not start by itself", async () => {
+      await post(B, `${tag} tube`, YT);
+      await new Promise((r) => setTimeout(r, 10000));
+      const r = await card(`${tag} tube`);
+      if (r.video || r.iframe) throw new Error("a player opened: " + JSON.stringify(r));
+      return r.slot ? "card with a poster" : "no card (preview not shown)";
+    });
+    await check("with Data Saver on nothing autoplays, and the Autoplay settings say why", async () => {
+      await openSettings("Privacy");
+      await A.page.locator(".settings-content label", { hasText: /^\s*Data Saver\s*$/ }).locator("input").check();
+      await A.page.locator(".settings-nav-item", { hasText: "Autoplay" }).click();
+      await A.page.locator(".settings-content").getByText(/Data Saver is on right now/).waitFor({ timeout: 5000 });
+      await closeDialogs();
+      await post(B, `${tag} saver`, VIDEO);
+      await new Promise((r) => setTimeout(r, 10000));
+      const r = await card(`${tag} saver`);
+      if (r.video) throw new Error("it started with Data Saver on: " + JSON.stringify(r));
+    });
+    await check("with the system's reduce-motion setting on nothing autoplays", async () => {
+      await openSettings("Privacy");
+      await A.page.locator(".settings-content label", { hasText: /^\s*Data Saver\s*$/ }).locator("input").uncheck();
+      await closeDialogs();
+      await A.page.emulateMedia({ reducedMotion: "reduce" });
+      await post(B, `${tag} calm`, VIDEO);
+      await until(`${tag} calm`, (x) => x.slot, 45000, "no video card");
+      await new Promise((r) => setTimeout(r, 6000));
+      const r = await card(`${tag} calm`);
+      if (r.video) throw new Error("it started with reduce-motion on: " + JSON.stringify(r));
+    });
+    await check("control: with reduce-motion off again, Bob's next video does start", async () => {
+      await A.page.emulateMedia({ reducedMotion: "no-preference" });
+      await post(B, `${tag} again`, VIDEO);
+      await until(`${tag} again`, (x) => x.video && x.paused === false, 60000, "did not start");
+    });
+  } finally {
+    await A.page.emulateMedia({ reducedMotion: null }).catch(() => {});
+    await A.page.evaluate(() => { localStorage.removeItem("farder.autoplay"); window.dispatchEvent(new CustomEvent("farder:autoplay-changed")); }).catch(() => {});
+    await closeDialogs().catch(() => {});
+  }
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // An ENCRYPTED channel through the real app (run after `ubuntu`): the owner makes it in Server Settings, B is
 // added by the app on its own, both send and read. Whether the server ever held the words is checked by
 // ubuntu-suite.sh `e2ee` on the server's raw database bytes afterwards (E2EE_WORD is the secret marker).
@@ -2183,6 +2324,7 @@ try {
   else if (scenario === "e2ee") await e2ee();
   else if (scenario === "density") await density();
   else if (scenario === "smallwin") await smallwin();
+  else if (scenario === "autoplay") await autoplay();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();

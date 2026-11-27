@@ -25,3 +25,26 @@ test("a player is not quiet unless autoplay said so", () => {
   const s = open(m.initialState, { kind: "video", src: "u", hostId: "h" });
   assert.equal(s.players[0].quiet, false);
 });
+
+test("at the cap, a new autoplay replaces the oldest still-quiet autoplay instead of giving up", () => {
+  // Seen in the two-app suite: after four autoplayed videos in a channel nothing could play again.
+  let s = m.initialState;
+  for (let i = 0; i < m.MAX_PLAYERS; i++) s = open(s, { kind: "video", src: "u" + i, hostId: "h" + i, float: false, quiet: true });
+  assert.equal(s.players.length, m.MAX_PLAYERS);
+  s = open(s, { kind: "video", src: "new", hostId: "hn", float: false, quiet: true });
+  assert.equal(s.players.length, m.MAX_PLAYERS);
+  assert.ok(s.players.some((p) => p.src === "new"), "the new one opened");
+  assert.ok(!s.players.some((p) => p.src === "u0"), "the oldest quiet one made room");
+});
+
+test("a video you clicked or took over is never closed to make room", () => {
+  let s = m.initialState;
+  for (let i = 0; i < m.MAX_PLAYERS; i++) s = open(s, { kind: "video", src: "u" + i, hostId: "h" + i, float: false });
+  const before = s.players.map((p) => p.id);
+  s = open(s, { kind: "video", src: "new", hostId: "hn", float: false, quiet: true });
+  assert.deepEqual(s.players.map((p) => p.id), before, "nothing was evicted and the autoplay did not open");
+  // A quiet one that was taken over (quiet cleared) is not evictable either.
+  let t = open(m.initialState, { kind: "video", src: "a", hostId: "ha", float: false, quiet: true });
+  t = m.mediaPlayersReducer(t, { type: "update", id: t.players[0].id, patch: { quiet: false } });
+  assert.equal(m.evictableQuiet(t.players), null);
+});

@@ -82,8 +82,30 @@ export default function ChatPanel() {
   }, [highlightMessageId, serverId, dispatch]);
 
   useEffect(() => {
+    stuckToBottom.current = true;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [channelMessages.length]);
+
+  // Stick to the bottom while content GROWS after it arrived (a link card, a picture
+  // or a video loading in): scrolling only on a new message left those half below
+  // the edge, so a trusted video never reached the "half on screen" autoplay rule.
+  // Only scrolling UP unsticks, so reading history never jumps, and the smooth
+  // scroll above (which moves down) cannot unstick it halfway.
+  const stuckToBottom = useRef(true);
+  const lastScrollTop = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === "undefined") return;
+    const follow = () => { if (stuckToBottom.current) list.scrollTop = list.scrollHeight; };
+    const ro = new ResizeObserver(follow);
+    for (const child of Array.from(list.children)) ro.observe(child);
+    const mo = new MutationObserver((records) => {
+      for (const r of records) r.addedNodes.forEach((n) => { if (n instanceof Element) ro.observe(n); });
+    });
+    mo.observe(list, { childList: true });
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, [currentChannelId]);
 
   useEffect(() => {
     setHasMore(true);
@@ -92,6 +114,10 @@ export default function ChatPanel() {
 
   async function handleScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget;
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (gap < 80) stuckToBottom.current = true;
+    else if (el.scrollTop < lastScrollTop.current) stuckToBottom.current = false;
+    lastScrollTop.current = el.scrollTop;
     if (el.scrollTop === 0 && !loadingMore && hasMore && currentChannelId && serverId) {
       const oldest = channelMessages[0];
       if (!oldest) return;
@@ -218,7 +244,7 @@ export default function ChatPanel() {
         </div>
       )}
       <ActiveWidgetsBar serverId={serverId} channelId={currentChannelId} />
-      <div className="message-list" onScroll={handleScroll}>
+      <div className="message-list" ref={listRef} onScroll={handleScroll}>
         {loadingMore && <div className="load-more-indicator">Loading...</div>}
         {showNoHistoryBanner && (
           <div className="e2ee-no-history-banner">
