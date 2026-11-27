@@ -714,11 +714,28 @@ export default function Message({ message, memberNames, grouped: groupedProp = f
           onClose={() => setMemberMenu(null)}
         />
       )}
-      {message.reply_to && (
-        <div className="message-reply-context">
-          Replying to a message
-        </div>
-      )}
+      {message.reply_to && (() => {
+        // Who and what this answers, and a click to jump to it (it used to say only
+        // "Replying to a message"). The target may not be loaded (older history).
+        const target = activeServer?.messages?.[message.channel_id]?.find((m) => m.id === message.reply_to);
+        if (!target) return <div className="message-reply-context">&#8618; Replying to an earlier message</div>;
+        const who = memberNames[publicKeyToString(target.author)] ?? "someone";
+        const words = target.content ? target.content : target.sealed ? "an encrypted message" : "an attachment";
+        const snippet = words.length > 60 ? words.slice(0, 60) + "..." : words;
+        return (
+          <div
+            className="message-reply-context"
+            role="button"
+            tabIndex={0}
+            style={{ cursor: "pointer" }}
+            title="Show the message this answers"
+            onClick={() => { if (serverId) dispatch({ type: "HIGHLIGHT_MESSAGE", serverId, payload: { messageId: target.id } }); }}
+            onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && serverId) { e.preventDefault(); dispatch({ type: "HIGHLIGHT_MESSAGE", serverId, payload: { messageId: target.id } }); } }}
+          >
+            &#8618; Replying to <strong>{who}</strong>: {snippet}
+          </div>
+        );
+      })()}
       {/* Attachment-only messages (voice notes, captionless images) have empty
           content — the body must still render so the attachments do. */}
       {(deleted || isSealed || undecryptable || displayContent || message.attachments.length > 0) && !showWidget && (

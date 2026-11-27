@@ -382,8 +382,9 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     // command instead of the legacy submitEvent/sendMessage paths. The legacy
     // fetchUrl image-embed, DM encryption, inline :emoji: book-item resolution,
     // and attachment paths are all EXCLUDED here — a sealed message is text-only
-    // this rung (sub-6 owns attachments) and replies stay top-level (TODO(#19): needs
-    // the sealed envelope to carry the reply ref).
+    // this rung (sub-6 owns attachments). A reply cites the target's event hash in
+    // the event's OUTER `reply_to`, as designed (sub-4a plan): the server learns which
+    // message answers which (not what they say) so it can thread them.
     if (isE2ee) {
       const logServerId = activeServer?.logServerId ?? null;
       if (!logServerId) {
@@ -397,7 +398,10 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
         // author cannot decrypt their own MLS message, so this is the ONLY way
         // their own text ever renders — see `ownSealedSends`.
         const staged = sealedAttachment ? [sealedAttachment] : [];
-        const sent = await api.sendSealedMessage(serverId, logServerId, channelId, text, null, staged);
+        // Replies cite the target's event hash, as on the plain log path (#19).
+        const pick = chooseReplyTarget(replyTo, activeServer?.messages[channelId] ?? []);
+        const sent = await api.sendSealedMessage(serverId, logServerId, channelId, text, pick.replyTo, staged);
+        if (pick.tooOld) toast.info(REPLY_TOO_OLD_NOTE);
         dispatch({
           type: "OWN_SEALED_SENT",
           serverId,
