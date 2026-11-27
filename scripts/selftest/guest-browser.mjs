@@ -95,6 +95,39 @@ await check("a wrong link code is refused with a plain explanation", async () =>
   await p3.screenshot({ path: `${SHOTS}/guest-bad-link.png` });
   await ctx3.close();
 });
+// A phone: an emulated iPhone (small screen, touch, mobile browser). Not a real device, but it catches
+// the layout problems a phone would show: anything wider than the screen, a composer pushed off it,
+// buttons too small to tap.
+await check("on a phone-sized screen: joins, nothing runs off the side, the box and Send fit and are big enough to tap, sending works", async () => {
+  const { devices } = await import("playwright-core");
+  const ctxP = await browser.newContext({ ...devices["iPhone 13"] });
+  const pp = await ctxP.newPage();
+  pp.on("pageerror", (e) => errors.push("phone: " + String(e)));
+  await pp.goto(BASE + "#" + code);
+  await pp.locator("#name").fill("Phoney");
+  await pp.locator("#go").click();
+  await pp.locator(".msg", { hasText: "hello from a browser guest" }).waitFor({ timeout: 30000 });
+  const r = await pp.evaluate(() => {
+    const box = document.querySelector("#text").getBoundingClientRect();
+    const send = document.querySelector("#composer button").getBoundingClientRect();
+    const wide = [...document.querySelectorAll("body *")].filter((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.right > innerWidth + 1; }).slice(0, 3).map((e) => e.id || e.className || e.tagName);
+    return { vw: innerWidth, vh: innerHeight, sideways: document.documentElement.scrollWidth > innerWidth + 1, wide,
+      box: [Math.round(box.left), Math.round(box.right), Math.round(box.bottom), Math.round(box.height)],
+      send: [Math.round(send.right), Math.round(send.bottom), Math.round(send.width), Math.round(send.height)],
+      font: parseFloat(getComputedStyle(document.querySelector(".msg")).fontSize) };
+  });
+  await pp.screenshot({ path: `${SHOTS}/guest-phone.png` });
+  if (r.sideways || r.wide.length) throw new Error("wider than the phone: " + JSON.stringify(r.wide));
+  if (r.box[1] > r.vw || r.box[2] > r.vh || r.box[3] < 30) throw new Error("the message box does not fit: " + JSON.stringify(r));
+  if (r.send[0] > r.vw || r.send[1] > r.vh) throw new Error("Send is off the screen: " + JSON.stringify(r));
+  if (r.send[2] < 40 || r.send[3] < 32) throw new Error(`Send is too small to tap (${r.send[2]}x${r.send[3]})`);
+  if (r.font < 13) throw new Error(`message text is ${r.font}px on a phone`);
+  await pp.locator("#text").fill("hello from a phone");
+  await pp.locator("#composer button").tap();
+  await pp.locator(".msg", { hasText: "hello from a phone" }).waitFor({ timeout: 20000 });
+  await ctxP.close();
+  return `${r.vw}x${r.vh}, Send ${r.send[2]}x${r.send[3]}, text ${r.font}px`;
+});
 await check("no script errors on the page", async () => { if (errors.length) throw new Error(errors.slice(0, 2).join(" | ")); });
 await browser.close();
 console.log(`${pass} passed, ${fail} failed`);
