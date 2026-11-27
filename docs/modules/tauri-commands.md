@@ -2534,6 +2534,8 @@ AttachmentCapInput { content_hash: String, declared_type: String, size: u64 }
 
 **ServerRequest:** `SubmitEvent { event }` → `ServerResponse::EventAccepted { event_hash, timestamp }`.
 
+**Lost-answer recovery:** if the message submit is refused with `"non-contiguous seq"` / `"prev does not link to the chain head"` (the server accepted an earlier event but the answer never arrived), the command sends `GetOwnChainHead`, adopts the head only if `farder_e2ee_client::adopt_own_chain_head` verifies it (signed by this device, our identity + device, ahead of our head), persists the new chain state, re-signs the message on it and submits it ONCE more (`chain_recover_once`). Otherwise the original error is returned. No new command.
+
 **invoke name:** `"submit_event"` → `submitEvent()` in `client/src/lib/tauri-bridge.ts`.
 
 ---

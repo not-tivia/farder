@@ -625,6 +625,10 @@ impl LogState {
     pub fn is_device_revoked(&self, device: &str) -> bool {
         self.revoked_devices.contains(device)
     }
+    /// The identity a device is authorized to (`None` if the device is unknown). Read-only.
+    pub fn device_owner(&self, device: &str) -> Option<&PublicKey> {
+        self.devices.get(device).map(|r| &r.identity)
+    }
     /// The log-position clock: number of accepted events folded so far.
     pub fn log_pos(&self) -> u64 {
         self.log_pos

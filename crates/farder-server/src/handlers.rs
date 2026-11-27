@@ -637,6 +637,7 @@ fn is_read_only_request(req: &ServerRequest) -> bool {
             | ServerRequest::Search { .. }
             | ServerRequest::Subscribe { .. }
             | ServerRequest::NegotiateProtocol { .. }
+            | ServerRequest::GetOwnChainHead { .. }
     )
 }
 
@@ -2724,6 +2725,20 @@ fn handle_request_inner(
             };
             let (events, done) = crate::event_ingest::load_events_page(conn, after, limit)?;
             ok(ServerResponse::LogPage { genesis, events, done })
+        }
+        ServerRequest::GetOwnChainHead { device } => {
+            // Only the caller's own devices: the head names the device's chain, which is theirs.
+            let guard = state.log_state.lock().unwrap();
+            let Some(ls) = guard.as_ref() else {
+                return err("server is not running the event log (no genesis yet)");
+            };
+            // A device the log knows for ANOTHER identity is refused; one it does not know yet has
+            // no events of ours, so it simply answers `None`.
+            if ls.device_owner(&device).is_some_and(|owner| owner != member) {
+                return err("that device does not belong to your account");
+            }
+            let event = crate::event_ingest::load_chain_head(conn, member, &device)?;
+            ok(ServerResponse::OwnChainHead { event })
         }
         ServerRequest::SetReplica { member: target, enabled } => {
             if !is_owner { return err("only the owner can allow a replica"); }
@@ -10570,6 +10585,7 @@ mod tests {
                 | ServerRequest::ListReplicas
                 | ServerRequest::SnapshotBegin
                 | ServerRequest::SnapshotChunk { .. }
+                | ServerRequest::GetOwnChainHead { .. }
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
@@ -12384,5 +12400,80 @@ mod tests {
         assert!(!text.contains("SEALED-MARKER") && !text.contains("PLAIN-MARKER"), "content leaked: {text}");
         assert!(!text.contains(&hex::encode(b"SEALED-MARKER-XYZ")), "{text}");
         assert!(!text.contains("53454c4544") && !text.to_lowercase().contains("sealed-marker"), "{text}");
+    }
+
+    // -----------------------------------------------------------------------
+    // GetOwnChainHead
+    // -----------------------------------------------------------------------
+
+    /// A server in log mode with an owner and a second member, each with one authorized device
+    /// (a `DeviceAuthorized` accepted for each).
+    fn own_head_setup() -> (Arc<ServerState>, Keypair, Keypair, farder_crypto::event_log::Event, Keypair, Keypair, String) {
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let other = Keypair::generate();
+        let other_dev = Keypair::generate();
+        for (kp, name) in [(&owner, "Owner"), (&other, "Other")] {
+            members::register_member(&conn, &kp.public_key(), name).unwrap();
+            members::assign_role(&conn, &kp.public_key(), everyone).unwrap();
+        }
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        crate::event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let mut owner_da = None;
+        for (id, dev, is_owner) in [(&owner, &owner_dev, true), (&other, &other_dev, false)] {
+            let cert = DeviceCert::create(id, &dev.public_key(), 1);
+            let da = Event::next(dev, id.public_key(), g.server_id(), None, 0, 1, EP::DeviceAuthorized { cert });
+            match handle_request(&conn, &id.public_key(), is_owner, ServerRequest::SubmitEvent { event: da.clone() }, "", &state).unwrap().response {
+                ServerResponse::EventAccepted { .. } => {}
+                o => panic!("DeviceAuthorized refused: {o:?}"),
+            }
+            if is_owner { owner_da = Some(da); }
+        }
+        drop(conn);
+        (state, owner, owner_dev, owner_da.unwrap(), other, other_dev, g.server_id())
+    }
+
+    #[test]
+    fn test_get_own_chain_head_returns_the_callers_own_device_head() {
+        let (state, owner, owner_dev, owner_da, _other, _od, _sid) = own_head_setup();
+        let conn = state.db.lock().unwrap();
+        let dev = farder_crypto::event_log::device_id(&owner_dev.public_key());
+        match handle_request(&conn, &owner.public_key(), true, ServerRequest::GetOwnChainHead { device: dev }, "", &state).unwrap().response {
+            ServerResponse::OwnChainHead { event: Some(e) } => assert_eq!(e.hash(), owner_da.hash()),
+            o => panic!("expected the owner's head, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn test_get_own_chain_head_refuses_someone_elses_device() {
+        let (state, owner, _od, _da, _other, other_dev, _sid) = own_head_setup();
+        let conn = state.db.lock().unwrap();
+        let dev = farder_crypto::event_log::device_id(&other_dev.public_key());
+        match handle_request(&conn, &owner.public_key(), true, ServerRequest::GetOwnChainHead { device: dev }, "", &state).unwrap().response {
+            ServerResponse::Error { .. } => {}
+            o => panic!("another identity's device must be refused, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn test_get_own_chain_head_for_a_device_with_no_events_is_none() {
+        let (state, owner, _od, _da, _other, _odev, _sid) = own_head_setup();
+        let conn = state.db.lock().unwrap();
+        let fresh = farder_crypto::event_log::device_id(&Keypair::generate().public_key());
+        match handle_request(&conn, &owner.public_key(), true, ServerRequest::GetOwnChainHead { device: fresh }, "", &state).unwrap().response {
+            ServerResponse::OwnChainHead { event: None } => {}
+            o => panic!("expected None, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn test_get_own_chain_head_is_answered_by_a_read_only_copy() {
+        assert!(is_read_only_request(&ServerRequest::GetOwnChainHead { device: String::new() }));
     }
 }

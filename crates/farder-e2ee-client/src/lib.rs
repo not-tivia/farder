@@ -32,7 +32,7 @@ pub mod transport;
 pub mod testing;
 
 pub use cert::{build_cert_resolver, resolve_device_cert, VerifiedCertResolver};
-pub use chain::{build_next_event, event_now_secs, Actor, ChainState};
+pub use chain::{adopt_own_chain_head, build_next_event, event_now_secs, submit_with_chain_recovery, Actor, ChainState};
 pub use channel::{
     bootstrap_group, channel_group_id, create_e2ee_channel, publish_key_package,
     persist_store_instance_hash, read_store_instance_hash, ChannelSpec, CommitSubmitted,

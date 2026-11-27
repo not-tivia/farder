@@ -48,6 +48,7 @@ trips the `async_fn_in_trait` lint and is not object-safe):
 - `fetch_key_packages(member: &PublicKey, device: &str) -> Result<Vec<Vec<u8>>, TransportError>`
 - `fetch_device_certs(identity: &PublicKey) -> Result<Vec<Vec<u8>>, TransportError>`
 - `fetch_history_v2(channel_id, before_id, limit) -> Result<Vec<MessageInfoV2>, TransportError>`
+- `fetch_own_chain_head(device: &str) -> Result<Option<Event>, TransportError>` — `ServerRequest::GetOwnChainHead`. **Defaulted** to a "not supported" error, so fakes need not implement it (recovery then surfaces the original error).
 
 The method signatures mirror `farder-protocol::server` request/response shapes.
 `channel_id` on `fetch_welcomes` **narrows, never widens**. `fetch_mls_control`
@@ -102,6 +103,20 @@ the fold's **verbatim** rejection string (wrapped by the server as
 - `build_next_event(device, identity, server_id, chain, timestamp, payload) -> Event`
   — builds + signs the next event exactly like the Tauri client's
   `event_build_next`; pure, no I/O.
+- `adopt_own_chain_head(actor, chain, head) -> bool` — adopts a server-supplied
+  chain head into `chain` ONLY if `head` verifies against THIS device's key, its
+  author/device/log server are ours, and its `seq` is ahead of the local head.
+  The server's word is never trusted.
+- `submit_with_chain_recovery(transport, actor, chain, timestamp, payload) -> Result<(Event, EventAccepted), TransportError>`
+  — build + sign + submit; if refused with a chain reason
+  (`TransportError::is_chain_refused()`: `"non-contiguous seq"` / `"prev does
+  not link to the chain head"` — the local head is behind the server's, e.g. a
+  lost acceptance), fetch the own head, adopt it, rebuild + re-sign, submit ONCE
+  more. A missing/forged/not-ahead head returns the ORIGINAL error; never loops.
+  Advances `chain` on success. Used by `send_sealed`; **not** used for MLS
+  commits (their lost answers are settled by `settle_staged_commit`, and the
+  group state must not be rebuilt blindly). Tested against a real server in
+  `tests/e2ee_lifecycle.rs`.
 - `event_now_secs() -> u64` — untrusted `core.timestamp` claim (ingest bounds
   it to 300 s ahead of server time).
 

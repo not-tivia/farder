@@ -5031,6 +5031,12 @@ pub async fn submit_event(
             uploader: identity.public_key(),
         })
         .collect();
+    let payload = EventPayload::MessagePosted {
+        channel_id,
+        content,
+        reply_to,
+        attachments: caps,
+    };
     let msg = event_build_next(
         &device,
         &identity,
@@ -5038,14 +5044,23 @@ pub async fn submit_event(
         ds.last_event_hash.clone(),
         ds.next_seq,
         ds.lamport,
-        EventPayload::MessagePosted {
-            channel_id,
-            content,
-            reply_to,
-            attachments: caps,
-        },
+        payload.clone(),
     );
-    let result = event_send_submit(&state, &server_id, &msg).await?;
+    let (msg, result) = match event_send_submit(&state, &server_id, &msg).await {
+        Ok(r) => (msg, r),
+        Err(reason) => {
+            // A lost acceptance leaves our chain one behind the server's: recover ONCE.
+            let Some(retry) = chain_recover_once(
+                &state, &server_id, &log_server_id, &identity, &device, &mut ds, &reason, payload,
+            )
+            .await?
+            else {
+                return Err(reason);
+            };
+            let r = event_send_submit(&state, &server_id, &retry).await?;
+            (retry, r)
+        }
+    };
 
     // 3. Advance + persist chain state ONLY on confirmed acceptance.
     ds.next_seq = msg.core.seq + 1;
@@ -5053,6 +5068,45 @@ pub async fn submit_event(
     ds.lamport = msg.core.lamport;
     ds.save(&log_server_id)?;
     Ok(result)
+}
+
+/// A submit was refused with `reason`. If it is one of the two chain reasons, ask the server for
+/// this device's own newest event and adopt it ONLY if it verifies (signed by THIS device's key,
+/// our identity + device, ahead of our head — `farder_e2ee_client::adopt_own_chain_head`). On
+/// adoption the new head is persisted and the event is rebuilt + re-signed on it; the caller
+/// submits it ONCE. `Ok(None)` means "not recoverable": surface the original error. Never loops.
+#[allow(clippy::too_many_arguments)]
+async fn chain_recover_once(
+    state: &AppState,
+    server_id: &str,
+    log_server_id: &str,
+    identity: &Keypair,
+    device: &Keypair,
+    ds: &mut crate::device::DeviceState,
+    reason: &str,
+    payload: farder_crypto::event_log::EventPayload,
+) -> Result<Option<farder_crypto::event_log::Event>, String> {
+    use farder_e2ee_client::{Actor, ChainState, TransportError};
+    if !TransportError::rejected(reason).is_chain_refused() {
+        return Ok(None);
+    }
+    let dev_id = farder_crypto::event_log::device_id(&device.public_key());
+    let head = match bridge::send_request(state, server_id, ServerRequest::GetOwnChainHead { device: dev_id }).await {
+        Ok(ServerResponse::OwnChainHead { event: Some(e) }) => e,
+        _ => return Ok(None),
+    };
+    let mut chain = ChainState { next_seq: ds.next_seq, last_event_hash: ds.last_event_hash.clone(), lamport: ds.lamport };
+    let actor = Actor { device, identity, log_server_id };
+    if !farder_e2ee_client::adopt_own_chain_head(&actor, &mut chain, &head) {
+        return Ok(None);
+    }
+    ds.next_seq = chain.next_seq;
+    ds.last_event_hash = chain.last_event_hash.clone();
+    ds.lamport = chain.lamport;
+    ds.save(log_server_id)?;
+    Ok(Some(event_build_next(
+        device, identity, log_server_id, ds.last_event_hash.clone(), ds.next_seq, ds.lamport, payload,
+    )))
 }
 
 /// Build the next chained event. We only store the prev hash (not the prev
