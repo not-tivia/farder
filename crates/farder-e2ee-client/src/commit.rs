@@ -163,10 +163,9 @@ async fn submit_welcome<T: E2eeTransport + Sync>(
     member: &DeclaredMember,
     welcome: Vec<u8>,
 ) -> Result<crate::transport::EventAccepted, E2eeError> {
-    let welcome_event = build_next_event(
-        actor.device,
-        actor.identity,
-        &key.log_server_id,
+    let (_welcome_event, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
         chain,
         event_now_secs(),
         EventPayload::MlsWelcome {
@@ -177,9 +176,8 @@ async fn submit_welcome<T: E2eeTransport + Sync>(
             for_device: member.device.clone(),
             welcome,
         },
-    );
-    let accepted = transport.submit_event(&welcome_event).await?;
-    chain.advance(&welcome_event);
+    )
+    .await?;
     Ok(accepted)
 }
 
@@ -338,13 +336,7 @@ pub async fn add_member<T: E2eeTransport + Sync>(
             device: m.device.clone(),
         })
         .collect();
-    let commit_event = build_next_event(
-        actor.device,
-        actor.identity,
-        &ctx.key.log_server_id,
-        chain,
-        event_now_secs(),
-        EventPayload::MlsCommit {
+    let payload = EventPayload::MlsCommit {
             channel_id: ctx.key.channel_id,
             generation: ctx.generation,
             epoch: outcome.epoch,
@@ -356,14 +348,21 @@ pub async fn add_member<T: E2eeTransport + Sync>(
             post_tree_hash: outcome.post_tree_hash,
             authz_head,
             store_instance_hash: *ctx.store_instance_hash,
-        },
-    );
+        };
 
     // 4. Submit the commit. Accepted: apply. ANY refusal: throw the staged add
     //    away so the group is exactly where it was. No answer at all: we
     //    cannot know, so it STAYS staged for `settle_staged_commit`.
-    let accepted = match transport.submit_event(&commit_event).await {
-        Ok(a) => a,
+    let accepted = match crate::chain::submit_commit_with_chain_recovery(
+        transport,
+        actor,
+        chain,
+        event_now_secs(),
+        payload,
+    )
+    .await
+    {
+        Ok((_event, a)) => a,
         Err(crate::transport::TransportError::ServerRejected { reason }) => {
             group
                 .discard_staged_own_commit(ctx.store)
@@ -388,7 +387,6 @@ pub async fn add_member<T: E2eeTransport + Sync>(
     group
         .merge_staged_own_commit(ctx.store)
         .map_err(|e| E2eeError::Mls(e.context("apply accepted add")))?;
-    chain.advance(&commit_event);
 
     // 5. Submit the Welcome citing the accepted commit's event hash. The fold
     //    rejects a Welcome that cites an unrecorded commit, so this MUST come

@@ -39,7 +39,7 @@ use farder_mls::credential::DeviceSigner;
 use farder_mls::group::MlsChannelGroup;
 use farder_mls::store::FarderMlsStore;
 
-use crate::chain::{build_next_event, event_now_secs, Actor, ChainState};
+use crate::chain::{event_now_secs, Actor, ChainState};
 use crate::channel::E2eeError;
 use crate::channel_key::ChannelKey;
 use crate::transport::E2eeTransport;
@@ -264,13 +264,7 @@ pub async fn rekey_channel<T: E2eeTransport + Sync>(
 
     // 2. Build the MlsCommit from the real CommitOutcome: a rekey is empty
     //    adds/removes by definition.
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        &ctx.key.log_server_id,
-        chain,
-        event_now_secs(),
-        EventPayload::MlsCommit {
+    let payload = EventPayload::MlsCommit {
             channel_id: ctx.key.channel_id,
             generation: ctx.generation,
             epoch: outcome.epoch,
@@ -282,15 +276,22 @@ pub async fn rekey_channel<T: E2eeTransport + Sync>(
             post_tree_hash: outcome.post_tree_hash,
             authz_head,
             store_instance_hash: *ctx.store_instance_hash,
-        },
-    );
+        };
 
     // 3. Submit. Accepted: apply. Refused: throw the staged refresh away, so
     //    the group is exactly where it was. No answer at all (the connection
     //    dropped): we cannot know, so the staged refresh STAYS and
     //    [`settle_staged_refresh`] decides from the log later. Never loop.
-    let accepted = match transport.submit_event(&event).await {
-        Ok(a) => a,
+    let accepted = match crate::chain::submit_commit_with_chain_recovery(
+        transport,
+        actor,
+        chain,
+        event_now_secs(),
+        payload,
+    )
+    .await
+    {
+        Ok((_event, a)) => a,
         Err(crate::transport::TransportError::ServerRejected { reason }) => {
             group
                 .discard_staged_own_commit(ctx.store)
@@ -302,7 +303,6 @@ pub async fn rekey_channel<T: E2eeTransport + Sync>(
     group
         .merge_staged_own_commit(ctx.store)
         .map_err(|e| E2eeError::Mls(e.context("apply accepted rekey")))?;
-    chain.advance(&event);
 
     Ok(RekeyOutcome {
         event_hash: accepted.event_hash,
@@ -536,6 +536,73 @@ mod tests {
             }
             other => panic!("expected MlsCommit, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_rekey_recovers_from_a_chain_refusal_via_the_served_own_head() {
+        let mut b = bootstrapped("chain-recover", E2EE_CHANNEL_ID_FLOOR + 41).await;
+        let a = actor(&b.identity, &b.device);
+        let ctx = RekeyContext { key: &b.key, generation: 0, store: &b.store, store_instance_hash: &b.store_instance_hash };
+        // An earlier event of ours (unrelated payload) whose answer was lost.
+        let lost = crate::chain::build_next_event(&b.device, &b.identity, SERVER_ID, &b.chain, 5, EventPayload::DeviceRevoked { device: "x".into() });
+        b.transport.serve_own_head(lost.clone());
+        b.transport.reject_next("prev does not link to the chain head (fork)");
+        let before = b.transport.submit_count();
+
+        let out = rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group).await.expect("recovers");
+
+        assert_eq!(out.local_epoch, 2);
+        let sent = b.transport.submitted();
+        assert_eq!(sent.len(), before + 2);
+        assert_eq!(sent[before + 1].core.prev.as_deref(), Some(lost.hash().as_str()));
+        // The SAME commit payload was re-signed, not a new one.
+        assert_eq!(sent[before].core.payload, sent[before + 1].core.payload);
+    }
+
+    #[tokio::test]
+    async fn a_rekey_with_a_forged_head_stays_staged_and_is_not_resubmitted() {
+        let mut b = bootstrapped("chain-forged", E2EE_CHANNEL_ID_FLOOR + 42).await;
+        let a = actor(&b.identity, &b.device);
+        let ctx = RekeyContext { key: &b.key, generation: 0, store: &b.store, store_instance_hash: &b.store_instance_hash };
+        let other = Keypair::generate();
+        b.transport.serve_own_head(crate::chain::build_next_event(&other, &b.identity, SERVER_ID, &b.chain, 5, EventPayload::DeviceRevoked { device: "x".into() }));
+        b.transport.reject_next("non-contiguous seq (gap or fork)");
+        let before = b.transport.submit_count();
+
+        let err = rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group).await.unwrap_err();
+
+        assert!(!matches!(err, E2eeError::RekeyRefused { .. }), "a chain refusal is not a verdict on the commit: {err:?}");
+        assert_eq!(b.transport.submit_count(), before + 1, "no resubmit");
+        assert_eq!(b.group.epoch(), 1, "not merged");
+    }
+
+    #[tokio::test]
+    async fn an_own_commit_already_on_the_adopted_head_is_never_submitted_twice() {
+        let mut b = bootstrapped("chain-own-commit", E2EE_CHANNEL_ID_FLOOR + 43).await;
+        let a = actor(&b.identity, &b.device);
+        let ctx = RekeyContext { key: &b.key, generation: 0, store: &b.store, store_instance_hash: &b.store_instance_hash };
+        // The head the server holds IS our commit for this epoch (the first submit's
+        // answer was lost, then this attempt was chain-refused).
+        let own = crate::chain::build_next_event(
+            &b.device, &b.identity, SERVER_ID, &b.chain, 5,
+            EventPayload::MlsCommit {
+                channel_id: b.key.channel_id, generation: 0, epoch: 1, mls_message: vec![], adds: vec![], removes: vec![],
+                prev_epoch_authenticator: [0; 32], post_epoch_authenticator: [0; 32], post_tree_hash: [0; 32],
+                authz_head: String::new(), store_instance_hash: b.store_instance_hash,
+            },
+        );
+        b.transport.serve_own_head(own.clone());
+        b.transport.reject_next("non-contiguous seq (gap or fork)");
+        let before = b.transport.submit_count();
+
+        let err = rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group).await.unwrap_err();
+
+        assert!(!matches!(err, E2eeError::RekeyRefused { .. }));
+        assert_eq!(b.transport.submit_count(), before + 1, "the commit is not resubmitted");
+        assert_eq!(b.chain.last_event_hash.as_deref(), Some(own.hash().as_str()), "adopted head is kept for the caller to persist");
+        // Still staged: settle decides from the log.
+        let (settled, _) = settle_staged_commit(&b.store, &mut b.group, std::slice::from_ref(&own), &farder_crypto::event_log::device_id(&b.device.public_key())).unwrap();
+        assert_eq!(settled, StagedCommitSettled::WasAccepted);
     }
 
     #[tokio::test]

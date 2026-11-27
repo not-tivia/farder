@@ -13,7 +13,7 @@
 
 use farder_crypto::event_log::EventPayload;
 
-use crate::chain::{build_next_event, event_now_secs, Actor, ChainState};
+use crate::chain::{event_now_secs, Actor, ChainState};
 use crate::channel::E2eeError;
 use crate::transport::E2eeTransport;
 
@@ -68,19 +68,17 @@ pub async fn revoke_device<T: E2eeTransport + Sync>(
     chain: &mut ChainState,
     device_id: String,
 ) -> Result<RevokeOutcome, E2eeError> {
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        actor.log_server_id,
-        chain,
-        event_now_secs(),
-        EventPayload::DeviceRevoked { device: device_id },
-    );
 
     // Submit; the fold authorizes (or rejects) by the author's role. Advance
     // only on accept.
-    let accepted = transport.submit_event(&event).await?;
-    chain.advance(&event);
+    let (_event, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
+        chain,
+        event_now_secs(),
+        EventPayload::DeviceRevoked { device: device_id },
+    )
+    .await?;
 
     Ok(RevokeOutcome {
         event_hash: accepted.event_hash,

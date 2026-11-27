@@ -2529,3 +2529,43 @@ async fn a_forged_own_chain_head_is_not_adopted() {
         assert_eq!(chain, before, "a forged head must not touch the local chain");
     }
 }
+
+// ---------------------------------------------------------------------------
+// A lost answer on ONE event must not strand OTHER kinds of event (issue #16)
+// ---------------------------------------------------------------------------
+
+/// The answer to one event is lost (the server took it; the client never advanced).
+/// Every later operation that signs on the chain — a KeyPackage publish and the
+/// creation of a second E2EE channel, neither of which is `send_sealed` — must
+/// still succeed through recovery. Without the recovery these fail with the chain
+/// refusal and the device stays stuck.
+#[tokio::test]
+async fn a_lost_answer_does_not_strand_a_keypackage_publish_or_a_second_channel() {
+    let core = setup_owner_core(E2EE_CHANNEL_ID_FLOOR + 92).await;
+    let actor = actor(&core.owner_kp, &core.owner_dev, &core.server_id);
+    let mut chain = core.owner_chain.clone();
+
+    let lost = build_next_event(&core.owner_dev, &core.owner_kp, &core.server_id, &chain, event_now_secs(), invite_payload("lost-3"));
+    submit_raw(&core.owner_transport, &lost).await;
+
+    // KeyPackage publish through the stale chain.
+    let published = publish_key_package(&core.owner_transport, &actor, &mut chain, &core.owner_store, &core.owner_hash)
+        .await
+        .expect("the publish must recover from the lost answer");
+    assert!(chain.next_seq > lost.core.seq + 1);
+    let head = core.owner_transport.fetch_own_chain_head(&device_id(&core.owner_dev.public_key())).await.unwrap().unwrap();
+    assert_eq!(head.hash(), published.event_hash, "the publish landed at the server as our head");
+    assert_eq!(head.core.prev.as_deref(), Some(lost.hash().as_str()));
+
+    // A second lost answer, then a second E2EE channel through the stale chain.
+    let lost2 = build_next_event(&core.owner_dev, &core.owner_kp, &core.server_id, &chain, event_now_secs(), invite_payload("lost-4"));
+    submit_raw(&core.owner_transport, &lost2).await;
+    let key2 = ChannelKey::new(core.server_id.clone(), E2EE_CHANNEL_ID_FLOOR + 93).unwrap();
+    let spec2 = ChannelSpec { key: key2, name: "second".to_string(), kind: "text".to_string(), parent: None };
+    let created = create_e2ee_channel(&core.owner_transport, &actor, &mut chain, &spec2, &temp_dir("second-channel"))
+        .await
+        .expect("channel creation must recover from the lost answer");
+    let head = core.owner_transport.fetch_own_chain_head(&device_id(&core.owner_dev.public_key())).await.unwrap().unwrap();
+    assert_eq!(head.hash(), created.event_hash);
+    assert_eq!(head.core.prev.as_deref(), Some(lost2.hash().as_str()));
+}

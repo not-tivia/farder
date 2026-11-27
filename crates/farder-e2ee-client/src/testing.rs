@@ -25,6 +25,7 @@ pub struct FakeTransport {
     responses: Mutex<VecDeque<Result<EventAccepted, TransportError>>>,
     key_packages: Mutex<HashMap<(PublicKey, String), Vec<Vec<u8>>>>,
     device_certs: Mutex<HashMap<PublicKey, Vec<Vec<u8>>>>,
+    own_head: Mutex<Option<Event>>,
 }
 
 impl FakeTransport {
@@ -82,6 +83,11 @@ impl FakeTransport {
         self.device_certs.lock().unwrap().insert(identity.clone(), events);
     }
 
+    /// Serve `head` from `fetch_own_chain_head` (as the server would a device's newest event).
+    pub fn serve_own_head(&self, head: Event) {
+        *self.own_head.lock().unwrap() = Some(head);
+    }
+
     /// Program the next `submit_event` call to be accepted with `event_hash`.
     pub fn accept_next(&self, event_hash: &str) {
         self.responses.lock().unwrap().push_back(Ok(EventAccepted {
@@ -113,6 +119,14 @@ impl E2eeTransport for FakeTransport {
                 .unwrap_or_else(|| Self::default_accept(&event))
         };
         async move { result }
+    }
+
+    fn fetch_own_chain_head(
+        &self,
+        _device: &str,
+    ) -> impl Future<Output = Result<Option<Event>, TransportError>> + Send {
+        let head = self.own_head.lock().unwrap().clone();
+        async move { Ok(head) }
     }
 
     fn fetch_welcomes(
