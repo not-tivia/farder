@@ -25,6 +25,15 @@ I/O of its own — network, file, and media-relay work are handled by the caller
 checks appropriate to that request, reads/mutates the SQLite DB, and returns a
 `HandleResult`.
 
+**Refusal log (`SubmitEvent` only):** `handle_request` is a thin wrapper over the
+dispatcher. When a `SubmitEvent` comes back as `ServerResponse::Error`, it writes
+exactly one `tracing` `info` line:
+`refused event: type=<payload type> author=<first 8 hex chars of author key> device=<device id> channel=<id or -> reason=<reason verbatim>`.
+**Never logged:** message content, sealed/MLS bytes, the event body, or a full key.
+Accepted events log nothing, so the log does not grow with normal traffic. Pinned by
+`refused_stale_epoch_and_permission_each_log_one_line` and
+`refused_events_never_log_content` in `handlers.rs`.
+
 **Parameters:**
 - `conn` — open `rusqlite::Connection` for the server's DB (not pooled; one per
   connection goroutine).
