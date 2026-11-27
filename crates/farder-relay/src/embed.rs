@@ -29,6 +29,11 @@ const ALLOWLIST: &[(&str, Provider)] = &[
     ("redd.it", Provider::Reddit),
     ("open.spotify.com", Provider::Spotify),
     ("fxtwitter.com", Provider::Twitter),
+    // The other well-known tweet-fixing sites people paste. Only the link's PATH is used
+    // (`fxtwitter_api_url`): the relay still fetches api.fxtwitter.com, never these hosts.
+    ("fixupx.com", Provider::Twitter),
+    ("vxtwitter.com", Provider::Twitter),
+    ("fixvx.com", Provider::Twitter),
 ];
 
 /// Media/thumbnail CDN hosts. Adapters extract media URLs that live on CDNs
@@ -556,6 +561,18 @@ mod tests {
             Some("https://api.fxtwitter.com/jack/status/20".to_string())
         );
         assert_eq!(fxtwitter_api_url("https://x.com/jack"), None); // not a status
+    }
+
+    #[test]
+    fn tweet_fixer_links_embed_as_tweets_through_the_fxtwitter_api() {
+        for host in ["fxtwitter.com", "fixupx.com", "vxtwitter.com", "fixvx.com", "d.fxtwitter.com"] {
+            let url = format!("https://{host}/jack/status/20");
+            assert_eq!(classify_url(&url), Some(Provider::Twitter), "{host}");
+            assert_eq!(fxtwitter_api_url(&url), Some("https://api.fxtwitter.com/jack/status/20".to_string()), "{host}");
+        }
+        // Look-alikes do not match.
+        assert_eq!(classify_url("https://vxtwitter.com.evil.com/jack/status/20"), None);
+        assert_eq!(classify_url("https://notfixupx.com/jack/status/20"), None);
     }
 
     #[tokio::test]
