@@ -32,7 +32,7 @@ All flags are `u64` bit constants defined in `permissions.rs`. Each is a distinc
 | `CREATE_INVITES` | 1 << 13 | Generating invite codes (`CreateInvite`) |
 | `TIMEOUT_MEMBERS` | 1 << 14 | Silencing a member for up to 28 days (`TimeoutMember`/`RemoveTimeout`) |
 
-`ALL_PERMISSIONS` is the OR of every flag above. `DEFAULT_EVERYONE` pre-grants `VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES | CREATE_INVITES` — this is the initial permission set assigned to the built-in `@everyone` role on a fresh server.
+`ALL_PERMISSIONS` is the OR of every flag above. `DEFAULT_EVERYONE` pre-grants `VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES | CREATE_INVITES | CONNECT | SPEAK` (`permissions.rs`) — this is the initial permission set assigned to the built-in `@everyone` role on a fresh server.
 
 ---
 
