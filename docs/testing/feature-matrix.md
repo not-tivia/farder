@@ -118,7 +118,7 @@ See `docs/modules/portability.md`.
 | A guest cannot use the signed history for anything but join/post | VERIFIED (unit) | test + deliberate break caught |
 | Caddy routes `/<name>/t` and `/ws/*` over real TLS | UNVERIFIED | written in `deploy/website/Caddyfile`, never run |
 | Owner's in-app screen for guest links: switch, make a link (duration, web name), copy; link then works in a real browser; both apps see the guest and their messages | VERIFIED | `ubuntu-suite.sh guestlink`: 2 + 9 + 2 checks (Windows apps, Ubuntu server, gateway, real Edge) |
-| Guest page on a phone browser | VERIFIED (emulated) | `ubuntu-suite.sh guestlink` (2026-11-27): an emulated iPhone 13 (390x664, touch, mobile browser) joins with the guest link; nothing runs off the side; the box and Send fit (Send 66x42, easy to tap); text 15px; sending by tap works. NOT a real phone (ADB waits for the owner). Possible polish: the channel column takes about a third of the width even with one channel |
+| Guest page on a phone browser | VERIFIED (emulated) | `ubuntu-suite.sh guestlink` (2026-11-27): an emulated iPhone 13 (390x664, touch, mobile browser) joins with the guest link; nothing runs off the side; the box and Send fit (Send 66x42, easy to tap); text 15px; sending by tap works. Fixed: on a phone the channel list is now one row above the messages (it took about a third of the width; messages now get 372 of 390px). NOT a real phone (ADB waits for the owner) |
 
 ## Mesh steps 1-2: a verified copy on another machine (docs/mesh-hosting-status.md)
 

@@ -114,7 +114,8 @@ await check("on a phone-sized screen: joins, nothing runs off the side, the box 
     return { vw: innerWidth, vh: innerHeight, sideways: document.documentElement.scrollWidth > innerWidth + 1, wide,
       box: [Math.round(box.left), Math.round(box.right), Math.round(box.bottom), Math.round(box.height)],
       send: [Math.round(send.right), Math.round(send.bottom), Math.round(send.width), Math.round(send.height)],
-      font: parseFloat(getComputedStyle(document.querySelector(".msg")).fontSize) };
+      font: parseFloat(getComputedStyle(document.querySelector(".msg")).fontSize),
+      msgWidth: Math.round(document.querySelector("#messages").getBoundingClientRect().width) };
   });
   await pp.screenshot({ path: `${SHOTS}/guest-phone.png` });
   if (r.sideways || r.wide.length) throw new Error("wider than the phone: " + JSON.stringify(r.wide));
@@ -122,11 +123,12 @@ await check("on a phone-sized screen: joins, nothing runs off the side, the box 
   if (r.send[0] > r.vw || r.send[1] > r.vh) throw new Error("Send is off the screen: " + JSON.stringify(r));
   if (r.send[2] < 40 || r.send[3] < 32) throw new Error(`Send is too small to tap (${r.send[2]}x${r.send[3]})`);
   if (r.font < 13) throw new Error(`message text is ${r.font}px on a phone`);
+  if (r.msgWidth < r.vw * 0.85) throw new Error(`the messages get only ${r.msgWidth}px of a ${r.vw}px screen`);
   await pp.locator("#text").fill("hello from a phone");
   await pp.locator("#composer button").tap();
   await pp.locator(".msg", { hasText: "hello from a phone" }).waitFor({ timeout: 20000 });
   await ctxP.close();
-  return `${r.vw}x${r.vh}, Send ${r.send[2]}x${r.send[3]}, text ${r.font}px`;
+  return `${r.vw}x${r.vh}, messages ${r.msgWidth}px wide, Send ${r.send[2]}x${r.send[3]}, text ${r.font}px`;
 });
 await check("no script errors on the page", async () => { if (errors.length) throw new Error(errors.slice(0, 2).join(" | ")); });
 await browser.close();
