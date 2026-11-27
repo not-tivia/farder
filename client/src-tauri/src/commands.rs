@@ -1316,12 +1316,35 @@ pub async fn connect_server(
             }
             let best = if reported_n >= known_term.as_ref().map_or(0, |t| t.term) { reported.clone() } else { known_term.clone() };
             let best_n = best.as_ref().map_or(0, |t| t.term);
-            if best_n > 0 && reported_n == best_n {
+            // WHO is this machine? A replaced host that learned the newer term reports the same term
+            // number, so the number alone cannot say "this is the host": the term names the host's key.
+            let here_key: Option<[u8; 32]> = match bridge::send_request(&state, &address, ServerRequest::GetPromotionInfo).await {
+                Ok(ServerResponse::PromotionInfo { host_key, .. }) => hex::decode(host_key).ok().and_then(|b| b.try_into().ok()),
+                _ => None, // a server from before promotion existed: fall back to the term numbers
+            };
+            let is_term_host = match (&best, here_key) {
+                (Some(t), Some(k)) => t.host_key == k,
+                _ => reported_n == best_n,
+            };
+            if best_n > 0 && is_term_host {
                 on_fallback = None; // the promoted host: writable, no "saved copy" banner
                 *server_conn.on_fallback.lock().unwrap() = None;
-            } else if best_n > reported_n {
+            } else if best_n > 0 {
                 let to = best.as_ref().map(|t| t.addresses.join(", ")).unwrap_or_default();
                 *server_conn.moved_to.lock().unwrap() = Some(if to.is_empty() { "a new host".into() } else { to });
+                // Tell the replaced host (#29) if it does not know yet: it verifies the term and goes
+                // read-only for EVERYONE, including apps that never saw the move. Best effort; this app
+                // fences itself anyway.
+                if let Some(t) = best.clone().filter(|_| reported_n < best_n) {
+                    let st = Arc::clone(state.inner());
+                    let addr = address.clone();
+                    tokio::spawn(async move {
+                        match bridge::send_request(&st, &addr, ServerRequest::NotifyHostTerm { term: t }).await {
+                            Ok(ServerResponse::Ok) => eprintln!("[promotion] told the replaced host at {addr} about the newer term"),
+                            other => eprintln!("[promotion] the replaced host at {addr} did not take the newer term: {other:?}"),
+                        }
+                    });
+                }
             }
 
             let stale = server_conn.moved_to.lock().unwrap().is_some();

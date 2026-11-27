@@ -77,6 +77,10 @@ async fn main() -> Result<()> {
                 println!("waiting: the owner has not allowed this key as a replica yet ({why}). Allow {}", key.public_key());
                 if a.once { std::process::exit(3); }
             }
+            Err(PullError::Promoted(term)) => {
+                eprintln!("this copy was promoted to host (term {term}); not overwriting it. Stop this replica for that folder: the promoted server owns latest.db now.");
+                std::process::exit(4);
+            }
             Err(PullError::Other(e)) => { eprintln!("copy failed (the previous good copy is kept): {e:#}"); if a.once { std::process::exit(1); } }
         }
         if a.once { return Ok(()); }

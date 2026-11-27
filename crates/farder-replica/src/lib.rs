@@ -166,13 +166,32 @@ pub struct CopyInfo { pub size: u64, pub sha256: String, pub history_id: String,
 pub enum PullError {
     /// The owner has not allowed this key as a replica yet.
     NotAllowed(String),
+    /// This folder's copy was PROMOTED to host (it holds hosting term N): the server running on it owns
+    /// the file now, and a pull would replace everything written since the promotion. Never pulled over.
+    Promoted(u64),
     Other(anyhow::Error),
+}
+
+/// The hosting term a copy's database holds (`server_settings.host_term`, written by a promotion), or
+/// `None` if it was never promoted. Unreadable or absent counts as `None`.
+pub fn held_term(db: &Path) -> Option<u64> {
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let hex_term: String = conn
+        .query_row("SELECT value FROM server_settings WHERE key = 'host_term'", [], |r| r.get(0))
+        .ok()?;
+    let bytes = hex::decode(hex_term).ok()?;
+    farder_crypto::host_term::HostTerm::from_bytes(&bytes).ok().map(|t| t.term)
 }
 impl From<anyhow::Error> for PullError { fn from(e: anyhow::Error) -> Self { PullError::Other(e) } }
 
 /// Pull one snapshot, verify it, and install it as `<out>/latest.db` (moving the old one to `previous.db`).
 pub async fn pull_once(s: &mut Session, out: &Path) -> std::result::Result<CopyInfo, PullError> {
     std::fs::create_dir_all(out).map_err(|e| PullError::Other(e.into()))?;
+    // A promoted copy is a host now: pulling (for example from an old host that came back) would
+    // overwrite everything written since the promotion. Checked before anything is downloaded.
+    if let Some(term) = held_term(&out.join("latest.db")) {
+        return Err(PullError::Promoted(term));
+    }
     let (id, size, sha) = match s.ask(ServerRequest::SnapshotBegin).await? {
         ServerResponse::SnapshotInfo { id, size, sha256 } => (id, size, sha256),
         ServerResponse::Error { reason } if reason.contains("only the owner") => return Err(PullError::NotAllowed(reason)),
@@ -199,6 +218,11 @@ pub async fn pull_once(s: &mut Session, out: &Path) -> std::result::Result<CopyI
     match result {
         Ok(info) => {
             let latest = out.join("latest.db");
+            // Checked again at install time: the folder may have been promoted while we downloaded.
+            if let Some(term) = held_term(&latest) {
+                let _ = std::fs::remove_file(&partial);
+                return Err(PullError::Promoted(term));
+            }
             if latest.exists() { let _ = std::fs::rename(&latest, out.join("previous.db")); }
             std::fs::rename(&partial, &latest).map_err(|e| PullError::Other(e.into()))?;
             let meta = serde_json::json!({ "taken_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),

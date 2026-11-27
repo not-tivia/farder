@@ -240,6 +240,7 @@ suite_promote() {  # a copy becomes the host; the old host is fenced (docs/specs
   echo "== the NEW host is stopped; only the old one answers"
   kill -9 "$COPYPID"; sleep 1
   FAILOVER_PHASE=old-host-fenced winrun failover
+  echo "old host learned it was replaced: $(grep -c 'REPLACED:' "$D/server.log") REPLACED line(s) (want 1 or more)"
   python3 -c "
 import sqlite3
 def has(db, t): return sqlite3.connect(db).execute('select count(*) from messages where content like ?', ('%'+t+'%',)).fetchone()[0]
