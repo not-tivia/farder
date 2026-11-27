@@ -297,6 +297,7 @@ export default function Message({ message, memberNames, grouped: groupedProp = f
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const [showPicker, setShowPicker] = useState(false);
+  const [pickerAt, setPickerAt] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [reacting, setReacting] = useState(false);
   const [profilePopup, setProfilePopup] = useState<{ x: number; y: number } | null>(null);
   const [ownPk, setOwnPk] = useState(cachedOwnPk);
@@ -932,7 +933,7 @@ export default function Message({ message, memberNames, grouped: groupedProp = f
         <div style={{ position: "relative" }}>
           <button
             className="reaction-add-btn"
-            onClick={() => setShowPicker((p) => !p)}
+            onClick={(e) => { setPickerAt({ x: e.clientX, y: e.clientY }); setShowPicker((p) => !p); }}
             title="Add reaction"
           >
             +
@@ -941,6 +942,8 @@ export default function Message({ message, memberNames, grouped: groupedProp = f
             <ReactionPicker
               onSelect={handlePickerSelect}
               onSelectBookItem={handlePickerBookSelect}
+              at={pickerAt}
+              onClose={() => setShowPicker(false)}
             />
           )}
         </div>
