@@ -2088,6 +2088,40 @@ mod tests {
         assert_eq!(f.reply_of(c_id.unwrap()), Some(p_id.unwrap() as i64));
     }
 
+    /// Issue #19: a client must be able to cite a plain message by hash. History
+    /// carries `event_hash`; a reply citing it materializes `reply_to` = the
+    /// target's id; a hash from ANOTHER channel resolves to no reply.
+    #[test]
+    fn history_carries_event_hash_and_replies_resolve_by_it_within_the_channel() {
+        let mut f = SealedFix::new();
+        let pk = f.owner.public_key();
+        let (parent, parent_id) = f.own(EP::MessagePosted {
+            channel_id: PLAIN_CH, content: "root".into(), reply_to: None, attachments: vec![],
+        });
+        let parent_id = parent_id.unwrap();
+        let (reply, reply_id) = f.own(EP::MessagePosted {
+            channel_id: PLAIN_CH, content: "answer".into(),
+            reply_to: Some(parent.hash()), attachments: vec![],
+        });
+        let reply_id = reply_id.unwrap();
+
+        let hist = crate::messages::fetch_history(&f.conn, PLAIN_CH, None, 50, &pk).unwrap();
+        let by_id = |id: u64| hist.iter().find(|m| m.id == id).expect("in history");
+        assert_eq!(by_id(parent_id).event_hash.as_deref(), Some(parent.hash().as_str()));
+        assert_eq!(by_id(reply_id).event_hash.as_deref(), Some(reply.hash().as_str()));
+        assert_eq!(by_id(reply_id).reply_to, Some(parent_id), "reply_to is the target's id");
+        let live = crate::messages::get_message(&f.conn, reply_id, &pk).unwrap().unwrap();
+        assert_eq!(live.event_hash.as_deref(), Some(reply.hash().as_str()));
+
+        // A hash from another channel resolves to no reply.
+        let (other, _) = f.sealed_post(b"elsewhere", None);
+        let (_, cross_id) = f.own(EP::MessagePosted {
+            channel_id: PLAIN_CH, content: "cross".into(),
+            reply_to: Some(other.hash()), attachments: vec![],
+        });
+        assert_eq!(f.reply_of(cross_id.unwrap()), None, "cross-channel hash is not a reply");
+    }
+
     #[test]
     fn an_unresolvable_reply_target_derives_null_and_is_repaired_by_reconcile() {
         let mut f = SealedFix::new();
