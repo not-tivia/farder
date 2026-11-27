@@ -48,6 +48,7 @@ trips the `async_fn_in_trait` lint and is not object-safe):
 - `fetch_key_packages(member: &PublicKey, device: &str) -> Result<Vec<Vec<u8>>, TransportError>`
 - `fetch_device_certs(identity: &PublicKey) -> Result<Vec<Vec<u8>>, TransportError>`
 - `fetch_history_v2(channel_id, before_id, limit) -> Result<Vec<MessageInfoV2>, TransportError>`
+- `fetch_own_chain_head(device: &str) -> Result<Option<Event>, TransportError>` — `ServerRequest::GetOwnChainHead`. **Defaulted** to a "not supported" error, so fakes need not implement it (recovery then surfaces the original error).
 
 The method signatures mirror `farder-protocol::server` request/response shapes.
 `channel_id` on `fetch_welcomes` **narrows, never widens**. `fetch_mls_control`
@@ -102,6 +103,20 @@ the fold's **verbatim** rejection string (wrapped by the server as
 - `build_next_event(device, identity, server_id, chain, timestamp, payload) -> Event`
   — builds + signs the next event exactly like the Tauri client's
   `event_build_next`; pure, no I/O.
+- `adopt_own_chain_head(actor, chain, head) -> bool` — adopts a server-supplied
+  chain head into `chain` ONLY if `head` verifies against THIS device's key, its
+  author/device/log server are ours, and its `seq` is ahead of the local head.
+  The server's word is never trusted.
+- `submit_with_chain_recovery(transport, actor, chain, timestamp, payload) -> Result<(Event, EventAccepted), TransportError>`
+  — build + sign + submit; if refused with a chain reason
+  (`TransportError::is_chain_refused()`: `"non-contiguous seq"` / `"prev does
+  not link to the chain head"` — the local head is behind the server's, e.g. a
+  lost acceptance), fetch the own head, adopt it, rebuild + re-sign, submit ONCE
+  more. A missing/forged/not-ahead head returns the ORIGINAL error; never loops.
+  Advances `chain` on success. Used by `send_sealed`; **not** used for MLS
+  commits (their lost answers are settled by `settle_staged_commit`, and the
+  group state must not be rebuilt blindly). Tested against a real server in
+  `tests/e2ee_lifecycle.rs`.
 - `event_now_secs() -> u64` — untrusted `core.timestamp` claim (ingest bounds
   it to 300 s ahead of server time).
 
@@ -179,10 +194,21 @@ the fold's **verbatim** rejection string (wrapped by the server as
   declared add that is not live, ...) discards the staged add and returns
   `E2eeError::CommitRefused { reason }`: group unchanged, NOT `is_diverged()`;
   catch up and retry. A transport failure with no answer leaves the add staged
-  for `settle_staged_commit` (which, if the add WAS accepted, leaves the caller
-  to submit the Welcome). Pinned by
-  `an_add_that_loses_the_epoch_race_leaves_the_group_unchanged` in
+  and returns `E2eeError::AddAnswerLost { unsent, source }`, so the Welcome is
+  not lost: `unsent` is an `UnsentWelcome { welcome, member, generation, epoch }`
+  (`epoch` = the epoch the commit was authored in). Keep it until
+  `settle_staged_commit` says what the log did: `WasAccepted` →
+  `submit_unsent_welcome`; anything else → drop it unsent. Pinned by
+  `an_add_that_loses_the_epoch_race_leaves_the_group_unchanged` and
+  `an_add_whose_answer_was_lost_still_delivers_its_welcome` in
   `tests/e2ee_lifecycle.rs`.
+- `submit_unsent_welcome(transport, actor, chain, key, unsent, commit) -> EventAccepted`
+  (async) — submit the kept Welcome citing `commit`, the accepted event
+  `settle_staged_commit` returned. It refuses (`E2eeError::Chain`, nothing sent)
+  unless `commit` is an `MlsCommit` authored by this device, in `unsent`'s
+  channel/generation/epoch, declaring `unsent.member` — a Welcome is never sent
+  for a commit the log does not show as ours. The desktop client persists
+  `unsent` as `<channel_id>.pending_welcome.json` beside `mls_state.json`.
 - `StewardContext<'a> { key, generation, store, store_instance_hash }` — the
   "where am I committing" bundle (keeps `add_member` under the 7-arg clippy
   bound).
@@ -597,6 +623,9 @@ The crate's one error type. Notable variants:
   discharge (`discharge_drift`); it was only staged and has been discarded, so
   NOTHING changed locally. Not a divergence (`is_diverged()` false);
   `is_commit_refused()`. Catch up from the log and retry once if still wanted.
+- `AddAnswerLost { unsent, source }` — an add's commit got no answer (transport
+  failure, not a refusal). The add stays staged; `unsent` carries the Welcome.
+  Not a divergence; `is_add_answer_lost()`. See `add_member`.
 - `DeviceCapReached { reason }` — the fold refused a `DeviceAuthorized` under
   the live-device cap (8); surfaced by `device.rs`'s `authorize_device`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.

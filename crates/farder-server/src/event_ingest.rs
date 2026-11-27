@@ -283,6 +283,18 @@ pub fn load_events_in_order(conn: &Connection) -> Result<Vec<Event>> {
     Ok(out)
 }
 
+/// The newest accepted event of one device chain (`author`, `device`), or `None` if it has none.
+pub fn load_chain_head(conn: &Connection, author: &farder_crypto::identity::PublicKey, device: &str) -> Result<Option<Event>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_body FROM events WHERE author = ?1 AND device = ?2 ORDER BY seq DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query(rusqlite::params![author.as_bytes().as_slice(), device])?;
+    match rows.next()? {
+        Some(r) => Ok(Some(Event::from_bytes(&r.get::<_, Vec<u8>>(0)?).context("decode stored event")?)),
+        None => Ok(None),
+    }
+}
+
 /// A page of stored events after acceptance position `after`, with the server's bookkeeping, and
 /// whether it reached the end. `limit` is clamped to 1..=500.
 pub fn load_events_page(conn: &Connection, after: u64, limit: u32) -> Result<(Vec<farder_protocol::server::StoredEvent>, bool)> {

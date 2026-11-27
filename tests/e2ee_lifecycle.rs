@@ -320,6 +320,22 @@ impl E2eeTransport for QuicE2eeTransport {
         }
     }
 
+    fn fetch_own_chain_head(
+        &self,
+        device: &str,
+    ) -> impl Future<Output = Result<Option<Event>, TransportError>> + Send {
+        let device = device.to_string();
+        async move {
+            match self.round_trip(ServerRequest::GetOwnChainHead { device }).await? {
+                ServerResponse::OwnChainHead { event } => Ok(event),
+                ServerResponse::Error { reason } => Err(TransportError::rejected(reason)),
+                other => Err(TransportError::transport(format!(
+                    "unexpected GetOwnChainHead response: {other:?}"
+                ))),
+            }
+        }
+    }
+
     fn fetch_history_v2(
         &self,
         channel_id: u64,
@@ -629,9 +645,19 @@ struct TwoClientSetup {
     joiner_chain: ChainState,
 }
 
-async fn setup_owner_joiner(channel_id: u64, confirm_joiner: bool) -> TwoClientSetup {
-    let mut core = setup_owner_core(channel_id).await;
+/// A joiner that has mesh-joined the server and published its KeyPackage but
+/// has NOT been added to the channel yet.
+struct PreparedJoiner {
+    joiner_kp: Keypair,
+    joiner_dev: Keypair,
+    joiner_transport: QuicE2eeTransport,
+    joiner_conn: Connection,
+    joiner_store: FarderMlsStore,
+    joiner_hash: [u8; 32],
+    joiner_chain: ChainState,
+}
 
+async fn prepare_joiner(core: &OwnerCore) -> PreparedJoiner {
     // Joiner mesh-log join (a second identity over its own connection).
     let joiner_kp = Keypair::generate();
     let joiner_dev = Keypair::generate();
@@ -687,7 +713,6 @@ async fn setup_owner_joiner(channel_id: u64, confirm_joiner: bool) -> TwoClientS
     joiner_chain.advance(&joiner_join);
 
     let joiner_dir = temp_dir("joiner");
-    let owner_actor = actor(&core.owner_kp, &core.owner_dev, &core.server_id);
     let joiner_actor = actor(&joiner_kp, &joiner_dev, &core.server_id);
 
     // Joiner publishes its KeyPackage.
@@ -701,6 +726,31 @@ async fn setup_owner_joiner(channel_id: u64, confirm_joiner: bool) -> TwoClientS
     )
     .await
     .unwrap();
+
+    PreparedJoiner {
+        joiner_kp,
+        joiner_dev,
+        joiner_transport,
+        joiner_conn,
+        joiner_store,
+        joiner_hash,
+        joiner_chain,
+    }
+}
+
+async fn setup_owner_joiner(channel_id: u64, confirm_joiner: bool) -> TwoClientSetup {
+    let mut core = setup_owner_core(channel_id).await;
+    let PreparedJoiner {
+        joiner_kp,
+        joiner_dev,
+        joiner_transport,
+        joiner_conn,
+        joiner_store,
+        joiner_hash,
+        mut joiner_chain,
+    } = prepare_joiner(&core).await;
+    let owner_actor = actor(&core.owner_kp, &core.owner_dev, &core.server_id);
+    let joiner_actor = actor(&joiner_kp, &joiner_dev, &core.server_id);
 
     // Owner adds the joiner.
     let member = DeclaredMember {
@@ -2142,5 +2192,340 @@ async fn an_add_that_loses_the_epoch_race_leaves_the_group_unchanged() {
             SealedOutcome::Decrypted(env) => assert_eq!(env.content, JOINER_PLAINTEXT),
             other => panic!("could not open the joiner's message: {other:?}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// An add whose answer is lost still delivers its Welcome
+// ---------------------------------------------------------------------------
+
+/// A transport that can drop the server's REPLY to one submit AFTER the server
+/// accepted it: the event is on the log, the caller sees a transport error.
+struct LossyTransport<'a> {
+    inner: &'a QuicE2eeTransport,
+    drop_next_reply: std::sync::atomic::AtomicBool,
+}
+
+impl E2eeTransport for LossyTransport<'_> {
+    fn submit_event(
+        &self,
+        event: &Event,
+    ) -> impl Future<Output = Result<EventAccepted, TransportError>> + Send {
+        let event = event.clone();
+        async move {
+            let accepted = self.inner.submit_event(&event).await;
+            if self.drop_next_reply.swap(false, Ordering::SeqCst) {
+                accepted.expect("the server accepted the event whose reply we drop");
+                return Err(TransportError::transport("reply lost after the server accepted"));
+            }
+            accepted
+        }
+    }
+    fn fetch_welcomes(
+        &self,
+        channel_id: Option<u64>,
+        since_accept_seq: u64,
+    ) -> impl Future<Output = Result<Welcomes, TransportError>> + Send {
+        self.inner.fetch_welcomes(channel_id, since_accept_seq)
+    }
+    fn fetch_mls_control(
+        &self,
+        channel_id: u64,
+        since_accept_seq: u64,
+    ) -> impl Future<Output = Result<MlsControl, TransportError>> + Send {
+        self.inner.fetch_mls_control(channel_id, since_accept_seq)
+    }
+    fn fetch_key_packages(
+        &self,
+        member: &PublicKey,
+        device: &str,
+    ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+        self.inner.fetch_key_packages(member, device)
+    }
+    fn fetch_device_certs(
+        &self,
+        identity: &PublicKey,
+    ) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+        self.inner.fetch_device_certs(identity)
+    }
+    fn fetch_history_v2(
+        &self,
+        channel_id: u64,
+        before_id: Option<u64>,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<MessageInfoV2>, TransportError>> + Send {
+        self.inner.fetch_history_v2(channel_id, before_id, limit)
+    }
+}
+
+/// The owner adds a joiner and the server accepts the commit, but the answer
+/// never reaches the owner. The add stays staged and the Welcome comes back in
+/// the error. The owner settles from the log, submits the kept Welcome, and the
+/// joiner joins from it; both then read each other. Before the fix the Welcome
+/// died with `add_member`'s stack frame, so the joiner never found one.
+#[tokio::test]
+async fn an_add_whose_answer_was_lost_still_delivers_its_welcome() {
+    let channel_id = E2EE_CHANNEL_ID_FLOOR + 50_120;
+    let mut core = setup_owner_core(channel_id).await;
+    let PreparedJoiner {
+        joiner_kp,
+        joiner_dev,
+        joiner_transport,
+        joiner_conn: _joiner_conn,
+        joiner_store,
+        joiner_hash,
+        mut joiner_chain,
+    } = prepare_joiner(&core).await;
+    let owner_actor = actor(&core.owner_kp, &core.owner_dev, &core.server_id);
+    let joiner_actor = actor(&joiner_kp, &joiner_dev, &core.server_id);
+    let me = device_id(&core.owner_dev.public_key());
+    let member = DeclaredMember {
+        identity: joiner_kp.public_key(),
+        device: device_id(&joiner_dev.public_key()),
+    };
+    let ctx = StewardContext {
+        key: &core.key,
+        generation: 0,
+        store: &core.owner_store,
+        store_instance_hash: &core.owner_hash,
+    };
+    let start = core.owner_group.epoch();
+
+    // 1. The add: the server takes the commit, the answer is lost.
+    let lossy = LossyTransport {
+        inner: &core.owner_transport,
+        drop_next_reply: std::sync::atomic::AtomicBool::new(true),
+    };
+    let err = add_member(
+        &lossy,
+        &owner_actor,
+        &mut core.owner_chain,
+        &ctx,
+        &mut core.owner_group,
+        &member,
+    )
+    .await
+    .expect_err("no answer");
+    let farder_e2ee_client::E2eeError::AddAnswerLost { unsent, .. } = err else {
+        panic!("expected AddAnswerLost, got {err}");
+    };
+    assert!(core.owner_group.has_staged_own_commit());
+    assert_eq!(core.owner_group.epoch(), start);
+
+    // The joiner finds NO Welcome yet: nothing was sent for an unsettled commit.
+    let none = fetch_pending_welcomes(&joiner_transport, &joiner_actor, Some(channel_id), 0)
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "no Welcome before the commit is settled");
+
+    // 2. The owner settles from the log: the commit is ours and accepted.
+    let (events, _) =
+        farder_e2ee_client::fetch_mls_control_exhaustive(&core.owner_transport, channel_id, 0)
+            .await
+            .unwrap();
+    let (how, accepted) = farder_e2ee_client::settle_staged_refresh(
+        &core.owner_store,
+        &mut core.owner_group,
+        &events,
+        &me,
+    )
+    .unwrap();
+    assert_eq!(how, farder_e2ee_client::StagedCommitSettled::WasAccepted);
+    let commit = accepted.expect("the accepted commit");
+    core.owner_chain.advance(commit);
+    assert_eq!(core.owner_group.epoch(), start + 1);
+
+    // 3. The kept Welcome goes out, once.
+    farder_e2ee_client::submit_unsent_welcome(
+        &core.owner_transport,
+        &owner_actor,
+        &mut core.owner_chain,
+        &core.key,
+        &unsent,
+        commit,
+    )
+    .await
+    .expect("the kept Welcome is accepted");
+
+    // 4. The joiner joins from it and confirms; both read each other.
+    let welcomes = fetch_pending_welcomes(&joiner_transport, &joiner_actor, Some(channel_id), 0)
+        .await
+        .unwrap();
+    assert_eq!(welcomes.len(), 1, "the joiner finds exactly one Welcome");
+    let (mut joiner_group, info) = join_channel(&joiner_store, &welcomes[0].welcome).unwrap();
+    confirm_leaf(
+        &joiner_transport,
+        &joiner_actor,
+        &mut joiner_chain,
+        &core.key,
+        &joiner_hash,
+        &welcomes[0],
+        &info,
+    )
+    .await
+    .unwrap();
+    assert_eq!(joiner_group.epoch(), core.owner_group.epoch());
+
+    let seal = |store, content| SealContext {
+        key: &core.key,
+        generation: 0,
+        store,
+        content,
+        reply_to: None,
+        attachments: &[],
+    };
+    send_sealed(
+        &core.owner_transport,
+        &owner_actor,
+        &mut core.owner_chain,
+        &seal(&core.owner_store, OWNER_PLAINTEXT),
+        &mut core.owner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("the owner sends");
+    let ct = fetch_ciphertext_by_author(&joiner_transport, channel_id, &core.owner_kp.public_key())
+        .await;
+    match receive_sealed(&joiner_store, &mut joiner_group, ct) {
+        SealedOutcome::Decrypted(env) => assert_eq!(env.content, OWNER_PLAINTEXT),
+        other => panic!("the joiner could not open the owner's message: {other:?}"),
+    }
+    send_sealed(
+        &joiner_transport,
+        &joiner_actor,
+        &mut joiner_chain,
+        &seal(&joiner_store, JOINER_PLAINTEXT),
+        &mut joiner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("the joiner sends");
+    let ct = fetch_ciphertext_by_author(&core.owner_transport, channel_id, &joiner_kp.public_key())
+        .await;
+    match receive_sealed(&core.owner_store, &mut core.owner_group, ct) {
+        SealedOutcome::Decrypted(env) => assert_eq!(env.content, JOINER_PLAINTEXT),
+        other => panic!("the owner could not open the joiner's message: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lost submit answer: the device's chain falls behind the server's (issue #12)
+// ---------------------------------------------------------------------------
+
+fn invite_payload(tag: &str) -> EventPayload {
+    EventPayload::InviteCreated {
+        code_hash: invite_code_hash(tag),
+        max_uses: 1,
+        expires_at: event_now_secs() + 3600,
+        requires_approval: false,
+    }
+}
+
+/// A transport that submits for real but answers `fetch_own_chain_head` with a
+/// canned (forged) head, to prove a bad head is never adopted.
+struct ForgedHeadTransport<'a> {
+    real: &'a QuicE2eeTransport,
+    head: Event,
+}
+
+impl E2eeTransport for ForgedHeadTransport<'_> {
+    fn submit_event(&self, event: &Event) -> impl Future<Output = Result<EventAccepted, TransportError>> + Send {
+        self.real.submit_event(event)
+    }
+    fn fetch_welcomes(&self, _c: Option<u64>, _s: u64) -> impl Future<Output = Result<Welcomes, TransportError>> + Send {
+        async { Err(TransportError::transport("unused")) }
+    }
+    fn fetch_mls_control(&self, _c: u64, _s: u64) -> impl Future<Output = Result<MlsControl, TransportError>> + Send {
+        async { Err(TransportError::transport("unused")) }
+    }
+    fn fetch_key_packages(&self, _m: &PublicKey, _d: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+        async { Err(TransportError::transport("unused")) }
+    }
+    fn fetch_device_certs(&self, _i: &PublicKey) -> impl Future<Output = Result<Vec<Vec<u8>>, TransportError>> + Send {
+        async { Err(TransportError::transport("unused")) }
+    }
+    fn fetch_history_v2(&self, _c: u64, _b: Option<u64>, _l: u32) -> impl Future<Output = Result<Vec<MessageInfoV2>, TransportError>> + Send {
+        async { Err(TransportError::transport("unused")) }
+    }
+    fn fetch_own_chain_head(&self, _d: &str) -> impl Future<Output = Result<Option<Event>, TransportError>> + Send {
+        let head = self.head.clone();
+        async move { Ok(Some(head)) }
+    }
+}
+
+/// The owner submits an event the server ACCEPTS, but the answer is "lost": the
+/// client-side chain advance is dropped. The next submit is refused with the
+/// chain reason; the recovery adopts the server's head (verified) and the
+/// re-signed event is accepted.
+#[tokio::test]
+async fn a_lost_submit_answer_is_recovered_by_adopting_the_own_chain_head() {
+    let core = setup_owner_core(E2EE_CHANNEL_ID_FLOOR + 90).await;
+    let actor = actor(&core.owner_kp, &core.owner_dev, &core.server_id);
+    let mut chain = core.owner_chain.clone();
+
+    // Accepted by the server; the client never sees the answer (no `advance`).
+    let lost = build_next_event(&core.owner_dev, &core.owner_kp, &core.server_id, &chain, event_now_secs(), invite_payload("lost-1"));
+    submit_raw(&core.owner_transport, &lost).await;
+    let stale = chain.clone();
+
+    // Without recovery the device is stuck: a plain submit is refused with the chain reason.
+    let stuck = build_next_event(&core.owner_dev, &core.owner_kp, &core.server_id, &chain, event_now_secs(), invite_payload("stuck"));
+    let err = core.owner_transport.submit_event(&stuck).await.unwrap_err();
+    assert!(err.is_chain_refused(), "expected the chain refusal, got {err:?}");
+
+    // With recovery: adopts the head and the re-signed event is accepted.
+    let (sent, _accepted) = farder_e2ee_client::submit_with_chain_recovery(
+        &core.owner_transport, &actor, &mut chain, event_now_secs(), invite_payload("after"),
+    )
+    .await
+    .expect("recovery must adopt the head and resubmit");
+    assert_eq!(sent.core.seq, lost.core.seq + 1);
+    assert_eq!(sent.core.prev.as_deref(), Some(lost.hash().as_str()));
+    assert_eq!(chain.next_seq, sent.core.seq + 1);
+    assert!(chain.next_seq > stale.next_seq + 1);
+
+    // The server now reports the new event as the head.
+    let head = core.owner_transport.fetch_own_chain_head(&device_id(&core.owner_dev.public_key())).await.unwrap();
+    assert_eq!(head.map(|e| e.hash()), Some(sent.hash()));
+}
+
+/// A head the server cannot honestly produce (signed by another key, or claiming
+/// another device) is NOT adopted: the original chain refusal surfaces, and the
+/// local chain is untouched.
+#[tokio::test]
+async fn a_forged_own_chain_head_is_not_adopted() {
+    let core = setup_owner_core(E2EE_CHANNEL_ID_FLOOR + 91).await;
+    let actor = actor(&core.owner_kp, &core.owner_dev, &core.server_id);
+    let mut chain = core.owner_chain.clone();
+    let lost = build_next_event(&core.owner_dev, &core.owner_kp, &core.server_id, &chain, event_now_secs(), invite_payload("lost-2"));
+    submit_raw(&core.owner_transport, &lost).await;
+    let before = chain.clone();
+
+    let attacker = Keypair::generate();
+    let other_dev = Keypair::generate();
+    // (a) our author + device, but signed by another key.
+    let mut core_a = lost.core.clone();
+    core_a.seq += 5;
+    let signed_by_other_key = Event::sign(core_a, &attacker);
+    // (b) validly signed, but by/for a different device of ours.
+    let mut core_b = lost.core.clone();
+    core_b.seq += 5;
+    core_b.device = device_id(&other_dev.public_key());
+    let other_device = Event::sign(core_b, &other_dev);
+    // (c) another identity's event.
+    let mut core_c = lost.core.clone();
+    core_c.seq += 5;
+    core_c.author = attacker.public_key();
+    let other_author = Event::sign(core_c, &core.owner_dev);
+
+    for forged in [signed_by_other_key, other_device, other_author] {
+        let t = ForgedHeadTransport { real: &core.owner_transport, head: forged };
+        let err = farder_e2ee_client::submit_with_chain_recovery(
+            &t, &actor, &mut chain, event_now_secs(), invite_payload("forged"),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_chain_refused(), "the original error must surface, got {err:?}");
+        assert_eq!(chain, before, "a forged head must not touch the local chain");
     }
 }

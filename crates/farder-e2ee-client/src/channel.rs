@@ -154,6 +154,12 @@ pub enum E2eeError {
     /// server. NOT a divergence. Apply whatever won the epoch (catch up) and,
     /// if the add/removal is still wanted, try again once.
     CommitRefused { reason: String },
+    /// An add's commit got NO answer (a transport failure, not a refusal). The
+    /// add stays staged for [`crate::rekey::settle_staged_commit`], and this
+    /// carries the Welcome that would otherwise be lost. Keep it until the log
+    /// settles the commit: `WasAccepted` -> [`crate::commit::submit_unsent_welcome`],
+    /// anything else -> drop it.
+    AddAnswerLost { unsent: Box<crate::commit::UnsentWelcome>, source: TransportError },
     /// A `channel_id` below `E2EE_CHANNEL_ID_FLOOR` — the id must stay clear
     /// of the legacy DB `channels` AUTOINCREMENT space.
     ChannelIdBelowFloor { channel_id: u64 },
@@ -233,6 +239,11 @@ impl E2eeError {
         matches!(self, Self::CommitRefused { .. })
     }
 
+    /// True iff an add's commit got no answer (see [`E2eeError::AddAnswerLost`]).
+    pub fn is_add_answer_lost(&self) -> bool {
+        matches!(self, Self::AddAnswerLost { .. })
+    }
+
     /// True iff a sealed send was rejected because the freshness ceiling was
     /// reached — the fold's guarantee that a rekey is now permitted, so the
     /// caller should rekey and retry. Keys on the `"freshness ceiling reached"`
@@ -305,6 +316,11 @@ impl fmt::Display for E2eeError {
                 f,
                 "the server refused our add/remove commit ({reason}); it was never applied, so \
                  nothing changed on this device"
+            ),
+            Self::AddAnswerLost { source, .. } => write!(
+                f,
+                "no answer to our add commit ({source}); it stays staged and its Welcome is kept \
+                 until the log settles it"
             ),
             Self::ChannelIdBelowFloor { channel_id } => write!(
                 f,

@@ -33,7 +33,7 @@ use farder_mls::envelope::{check_preseal_limits, MessageEnvelope};
 use farder_mls::group::MlsChannelGroup;
 use farder_mls::store::FarderMlsStore;
 
-use crate::chain::{build_next_event, event_now_secs, Actor, ChainState};
+use crate::chain::{event_now_secs, Actor, ChainState};
 use crate::channel::E2eeError;
 use crate::channel_key::ChannelKey;
 use crate::join::SendEligibility;
@@ -198,10 +198,9 @@ pub async fn send_sealed<T: E2eeTransport + Sync>(
     }
 
     // 7. Build + submit.
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        &ctx.key.log_server_id,
+    let (_event, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
         chain,
         event_now_secs(),
         EventPayload::MessagePostedE2ee {
@@ -213,9 +212,8 @@ pub async fn send_sealed<T: E2eeTransport + Sync>(
             attachments: ctx.attachments.iter().map(|a| a.cap.clone()).collect(),
             authz_head,
         },
-    );
-    let accepted = transport.submit_event(&event).await?;
-    chain.advance(&event);
+    )
+    .await?;
 
     Ok(SealedSendOutcome {
         event_hash: accepted.event_hash,
