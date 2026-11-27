@@ -3468,6 +3468,33 @@ app's normal reconnect returns to the host.
 
 ---
 
+### `get_moved_host(state, server_id) -> Option<String>`
+
+**What it does:** `Some(the new host's addresses)` when this app is connected to a host the owner has REPLACED
+(promotion: the machine holds a lower hosting term than one this device has verified). `None` otherwise.
+**Fencing:** while set, `bridge::send_request` refuses every request that is not `ServerRequest::is_read_only()`,
+so an old host that comes back can never collect writes (the history would fork).
+**Where terms come from:** `connect_to_server` asks every machine it reaches for `GetHostTerm`, verifies the term
+against the server's owner and log id (`verified_term`), and keeps the highest per saved server
+(`ServerEntry.host_term`, servers.json). That term's addresses are tried FIRST on every connect. The host probe
+(every 20 s, while on a backup or a replaced host) aims at those addresses, never at the replaced host. It also
+re-checks the connected machine's own term, so an app on a copy that is promoted meanwhile reconnects and writes.
+**invoke name:** `"get_moved_host"` → `getMovedHost(...)`. Used by `SavedCopyBanner`.
+
+### `promote_copy(state, server_id, copy_address) -> Result<String, String>`
+
+**What it does:** owner only. Makes the read-only copy at `copy_address` the host of this server:
+1. checks that this identity is the owner;
+2. connects to the copy (a one-off connection) and asks `GetPromotionInfo` (host key, log head, term, read-only; it
+   refuses anything that is not a read-only copy);
+3. signs a `HostTerm` one higher than any this device or the copy knows, with the copy's address;
+4. sends `PromoteToHost`, remembers the term, and closes the current connection so the app reconnects with the new
+   host first.
+
+**Returns:** a short confirmation, or the copy's plain refusal.
+**invoke name:** `"promote_copy"` → `promoteCopy(...)`. Used by `BackupCopyTab` ("Make a copy the host", owner only).
+Design: `docs/specs/2026-11-27-promotion-design.md`.
+
 ### `get_connection_route(state, server_id) -> Option<String>`
 
 **What it does:** the backup address this server is currently reached through (a read-only saved copy), or `None`

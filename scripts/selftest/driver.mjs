@@ -1677,6 +1677,55 @@ async function failover() {
       await shot(B.page, "B-send-refused");
       return (await B.page.locator(".error-text", { hasText: /saved copy/ }).first().innerText()).slice(0, 90);
     });
+  } else if (phase === "promote") {
+    // Host off, both apps on the copy. The OWNER makes the copy the host from Server Settings.
+    await check("A (owner) makes the copy the host from Server Settings > Backup copy", async () => {
+      A.page.once("dialog", (d) => d.accept());
+      await A.page.getByTitle("Server Settings").click();
+      await A.page.getByRole("button", { name: "Backup copy", exact: true }).click();
+      await A.page.getByLabel("Copy to make the host").fill(backup);
+      await A.page.getByRole("button", { name: "Make it the host", exact: true }).click();
+      await A.page.getByText(/is now the host \(term 1\)/).waitFor({ timeout: 30000 });
+      await shot(A.page, "A-promoted");
+      await A.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    });
+    await check("B notices the copy is now the host: the 'saved copy' banner goes, and B's message goes through", async () => {
+      const t0 = Date.now();
+      await B.page.locator(".recovery-banner", { hasText: "reading a saved copy" }).waitFor({ state: "detached", timeout: 120000 });
+      const text = "written on the promoted host " + stamp;
+      for (let i = 0; i < 12; i++) {
+        const box = B.page.getByPlaceholder(/Type a message/);
+        if (await box.isEnabled().catch(() => false)) {
+          await box.fill(text); await box.press("Enter");
+          if (await A.page.locator(".message-content", { hasText: text }).first().waitFor({ timeout: 5000 }).then(() => true, () => false)) return `after ${Math.round((Date.now() - t0) / 1000)}s`;
+        } else await new Promise((r) => setTimeout(r, 5000));
+      }
+      throw new Error("A never saw B's message on the promoted host");
+    });
+  } else if (phase === "promoted-stays") {
+    // The OLD host is running again. The apps must stay on the new host.
+    await check("with the old host back, the apps stay on the new host and keep writing there", async () => {
+      await new Promise((r) => setTimeout(r, 45000));   // longer than the probe period
+      const text = "still on the new host " + stamp;
+      await sendText(B, text);
+      await seesText(A, text, 30000);
+      const moved = await B.page.evaluate(async (nm) => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+        return { moved: await inv("get_moved_host", { serverId: s.id }), route: await inv("get_connection_route", { serverId: s.id }) };
+      }, name);
+      if (moved.moved) throw new Error("B thinks it is on the replaced host: " + JSON.stringify(moved));
+      return JSON.stringify(moved);
+    });
+  } else if (phase === "old-host-fenced") {
+    // The NEW host is off; only the old host answers. B may read there but must not write.
+    await check("with only the replaced host reachable, B reads there but cannot write (the history must not fork)", async () => {
+      await B.page.locator(".recovery-banner", { hasText: "moved to a new host" }).waitFor({ timeout: 150000 });
+      await shot(B.page, "B-old-host-fenced");
+      await sendText(B, "sent to the replaced host " + stamp);
+      await B.page.locator(".error-text", { hasText: /moved to a new host/ }).waitFor({ timeout: 20000 });
+      return (await B.page.locator(".recovery-banner", { hasText: "moved to a new host" }).innerText()).slice(0, 100);
+    });
   } else {
     await check("with the host back, B leaves the copy by itself (the banner goes away)", async () => {
       const t0 = Date.now();

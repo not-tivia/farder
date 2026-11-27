@@ -1068,6 +1068,41 @@ pub struct ServerEntry {
     /// read-only copy). Kept on this device only.
     #[serde(default)]
     pub fallbacks: Vec<String>,
+    /// The highest hosting term this device has seen for this server (hex of the signed
+    /// `HostTerm`), verified against the owner. Its addresses are tried first, and a host holding a
+    /// LOWER term is only read from (see `ServerConnection::moved_to`). Kept on this device only.
+    #[serde(default)]
+    pub host_term: Option<String>,
+}
+
+/// The verified hosting term this device holds for a saved server, if any.
+fn entry_host_term(address: &str) -> Option<farder_crypto::host_term::HostTerm> {
+    let hex_term = load_server_entries().into_iter().find(|e| e.id == address)?.host_term?;
+    farder_crypto::host_term::HostTerm::from_bytes(&hex::decode(hex_term).ok()?).ok()
+}
+
+/// Remember `term` for a saved server (callers only pass a verified, higher term).
+fn save_entry_host_term(address: &str, term: &farder_crypto::host_term::HostTerm) {
+    let mut entries = load_server_entries();
+    if let Some(e) = entries.iter_mut().find(|e| e.id == address) {
+        e.host_term = Some(hex::encode(term.to_bytes()));
+        if let Ok(json) = serde_json::to_string_pretty(&entries) {
+            let _ = std::fs::write(servers_list_path(), json);
+        }
+    }
+}
+
+/// A term the app may trust: signed by the server's owner and naming this server.
+fn verified_term(
+    term: Option<farder_crypto::host_term::HostTerm>,
+    owner: Option<&farder_crypto::identity::PublicKey>,
+    log_server_id: Option<&str>,
+) -> Option<farder_crypto::host_term::HostTerm> {
+    let t = term?;
+    let owner = owner?;
+    if t.verify(owner).is_err() { return None; }
+    if log_server_id.is_some_and(|sid| sid != t.server_id) { return None; }
+    Some(t)
 }
 
 fn servers_list_path() -> std::path::PathBuf {
@@ -1088,7 +1123,7 @@ fn save_server_entry(address: &str, name: &str) {
 fn save_server_entry_with_config(address: &str, name: &str, local: Option<LocalServerConfig>) {
     let mut entries = load_server_entries();
     if !entries.iter().any(|e| e.id == address) {
-        entries.push(ServerEntry { id: address.to_string(), name: name.to_string(), local, fallbacks: Vec::new() });
+        entries.push(ServerEntry { id: address.to_string(), name: name.to_string(), local, fallbacks: Vec::new(), host_term: None });
         let _ = std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap());
     }
 }
@@ -1166,25 +1201,37 @@ pub async fn connect_server(
     // Try the host first; if it does not answer, try this device's backup addresses in order (a replica
     // serving a read-only saved copy). The invite code / setup token only make sense for the host itself.
     let fallbacks: Vec<String> = load_server_entries().into_iter().find(|e| e.id == address).map(|e| e.fallbacks).unwrap_or_default();
-    let patience = if fallbacks.is_empty() { None } else { Some(std::time::Duration::from_secs(5)) };
+    // Promotion: if the owner moved this server to another machine, that machine is tried FIRST.
+    let known_term = entry_host_term(&address);
+    let term_hosts: Vec<String> = known_term.as_ref().map(|t| t.addresses.iter().filter(|a| **a != address).cloned().collect()).unwrap_or_default();
+    let patience = if fallbacks.is_empty() && term_hosts.is_empty() { None } else { Some(std::time::Duration::from_secs(5)) };
     let mut on_fallback: Option<String> = None;
-    let primary = connect_one(&address, &keypair, invite_code.clone(), setup_token.clone(), patience).await;
-    let (endpoint, conn, send, recv, session_token, relayed) = match primary {
-        Ok(t) => t,
-        Err(primary_err) => {
-            let mut found = None;
-            for fb in &fallbacks {
-                if let Ok(t) = connect_one(fb, &keypair, None, None, patience).await {
-                    on_fallback = Some(fb.clone());
-                    found = Some(t);
-                    break;
+    let mut reached: Option<_> = None;
+    for th in &term_hosts {
+        if let Ok(t) = connect_one(th, &keypair, None, None, patience).await {
+            reached = Some(t);
+            break;
+        }
+    }
+    let (endpoint, conn, send, recv, session_token, relayed) = match reached {
+        Some(t) => t,
+        None => match connect_one(&address, &keypair, invite_code.clone(), setup_token.clone(), patience).await {
+            Ok(t) => t,
+            Err(primary_err) => {
+                let mut found = None;
+                for fb in &fallbacks {
+                    if let Ok(t) = connect_one(fb, &keypair, None, None, patience).await {
+                        on_fallback = Some(fb.clone());
+                        found = Some(t);
+                        break;
+                    }
+                }
+                match found {
+                    Some(t) => t,
+                    None => return Err(primary_err),
                 }
             }
-            match found {
-                Some(t) => t,
-                None => return Err(primary_err),
-            }
-        }
+        },
     };
 
     let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
@@ -1219,7 +1266,8 @@ pub async fn connect_server(
         media_dispatcher,
         session_token,
         relayed,
-        on_fallback: on_fallback.clone(),
+        on_fallback: Mutex::new(on_fallback.clone()),
+        moved_to: Mutex::new(None),
     });
 
     let handle = bridge::spawn_event_reader(app, address.clone(), Arc::clone(&server_conn), recv);
@@ -1255,8 +1303,41 @@ pub async fn connect_server(
             // `UPGRADE_REQUIRED` unless this connection has already negotiated.
             negotiate_protocol(&state, &address).await;
 
-            if on_fallback.is_some() {
-                spawn_host_probe(address.clone(), Arc::clone(&server_conn), Keypair::from_signing_key_bytes(keypair.signing_key_bytes()));
+            // Promotion fencing: what term does the machine we reached hold, against the highest
+            // this device has seen? Equal (and > 0): it is the current host, writable, even if it
+            // was reached at a backup address. Lower: it is a replaced host; only read from it.
+            let reported = match bridge::send_request(&state, &address, ServerRequest::GetHostTerm).await {
+                Ok(ServerResponse::HostTerm { term }) => verified_term(term, owner_public_key.as_ref(), server_id.as_deref()),
+                _ => None,
+            };
+            let reported_n = reported.as_ref().map_or(0, |t| t.term);
+            if reported_n > known_term.as_ref().map_or(0, |t| t.term) {
+                if let Some(t) = &reported { save_entry_host_term(&address, t); }
+            }
+            let best = if reported_n >= known_term.as_ref().map_or(0, |t| t.term) { reported.clone() } else { known_term.clone() };
+            let best_n = best.as_ref().map_or(0, |t| t.term);
+            if best_n > 0 && reported_n == best_n {
+                on_fallback = None; // the promoted host: writable, no "saved copy" banner
+                *server_conn.on_fallback.lock().unwrap() = None;
+            } else if best_n > reported_n {
+                let to = best.as_ref().map(|t| t.addresses.join(", ")).unwrap_or_default();
+                *server_conn.moved_to.lock().unwrap() = Some(if to.is_empty() { "a new host".into() } else { to });
+            }
+
+            let stale = server_conn.moved_to.lock().unwrap().is_some();
+            if on_fallback.is_some() || stale {
+                // Probe the PREFERRED machine: the current term's host if there is one, else the
+                // original address. Never the replaced host, so the app is not pulled back to it.
+                let prefer: Vec<String> = match &best {
+                    Some(t) if t.term > 0 => t.addresses.clone(),
+                    _ => vec![address.clone()],
+                };
+                spawn_host_probe(
+                    prefer,
+                    Arc::clone(&server_conn),
+                    Keypair::from_signing_key_bytes(keypair.signing_key_bytes()),
+                    TermWatch { state: Arc::clone(state.inner()), address: address.clone(), owner: owner_public_key.clone(), log_server_id: server_id.clone(), known: best_n },
+                );
             }
 
             Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed, server_id, on_fallback })
@@ -1294,17 +1375,31 @@ async fn connect_one(
     }
 }
 
-/// While connected to a backup copy, keep asking the host (every 20 s). When it answers, close the
-/// backup connection: the app's normal reconnect then connects to the host first and the copy is left.
-fn spawn_host_probe(address: String, conn: Arc<ServerConnection>, keypair: Keypair) {
+/// While connected to a backup copy (or to a replaced host), keep asking the preferred machine (every
+/// 20 s): the original host, or the host of the newest hosting term. When one answers, close this
+/// connection: the app's normal reconnect then tries the preferred machines first.
+fn spawn_host_probe(prefer: Vec<String>, conn: Arc<ServerConnection>, keypair: Keypair, watch: TermWatch) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
             if conn.connection.close_reason().is_some() { return; }
-            if let Ok((_e, probe, _s, _r, _t, _rel)) = connect_one(&address, &keypair, None, None, Some(std::time::Duration::from_secs(5))).await {
-                probe.close(0u32.into(), b"probe");
-                conn.connection.close(0u32.into(), b"the host is back");
-                return;
+            // The machine we are on may itself have been promoted meanwhile (the owner made this copy
+            // the host). Then reconnect: the new term's host is tried first and is writable.
+            if let Ok(ServerResponse::HostTerm { term }) = bridge::send_request(&watch.state, &watch.address, ServerRequest::GetHostTerm).await {
+                if let Some(t) = verified_term(term, watch.owner.as_ref(), watch.log_server_id.as_deref()) {
+                    if t.term > watch.known {
+                        save_entry_host_term(&watch.address, &t);
+                        conn.connection.close(0u32.into(), b"this copy became the host");
+                        return;
+                    }
+                }
+            }
+            for address in &prefer {
+                if let Ok((_e, probe, _s, _r, _t, _rel)) = connect_one(address, &keypair, None, None, Some(std::time::Duration::from_secs(5))).await {
+                    probe.close(0u32.into(), b"probe");
+                    conn.connection.close(0u32.into(), b"the host is back");
+                    return;
+                }
             }
         }
     });
@@ -1357,11 +1452,95 @@ pub fn set_fallback_addresses(address: String, addresses: Vec<String>) -> Result
     std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap()).map_err(|e| e.to_string())
 }
 
+/// What the host probe needs to notice that the machine it is on was promoted meanwhile.
+struct TermWatch {
+    state: Arc<AppState>,
+    address: String,
+    owner: Option<farder_crypto::identity::PublicKey>,
+    log_server_id: Option<String>,
+    known: u64,
+}
+
+/// `Some(where it moved)` when this app is connected to a host the owner has REPLACED (a lower
+/// hosting term than one this device has seen): the app only reads from it. `None` otherwise.
+#[tauri::command]
+pub fn get_moved_host(state: State<'_, Arc<AppState>>, server_id: String) -> Option<String> {
+    state.servers.lock().unwrap().get(&server_id).and_then(|c| c.moved_to.lock().unwrap().clone())
+}
+
+/// Owner only: make the read-only copy at `copy_address` the host of this server (promotion).
+/// Connects to the copy, asks it for its host key and log head (`GetPromotionInfo`), signs a hosting
+/// term one higher than any this device or the copy knows, sends `PromoteToHost`, and remembers the
+/// term. Then closes this server's current connection so the app reconnects, the new host first.
+#[tauri::command]
+pub async fn promote_copy(state: State<'_, Arc<AppState>>, server_id: String, copy_address: String) -> Result<String, String> {
+    let keypair = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        match lock.as_ref() {
+            Some(bytes) => Keypair::from_signing_key_bytes(bytes),
+            None => return Err("unlock your identity first".to_string()),
+        }
+    };
+    // This server's log id, from the live connection.
+    let log_server_id = match bridge::send_request(&state, &server_id, ServerRequest::GetServerInfo).await.map_err(|e| e.to_string())? {
+        ServerResponse::ServerInfo { server_id: Some(sid), owner_public_key, .. } => {
+            if owner_public_key.as_ref() != Some(&keypair.public_key()) {
+                return Err("only the owner can make a copy the host".to_string());
+            }
+            sid
+        }
+        ServerResponse::ServerInfo { server_id: None, .. } => return Err("this server has no signed history, so it cannot be moved".to_string()),
+        other => return Err(format!("unexpected response: {other:?}")),
+    };
+    let (_endpoint, conn, mut send, mut recv, _token, _relayed) = connect_one(&copy_address, &keypair, None, None, Some(std::time::Duration::from_secs(8)))
+        .await
+        .map_err(|e| format!("could not reach the copy at {copy_address}: {e}"))?;
+    // The requests below go over this one-off connection to the copy, not the app's live one.
+    async fn one(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream, id: u32, body: ServerRequest) -> Result<ServerResponse, String> {
+        let data = farder_protocol::codec::encode(&farder_protocol::server::ClientFrame::Request { id, body }).map_err(|e| e.to_string())?;
+        crate::connection::write_frame(send, &data).await.map_err(|e| e.to_string())?;
+        loop {
+            let bytes = tokio::time::timeout(std::time::Duration::from_secs(15), crate::connection::read_frame(recv))
+                .await.map_err(|_| "the copy did not answer".to_string())?.map_err(|e| e.to_string())?;
+            match farder_protocol::codec::decode::<farder_protocol::server::ServerFrame>(&bytes).map_err(|e| e.to_string())? {
+                farder_protocol::server::ServerFrame::Response { request_id, body } if request_id == id => return Ok(body),
+                _ => continue, // events and other frames
+            }
+        }
+    }
+    let info = one(&mut send, &mut recv, 1, ServerRequest::GetPromotionInfo).await?;
+    let ServerResponse::PromotionInfo { host_key, head_event, term: copy_term, read_only } = info else {
+        return Err(format!("that machine did not answer like a Farder copy: {info:?}"));
+    };
+    if !read_only {
+        conn.close(0u32.into(), b"done");
+        return Err("that machine is not a read-only copy (it is already a writable host)".to_string());
+    }
+    let key: [u8; 32] = hex::decode(&host_key).ok().and_then(|b| b.try_into().ok())
+        .ok_or_else(|| "the copy did not report a valid host key".to_string())?;
+    let next = entry_host_term(&server_id).map_or(0, |t| t.term).max(copy_term) + 1;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let term = farder_crypto::host_term::HostTerm::sign(&keypair, log_server_id, next, key, vec![copy_address.clone()], head_event, now);
+    let answer = one(&mut send, &mut recv, 2, ServerRequest::PromoteToHost { term: term.clone() }).await?;
+    conn.close(0u32.into(), b"done");
+    match answer {
+        ServerResponse::Ok => {}
+        ServerResponse::Error { reason } => return Err(reason),
+        other => return Err(format!("unexpected response: {other:?}")),
+    }
+    save_entry_host_term(&server_id, &term);
+    // Reconnect through the normal path: the new host is tried first and is writable.
+    if let Some(c) = state.servers.lock().unwrap().get(&server_id) {
+        c.connection.close(0u32.into(), b"the server moved to a new host");
+    }
+    Ok(format!("{copy_address} is now the host (term {next})"))
+}
+
 /// `Some(address)` when this server is currently reached through a backup address (a read-only saved
 /// copy), `None` when through the host or not connected.
 #[tauri::command]
 pub fn get_connection_route(state: State<'_, Arc<AppState>>, server_id: String) -> Option<String> {
-    state.servers.lock().unwrap().get(&server_id).and_then(|c| c.on_fallback.clone())
+    state.servers.lock().unwrap().get(&server_id).and_then(|c| c.on_fallback.lock().unwrap().clone())
 }
 
 /// Disconnect from a specific server and remove it from the map.
@@ -1392,6 +1571,7 @@ pub fn list_servers(state: State<'_, Arc<AppState>>) -> Vec<ServerEntry> {
         name: conn.server_name.lock().unwrap().clone(),
         local: None,
         fallbacks: Vec::new(),
+        host_term: None,
     }).collect()
 }
 
@@ -4724,7 +4904,8 @@ pub async fn create_local_server(
         media_dispatcher,
         session_token,
         relayed,
-        on_fallback: None,
+        on_fallback: Mutex::new(None),
+        moved_to: Mutex::new(None),
     });
 
     let handle = bridge::spawn_event_reader(app.clone(), address.clone(), Arc::clone(&server_conn), recv);
@@ -4942,6 +5123,7 @@ pub fn restart_local_servers(
                         name: entry.name.clone(),
                         local: entry.local.clone(),
                         fallbacks: entry.fallbacks.clone(),
+                        host_term: entry.host_term.clone(),
                     });
                 }
                 Err(e) => {
@@ -9145,5 +9327,35 @@ mod popup_style_tests {
         assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "off" }))), "off");
         // Not case-folded or trimmed: only the exact words the settings screen writes.
         assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "OFF" }))), "skinned");
+    }
+}
+
+#[cfg(test)]
+mod host_term_fencing_tests {
+    use super::verified_term;
+    use farder_crypto::host_term::HostTerm;
+    use farder_crypto::identity::Keypair;
+
+    fn term(owner: &Keypair, sid: &str, n: u64) -> HostTerm {
+        HostTerm::sign(owner, sid.to_string(), n, [7u8; 32], vec!["10.0.0.2:4433".into()], "head".into(), 1)
+    }
+
+    #[test]
+    fn only_an_owner_signed_term_for_this_server_is_trusted() {
+        let owner = Keypair::generate();
+        let other = Keypair::generate();
+        let good = term(&owner, "sid", 1);
+        assert_eq!(verified_term(Some(good.clone()), Some(&owner.public_key()), Some("sid")), Some(good));
+        // Signed by someone else: a copy cannot invent its own promotion.
+        assert_eq!(verified_term(Some(term(&other, "sid", 1)), Some(&owner.public_key()), Some("sid")), None);
+        // For another server.
+        assert_eq!(verified_term(Some(term(&owner, "other-sid", 1)), Some(&owner.public_key()), Some("sid")), None);
+        // Tampered after signing.
+        let mut t = term(&owner, "sid", 1);
+        t.term = 9;
+        assert_eq!(verified_term(Some(t), Some(&owner.public_key()), Some("sid")), None);
+        // Unknown owner: nothing can be trusted.
+        assert_eq!(verified_term(Some(term(&owner, "sid", 1)), None, Some("sid")), None);
+        assert_eq!(verified_term(None, Some(&owner.public_key()), Some("sid")), None);
     }
 }

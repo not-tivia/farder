@@ -67,3 +67,10 @@ Test: `cargo test -p farder-replica --test replica promotes` (real server binary
 
 `cargo test -p farder-replica` (unit tests for the link forms; integration tests against a real server, including the
 read-only copy keeping the host's name). End to end with the app: `bash scripts/selftest/ubuntu-suite.sh failover`.
+
+## Promotion, app side (2026-11-27)
+
+The owner uses Server Settings > Backup copy > "Make a copy the host" (`promote_copy`). Every app keeps the highest
+verified hosting term per server and fences on it: the new host first, and a replaced host only read from. See
+`get_moved_host` in `docs/modules/tauri-commands.md`. After promotion, stop `farder-replica` for that folder: the
+promoted server owns `latest.db` (#28 makes the replica refuse anyway).

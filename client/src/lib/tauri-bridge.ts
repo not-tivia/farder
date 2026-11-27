@@ -52,6 +52,18 @@ export async function getConnectionRoute(serverId: string): Promise<string | nul
   return invoke<string | null>("get_connection_route", { serverId });
 }
 
+/** `Some(where it moved)` when this app is connected to a host the owner has replaced (promotion):
+ *  the app only reads from it. */
+export async function getMovedHost(serverId: string): Promise<string | null> {
+  return invoke<string | null>("get_moved_host", { serverId });
+}
+
+/** Owner only: make the read-only copy at `copyAddress` the host of this server. Returns a short
+ *  confirmation; the app then reconnects, the new host first. */
+export async function promoteCopy(serverId: string, copyAddress: string): Promise<string> {
+  return invoke<string>("promote_copy", { serverId, copyAddress });
+}
+
 export async function disconnectServer(serverId: string): Promise<void> {
   return invoke<void>("disconnect_server", { serverId });
 }

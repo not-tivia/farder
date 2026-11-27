@@ -237,6 +237,8 @@ pub fn run() {
             commands::get_fallback_addresses,
             commands::set_fallback_addresses,
             commands::get_connection_route,
+            commands::get_moved_host,
+            commands::promote_copy,
             commands::get_guest_links,
             commands::set_guest_links,
             commands::create_guest_invite,
