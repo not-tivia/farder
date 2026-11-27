@@ -285,10 +285,9 @@ pub async fn confirm_leaf<T: E2eeTransport + Sync>(
         )));
     }
 
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        &key.log_server_id,
+    let (_event, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
         chain,
         event_now_secs(),
         EventPayload::MlsLeafConfirmed {
@@ -298,9 +297,8 @@ pub async fn confirm_leaf<T: E2eeTransport + Sync>(
             tree_hash: join_info.tree_hash,
             store_instance_hash: *store_instance_hash,
         },
-    );
-    let accepted = transport.submit_event(&event).await?;
-    chain.advance(&event);
+    )
+    .await?;
 
     Ok(LeafConfirmation {
         event_hash: accepted.event_hash,

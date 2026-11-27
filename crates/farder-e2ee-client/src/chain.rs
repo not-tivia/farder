@@ -111,6 +111,24 @@ pub async fn submit_with_chain_recovery<T: crate::transport::E2eeTransport>(
     timestamp: u64,
     payload: EventPayload,
 ) -> Result<(Event, crate::transport::EventAccepted), crate::transport::TransportError> {
+    submit_with_chain_recovery_guarded(transport, actor, chain, timestamp, payload, |_| true).await
+}
+
+/// [`submit_with_chain_recovery`] with a guard on the adopted head. After a head is
+/// adopted, `may_resubmit(&head)` decides whether the payload may be submitted again.
+/// Own MLS commits pass a guard that refuses when `head` IS this same commit
+/// ([`is_own_commit_for`]): the staged commit was then in fact accepted, so it is never
+/// resubmitted. When the guard refuses, the chain stays adopted (the caller must persist
+/// it) and a NON-rejection transport error ("no answer") is returned, so the caller
+/// leaves the staged commit in place for `settle_staged_commit` to resolve.
+pub async fn submit_with_chain_recovery_guarded<T: crate::transport::E2eeTransport>(
+    transport: &T,
+    actor: &Actor<'_>,
+    chain: &mut ChainState,
+    timestamp: u64,
+    payload: EventPayload,
+    may_resubmit: impl Fn(&Event) -> bool,
+) -> Result<(Event, crate::transport::EventAccepted), crate::transport::TransportError> {
     let event = build_next_event(actor.device, actor.identity, actor.log_server_id, chain, timestamp, payload.clone());
     let first_err = match transport.submit_event(&event).await {
         Ok(accepted) => {
@@ -129,10 +147,57 @@ pub async fn submit_with_chain_recovery<T: crate::transport::E2eeTransport>(
     if !adopt_own_chain_head(actor, chain, &head) {
         return Err(first_err);
     }
+    if !may_resubmit(&head) {
+        return Err(crate::transport::TransportError::transport(
+            "chain refused, and the adopted head is this same commit: it was already accepted; settle the staged commit instead of resubmitting",
+        ));
+    }
     let retry = build_next_event(actor.device, actor.identity, actor.log_server_id, chain, timestamp, payload);
     let accepted = transport.submit_event(&retry).await?;
     chain.advance(&retry);
     Ok((retry, accepted))
+}
+
+/// [`submit_with_chain_recovery_guarded`] for an own `MlsCommit` (rekey, add, discharge,
+/// reset bootstrap). Never submits the commit twice: if the adopted head is this same
+/// commit it is not resubmitted, and a chain refusal that recovery could not resolve is
+/// reported as a no-answer transport error rather than a rejection — in both cases the
+/// caller keeps the commit STAGED for `settle_staged_commit` (a rejection would make it
+/// discard a commit the log may in fact hold). Callers must persist `chain` afterwards.
+pub async fn submit_commit_with_chain_recovery<T: crate::transport::E2eeTransport>(
+    transport: &T,
+    actor: &Actor<'_>,
+    chain: &mut ChainState,
+    timestamp: u64,
+    payload: EventPayload,
+) -> Result<(Event, crate::transport::EventAccepted), crate::transport::TransportError> {
+    let probe = payload.clone();
+    submit_with_chain_recovery_guarded(transport, actor, chain, timestamp, payload, |head| {
+        !is_own_commit_for(head, &probe)
+    })
+    .await
+    .map_err(|e| {
+        if e.is_chain_refused() {
+            crate::transport::TransportError::transport(format!(
+                "chain refused and not recovered ({}); the commit stays staged for settle",
+                e.rejection_reason()
+            ))
+        } else {
+            e
+        }
+    })
+}
+
+/// True iff `head` is an `MlsCommit` for the same channel, generation and epoch as
+/// `payload` (itself an `MlsCommit`) — i.e. our own earlier submit of this commit.
+pub fn is_own_commit_for(head: &Event, payload: &EventPayload) -> bool {
+    match (&head.core.payload, payload) {
+        (
+            EventPayload::MlsCommit { channel_id: c1, generation: g1, epoch: e1, .. },
+            EventPayload::MlsCommit { channel_id: c2, generation: g2, epoch: e2, .. },
+        ) => c1 == c2 && g1 == g2 && e1 == e2,
+        _ => false,
+    }
 }
 
 /// The device wall-clock now, in unix seconds — the untrusted `core.timestamp`
@@ -149,7 +214,7 @@ mod tests {
     use super::*;
     use farder_crypto::event_log::EventPayload;
 
-    fn msg_payload(n: u64) -> EventPayload {
+    pub(super) fn msg_payload(n: u64) -> EventPayload {
         EventPayload::MessagePosted {
             channel_id: 1,
             content: format!("m{n}"),
@@ -212,5 +277,99 @@ mod tests {
         assert_eq!(a.core.author, b.core.author);
         assert_ne!(a.core.device, b.core.device);
         assert_ne!(a.hash(), b.hash());
+    }
+
+    // ---- recovery from a lost answer, across the operation kinds (issue #16) ----
+
+    const SERVER_ID: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const CHAIN_REFUSAL: &str = "non-contiguous seq (gap or fork)";
+
+    /// A genuine event of this device's chain at the chain's current head, as if an
+    /// earlier submit whose answer was lost HAD been accepted. It is never submitted
+    /// to the fake; it is only served back as the device's own head.
+    fn lost_event(identity: &Keypair, device: &Keypair, chain: &ChainState) -> Event {
+        build_next_event(device, identity, SERVER_ID, chain, 5, msg_payload(0))
+    }
+
+    fn stale_actor<'a>(identity: &'a Keypair, device: &'a Keypair) -> Actor<'a> {
+        Actor { device, identity, log_server_id: SERVER_ID }
+    }
+
+    #[tokio::test]
+    async fn channel_create_recovers_from_a_chain_refusal_via_the_served_own_head() {
+        use crate::channel::{create_e2ee_channel, ChannelSpec};
+        let transport = crate::testing::FakeTransport::new();
+        let (identity, device) = (Keypair::generate(), Keypair::generate());
+        let a = stale_actor(&identity, &device);
+        let mut chain = ChainState::default();
+        transport.serve_own_head(lost_event(&identity, &device, &chain));
+        transport.reject_next(CHAIN_REFUSAL);
+        let key = crate::channel_key::ChannelKey::new(SERVER_ID.to_string(), farder_crypto::event_log::E2EE_CHANNEL_ID_FLOOR + 31).unwrap();
+        let spec = ChannelSpec { key, name: "v".into(), kind: "text".into(), parent: None };
+        let dir = std::env::temp_dir().join(format!("farder-chain-recover-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        create_e2ee_channel(&transport, &a, &mut chain, &spec, &dir).await.expect("recovers");
+
+        let sent = transport.submitted();
+        assert_eq!(sent.len(), 2, "one refused attempt, one retry");
+        assert_eq!(sent[0].core.seq, 0);
+        assert_eq!(sent[1].core.seq, 1, "retried on the adopted head");
+        assert_eq!(chain.next_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn channel_create_with_a_forged_head_does_not_recover() {
+        use crate::channel::{create_e2ee_channel, ChannelSpec};
+        let transport = crate::testing::FakeTransport::new();
+        let (identity, device) = (Keypair::generate(), Keypair::generate());
+        let a = stale_actor(&identity, &device);
+        let mut chain = ChainState::default();
+        // Signed by a different key than our device.
+        let forged = lost_event(&identity, &Keypair::generate(), &chain);
+        transport.serve_own_head(forged);
+        transport.reject_next(CHAIN_REFUSAL);
+        let key = crate::channel_key::ChannelKey::new(SERVER_ID.to_string(), farder_crypto::event_log::E2EE_CHANNEL_ID_FLOOR + 32).unwrap();
+        let spec = ChannelSpec { key, name: "v".into(), kind: "text".into(), parent: None };
+        let dir = std::env::temp_dir().join(format!("farder-chain-forged-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = create_e2ee_channel(&transport, &a, &mut chain, &spec, &dir).await;
+
+        assert!(err.is_err());
+        assert_eq!(transport.submit_count(), 1, "no retry on a forged head");
+        assert_eq!(chain, ChainState::default(), "nothing adopted");
+    }
+
+    #[tokio::test]
+    async fn key_package_publish_recovers_and_rejects_a_forged_head() {
+        use crate::channel::{create_e2ee_channel, publish_key_package, ChannelSpec};
+        for forged in [false, true] {
+            let transport = crate::testing::FakeTransport::new();
+            let (identity, device) = (Keypair::generate(), Keypair::generate());
+            let a = stale_actor(&identity, &device);
+            let mut chain = ChainState::default();
+            let key = crate::channel_key::ChannelKey::new(SERVER_ID.to_string(), farder_crypto::event_log::E2EE_CHANNEL_ID_FLOOR + 33 + forged as u64).unwrap();
+            let spec = ChannelSpec { key, name: "v".into(), kind: "text".into(), parent: None };
+            let dir = std::env::temp_dir().join(format!("farder-chain-kp-{forged}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let created = create_e2ee_channel(&transport, &a, &mut chain, &spec, &dir).await.unwrap();
+            let other = Keypair::generate();
+            let signer = if forged { &other } else { &device };
+            transport.serve_own_head(lost_event(&identity, signer, &chain));
+            transport.reject_next(CHAIN_REFUSAL);
+            let before = transport.submit_count();
+
+            let res = publish_key_package(&transport, &a, &mut chain, &created.store, &created.store_instance_hash).await;
+
+            if forged {
+                assert!(res.is_err());
+                assert_eq!(transport.submit_count(), before + 1);
+            } else {
+                res.expect("recovers");
+                assert_eq!(transport.submit_count(), before + 2);
+                assert_eq!(chain.next_seq, 3);
+            }
+        }
     }
 }

@@ -45,7 +45,7 @@ use farder_mls::credential::DeviceSigner;
 use farder_mls::group::{DeclaredMember, MlsChannelGroup};
 use farder_mls::store::FarderMlsStore;
 
-use crate::chain::{build_next_event, event_now_secs, Actor, ChainState};
+use crate::chain::{event_now_secs, Actor, ChainState};
 use crate::channel::E2eeError;
 use crate::channel_key::ChannelKey;
 use crate::transport::E2eeTransport;
@@ -185,13 +185,7 @@ pub async fn discharge_drift<T: E2eeTransport + Sync>(
             device: m.device.clone(),
         })
         .collect();
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        &ctx.key.log_server_id,
-        chain,
-        event_now_secs(),
-        EventPayload::MlsCommit {
+    let payload = EventPayload::MlsCommit {
             channel_id: ctx.key.channel_id,
             generation: ctx.generation,
             epoch: outcome.epoch,
@@ -203,15 +197,22 @@ pub async fn discharge_drift<T: E2eeTransport + Sync>(
             post_tree_hash: outcome.post_tree_hash,
             authz_head,
             store_instance_hash: *ctx.store_instance_hash,
-        },
-    );
+        };
 
     // 3. Submit. Accepted: apply. ANY refusal (stale-epoch, or the
     //    commit-rate rule, which for a drift discharge means the dead-leaf set
     //    was wrong): discard the staged removal, group unchanged. No answer:
     //    it stays staged for `settle_staged_commit`. Never loop.
-    let accepted = match transport.submit_event(&event).await {
-        Ok(a) => a,
+    let accepted = match crate::chain::submit_commit_with_chain_recovery(
+        transport,
+        actor,
+        chain,
+        event_now_secs(),
+        payload,
+    )
+    .await
+    {
+        Ok((_event, a)) => a,
         Err(crate::transport::TransportError::ServerRejected { reason }) => {
             group
                 .discard_staged_own_commit(ctx.store)
@@ -223,7 +224,6 @@ pub async fn discharge_drift<T: E2eeTransport + Sync>(
     group
         .merge_staged_own_commit(ctx.store)
         .map_err(|e| E2eeError::Mls(e.context("apply accepted drift discharge")))?;
-    chain.advance(&event);
 
     Ok(DriftDischargeOutcome {
         event_hash: accepted.event_hash,

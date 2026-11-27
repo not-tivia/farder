@@ -113,9 +113,23 @@ the fold's **verbatim** rejection string (wrapped by the server as
   not link to the chain head"` — the local head is behind the server's, e.g. a
   lost acceptance), fetch the own head, adopt it, rebuild + re-sign, submit ONCE
   more. A missing/forged/not-ahead head returns the ORIGINAL error; never loops.
-  Advances `chain` on success. Used by `send_sealed`; **not** used for MLS
-  commits (their lost answers are settled by `settle_staged_commit`, and the
-  group state must not be rebuilt blindly). Tested against a real server in
+  Advances `chain` on success. If the chain was adopted the caller must persist
+  `chain` even when the retry then fails (the adopted head is still correct).
+- `submit_with_chain_recovery_guarded(.., may_resubmit)` — same, but after adopting
+  a head `may_resubmit(&head)` can veto the retry (the chain stays adopted).
+- `submit_commit_with_chain_recovery(..)` + `is_own_commit_for(head, payload)` — the
+  variant for OWN `MlsCommit`s. The payload (epoch, authenticators) is re-signed
+  unchanged on the new head, which is fine since chain fields are outside it. But
+  if the adopted head IS our commit for that channel/generation/epoch, the staged
+  commit was in fact accepted: it is **never resubmitted**; a no-answer transport
+  error is returned and the commit stays staged for `settle_staged_commit`. A chain
+  refusal recovery could not resolve is also turned into a no-answer error (not a
+  `ServerRejected`), so callers never discard a commit the log may hold.
+- **Operations that recover** (all use the above): `send_sealed`, the Tauri
+  `submit_event`, channel create, KeyPackage publish, group bootstrap commit,
+  add (commit + Welcome), `submit_welcome`, rekey, drift discharge, reset (Welcomes,
+  `MlsGroupReset`, `join_reset`), `confirm_leaf`, `authorize_device`, `revoke_device`.
+  Tested with `FakeTransport` (`chain.rs`, `rekey.rs`) and against a real server in
   `tests/e2ee_lifecycle.rs`.
 - `event_now_secs() -> u64` — untrusted `core.timestamp` claim (ingest bounds
   it to 300 s ahead of server time).

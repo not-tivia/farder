@@ -179,10 +179,9 @@ pub async fn reset_group<T: E2eeTransport + Sync>(
         //    bytes, one event per member so the fold's exact-cover check can
         //    count them (owner-only, `event_log_state.rs:1243-1246`).
         for member in members {
-            let welcome_event = build_next_event(
-                actor.device,
-                actor.identity,
-                actor.log_server_id,
+            let (_welcome_event, accepted) = crate::chain::submit_with_chain_recovery(
+                transport,
+                actor,
                 chain,
                 event_now_secs(),
                 EventPayload::MlsWelcome {
@@ -193,9 +192,8 @@ pub async fn reset_group<T: E2eeTransport + Sync>(
                     for_device: member.device.clone(),
                     welcome: welcome_bytes.clone(),
                 },
-            );
-            let accepted = transport.submit_event(&welcome_event).await?;
-            chain.advance(&welcome_event);
+            )
+            .await?;
             welcome_refs.push(accepted.event_hash);
         }
     }
@@ -207,10 +205,9 @@ pub async fn reset_group<T: E2eeTransport + Sync>(
     // 5. Submit the reset citing exactly the staged Welcomes. The fold's
     //    exact-cover rule (`event_log_state.rs:1387-1392`) checks the refs cover
     //    member_leaf_set minus the resetter's own device.
-    let reset_event = build_next_event(
-        actor.device,
-        actor.identity,
-        actor.log_server_id,
+    let (_reset_event, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
         chain,
         event_now_secs(),
         EventPayload::MlsGroupReset {
@@ -219,9 +216,8 @@ pub async fn reset_group<T: E2eeTransport + Sync>(
             welcomes: welcome_refs,
             post_tree_hash,
         },
-    );
-    let accepted = transport.submit_event(&reset_event).await?;
-    chain.advance(&reset_event);
+    )
+    .await?;
 
     Ok(ResetOutcome {
         event_hash: accepted.event_hash,
@@ -268,10 +264,9 @@ pub async fn join_reset<T: E2eeTransport + Sync>(
         ));
     }
 
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        actor.log_server_id,
+    let (_event, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
         chain,
         event_now_secs(),
         EventPayload::MlsLeafConfirmed {
@@ -281,9 +276,8 @@ pub async fn join_reset<T: E2eeTransport + Sync>(
             tree_hash: reset_post_tree_hash,
             store_instance_hash: *ctx.store_instance_hash,
         },
-    );
-    let accepted = transport.submit_event(&event).await?;
-    chain.advance(&event);
+    )
+    .await?;
 
     Ok(LeafConfirmation {
         event_hash: accepted.event_hash,
