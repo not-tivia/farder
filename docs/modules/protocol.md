@@ -37,6 +37,26 @@ farder_protocol::codec::decode(&bytes)   // -> Result<T>
 There is no versioning or magic header in the byte stream; both sides must agree
 on the same compiled type definitions.
 
+### Compatibility
+
+`codec::encode` uses `rmp_serde::to_vec_named`: structs go on the wire as maps
+keyed by **field name**, not as positional arrays. `codec::decode` accepts both
+forms, so peers that still send positional bytes keep working. Consequences:
+
+- Appending a `#[serde(default)]` field is safe in both directions (an older reader
+  ignores the unknown key; a newer reader fills the default from older bytes).
+- **Renaming or removing a field is NOT safe** (the key no longer matches). Don't.
+- **Signed and hashed bytes stay positional.** Event, genesis, device-cert and
+  profile signing/hashing call `rmp_serde::to_vec` directly in `farder-crypto`;
+  never route those through `codec::encode`.
+- Size: named frames are larger (a 100-message history page of 4000-char messages:
+  ~424 KB named vs ~407 KB positional; small structs grow more in relative terms).
+  Every frame cap is 16 MiB (server/client `connection.rs`, relay `read_framed` /
+  `read_message`); snapshot chunks are capped at 1 MiB.
+- Tests: `old_positional_bytes_decode_into_current_message_info`,
+  `current_encoder_output_decodes_into_older_message_info`,
+  `message_info_crosses_server_event_and_frame_both_ways` (`server.rs`).
+
 ### Wire-compatibility rule: NEVER MUTATE A SHIPPED STRUCT OR VARIANT
 
 This is measured behaviour, pinned by

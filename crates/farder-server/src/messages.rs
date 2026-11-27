@@ -1014,21 +1014,6 @@ mod tests {
     }
 
     #[test]
-    fn test_message_info_decodes_without_widget_field() {
-        // A MessageInfo encoded WITHOUT `widget` (old peer) must decode with
-        // widget: None — the #[serde(default)] guard.
-        let (conn, channel_id, pk) = setup();
-        let id = insert_message(&conn, channel_id, &pk, "old frame", None).unwrap();
-        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
-        // Simulate an old encoder: serialize to a JSON map and strip the field.
-        let mut v = serde_json::to_value(&msg).unwrap();
-        v.as_object_mut().unwrap().remove("widget").expect("widget field present");
-        let decoded: MessageInfo = serde_json::from_value(v).unwrap();
-        assert_eq!(decoded.widget, None);
-        assert_eq!(decoded.content, "old frame");
-    }
-
-    #[test]
     fn test_insert_and_get_message() {
         let (conn, channel_id, pk) = setup();
         let id = insert_message_with_ts(&conn, channel_id, &pk, "Hello, world!", None, 1_000_000).unwrap();
