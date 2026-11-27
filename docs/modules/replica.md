@@ -42,6 +42,7 @@ Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir 
 Design: `docs/specs/2026-11-27-promotion-design.md`. Step 1 (server side only) is built: the owner signs a `HostTerm`
 (`farder-crypto::host_term`) and sends `PromoteToHost { term }` to a running read-only copy, which becomes writable
 **without a restart**. `GetHostTerm` returns the stored term on both host and copy (`None` = original host).
+The owner's app builds the term from `GetPromotionInfo` (the copy's host key and log head), signs it, and sends `PromoteToHost` to the copy.
 
 Step 2 (server side): `NotifyHostTerm { term }` (any member, also accepted by a read-only copy) lets a REPLACED host learn the
 newer term: same signature, `server_id` and "higher term" checks, but `host_key` must NOT be its own identity. It stores the term,
@@ -71,3 +72,10 @@ Test: `cargo test -p farder-replica --test replica promotes` (real server binary
 
 `cargo test -p farder-replica` (unit tests for the link forms; integration tests against a real server, including the
 read-only copy keeping the host's name). End to end with the app: `bash scripts/selftest/ubuntu-suite.sh failover`.
+
+## Promotion, app side (2026-11-27)
+
+The owner uses Server Settings > Backup copy > "Make a copy the host" (`promote_copy`). Every app keeps the highest
+verified hosting term per server and fences on it: the new host first, and a replaced host only read from. See
+`get_moved_host` in `docs/modules/tauri-commands.md`. After promotion, stop `farder-replica` for that folder: the
+promoted server owns `latest.db` (#28 makes the replica refuse anyway).

@@ -39,6 +39,7 @@ experiment used only by a demo) and the relay (forwarding only).
    is down, try the next.
 4. **Promotion:** a backup can become the host (one writer at a time, so nothing has to be
    merged yet). Test: kill the host mid-chat, promote, keep chatting.
+   **BUILT + VERIFIED 2026-11-27** (`ubuntu-suite.sh promote`; design `docs/specs/2026-11-27-promotion-design.md`).
 5. Only then, **several writers at once** (the true mesh), which is the hard part: merging,
    who may be a host, and abuse by a bad host. The spec already names these risks.
 

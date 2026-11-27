@@ -211,6 +211,45 @@ suite_ui() {  # layout features measured in the real apps
   pkill -x farder-server
 }
 
+suite_promote() {  # a copy becomes the host; the old host is fenced (docs/specs/2026-11-27-promotion-design.md)
+  local D="$TMP/promote" PORT=4581 CPORT=4582; rm -rf "$D"; mkdir -p "$D/rep" "$D/copy"; pkill -x farder-server; pkill -x farder-replica
+  fresh_pair
+  start_direct $PORT "$D"; local HOSTPID=$!
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  export INVITE_OUT="$DATA\\replica-invite.txt"; rm -f /mnt/c/Users/Deez/farder-selftest-data/replica-invite.txt
+  FAILOVER_PHASE=invite winrun failover
+  local LINK; LINK=$(tr -d '\r\n' < /mnt/c/Users/Deez/farder-selftest-data/replica-invite.txt)
+  local REP="$ROOT/target/debug/farder-replica"
+  "$REP" --dir "$D/rep" --invite "$LINK" --once > "$D/rep1.log" 2>&1
+  export REPLICA_KEY; REPLICA_KEY=$(grep -o "replica key: [^ ]*" "$D/rep1.log" | awk '{print $3}')
+  export FAILOVER_ADDR="$WSLIP:$CPORT"
+  FAILOVER_PHASE=allow winrun failover
+  "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; echo "replica exit: $? (want 0)"
+  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
+  local COPYPID=$!
+  wait_for "$D/copy.log" "Server listening"
+  kill -9 "$HOSTPID"; sleep 1
+  FAILOVER_PHASE=down winrun failover
+  echo "== the owner makes the copy the host"
+  FAILOVER_PHASE=promote winrun failover
+  echo "copy log: $(grep -c PROMOTED "$D/copy.log") PROMOTED line(s) (want 1)"
+  echo "== the OLD host is started again"
+  start_direct $PORT "$D"; local OLDPID=$!
+  FAILOVER_PHASE=promoted-stays winrun failover
+  echo "== the NEW host is stopped; only the old one answers"
+  kill -9 "$COPYPID"; sleep 1
+  FAILOVER_PHASE=old-host-fenced winrun failover
+  python3 -c "
+import sqlite3
+def has(db, t): return sqlite3.connect(db).execute('select count(*) from messages where content like ?', ('%'+t+'%',)).fetchone()[0]
+old, new = '$D/u.db', '$D/rep/latest.db'
+print('new host has the promoted-era messages:', has(new, 'written on the promoted host'), has(new, 'still on the new host'), '(want 1 1)')
+print('old host has them:', has(old, 'written on the promoted host'), has(old, 'still on the new host'), '(want 0 0)')
+print('sent to the replaced host, on the old host:', has(old, 'sent to the replaced host'), '(want 0)')"
+  pkill -x farder-server
+}
+
 suite_e2ee() {
   local D="$TMP/e2ee" PORT=4578; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
   fresh_pair
@@ -237,6 +276,7 @@ case "${1:-all}" in
   brake) suite_brake ;;
   failover) suite_failover ;;
   e2ee) suite_e2ee ;;
+  promote) suite_promote ;;
   ui) suite_ui ;;
   only) suite_only "$2" ;;
   guestlink) suite_guestlink ;;
