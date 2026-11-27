@@ -34,4 +34,10 @@ details { margin-top: 10px; }
 .msg .when { color: var(--muted); font-size: 12px; }
 .msg.mine .who { color: var(--accent); }
 #composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
-@media (max-width: 560px) { #channels { width: 110px; } #app { padding: 8px; } }
+/* A phone: the channel list becomes one row above the messages (it used to eat a third of the width). */
+@media (max-width: 560px) {
+  #app { padding: 8px; }
+  .body { flex-direction: column; }
+  #channels { width: auto; display: flex; gap: 4px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 6px; }
+  #channels button { display: inline-block; width: auto; white-space: nowrap; }
+}

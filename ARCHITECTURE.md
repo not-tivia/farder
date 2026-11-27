@@ -52,7 +52,7 @@ Data crosses several hard boundaries; each is a place bugs hide.
 | `crates/farder-node/` | Personal node embedded in the client (DMs). |
 | `crates/farder-relay/` | Relay node (IP masking). |
 | `crates/farder-gateway/` | Browser gateway: WebSocket in, the server's QUIC main stream out (guest links; `docs/modules/gateway.md`). |
-| `crates/farder-replica/` | Keeps a verified copy of a server's database on another machine (owner-allowed); served with `farder-server --read-only` while the host is off, and the client fails over to it (`docs/modules/replica.md`). |
+| `crates/farder-replica/` | Keeps a verified copy of a server's database on another machine (owner-allowed); served with `farder-server --read-only` while the host is off, and the client fails over to it. **Promotion:** the owner signs a `HostTerm` (`farder-crypto/src/host_term.rs`) that makes a copy the writable host (`PromoteToHost`); apps keep the highest verified term, try its host first, and only read from a replaced host (`get_moved_host`), which is also told (`NotifyHostTerm`) and goes read-only (`docs/modules/replica.md`, `docs/specs/2026-11-27-promotion-design.md`). |
 | `crates/farder-notify/` | Desktop notifications helper. |
 
 ## Two end-to-end flows (the ones worth knowing)
