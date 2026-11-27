@@ -2046,6 +2046,52 @@ async function smallwin() {
     await A.page.locator(".compact-list .channel-item", { hasText: second }).first().click();
     await seesText(A, `${tag} over here`, 15000);
   });
+  await check("a direct message from Bob shows under DIRECT MESSAGES in the small list, and opens there", async () => {
+    await B.page.locator(".member-item", { hasText: "Alice" }).first().click();
+    await B.page.getByRole("button", { name: "Message", exact: true }).click();
+    await B.page.getByRole("button", { name: "Pop Out" }).waitFor({ timeout: 40000 });
+    await sendText(B, `${tag} dm for the small window`);
+    const cat = A.page.locator(".compact-list .channel-category", { hasText: "DIRECT MESSAGES" });
+    await cat.waitFor({ timeout: 30000 });
+    const row = A.page.locator(".compact-list .dm-item", { hasText: "Bob" }).first();
+    await row.waitFor({ timeout: 30000 });
+    await shot(A.page, "small-window-dm-listed");
+    await row.click();
+    await seesText(A, `${tag} dm for the small window`, 30000);
+    await A.page.locator(".compact-list .channel-item", { hasText: "general" }).first().click();
+  });
+  await check("the small list stays readable and inside the window in two more themes", async () => {
+    const original = await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_active_theme").then((t) => t.id));
+    const out = [];
+    try {
+      for (const id of ["velvet", "candy"]) {
+        await A.page.evaluate(async (id) => {
+          const css = await window.__TAURI_INTERNALS__.invoke("load_theme_css", { id });
+          document.getElementById("active-theme").textContent = css;
+          document.documentElement.dataset.theme = id;
+        }, id);
+        await new Promise((r) => setTimeout(r, 500));
+        const r = await A.page.evaluate(() => {
+          const lum = (rgb) => { const m = rgb.match(/[\d.]+/g).map(Number); const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]); };
+          const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { if (getComputedStyle(e).backgroundImage !== "none") return null; const c = getComputedStyle(e).backgroundColor; const m = c.match(/[\d.]+/g); if (m && (m.length < 4 || Number(m[3]) > 0.5)) return c; } return "rgb(255, 255, 255)"; };
+          const items = [...document.querySelectorAll(".compact-list .channel-item:not(.active)")];
+          const cs = items.map((el) => { const bg = bgOf(el); if (!bg) return null; const a = lum(getComputedStyle(el).color), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); }).filter((x) => x !== null);
+          return { min: cs.length ? Math.min(...cs) : null, sideways: document.documentElement.scrollWidth > innerWidth + 2 };
+        });
+        await shot(A.page, "small-window-" + id);
+        if (r.sideways) throw new Error(id + ": the page is wider than the window");
+        if (r.min !== null && r.min < 3) throw new Error(`${id}: list text contrast ${r.min.toFixed(1)}`);
+        out.push(`${id} ${r.min === null ? "?" : r.min.toFixed(1)}`);
+      }
+    } finally {
+      await A.page.evaluate(async (id) => {
+        const css = await window.__TAURI_INTERNALS__.invoke("load_theme_css", { id });
+        document.getElementById("active-theme").textContent = css;
+        document.documentElement.dataset.theme = id;
+      }, original);
+    }
+    return "lowest list contrast: " + out.join(", ");
+  });
   await check("click the server name: the server list and + Add server appear; Add server opens its dialog", async () => {
     await A.page.locator(".compact-list .server-name").click();
     await A.page.locator(".compact-list .channel-category", { hasText: "SERVERS" }).waitFor({ timeout: 5000 });
