@@ -2373,6 +2373,19 @@ async function e2ee() {
     for (const c of [A, B]) if (await c.page.locator("em", { hasText: "couldn't decrypt" }).count()) throw new Error(`${c.who} shows couldn't decrypt`);
     return `B->A ${a}, A->B ${b}`;
   });
+  await check("a reply in the encrypted channel is linked to the message it answers, on both screens", async () => {
+    const target = `${word} later from A`;
+    await B.page.locator(".message", { hasText: target }).first().click({ button: "right" });
+    await B.page.locator(".context-menu .context-menu-item", { hasText: "Reply" }).first().click();
+    await B.page.locator(".reply-preview").waitFor({ timeout: 5000 });
+    const n = await sendUntilSeen(B, A, `${word} reply from B`);
+    for (const c of [A, B]) {
+      const ctx = c.page.locator(".message", { hasText: `${word} reply from B` }).first().locator(".message-reply-context");
+      await ctx.waitFor({ timeout: 15000 });
+      if (!(await ctx.innerText()).includes("Alice")) throw new Error(`${c.who}: the reply does not name Alice`);
+    }
+    return n;
+  });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
 }
