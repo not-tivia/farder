@@ -237,7 +237,8 @@ suite_promote() {  # a copy becomes the host; the old host is fenced (docs/specs
   export REPLICA_KEY; REPLICA_KEY=$(grep -o "replica key: [^ ]*" "$D/rep1.log" | awk '{print $3}')
   export FAILOVER_ADDR="$WSLIP:$CPORT"
   FAILOVER_PHASE=allow winrun failover
-  "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; echo "replica exit: $? (want 0)"
+  "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once --announce "$WSLIP:$CPORT" > "$D/rep2.log" 2>&1; echo "replica exit: $? (want 0)"
+  echo "host knows the copy: $(python3 -c "import sqlite3; print(sqlite3.connect('$D/u.db').execute(\"select value from server_settings where key='known_copies'\").fetchone())") (want ['$WSLIP:$CPORT'])"
   setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
   local COPYPID=$!
   wait_for "$D/copy.log" "Server listening"
@@ -248,6 +249,9 @@ suite_promote() {  # a copy becomes the host; the old host is fenced (docs/specs
   echo "copy log: $(grep -c PROMOTED "$D/copy.log") PROMOTED line(s) (want 1)"
   echo "== the OLD host is started again"
   start_direct $PORT "$D"; local OLDPID=$!
+  # Step 4: before any app talks to it, the old host asks the copy it knows and goes read-only by itself.
+  if wait_for "$D/server.log" "learned the newer term from the copy"; then echo "PASS the restarted old host learned from the copy by itself that it was replaced"
+  else echo "FAIL the restarted old host did not learn from the copy (no 'learned the newer term' line)"; fi
   FAILOVER_PHASE=promoted-stays winrun failover
   echo "== the NEW host is stopped; only the old one answers"
   kill -9 "$COPYPID"; sleep 1
