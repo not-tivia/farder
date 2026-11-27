@@ -188,6 +188,16 @@ print('\'sent while on the copy\' in host:', has(host, 'sent while on the copy')
   pkill -x farder-server
 }
 
+suite_only() {  # claim + chat, then ONE scenario: ubuntu-suite.sh only <scenario>
+  local D="$TMP/only" PORT=4580; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
+  fresh_pair
+  start_direct $PORT "$D"
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  echo "== $1"; winrun "$1"
+  pkill -x farder-server
+}
+
 suite_ui() {  # layout features measured in the real apps
   local D="$TMP/ui" PORT=4579; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
   fresh_pair
@@ -196,6 +206,7 @@ suite_ui() {  # layout features measured in the real apps
   echo "== claim, invite, chat"; winrun ubuntu
   echo "== message density"; winrun density
   echo "== small window"; winrun smallwin
+  echo "== autoplay (needs the internet: the public relay fetches the video)"; winrun autoplay
   pkill -x farder-server
 }
 
@@ -226,6 +237,7 @@ case "${1:-all}" in
   failover) suite_failover ;;
   e2ee) suite_e2ee ;;
   ui) suite_ui ;;
+  only) suite_only "$2" ;;
   guestlink) suite_guestlink ;;
   reset) suite_reset ;;
   restore) suite_restore ;;

@@ -34,7 +34,7 @@ export interface MediaPlayerInfo {
 }
 
 export interface OpenPlayerInput { kind: PlayerKind; src: string; hostId: string; title?: string; float?: boolean; quiet?: boolean }
-export type PlayerPatch = Partial<Pick<MediaPlayerInfo, "pos" | "size" | "opacity">>;
+export type PlayerPatch = Partial<Pick<MediaPlayerInfo, "pos" | "size" | "opacity" | "quiet">>;
 
 interface State { players: MediaPlayerInfo[]; nextZ: number; nextId: number }
 
@@ -66,6 +66,14 @@ export const initialState: State = { players: [], nextZ: BASE_Z, nextId: 1 };
  *   - hostVisible(host,true) when floating&autoFloated → docked + autoFloated=false
  *   - hostVisible(host,true) when floating&!autoFloated (popped out) → unchanged
  */
+/** The oldest autoplayed player that is still quiet (nobody took it over) and
+ *  sits in its card: the first to close when the cap is reached. */
+export function evictableQuiet(players: MediaPlayerInfo[]): MediaPlayerInfo | null {
+  const quiet = players.filter((p) => p.quiet && p.state === "docked");
+  if (quiet.length === 0) return null;
+  return quiet.reduce((a, b) => (Number(a.id.slice(3)) < Number(b.id.slice(3)) ? a : b));
+}
+
 export function mediaPlayersReducer(state: State, action: Action): State {
   switch (action.type) {
     case "open": {
@@ -74,7 +82,15 @@ export function mediaPlayersReducer(state: State, action: Action): State {
       if (existing) {
         return { ...state, nextZ: state.nextZ + 1, players: state.players.map((p) => p.id === existing.id ? { ...p, z: state.nextZ } : p) };
       }
-      if (state.players.length >= MAX_PLAYERS) return state;
+      if (state.players.length >= MAX_PLAYERS) {
+        // At the cap, an autoplayed video nobody took over is the one to give up:
+        // nobody asked for it. Without this, four autoplays in a channel used up
+        // every slot (paused, scrolled away) and nothing could play again, not even
+        // with Play ("Close a player..." about players you cannot see).
+        const victim = evictableQuiet(state.players);
+        if (!victim) return state;
+        state = { ...state, players: state.players.filter((p) => p.id !== victim.id) };
+      }
       const floating = !!action.input.float;
       const a = action.anchor;
       const floatingCount = state.players.filter((p) => p.state === "floating").length;
@@ -152,7 +168,7 @@ export function MediaPlayersProvider({ children }: { children: ReactNode }) {
   const openPlayer = useCallback((input: OpenPlayerInput) => {
     const s = stateRef.current;
     const dup = s.players.some((p) => p.kind === input.kind && p.src === input.src && p.hostId === input.hostId);
-    if (!dup && s.players.length >= MAX_PLAYERS) {
+    if (!dup && s.players.length >= MAX_PLAYERS && !evictableQuiet(s.players)) {
       // Autoplay is never worth a message: you did not ask for it.
       if (!input.quiet) toast.info("Close a player to open another");
       return;
