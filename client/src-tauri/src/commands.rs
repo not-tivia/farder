@@ -5397,6 +5397,11 @@ async fn run_create_e2ee_channel(
 pub struct AddMembersResult {
     pub added: Vec<AddedE2eeMember>,
     pub skipped: Vec<SkippedE2eeMember>,
+    /// Someone else's commit won the epoch, so an add was refused (nothing changed
+    /// locally: adds are staged). Every later add in this pass would be refused the
+    /// same way, so the pass stopped. The caller applies the winning commit
+    /// (`process_mls_control_events`) and runs the add again.
+    pub catch_up_needed: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -5518,9 +5523,10 @@ async fn add_current_members_to_group(
     let mut result = AddMembersResult {
         added: Vec::new(),
         skipped: Vec::new(),
+        catch_up_needed: false,
     };
 
-    for member in members {
+    'members: for member in members {
         if member.public_key == identity.public_key() {
             continue; // the owner is already the creator + bootstrapped leaf
         }
@@ -5736,6 +5742,19 @@ async fn add_current_members_to_group(
                         device: device_id.clone(),
                         epoch: outcome.local_epoch,
                     });
+                }
+                Err(e) if e.is_commit_refused() => {
+                    // A clean refusal (usually: another commit won this epoch). The
+                    // group did not move, so stop here and let the caller catch up
+                    // and retry, instead of authoring more doomed adds.
+                    eprintln!("E2EE add: refused for {device_id} ({e}); stopping this pass to catch up");
+                    result.skipped.push(SkippedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: Some(device_id.clone()),
+                        reason: format!("add member: {e}"),
+                    });
+                    result.catch_up_needed = true;
+                    break 'members;
                 }
                 Err(e) if e.is_stale_epoch_diverged() => {
                     return Err(format!(

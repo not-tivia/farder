@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import AppearanceSettings from "../AppearanceSettings";
 import DensitySettings from "./DensitySettings";
 import LayoutSettings from "./LayoutSettings";
@@ -57,7 +58,10 @@ export default function SettingsModal({ onClose }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  return (
+  // Rendered at the top of the page, not inside whoever opened it: the full layout's
+  // sidebar opens this, and choosing "Small window" HIDES that sidebar, which used to
+  // hide the open dialog with it (still open, invisible, back again in the full window).
+  return createPortal(
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-dialog settings-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-titlebar">
@@ -100,6 +104,7 @@ export default function SettingsModal({ onClose }: Props) {
           </section>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

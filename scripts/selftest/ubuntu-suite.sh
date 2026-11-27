@@ -168,6 +168,7 @@ suite_failover() {
   echo "== the owner allows it in Backup copy; A and B save the backup address"
   FAILOVER_PHASE=allow winrun failover
   "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; RC=$?; echo "replica exit: $RC (want 0): $(grep 'copy saved' "$D/rep2.log")"
+  echo "replica files: $(grep -i 'files' "$D/rep2.log" | tail -1) | on disk: $(find "$D/rep/files" -type f | wc -l)"
   [ $RC = 0 ] || { sed 's/^/  replica: /' "$D/rep2.log"; pkill -x farder-server; return 1; }
   echo "== the copy serves read-only; the HOST IS STOPPED"
   setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
@@ -184,6 +185,17 @@ def has(db, t): return sqlite3.connect(db).execute('select count(*) from message
 host, copy = '$D/u.db', '$D/rep/latest.db'
 print('host has \'back on the host\':', has(host, 'back on the host'), '(want 1 or more)')
 print('\'sent while on the copy\' in host:', has(host, 'sent while on the copy'), 'in copy:', has(copy, 'sent while on the copy'), '(want 0 0)')"
+  pkill -x farder-server
+}
+
+suite_ui() {  # layout features measured in the real apps
+  local D="$TMP/ui" PORT=4579; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
+  fresh_pair
+  start_direct $PORT "$D"
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  echo "== message density"; winrun density
+  echo "== small window"; winrun smallwin
   pkill -x farder-server
 }
 
@@ -213,12 +225,13 @@ case "${1:-all}" in
   brake) suite_brake ;;
   failover) suite_failover ;;
   e2ee) suite_e2ee ;;
+  ui) suite_ui ;;
   guestlink) suite_guestlink ;;
   reset) suite_reset ;;
   restore) suite_restore ;;
   relay) suite_relay ;;
   recovery) suite_recovery ;;
   all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
-  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|e2ee|all]"; exit 2 ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|e2ee|ui|all]"; exit 2 ;;
 esac
 echo FINISHED

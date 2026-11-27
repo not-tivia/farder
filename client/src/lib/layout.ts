@@ -74,6 +74,11 @@ html[data-layout="small"] .compact-list { width: 168px; min-width: 168px; }
 html[data-layout="small"] .chat-panel { min-width: 0; }
 html[data-layout="small"] .channel-header-topic { display: none; }
 html[data-layout="small"] .message-input-textwrap { min-width: 0; }
+/* A narrow chat cannot hold six buttons AND a box to type in on one line: the box
+   was squeezed to a sliver and Send fell off the edge. So the box takes its own full
+   line and the buttons and Send wrap underneath (the box's flex is inline: hence !important). */
+html[data-layout="small"] .message-input-row { flex-wrap: wrap; row-gap: 4px; }
+html[data-layout="small"] .message-input-textwrap { order: -1; flex: 1 0 100% !important; }
 /* The Back button (only rendered in the small layout) shows on a phone-width screen only. */
 html[data-layout="small"] .phone-back { display: none; }
 @media (max-width: ${PHONE_MAX_WIDTH}px) {

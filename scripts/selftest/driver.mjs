@@ -153,7 +153,8 @@ async function unlock(c) {
   const p = c.page;
   await p.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 60000 });
   await p.locator('input[aria-label="PIN entry"]').first().fill(PIN);
-  await p.getByText("general").first().waitFor({ timeout: 90000 });
+  // ANY visible "general": in the small layout the full sidebar's copy is hidden and comes first.
+  await p.waitForFunction(() => [...document.querySelectorAll(".channel-item")].some((e) => e.innerText.includes("general") && e.getBoundingClientRect().width > 0), null, { timeout: 90000 });
 }
 
 // Run AFTER `core`, with both windows quit and started again WITHOUT -Fresh:
@@ -592,6 +593,45 @@ async function themes() {
   await A.browser.close().catch(() => {});
 }
 
+// A small real PNG (16x16, solid orange), written to the shots folder; returns { path, fileName, png }.
+async function orangePng(stamp, label = "orange") {
+  const { deflateSync } = await import("node:zlib");
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const len = Buffer.alloc(4); len.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const cs = Buffer.alloc(4); cs.writeUInt32BE(crc(td)); return Buffer.concat([len, td, cs]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(16, 0); ihdr.writeUInt32BE(16, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const row = Buffer.concat([Buffer.from([0]), Buffer.concat(Array.from({ length: 16 }, () => Buffer.from([255, 140, 0])))]);
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.concat(Array.from({ length: 16 }, () => row)))), chunk("IEND", Buffer.alloc(0))]);
+  const dir = process.env.SHOTS || "selftest-shots";
+  fs.mkdirSync(dir, { recursive: true });
+  const fileName = `${label}-${stamp}.png`;
+  const path = (await import("node:path")).resolve(dir, fileName);
+  fs.writeFileSync(path, png);
+  return { path, fileName, png };
+}
+
+// Drop a file on a window (the same event Windows sends when you drag one in), wait until it is staged,
+// then send it with a caption.
+async function dropAndSend(c, path, fileName, caption) {
+  await c.page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "tauri://drag-drop", payload: { paths: [p], position: { x: 400, y: 400 } } }), path);
+  const staged = await c.page.getByText(fileName).first().waitFor({ timeout: 30000 }).then(() => true, () => false);
+  if (!staged) {
+    const errs = await c.page.locator(".error-text").allInnerTexts().catch(() => []);
+    const previews = await c.page.locator(".attachment-preview").allInnerTexts().catch(() => []);
+    throw new Error(`${c.who}: the dropped file never showed as staged (previews on screen: ${JSON.stringify(previews).slice(0, 80)})` + (errs.length ? ` (screen says: ${errs.join(" | ").slice(0, 120)})` : ""));
+  }
+  await sendText(c, caption);
+  await seesText(c, caption, 30000);
+}
+
+// The picture in the message with `caption` has actually loaded on c's screen.
+async function pictureLoads(c, caption) {
+  const msg = c.page.locator(".message", { hasText: caption }).first();
+  await msg.locator("img:not(.message-avatar img)").last().waitFor({ timeout: 30000 });
+  const ok = await msg.locator("img").evaluateAll((imgs) => imgs.some((i) => i.naturalWidth >= 8 && !i.classList.contains("message-avatar")));
+  if (!ok) throw new Error("the picture element is there but did not load (naturalWidth 0)");
+}
+
 // A file attachment: drop a picture on A's window (the same event Windows sends when
 // you drag a file in), send it, and B must receive it AND be able to fetch and show
 // it. Run after `core`.
@@ -604,33 +644,15 @@ async function attach_file() {
     await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
     await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
   }
-  // A small real PNG (16x16, solid orange).
-  const { deflateSync } = await import("node:zlib");
-  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
-  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
-  const chunk = (t, d) => { const len = Buffer.alloc(4); len.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const cs = Buffer.alloc(4); cs.writeUInt32BE(crc(td)); return Buffer.concat([len, td, cs]); };
-  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(16, 0); ihdr.writeUInt32BE(16, 4); ihdr[8] = 8; ihdr[9] = 2;
-  const row = Buffer.concat([Buffer.from([0]), Buffer.concat(Array.from({ length: 16 }, () => Buffer.from([255, 140, 0])))]);
-  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.concat(Array.from({ length: 16 }, () => row)))), chunk("IEND", Buffer.alloc(0))]);
-  const dir = process.env.SHOTS || "selftest-shots";
-  fs.mkdirSync(dir, { recursive: true });
-  const fileName = `orange-${stamp}.png`;
-  const path = (await import("node:path")).resolve(dir, fileName);
-  fs.writeFileSync(path, png);
+  const { path, fileName } = await orangePng(stamp);
   await check("A: drop a picture on the window, it is staged, then sent with a caption", async () => {
-    await A.page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "tauri://drag-drop", payload: { paths: [p], position: { x: 400, y: 400 } } }), path);
-    await A.page.getByText(fileName).first().waitFor({ timeout: 30000 });
-    await shot(A.page, "A-file-staged");
-    await sendText(A, "with a file " + stamp);
-    await seesText(A, "with a file " + stamp, 30000);
+    await dropAndSend(A, path, fileName, "with a file " + stamp);
+    await shot(A.page, "A-file-sent");
   });
   await check("B: receives the message with the file, and the picture actually loads", async () => {
     await seesText(B, "with a file " + stamp, 30000);
-    const msg = B.page.locator(".message", { hasText: "with a file " + stamp }).first();
-    await msg.locator("img:not(.message-avatar img)").last().waitFor({ timeout: 30000 });
-    const ok = await msg.locator("img").evaluateAll((imgs) => imgs.some((i) => i.naturalWidth >= 8 && !i.classList.contains("message-avatar")));
+    await pictureLoads(B, "with a file " + stamp);
     await shot(B.page, "B-file");
-    if (!ok) throw new Error("the picture element is there but did not load (naturalWidth 0)");
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
@@ -1582,6 +1604,13 @@ async function failover() {
       await setBackup(B);
       await B.page.locator(".modal-close").first().click();
     });
+    await check("A posts a picture while the host is up, and B sees it load", async () => {
+      const { path, fileName } = await orangePng(stamp, "before-outage");
+      for (const c of [A, B]) await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+      await dropAndSend(A, path, fileName, "picture before the outage " + stamp);
+      await seesText(B, "picture before the outage " + stamp, 30000);
+      await pictureLoads(B, "picture before the outage " + stamp);
+    });
   } else if (phase === "down") {
     await check("with the host off, B ends up on the saved copy: the banner names the backup address", async () => {
       const t0 = Date.now();
@@ -1612,6 +1641,33 @@ async function failover() {
       await seesText(B, "hello from A to ubuntu " + stamp, 30000);
       return `route ${r.route}, ${r.contents.length} messages from the copy`;
     });
+    // The picture on screen could be the app's own memory of it, so fetch the file again over the
+    // connection that is now on the copy, and compare the bytes with what A posted.
+    await check("with the host off, the picture posted earlier comes from the copy, byte for byte", async () => {
+      const { png } = await orangePng(stamp, "before-outage");
+      const r = await B.page.evaluate(async ([nm, caption]) => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+        const route = await inv("get_connection_route", { serverId: s.id });
+        const info = await inv("get_server_info_v2", { serverId: s.id });
+        const general = info.channels.map((c) => c.base || c).find((c) => c.name === "general");
+        const msgs = await inv("fetch_history", { serverId: s.id, channelId: general.id, beforeId: null, limit: 50 });
+        const m = msgs.find((x) => (x.content || "").includes(caption));
+        if (!m) return { err: "the copy has no message: " + caption };
+        const a = (m.attachments || [])[0];
+        if (!a) return { err: "the message came back without its attachment" };
+        const d = await inv("download_file", { serverId: s.id, fileId: a.file_id });
+        return { route, name: a.name, url: d.data_url || "" };
+      }, [name, "picture before the outage " + stamp]);
+      if (r.err) throw new Error(r.err);
+      if (r.route !== backup) throw new Error(`route is ${r.route}, not ${backup}`);
+      const got = Buffer.from(r.url.replace(/^data:[^,]*,/, ""), "base64");
+      if (!got.equals(png)) throw new Error(`the copy served ${got.length} bytes that do not match the ${png.length} posted`);
+      await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+      await pictureLoads(B, "picture before the outage " + stamp);
+      await shot(B.page, "B-picture-from-copy");
+      return `${r.name}: ${got.length} bytes, identical, via ${r.route}`;
+    });
     await check("the server keeps its own name on the copy (not renamed to the default)", async () => {
       await B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 5000 });
     });
@@ -1639,6 +1695,327 @@ async function failover() {
       throw new Error("A never saw B's message");
     });
   }
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// Message density (run after `ubuntu`). B posts a short burst, a long line and a picture; A switches
+// every mode through Settings and the layout is MEASURED: one row per message in the dense modes, the
+// IRC brackets and the tiny colon really drawn, nothing running off the edge, text readable in two
+// themes, and the choice still set after a reload.
+async function density() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const tag = "dens" + stamp;
+  const burst = [1, 2, 3].map((i) => `${tag} burst ${i}`);
+  const long = `${tag} long ` + "a fairly long sentence that has to wrap instead of running off the edge ".repeat(8);
+  await check("B posts a burst of three and one long message; A posts a picture", async () => {
+    for (const t of [...burst, long]) await sendText(B, t);
+    const { path, fileName } = await orangePng(stamp, "density");
+    await dropAndSend(A, path, fileName, `${tag} picture`);
+    await seesText(A, `${tag} picture`, 30000);
+    await pictureLoads(A, `${tag} picture`);
+  });
+  const openDensity = async () => {
+    await A.page.getByRole("button", { name: "Your settings" }).click();
+    await A.page.locator(".settings-nav-item", { hasText: "Message density" }).click();
+  };
+  const choose = async (label) => {
+    await openDensity();
+    await A.page.locator(".settings-option", { hasText: label }).first().click();
+    await A.page.locator(".modal-close").first().click();
+    await new Promise((r) => setTimeout(r, 400));
+  };
+  const measure = () => A.page.evaluate((tag) => {
+    const lum = (rgb) => { const m = rgb.match(/[\d.]+/g).map(Number); const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]); };
+    const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { if (getComputedStyle(e).backgroundImage !== "none") return null; const c = getComputedStyle(e).backgroundColor; const m = c.match(/[\d.]+/g); if (m && (m.length < 4 || Number(m[3]) > 0.5)) return c; } return "rgb(255, 255, 255)"; };
+    const contrast = (el) => { const bg = bgOf(el); if (bg === null) return null; const a = lum(getComputedStyle(el).color), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+    const list = document.querySelector(".message-list");
+    const lr = list.getBoundingClientRect();
+    const rows = [...document.querySelectorAll(".message")].filter((m) => (m.querySelector(".message-content")?.innerText || "").includes(tag));
+    const vis = (el) => !!el && getComputedStyle(el).display !== "none" && el.getBoundingClientRect().width > 0;
+    return {
+      mode: document.documentElement.dataset.density,
+      rows: rows.map((m) => {
+        const content = m.querySelector(".message-content");
+        const author = m.querySelector(".message-author");
+        const av = m.querySelector(".message-avatar");
+        const ts = m.querySelector(".message-timestamp");
+        const att = m.querySelector(".message-attachments");
+        const cs = getComputedStyle(content);
+        const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.3;
+        const r = m.getBoundingClientRect();
+        return {
+          text: content.innerText.slice(0, 40),
+          h: r.height, lh, right: r.right, contentRight: content.getBoundingClientRect().right,
+          avatar: vis(av) ? av.getBoundingClientRect().width : 0,
+          author: vis(author),
+          authorBefore: author ? getComputedStyle(author, "::before").content : "",
+          authorAfter: author ? getComputedStyle(author, "::after").content : "",
+          tsBefore: ts ? getComputedStyle(ts, "::before").content : "",
+          tsOpacity: ts ? Number(getComputedStyle(ts).opacity) : 0,
+          tsText: ts ? ts.innerText : "",
+          mono: /mono|consolas/i.test(getComputedStyle(m).fontFamily),
+          attBelowAuthor: att && author ? att.getBoundingClientRect().top >= author.getBoundingClientRect().bottom - 1 : null,
+          contrast: contrast(content),
+        };
+      }),
+      listRight: lr.right,
+      sideways: list.scrollWidth > list.clientWidth + 2,
+    };
+  }, tag);
+  const results = {};
+  for (const [label, mode] of [["Normal", "normal"], ["Roomy", "roomy"], ["Compact", "compact"], ["IRC", "irc"], ["Tiny", "tiny"]]) {
+    await check(`density ${label}: chosen in Settings, laid out as described, nothing off the edge`, async () => {
+      await choose(label);
+      const m = await measure();
+      results[mode] = m;
+      await shot(A.page, "density-" + mode);
+      if (m.mode !== mode) throw new Error(`page says ${m.mode}, not ${mode}`);
+      if (m.rows.length < 5) throw new Error(`only ${m.rows.length} test messages on screen`);
+      if (m.sideways) throw new Error("the message list scrolls sideways");
+      for (const r of m.rows) if (r.contentRight > m.listRight + 1) throw new Error(`"${r.text}" runs past the edge`);
+      const short = m.rows.filter((r) => r.text.includes("burst"));
+      const longRow = m.rows.find((r) => r.text.includes(" long "));
+      if (!(longRow.h > short[0].h * 1.5)) throw new Error("the long message did not wrap onto more lines");
+      const named = short.filter((r) => r.author).length;
+      const dense = ["compact", "irc", "tiny"].includes(mode);
+      if (dense) {
+        for (const r of short) if (r.h > r.lh * 2.2) throw new Error(`"${r.text}" is ${Math.round(r.h)}px tall, not one line (${Math.round(r.lh)}px)`);
+        if (named !== 3) throw new Error(`a burst of three shows the name ${named} times, want 3`);
+        const pic = m.rows.find((r) => r.text.includes("picture"));
+        if (pic.attBelowAuthor === false) throw new Error("the picture is not on its own line under the name");
+      } else if (named > 1) throw new Error(`a burst of three shows the name ${named} times, want at most 1 (folded under one name)`);
+      if (mode === "compact") {
+        const normalAv = results.normal?.rows.find((r) => r.avatar > 0)?.avatar || 32;
+        if (!(short[0].avatar > 0 && short[0].avatar < normalAv * 0.8)) throw new Error(`picture is ${short[0].avatar}px, not smaller than Normal's ${normalAv}px`);
+        if (short[0].tsOpacity !== 0) throw new Error("the time shows without pointing at the message");
+      }
+      if (mode === "irc") {
+        const r = short[0];
+        if (r.avatar !== 0) throw new Error("IRC shows pictures");
+        if (!r.mono) throw new Error("IRC is not in a monospace font");
+        if (r.authorBefore !== '"<"' || r.authorAfter !== '">"' || r.tsBefore !== '"["') throw new Error(`not [time] <name>: ${r.tsBefore} ${r.authorBefore} ${r.authorAfter}`);
+        if (!/^\d\d:\d\d$/.test(r.tsText)) throw new Error("IRC clock is not hh:mm: " + r.tsText);
+      }
+      if (mode === "tiny") {
+        const r = short[0];
+        if (r.avatar !== 0) throw new Error("tiny shows pictures");
+        if (r.authorAfter !== '":"') throw new Error("tiny is not name: text");
+        if (r.tsOpacity !== 0) throw new Error("tiny shows a clock");
+      }
+      const low = m.rows.map((r) => r.contrast).filter((c) => c !== null && c < 3);
+      if (low.length) throw new Error("text hard to read, contrast " + low[0].toFixed(1));
+      return `rows ${short.map((r) => Math.round(r.h)).join("/")}px, long ${Math.round(longRow.h)}px` + (short[0].avatar ? `, picture ${Math.round(short[0].avatar)}px` : "");
+    });
+  }
+  await check("Roomy gives each message more room than Normal", async () => {
+    const h = (m) => m.rows.filter((r) => r.text.includes("burst")).reduce((a, r) => a + r.h, 0);
+    if (!results.roomy || !results.normal) throw new Error("a mode failed above");
+    if (!(h(results.roomy) > h(results.normal))) throw new Error(`roomy ${h(results.roomy)}px vs normal ${h(results.normal)}px`);
+    return `${Math.round(h(results.roomy))}px vs ${Math.round(h(results.normal))}px for the burst`;
+  });
+  const original = await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_active_theme").then((t) => t.id));
+  const setTheme = (id) => A.page.evaluate(async (id) => {
+    const css = await window.__TAURI_INTERNALS__.invoke("load_theme_css", { id });
+    document.getElementById("active-theme").textContent = css;
+    document.documentElement.dataset.theme = id;
+  }, id);
+  try {
+    for (const theme of ["velvet", "candy"]) {
+      await check(`theme ${theme}: every density mode stays readable and inside the window`, async () => {
+        await setTheme(theme);
+        const worst = [];
+        for (const label of ["Roomy", "Compact", "IRC", "Tiny", "Normal"]) {
+          await choose(label);
+          const m = await measure();
+          await shot(A.page, `density-${theme}-${m.mode}`);
+          if (m.sideways) throw new Error(`${label}: the list scrolls sideways`);
+          const cs = m.rows.map((r) => r.contrast).filter((c) => c !== null);
+          if (cs.length && Math.min(...cs) < 3) throw new Error(`${label}: contrast ${Math.min(...cs).toFixed(1)}`);
+          worst.push(cs.length ? Math.min(...cs).toFixed(1) : "?");
+        }
+        return "lowest contrast per mode " + worst.join(", ");
+      });
+    }
+  } finally {
+    await setTheme(original);
+  }
+  await check("the chosen mode is still set after the app reloads", async () => {
+    await choose("Compact");
+    await A.page.reload();
+    if (await A.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 8000 }).then(() => true, () => false)) await unlock(A);
+    await A.page.waitForFunction(() => document.documentElement.dataset.density === "compact", null, { timeout: 15000 });
+    await openDensity();
+    const sel = await A.page.locator(".settings-option.selected").innerText();
+    await A.page.locator(".modal-close").first().click();
+    if (!sel.includes("Compact")) throw new Error("Settings shows " + sel.split("\n")[0]);
+  });
+  await choose("Normal").catch(() => {});
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// Small-window layout (run after `ubuntu`): chosen in Settings, the window shrinks and only the
+// conversation list + one chat remain; channels and DMs open there, unread shows, the server switcher,
+// Settings gear and sending work, the window cannot be dragged below the minimum and nothing important
+// is cut off at that size, Full window brings everything back, and a reload starts small again.
+async function smallwin() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const second = `side-${stamp}`.toLowerCase();
+  const tag = "sw" + stamp;
+  const win = () => A.page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight, layout: document.documentElement.dataset.layout }));
+  const visible = (sel) => A.page.evaluate((sel) => { const e = document.querySelector(sel); if (!e) return false; const r = e.getBoundingClientRect(); return getComputedStyle(e).display !== "none" && r.width > 0 && r.height > 0; }, sel);
+  // Resize A's window from OUTSIDE, the way a person drags its edge: the app (rightly) does not let its own
+  // page resize it. A is the first process start-pair.ps1 recorded. Sizes are in screen pixels.
+  const resize = async (w, h) => {
+    const { execFileSync } = await import("node:child_process");
+    const pathMod = await import("node:path");
+    const pid = fs.readFileSync(pathMod.join(pathMod.dirname(process.env.STATE || "selftest-state.json"), "pids.txt"), "utf8").trim().split(/\s+/)[0];
+    const ps = `Add-Type -Name W -Namespace U -MemberDefinition '[DllImport("user32.dll")] public static extern bool MoveWindow(System.IntPtr h, int x, int y, int w, int g, bool r);'; $p = Get-Process -Id ${pid}; [U.W]::MoveWindow($p.MainWindowHandle, 40, 40, ${w}, ${h}, $true) | Out-Null`;
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", ps]);
+  };
+  // The smallest size Windows lets a person DRAG the window to (WM_GETMINMAXINFO's ptMinTrackSize, screen
+  // pixels, frame included). A program moving the window is not held to it, so that is what we ask for.
+  const minTrack = async () => {
+    const { execFileSync } = await import("node:child_process");
+    const pathMod = await import("node:path");
+    const pid = fs.readFileSync(pathMod.join(pathMod.dirname(process.env.STATE || "selftest-state.json"), "pids.txt"), "utf8").trim().split(/\s+/)[0];
+    const cs = 'using System; using System.Runtime.InteropServices; public static class M { [StructLayout(LayoutKind.Sequential)] public struct P { public int x; public int y; } [StructLayout(LayoutKind.Sequential)] public struct I { public P a; public P b; public P c; public P minT; public P maxT; } [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, ref I l); public static string Get(IntPtr h) { I i = new I(); SendMessage(h, 0x24, IntPtr.Zero, ref i); return i.minT.x + "x" + i.minT.y; } }';
+    const ps = `Add-Type -TypeDefinition '${cs}'; [M]::Get((Get-Process -Id ${pid}).MainWindowHandle)`;
+    const out = execFileSync("powershell.exe", ["-NoProfile", "-Command", ps]).toString().trim();
+    const [w, h] = out.split("x").map(Number);
+    return { w, h };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 1200));
+  // A second channel, and B's direct message to A, so the list has both kinds and something to be unread.
+  await check("setup: a second channel, so there is somewhere to be unread", async () => {
+    await A.page.evaluate(async ([nm, ch]) => {
+      const inv = window.__TAURI_INTERNALS__.invoke;
+      const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+      await inv("create_channel", { serverId: s.id, name: ch, channelType: "Text", categoryId: null });
+    }, [name, second]);
+    await A.page.locator(".channel-item", { hasText: second }).first().waitFor({ timeout: 20000 });
+    await B.page.locator(".channel-item", { hasText: second }).first().waitFor({ timeout: 20000 });
+  });
+  await check("Settings > Window layout > Small window: the window shrinks to the small layout", async () => {
+    await A.page.getByRole("button", { name: "Your settings" }).click();
+    await A.page.locator(".settings-nav-item", { hasText: "Window layout" }).click();
+    await A.page.locator(".settings-option", { hasText: "Small window" }).first().click();
+    await A.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await settle();
+    const w = await win();
+    await shot(A.page, "small-window");
+    if (w.layout !== "small") throw new Error("layout is " + w.layout);
+    if (w.w > 700 || w.h > 500) throw new Error(`window is still ${w.w}x${w.h}`);
+    for (const sel of [".compact-list", ".member-sidebar", ".server-strip"]) {
+      const v = await visible(sel);
+      if (sel === ".compact-list" ? !v : v) throw new Error(`${sel} ${v ? "is" : "is not"} showing`);
+    }
+    const list = await A.page.locator(".compact-list").innerText();
+    for (const t of [name, "CHANNELS", "general", second, "Full window"]) if (!list.includes(t)) throw new Error("the list has no " + t);
+    if ((await A.page.locator(".modal-dialog").count()) > 0) throw new Error("a dialog is still open (hidden?) after choosing the small window");
+    const fit = await A.page.evaluate(() => {
+      const box = document.querySelector(".message-input-textwrap textarea")?.getBoundingClientRect();
+      const send = [...document.querySelectorAll(".message-input-row button")].find((b) => b.innerText.trim() === "Send")?.getBoundingClientRect();
+      return { box: box ? Math.round(box.width) : 0, sendRight: send ? Math.round(send.right) : 99999, w: innerWidth };
+    });
+    if (fit.box < 180) throw new Error(`the message box is only ${fit.box}px wide`);
+    if (fit.sendRight > fit.w) throw new Error(`Send is cut off (${fit.sendRight}px of a ${fit.w}px window)`);
+    return `${w.w}x${w.h}, message box ${fit.box}px, Send inside`;
+  });
+  await check("click a channel in the list: it opens in the chat", async () => {
+    await A.page.locator(".compact-list .channel-item", { hasText: "general" }).first().click();
+    await seesText(A, "hello from B to ubuntu " + stamp, 15000);
+  });
+  await check("a message in another channel makes its row unread", async () => {
+    await B.page.locator(".channel-item", { hasText: second }).first().click();
+    await sendText(B, `${tag} over here`);
+    await A.page.locator(".compact-list .channel-item.unread", { hasText: second }).waitFor({ timeout: 20000 });
+    await shot(A.page, "small-window-unread");
+    await A.page.locator(".compact-list .channel-item", { hasText: second }).first().click();
+    await seesText(A, `${tag} over here`, 15000);
+  });
+  await check("click the server name: the server list and + Add server appear; Add server opens its dialog", async () => {
+    await A.page.locator(".compact-list .server-name").click();
+    await A.page.locator(".compact-list .channel-category", { hasText: "SERVERS" }).waitFor({ timeout: 5000 });
+    await A.page.locator(".compact-list .channel-item", { hasText: "+ Add server" }).click();
+    await A.page.locator(".modal-dialog:visible").first().waitFor({ timeout: 5000 });
+    await shot(A.page, "small-window-add-server");
+    await A.page.locator(".modal-dialog:visible .modal-close").first().click();
+  });
+  await check("the gear opens Settings; typing and sending works from the small window", async () => {
+    await A.page.locator(".compact-list .server-invite-btn[title='Settings']").click();
+    await A.page.getByText(/Your Settings/).first().waitFor({ timeout: 5000 });
+    await A.page.locator(".modal-dialog:visible .modal-close").first().click();
+    await A.page.locator(".compact-list .channel-item", { hasText: "general" }).first().click();
+    await sendText(A, `${tag} from the small window`);
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await seesText(B, `${tag} from the small window`, 20000);
+  });
+  await check("the window cannot be made smaller than about 380x280, and at that size the chat header and message box fit", async () => {
+    const min = await minTrack();
+    const dpr = await A.page.evaluate(() => window.devicePixelRatio);
+    // Allow for the frame and title bar: the INSIDE must still be about 380x280 logical.
+    if (!(min.w / dpr >= 380 && min.h / dpr >= 280)) throw new Error(`Windows lets the window be dragged down to ${min.w}x${min.h} screen px (scale ${dpr})`);
+    await resize(min.w, min.h);
+    await settle();
+    const w = await win();
+    await shot(A.page, "small-window-minimum");
+    const cut = await A.page.evaluate(() => {
+      const bad = [];
+      for (const sel of [".channel-header", ".message-input-textwrap textarea"]) {
+        const e = document.querySelector(sel);
+        if (!e) { bad.push(sel + " missing"); continue; }
+        const r = e.getBoundingClientRect();
+        if (r.bottom > window.innerHeight + 1 || r.right > window.innerWidth + 1 || r.width < 40 || r.height < 12) bad.push(`${sel} ${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`);
+      }
+      return bad;
+    });
+    if (cut.length) throw new Error("cut off at the minimum: " + cut.join("; "));
+    return `drag minimum ${min.w}x${min.h} screen px, inside ${w.w}x${w.h}`;
+  });
+  await check("Full window brings the window and everything back", async () => {
+    if (await A.page.locator(".phone-back").isVisible().catch(() => false)) await A.page.locator(".phone-back").click();
+    await A.page.locator(".compact-list button", { hasText: "Full window" }).click();
+    await settle();
+    const w = await win();
+    if (w.layout !== "full") throw new Error("layout is " + w.layout);
+    if (w.w < 1000 || w.h < 650) throw new Error(`window only grew to ${w.w}x${w.h}`);
+    if (!(await visible(".member-sidebar"))) throw new Error("the member list did not come back");
+    if (!(await visible(".server-strip"))) throw new Error("the server column did not come back");
+    return `${w.w}x${w.h}`;
+  });
+  await check("a reload while in the small layout starts small again", async () => {
+    await A.page.evaluate(() => localStorage.setItem("farder.layout", "small"));
+    await A.page.reload();
+    if (await A.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 8000 }).then(() => true, () => false)) await unlock(A);
+    await A.page.waitForFunction(() => document.documentElement.dataset.layout === "small", null, { timeout: 15000 });
+    await settle();
+    const w = await win();
+    if (w.w > 700) throw new Error(`layout small but the window is ${w.w}x${w.h}`);
+    return `${w.w}x${w.h}`;
+  });
+  // Back to the full window for whatever runs next.
+  await A.page.locator(".compact-list button", { hasText: "Full window" }).click().catch(() => {});
+  await settle();
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
 }
@@ -1804,6 +2181,8 @@ try {
   else if (scenario === "brake") await brake();
   else if (scenario === "failover") await failover();
   else if (scenario === "e2ee") await e2ee();
+  else if (scenario === "density") await density();
+  else if (scenario === "smallwin") await smallwin();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
