@@ -5,6 +5,7 @@ pub mod media;
 pub mod encryption;
 pub mod event_log;
 pub mod event_log_state;
+pub mod host_term;
 pub mod pin;
 pub mod profile;
 pub mod recovery;

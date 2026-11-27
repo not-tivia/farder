@@ -37,6 +37,31 @@ Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir 
 | `invite_from_link(s) -> (Option<SocketAddr>, code)` | Parse the three invite forms above. |
 | `state_path(dir)` | Where the "joined" flag is kept. |
 
+## Promotion (a copy becomes the host)
+
+Design: `docs/specs/2026-11-27-promotion-design.md`. Step 1 (server side only) is built: the owner signs a `HostTerm`
+(`farder-crypto::host_term`) and sends `PromoteToHost { term }` to a running read-only copy, which becomes writable
+**without a restart**. `GetHostTerm` returns the stored term on both host and copy (`None` = original host).
+
+The copy accepts only if ALL hold (each refusal is a plain reason and the copy stays read-only):
+
+1. it is read-only (a writable host refuses: "already the writable host");
+2. the term verifies against the CURRENT owner (genesis owner, or the owner after a completed recovery takeover, as the fold knows it);
+3. `server_id` is this server's;
+4. `term` is higher than the stored term (none stored = 0);
+5. `host_key` is this server's own identity: the 32 bytes in `--data-dir/server_id` (the TLS certificate is regenerated each start, so it cannot be the identity). Give each copy its own `--data-dir`; a restored backup carries the original's `server_id`;
+6. `after_event` is the hash of the newest event in the copy's log.
+
+On accept the term is saved in `server_settings` (`host_term`), SQLite `query_only` is lifted, the server turns writable, the
+retention/bot/widget jobs start, and one `PROMOTED:` line is logged. Not restarted by promotion: automatic backups
+(`--backup-dir`) and `--relay` registration begin at the next start.
+
+Start-up: a database with a stored term whose `host_key` is not this machine's identity starts READ-ONLY even without
+`--read-only` (it was replaced). A promoted copy restarted from its `--db` with the same `--data-dir` stays writable with the
+same term. Not yet: asking peers for a higher term, client-side fencing, the UI, and a way for the app to learn the copy's `host_key`.
+
+Test: `cargo test -p farder-replica --test replica promotes` (real server binary: promote, every refusal, restart).
+
 ## Tests
 
 `cargo test -p farder-replica` (unit tests for the link forms; integration tests against a real server, including the

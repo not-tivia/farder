@@ -124,7 +124,19 @@ pub struct ServerState {
     /// A read-only COPY of a server (`--read-only`): serves history and members from a replica's copy
     /// while the host is down, and refuses everything that writes. SQLite itself is also told not to
     /// write (`query_only`), so the copy cannot change even if a code path forgets to check this.
-    pub read_only: bool,
+    ///
+    /// Atomic because a read-only copy can be PROMOTED at runtime (`PromoteToHost`): read it with
+    /// [`ServerState::is_read_only`]; only `host_term::promote` and start-up write it.
+    pub read_only: std::sync::atomic::AtomicBool,
+
+    /// This machine's own host identity: the 32-byte id in `<data_dir>/server_id` (the only stable
+    /// identity a server has; its TLS certificate is regenerated on every start). A `HostTerm` is
+    /// accepted only if its `host_key` equals this. `None` in unit tests that never set it.
+    pub host_identity: std::sync::Mutex<Option<[u8; 32]>>,
+
+    /// Run when a read-only copy becomes the host, to start the background jobs a copy does not run
+    /// (set by `main`). `None` in tests.
+    pub on_promoted: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 /// Default waiting period for a recovery takeover: 72 hours.
@@ -158,8 +170,15 @@ impl ServerState {
             recovery_wait_secs: DEFAULT_RECOVERY_WAIT_SECS,
             brake: crate::brake::Brake::default(),
             snapshots: crate::snapshot::Snapshots::default(),
-            read_only: false,
+            read_only: std::sync::atomic::AtomicBool::new(false),
+            host_identity: std::sync::Mutex::new(None),
+            on_promoted: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Whether this server is currently a read-only copy (see the `read_only` field).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Who the owner is RIGHT NOW. On a server with a signed history the history is the

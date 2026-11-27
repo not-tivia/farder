@@ -1,6 +1,6 @@
 # farder-crypto
 
-> **File(s):** `crates/farder-crypto/src/identity.rs`, `key_exchange.rs`, `encryption.rs`, `media.rs`, `recovery.rs`, `event_log.rs`, `event_log_state.rs`, `lib.rs`
+> **File(s):** `crates/farder-crypto/src/identity.rs`, `key_exchange.rs`, `encryption.rs`, `media.rs`, `recovery.rs`, `host_term.rs`, `event_log.rs`, `event_log_state.rs`, `lib.rs`
 > **Layer:** Crypto crate
 > **Last reviewed:** 2026-07-28
 
@@ -353,6 +353,19 @@ TypeScript types in `types.ts` use `{ bytes: number[] }` for the serde form. Cal
 `derive_stream_key` generates a fresh random key. `VoiceController` calls this every time it sends a `StreamKeyOffer` — but whether that is truly once per voice-channel join or repeated during re-keys is controlled by `voice/mod.rs`, not by this crate. The crypto layer itself provides no replay protection beyond the `seq` nonce counter.
 
 ---
+
+## `host_term.rs` — owner-signed hosting terms (promotion)
+
+`HostTerm { server_id, term, host_key: [u8; 32], addresses, after_event, issued_at, signature }`: the owner's statement "from term N on, the machine whose host identity is `host_key` is the host, continuing after event `after_event`". Term 0 is the original host, implicit and never signed.
+
+| Item | What it does |
+|---|---|
+| `HostTerm::sign(owner: &Keypair, server_id, term, host_key, addresses, after_event, issued_at) -> HostTerm` | Build and sign. |
+| `HostTerm::verify(&self, owner: &PublicKey) -> Result<()>` | Ok only if `owner` signed exactly these fields. Any changed field, another key, or `term == 0` fails. |
+| `HostTerm::signed_bytes(&self) -> Vec<u8>` | The signed bytes: **positional** `rmp_serde::to_vec` of every field except `signature`. Never route these through `farder_protocol::codec` (named maps); see "Compatibility" in `protocol.md`. |
+| `to_bytes` / `from_bytes` | Storage form (whole record, positional). The server keeps it in `server_settings` under `host_term` (hex). |
+
+`host_key` is the 32-byte id in the host's `--data-dir/server_id` file (the only stable identity a server has: its TLS certificate is regenerated at every start). Tests: `cargo test -p farder-crypto host_term`.
 
 ## `event_log.rs` — the signed event type system
 

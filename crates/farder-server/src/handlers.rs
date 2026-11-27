@@ -638,6 +638,8 @@ fn is_read_only_request(req: &ServerRequest) -> bool {
             | ServerRequest::Subscribe { .. }
             | ServerRequest::NegotiateProtocol { .. }
             | ServerRequest::GetOwnChainHead { .. }
+            | ServerRequest::GetHostTerm
+            | ServerRequest::PromoteToHost { .. }
     )
 }
 
@@ -710,7 +712,7 @@ fn handle_request_dispatch(
     state: &Arc<ServerState>,
 ) -> Result<HandleResult> {
     // A read-only copy answers reads and refuses everything else, with a plain reason.
-    if state.read_only && !is_read_only_request(&request) {
+    if state.is_read_only() && !is_read_only_request(&request) {
         return err(READ_ONLY_COPY);
     }
     if !is_destructive(&request) {
@@ -2739,6 +2741,17 @@ fn handle_request_inner(
             }
             let event = crate::event_ingest::load_chain_head(conn, member, &device)?;
             ok(ServerResponse::OwnChainHead { event })
+        }
+        ServerRequest::GetHostTerm => {
+            // Any member; the host and a read-only copy answer the same way. `None` = original host.
+            ok(ServerResponse::HostTerm { term: crate::promotion::stored_term(conn)? })
+        }
+        ServerRequest::PromoteToHost { term } => {
+            // The signed term is the authority, not the sender: anyone connected may carry it.
+            match crate::promotion::promote(conn, state, term) {
+                Ok(()) => ok(ServerResponse::Ok),
+                Err(reason) => err(&reason),
+            }
         }
         ServerRequest::SetReplica { member: target, enabled } => {
             if !is_owner { return err("only the owner can allow a replica"); }
@@ -10586,6 +10599,8 @@ mod tests {
                 | ServerRequest::SnapshotBegin
                 | ServerRequest::SnapshotChunk { .. }
                 | ServerRequest::GetOwnChainHead { .. }
+                | ServerRequest::GetHostTerm
+                | ServerRequest::PromoteToHost { .. }
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
