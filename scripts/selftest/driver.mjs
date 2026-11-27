@@ -592,6 +592,40 @@ async function themes() {
   await A.browser.close().catch(() => {});
 }
 
+// A small real PNG (16x16, solid orange), written to the shots folder; returns { path, fileName, png }.
+async function orangePng(stamp, label = "orange") {
+  const { deflateSync } = await import("node:zlib");
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const len = Buffer.alloc(4); len.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const cs = Buffer.alloc(4); cs.writeUInt32BE(crc(td)); return Buffer.concat([len, td, cs]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(16, 0); ihdr.writeUInt32BE(16, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const row = Buffer.concat([Buffer.from([0]), Buffer.concat(Array.from({ length: 16 }, () => Buffer.from([255, 140, 0])))]);
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.concat(Array.from({ length: 16 }, () => row)))), chunk("IEND", Buffer.alloc(0))]);
+  const dir = process.env.SHOTS || "selftest-shots";
+  fs.mkdirSync(dir, { recursive: true });
+  const fileName = `${label}-${stamp}.png`;
+  const path = (await import("node:path")).resolve(dir, fileName);
+  fs.writeFileSync(path, png);
+  return { path, fileName, png };
+}
+
+// Drop a file on a window (the same event Windows sends when you drag one in), wait until it is staged,
+// then send it with a caption.
+async function dropAndSend(c, path, fileName, caption) {
+  await c.page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "tauri://drag-drop", payload: { paths: [p], position: { x: 400, y: 400 } } }), path);
+  await c.page.getByText(fileName).first().waitFor({ timeout: 30000 });
+  await sendText(c, caption);
+  await seesText(c, caption, 30000);
+}
+
+// The picture in the message with `caption` has actually loaded on c's screen.
+async function pictureLoads(c, caption) {
+  const msg = c.page.locator(".message", { hasText: caption }).first();
+  await msg.locator("img:not(.message-avatar img)").last().waitFor({ timeout: 30000 });
+  const ok = await msg.locator("img").evaluateAll((imgs) => imgs.some((i) => i.naturalWidth >= 8 && !i.classList.contains("message-avatar")));
+  if (!ok) throw new Error("the picture element is there but did not load (naturalWidth 0)");
+}
+
 // A file attachment: drop a picture on A's window (the same event Windows sends when
 // you drag a file in), send it, and B must receive it AND be able to fetch and show
 // it. Run after `core`.
@@ -604,33 +638,15 @@ async function attach_file() {
     await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
     await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
   }
-  // A small real PNG (16x16, solid orange).
-  const { deflateSync } = await import("node:zlib");
-  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
-  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
-  const chunk = (t, d) => { const len = Buffer.alloc(4); len.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const cs = Buffer.alloc(4); cs.writeUInt32BE(crc(td)); return Buffer.concat([len, td, cs]); };
-  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(16, 0); ihdr.writeUInt32BE(16, 4); ihdr[8] = 8; ihdr[9] = 2;
-  const row = Buffer.concat([Buffer.from([0]), Buffer.concat(Array.from({ length: 16 }, () => Buffer.from([255, 140, 0])))]);
-  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.concat(Array.from({ length: 16 }, () => row)))), chunk("IEND", Buffer.alloc(0))]);
-  const dir = process.env.SHOTS || "selftest-shots";
-  fs.mkdirSync(dir, { recursive: true });
-  const fileName = `orange-${stamp}.png`;
-  const path = (await import("node:path")).resolve(dir, fileName);
-  fs.writeFileSync(path, png);
+  const { path, fileName } = await orangePng(stamp);
   await check("A: drop a picture on the window, it is staged, then sent with a caption", async () => {
-    await A.page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "tauri://drag-drop", payload: { paths: [p], position: { x: 400, y: 400 } } }), path);
-    await A.page.getByText(fileName).first().waitFor({ timeout: 30000 });
-    await shot(A.page, "A-file-staged");
-    await sendText(A, "with a file " + stamp);
-    await seesText(A, "with a file " + stamp, 30000);
+    await dropAndSend(A, path, fileName, "with a file " + stamp);
+    await shot(A.page, "A-file-sent");
   });
   await check("B: receives the message with the file, and the picture actually loads", async () => {
     await seesText(B, "with a file " + stamp, 30000);
-    const msg = B.page.locator(".message", { hasText: "with a file " + stamp }).first();
-    await msg.locator("img:not(.message-avatar img)").last().waitFor({ timeout: 30000 });
-    const ok = await msg.locator("img").evaluateAll((imgs) => imgs.some((i) => i.naturalWidth >= 8 && !i.classList.contains("message-avatar")));
+    await pictureLoads(B, "with a file " + stamp);
     await shot(B.page, "B-file");
-    if (!ok) throw new Error("the picture element is there but did not load (naturalWidth 0)");
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
@@ -1582,6 +1598,13 @@ async function failover() {
       await setBackup(B);
       await B.page.locator(".modal-close").first().click();
     });
+    await check("A posts a picture while the host is up, and B sees it load", async () => {
+      const { path, fileName } = await orangePng(stamp, "before-outage");
+      for (const c of [A, B]) await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+      await dropAndSend(A, path, fileName, "picture before the outage " + stamp);
+      await seesText(B, "picture before the outage " + stamp, 30000);
+      await pictureLoads(B, "picture before the outage " + stamp);
+    });
   } else if (phase === "down") {
     await check("with the host off, B ends up on the saved copy: the banner names the backup address", async () => {
       const t0 = Date.now();
@@ -1611,6 +1634,33 @@ async function failover() {
       await B.page.locator(".channel-item", { hasText: "general" }).first().click();
       await seesText(B, "hello from A to ubuntu " + stamp, 30000);
       return `route ${r.route}, ${r.contents.length} messages from the copy`;
+    });
+    // The picture on screen could be the app's own memory of it, so fetch the file again over the
+    // connection that is now on the copy, and compare the bytes with what A posted.
+    await check("with the host off, the picture posted earlier comes from the copy, byte for byte", async () => {
+      const { png } = await orangePng(stamp, "before-outage");
+      const r = await B.page.evaluate(async ([nm, caption]) => {
+        const inv = window.__TAURI_INTERNALS__.invoke;
+        const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+        const route = await inv("get_connection_route", { serverId: s.id });
+        const info = await inv("get_server_info_v2", { serverId: s.id });
+        const general = info.channels.map((c) => c.base || c).find((c) => c.name === "general");
+        const msgs = await inv("fetch_history", { serverId: s.id, channelId: general.id, beforeId: null, limit: 50 });
+        const m = msgs.find((x) => (x.content || "").includes(caption));
+        if (!m) return { err: "the copy has no message: " + caption };
+        const a = (m.attachments || [])[0];
+        if (!a) return { err: "the message came back without its attachment" };
+        const d = await inv("download_file", { serverId: s.id, fileId: a.file_id });
+        return { route, name: a.name, url: d.data_url || "" };
+      }, [name, "picture before the outage " + stamp]);
+      if (r.err) throw new Error(r.err);
+      if (r.route !== backup) throw new Error(`route is ${r.route}, not ${backup}`);
+      const got = Buffer.from(r.url.replace(/^data:[^,]*,/, ""), "base64");
+      if (!got.equals(png)) throw new Error(`the copy served ${got.length} bytes that do not match the ${png.length} posted`);
+      await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+      await pictureLoads(B, "picture before the outage " + stamp);
+      await shot(B.page, "B-picture-from-copy");
+      return `${r.name}: ${got.length} bytes, identical, via ${r.route}`;
     });
     await check("the server keeps its own name on the copy (not renamed to the default)", async () => {
       await B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 5000 });

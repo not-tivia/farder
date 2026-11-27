@@ -91,7 +91,8 @@ takes the link straight from the app's invite dialog.
 
 **Attachments (2026-11-26):** after each database pull the replica fetches every file the copy lists (checked against its SHA-256)
 and removes files the host redacted or deleted; the read-only copy serves them with `--storage-dir`. Tested in
-`cargo test -p farder-replica` against the real server (and proven to fail without the server's replica download rule).
+`cargo test -p farder-replica` against the real server (and proven to fail without the server's replica download rule), and through the app in `ubuntu-suite.sh failover`: a picture
+posted before the host is killed comes from the copy byte for byte and loads on screen.
 
 Not done: promotion (a copy becomes the host), and running the replica plus
 its read-only server as a service on the Beelink.

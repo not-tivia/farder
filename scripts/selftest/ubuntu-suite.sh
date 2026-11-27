@@ -168,6 +168,7 @@ suite_failover() {
   echo "== the owner allows it in Backup copy; A and B save the backup address"
   FAILOVER_PHASE=allow winrun failover
   "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once > "$D/rep2.log" 2>&1; RC=$?; echo "replica exit: $RC (want 0): $(grep 'copy saved' "$D/rep2.log")"
+  echo "replica files: $(grep -i 'files' "$D/rep2.log" | tail -1) | on disk: $(find "$D/rep/files" -type f | wc -l)"
   [ $RC = 0 ] || { sed 's/^/  replica: /' "$D/rep2.log"; pkill -x farder-server; return 1; }
   echo "== the copy serves read-only; the HOST IS STOPPED"
   setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
