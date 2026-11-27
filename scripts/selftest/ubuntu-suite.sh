@@ -195,6 +195,7 @@ suite_ui() {  # layout features measured in the real apps
   export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
   echo "== claim, invite, chat"; winrun ubuntu
   echo "== message density"; winrun density
+  echo "== small window"; winrun smallwin
   pkill -x farder-server
 }
 

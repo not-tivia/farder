@@ -44,3 +44,9 @@ test("each layout has a label and a description", () => {
     assert.ok(l.LAYOUT_INFO[k].description.length > 0);
   }
 });
+
+test("in the small window the message box gets its own line and the buttons wrap under it", () => {
+  // Seen in the two-app suite at 560x380: the box was a sliver and Send was cut off.
+  assert.match(l.LAYOUT_CSS, /html\[data-layout="small"\] \.message-input-row \{[^}]*flex-wrap: wrap/);
+  assert.match(l.LAYOUT_CSS, /html\[data-layout="small"\] \.message-input-textwrap \{[^}]*flex: 1 0 100% !important/);
+});

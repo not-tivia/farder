@@ -1863,6 +1863,147 @@ async function density() {
   await B.browser.close().catch(() => {});
 }
 
+// Small-window layout (run after `ubuntu`): chosen in Settings, the window shrinks and only the
+// conversation list + one chat remain; channels and DMs open there, unread shows, the server switcher,
+// Settings gear and sending work, the window cannot be dragged below the minimum and nothing important
+// is cut off at that size, Full window brings everything back, and a reload starts small again.
+async function smallwin() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const second = `side-${stamp}`.toLowerCase();
+  const tag = "sw" + stamp;
+  const win = () => A.page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight, layout: document.documentElement.dataset.layout }));
+  const visible = (sel) => A.page.evaluate((sel) => { const e = document.querySelector(sel); if (!e) return false; const r = e.getBoundingClientRect(); return getComputedStyle(e).display !== "none" && r.width > 0 && r.height > 0; }, sel);
+  // Resize A's window from OUTSIDE, the way a person drags its edge: the app (rightly) does not let its own
+  // page resize it. A is the first process start-pair.ps1 recorded. Sizes are in screen pixels.
+  const resize = async (w, h) => {
+    const { execFileSync } = await import("node:child_process");
+    const pathMod = await import("node:path");
+    const pid = fs.readFileSync(pathMod.join(pathMod.dirname(process.env.STATE || "selftest-state.json"), "pids.txt"), "utf8").trim().split(/\s+/)[0];
+    const ps = `Add-Type -Name W -Namespace U -MemberDefinition '[DllImport("user32.dll")] public static extern bool MoveWindow(System.IntPtr h, int x, int y, int w, int g, bool r);'; $p = Get-Process -Id ${pid}; [U.W]::MoveWindow($p.MainWindowHandle, 40, 40, ${w}, ${h}, $true) | Out-Null`;
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", ps]);
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 1200));
+  // A second channel, and B's direct message to A, so the list has both kinds and something to be unread.
+  await check("setup: a second channel, so there is somewhere to be unread", async () => {
+    await A.page.evaluate(async ([nm, ch]) => {
+      const inv = window.__TAURI_INTERNALS__.invoke;
+      const s = (await inv("get_saved_servers")).find((x) => x.name === nm);
+      await inv("create_channel", { serverId: s.id, name: ch, channelType: "Text", categoryId: null });
+    }, [name, second]);
+    await A.page.locator(".channel-item", { hasText: second }).first().waitFor({ timeout: 20000 });
+    await B.page.locator(".channel-item", { hasText: second }).first().waitFor({ timeout: 20000 });
+  });
+  await check("Settings > Window layout > Small window: the window shrinks to the small layout", async () => {
+    await A.page.getByRole("button", { name: "Your settings" }).click();
+    await A.page.locator(".settings-nav-item", { hasText: "Window layout" }).click();
+    await A.page.locator(".settings-option", { hasText: "Small window" }).first().click();
+    await A.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await settle();
+    const w = await win();
+    await shot(A.page, "small-window");
+    if (w.layout !== "small") throw new Error("layout is " + w.layout);
+    if (w.w > 700 || w.h > 500) throw new Error(`window is still ${w.w}x${w.h}`);
+    for (const sel of [".compact-list", ".member-sidebar", ".server-strip"]) {
+      const v = await visible(sel);
+      if (sel === ".compact-list" ? !v : v) throw new Error(`${sel} ${v ? "is" : "is not"} showing`);
+    }
+    const list = await A.page.locator(".compact-list").innerText();
+    for (const t of [name, "CHANNELS", "general", second, "Full window"]) if (!list.includes(t)) throw new Error("the list has no " + t);
+    if ((await A.page.locator(".modal-dialog").count()) > 0) throw new Error("a dialog is still open (hidden?) after choosing the small window");
+    const fit = await A.page.evaluate(() => {
+      const box = document.querySelector(".message-input-textwrap textarea")?.getBoundingClientRect();
+      const send = [...document.querySelectorAll(".message-input-row button")].find((b) => b.innerText.trim() === "Send")?.getBoundingClientRect();
+      return { box: box ? Math.round(box.width) : 0, sendRight: send ? Math.round(send.right) : 99999, w: innerWidth };
+    });
+    if (fit.box < 180) throw new Error(`the message box is only ${fit.box}px wide`);
+    if (fit.sendRight > fit.w) throw new Error(`Send is cut off (${fit.sendRight}px of a ${fit.w}px window)`);
+    return `${w.w}x${w.h}, message box ${fit.box}px, Send inside`;
+  });
+  await check("click a channel in the list: it opens in the chat", async () => {
+    await A.page.locator(".compact-list .channel-item", { hasText: "general" }).first().click();
+    await seesText(A, "hello from B to ubuntu " + stamp, 15000);
+  });
+  await check("a message in another channel makes its row unread", async () => {
+    await B.page.locator(".channel-item", { hasText: second }).first().click();
+    await sendText(B, `${tag} over here`);
+    await A.page.locator(".compact-list .channel-item.unread", { hasText: second }).waitFor({ timeout: 20000 });
+    await shot(A.page, "small-window-unread");
+    await A.page.locator(".compact-list .channel-item", { hasText: second }).first().click();
+    await seesText(A, `${tag} over here`, 15000);
+  });
+  await check("click the server name: the server list and + Add server appear; Add server opens its dialog", async () => {
+    await A.page.locator(".compact-list .server-name").click();
+    await A.page.locator(".compact-list .channel-category", { hasText: "SERVERS" }).waitFor({ timeout: 5000 });
+    await A.page.locator(".compact-list .channel-item", { hasText: "+ Add server" }).click();
+    await A.page.locator(".modal-dialog:visible").first().waitFor({ timeout: 5000 });
+    await shot(A.page, "small-window-add-server");
+    await A.page.locator(".modal-dialog:visible .modal-close").first().click();
+  });
+  await check("the gear opens Settings; typing and sending works from the small window", async () => {
+    await A.page.locator(".compact-list .server-invite-btn[title='Settings']").click();
+    await A.page.getByText(/Your Settings/).first().waitFor({ timeout: 5000 });
+    await A.page.locator(".modal-dialog:visible .modal-close").first().click();
+    await A.page.locator(".compact-list .channel-item", { hasText: "general" }).first().click();
+    await sendText(A, `${tag} from the small window`);
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await seesText(B, `${tag} from the small window`, 20000);
+  });
+  await check("the window cannot be made smaller than about 380x280, and at that size the chat header and message box fit", async () => {
+    await resize(200, 150);
+    await settle();
+    const w = await win();
+    await shot(A.page, "small-window-minimum");
+    if (w.w < 360 || w.h < 260) throw new Error(`window went down to ${w.w}x${w.h}`);
+    const cut = await A.page.evaluate(() => {
+      const bad = [];
+      for (const sel of [".channel-header", ".message-input-textwrap textarea"]) {
+        const e = document.querySelector(sel);
+        if (!e) { bad.push(sel + " missing"); continue; }
+        const r = e.getBoundingClientRect();
+        if (r.bottom > window.innerHeight + 1 || r.right > window.innerWidth + 1 || r.width < 40 || r.height < 12) bad.push(`${sel} ${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`);
+      }
+      return bad;
+    });
+    if (cut.length) throw new Error("cut off at the minimum: " + cut.join("; "));
+    return `smallest ${w.w}x${w.h}`;
+  });
+  await check("Full window brings the window and everything back", async () => {
+    if (await A.page.locator(".phone-back").isVisible().catch(() => false)) await A.page.locator(".phone-back").click();
+    await A.page.locator(".compact-list button", { hasText: "Full window" }).click();
+    await settle();
+    const w = await win();
+    if (w.layout !== "full") throw new Error("layout is " + w.layout);
+    if (w.w < 1000 || w.h < 650) throw new Error(`window only grew to ${w.w}x${w.h}`);
+    if (!(await visible(".member-sidebar"))) throw new Error("the member list did not come back");
+    if (!(await visible(".server-strip"))) throw new Error("the server column did not come back");
+    return `${w.w}x${w.h}`;
+  });
+  await check("a reload while in the small layout starts small again", async () => {
+    await A.page.evaluate(() => localStorage.setItem("farder.layout", "small"));
+    await A.page.reload();
+    if (await A.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 8000 }).then(() => true, () => false)) await unlock(A);
+    await A.page.waitForFunction(() => document.documentElement.dataset.layout === "small", null, { timeout: 15000 });
+    await settle();
+    const w = await win();
+    if (w.w > 700) throw new Error(`layout small but the window is ${w.w}x${w.h}`);
+    return `${w.w}x${w.h}`;
+  });
+  // Back to the full window for whatever runs next.
+  await A.page.locator(".compact-list button", { hasText: "Full window" }).click().catch(() => {});
+  await settle();
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // An ENCRYPTED channel through the real app (run after `ubuntu`): the owner makes it in Server Settings, B is
 // added by the app on its own, both send and read. Whether the server ever held the words is checked by
 // ubuntu-suite.sh `e2ee` on the server's raw database bytes afterwards (E2EE_WORD is the secret marker).
@@ -2025,6 +2166,7 @@ try {
   else if (scenario === "failover") await failover();
   else if (scenario === "e2ee") await e2ee();
   else if (scenario === "density") await density();
+  else if (scenario === "smallwin") await smallwin();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
