@@ -1138,10 +1138,12 @@ fn handle_request_inner(
             if !permissions::has(perms, permissions::MANAGE_CHANNEL) {
                 return err("missing MANAGE_CHANNEL permission");
             }
-            // Capture name BEFORE delete so the audit row has it.
-            let prev_channel_name = channels::get_channel(conn, channel_id)?
-                .map(|ch| ch.name)
-                .unwrap_or_default();
+            // Capture name BEFORE delete so the audit row has it. A channel that is already gone
+            // is refused (an Error costs no brake budget, so a stale retry is harmless).
+            let Some(prev_channel) = channels::get_channel(conn, channel_id)? else {
+                return err("that channel no longer exists");
+            };
+            let prev_channel_name = prev_channel.name;
             channels::soft_delete_channel(conn, channel_id)?;
             let mut events = vec![BroadcastEvent {
                 target: EventTarget::All,
@@ -12095,6 +12097,31 @@ mod tests {
             let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: *id }, "", &off).unwrap();
             assert!(!matches!(r.response, ServerResponse::Error { .. }));
         }
+    }
+
+    #[test]
+    fn deleting_a_missing_channel_is_refused() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: 987_654 }, "", &st).unwrap();
+        assert!(matches!(&r.response, ServerResponse::Error { reason } if reason.contains("no longer exists")), "{:?}", r.response);
+    }
+
+    #[test]
+    fn refused_deletes_of_missing_channels_do_not_use_brake_budget() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        for i in 0..5u64 {
+            let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: 900_000 + i }, "", &st).unwrap();
+            assert!(matches!(r.response, ServerResponse::Error { .. }));
+        }
+        let ids: Vec<u64> = (0..6).map(|i| channels::create_channel(&conn, &format!("c{i}"), ChannelType::Text, None, i).unwrap()).collect();
+        for id in &ids[..5] {
+            let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: *id }, "", &st).unwrap();
+            assert!(!matches!(r.response, ServerResponse::Error { .. }), "{:?}", r.response);
+        }
+        let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: ids[5] }, "", &st).unwrap();
+        assert!(matches!(&r.response, ServerResponse::Error { reason } if reason.contains("slow down")), "{:?}", r.response);
     }
 
     #[test]
