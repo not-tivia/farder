@@ -13,6 +13,9 @@ on:
 
 jobs:
   implement:
+    # Public repo: only issues opened by the owner start a run, so a stranger's
+    # issue can never spend the token or get an agent with write access.
+    if: github.event.issue.author_association == 'OWNER'
     runs-on: ubuntu-latest
     permissions:
       contents: write
