@@ -1,0 +1,56 @@
+name: Claude Autonomous Issue Fixer
+
+# Fires on every newly opened issue. Claude reads the issue, implements the
+# change on a branch, and opens a pull request. No @claude mention needed.
+#
+# NOTE: this workflow only runs once it lives on the repo's DEFAULT branch.
+# Prereqs (one-time): install the Claude GitHub App on this repo
+# (https://github.com/apps/claude) and set the CLAUDE_CODE_OAUTH_TOKEN repo
+# secret (generate it with `claude setup-token`).
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  implement:
+    # Public repo: only issues opened by the owner start a run, so a stranger's
+    # issue can never spend the token or get an agent with write access.
+    if: github.event.issue.author_association == 'OWNER'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so Claude can branch, diff, and read blame.
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            A new GitHub issue (#${{ github.event.issue.number }}) was just opened
+            in this repository. Your job is to implement it and open a pull request.
+
+            Steps:
+            1. Read the issue:
+                 gh issue view ${{ github.event.issue.number }}
+            2. If the repo has a CLAUDE.md, AGENTS.md, HANDOFF.md, or README,
+               read it and follow its conventions.
+            3. Implement exactly what the issue asks. Do not expand scope.
+            4. If the project has tests, run them and make sure they pass.
+            5. Create a new branch named claude/issue-${{ github.event.issue.number }},
+               commit your work there, push it, and open a pull request against the
+               default branch with `gh pr create`. The PR body MUST contain
+               "Closes #${{ github.event.issue.number }}".
+
+            If the issue is too vague to act on safely, or asks for something out of
+            scope or destructive, DO NOT guess and DO NOT open a PR. Instead comment
+            on the issue with `gh issue comment` explaining what you need, and stop.
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash"
