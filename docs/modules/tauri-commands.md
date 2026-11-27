@@ -428,9 +428,14 @@ non-farder one) is skipped, not an error. Adds are staged and applied only once 
 server accepts them, so a refused add (`CommitRefused`, usually another commit won the
 epoch) changes nothing: the pass stops there with `catch_up_needed: true`, and the
 frontend's `addMembersWithCatchUp` applies the winning commit
-(`process_mls_control_events`) and runs the add once more. It never loops. Known gap:
-if an add's ANSWER is lost and the log later shows it was accepted, the steward applies
-it but the Welcome was never sent, so that member waits for a new add.
+(`process_mls_control_events`) and runs the add once more. It never loops. If an add's
+ANSWER is lost (`E2eeError::AddAnswerLost`), the add stays staged, the Welcome is saved to
+`servers/<log_server_id>/mls/<channel_id>.pending_welcome.json` (`mls_state::PendingAddWelcome`),
+the member is reported skipped with `catch_up_needed: true`, and the pass stops. The next
+`process_mls_control_events` (or sealed send) settles the commit from the log
+(`settle_leftover_refresh`): accepted -> the saved Welcome is submitted once
+(`submit_unsent_welcome`, which refuses unless the log's commit is ours and declares that
+member) and the file deleted; lost the epoch / never arrived -> deleted unsent.
 **Side effects:** advances + persists the device chain and
 `servers/<log_server_id>/mls/<channel_id>.mls_state.json` after each accepted
 commit (updating the record, never rebuilding it).
