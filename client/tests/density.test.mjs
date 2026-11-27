@@ -43,3 +43,17 @@ test("the short clock is HH:MM with no day words", () => {
   const s = d.shortClock(1_700_000_000);
   assert.match(s, /^\d{2}:\d{2}$/);
 });
+
+test("in the one-row modes the pointing-only reaction bar floats instead of costing a line", () => {
+  // Seen in the two-app suite: every compact/IRC/tiny row was ~50px, not one line, because
+  // the empty hover-only reaction bar got a full-width line of its own.
+  for (const k of ["compact", "irc", "tiny"]) {
+    const rule = new RegExp(`html\\[data-density="${k}"\\] \\.reaction-bar\\.hover-only[^{]*\\{[^}]*position: absolute`);
+    assert.ok(rule.test(d.DENSITY_CSS), k);
+  }
+});
+
+test("a block on its own line never adds its indent to a full width (no sideways scroll)", () => {
+  // `flex-basis: 100%` plus a left margin is wider than the row: compact scrolled sideways.
+  assert.equal(/flex: 0 0 100%;[^}]*margin-left/.test(d.DENSITY_CSS), false);
+});

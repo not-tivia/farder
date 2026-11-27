@@ -188,6 +188,16 @@ print('\'sent while on the copy\' in host:', has(host, 'sent while on the copy')
   pkill -x farder-server
 }
 
+suite_ui() {  # layout features measured in the real apps
+  local D="$TMP/ui" PORT=4579; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
+  fresh_pair
+  start_direct $PORT "$D"
+  export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
+  echo "== claim, invite, chat"; winrun ubuntu
+  echo "== message density"; winrun density
+  pkill -x farder-server
+}
+
 suite_e2ee() {
   local D="$TMP/e2ee" PORT=4578; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
   fresh_pair
@@ -214,12 +224,13 @@ case "${1:-all}" in
   brake) suite_brake ;;
   failover) suite_failover ;;
   e2ee) suite_e2ee ;;
+  ui) suite_ui ;;
   guestlink) suite_guestlink ;;
   reset) suite_reset ;;
   restore) suite_restore ;;
   relay) suite_relay ;;
   recovery) suite_recovery ;;
   all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
-  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|e2ee|all]"; exit 2 ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|e2ee|ui|all]"; exit 2 ;;
 esac
 echo FINISHED

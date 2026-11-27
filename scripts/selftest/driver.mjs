@@ -613,7 +613,11 @@ async function orangePng(stamp, label = "orange") {
 // then send it with a caption.
 async function dropAndSend(c, path, fileName, caption) {
   await c.page.evaluate((p) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "tauri://drag-drop", payload: { paths: [p], position: { x: 400, y: 400 } } }), path);
-  await c.page.getByText(fileName).first().waitFor({ timeout: 30000 });
+  const staged = await c.page.getByText(fileName).first().waitFor({ timeout: 30000 }).then(() => true, () => false);
+  if (!staged) {
+    const errs = await c.page.locator(".error-text").allInnerTexts().catch(() => []);
+    throw new Error(`${c.who}: the dropped file never showed as staged` + (errs.length ? ` (screen says: ${errs.join(" | ").slice(0, 120)})` : ""));
+  }
   await sendText(c, caption);
   await seesText(c, caption, 30000);
 }
@@ -1693,6 +1697,170 @@ async function failover() {
   await B.browser.close().catch(() => {});
 }
 
+// Message density (run after `ubuntu`). B posts a short burst, a long line and a picture; A switches
+// every mode through Settings and the layout is MEASURED: one row per message in the dense modes, the
+// IRC brackets and the tiny colon really drawn, nothing running off the edge, text readable in two
+// themes, and the choice still set after a reload.
+async function density() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  const tag = "dens" + stamp;
+  const burst = [1, 2, 3].map((i) => `${tag} burst ${i}`);
+  const long = `${tag} long ` + "a fairly long sentence that has to wrap instead of running off the edge ".repeat(8);
+  await check("B posts a burst of three, one long message and a picture", async () => {
+    for (const t of [...burst, long]) await sendText(B, t);
+    const { path, fileName } = await orangePng(stamp, "density");
+    await dropAndSend(B, path, fileName, `${tag} picture`);
+    await seesText(A, `${tag} picture`, 30000);
+    await pictureLoads(A, `${tag} picture`);
+  });
+  const openDensity = async () => {
+    await A.page.getByRole("button", { name: "Your settings" }).click();
+    await A.page.locator(".settings-nav-item", { hasText: "Message density" }).click();
+  };
+  const choose = async (label) => {
+    await openDensity();
+    await A.page.locator(".settings-option", { hasText: label }).first().click();
+    await A.page.locator(".modal-close").first().click();
+    await new Promise((r) => setTimeout(r, 400));
+  };
+  const measure = () => A.page.evaluate((tag) => {
+    const lum = (rgb) => { const m = rgb.match(/[\d.]+/g).map(Number); const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]); };
+    const bgOf = (el) => { for (let e = el; e; e = e.parentElement) { if (getComputedStyle(e).backgroundImage !== "none") return null; const c = getComputedStyle(e).backgroundColor; const m = c.match(/[\d.]+/g); if (m && (m.length < 4 || Number(m[3]) > 0.5)) return c; } return "rgb(255, 255, 255)"; };
+    const contrast = (el) => { const bg = bgOf(el); if (bg === null) return null; const a = lum(getComputedStyle(el).color), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
+    const list = document.querySelector(".message-list");
+    const lr = list.getBoundingClientRect();
+    const rows = [...document.querySelectorAll(".message")].filter((m) => (m.querySelector(".message-content")?.innerText || "").includes(tag));
+    const vis = (el) => !!el && getComputedStyle(el).display !== "none" && el.getBoundingClientRect().width > 0;
+    return {
+      mode: document.documentElement.dataset.density,
+      rows: rows.map((m) => {
+        const content = m.querySelector(".message-content");
+        const author = m.querySelector(".message-author");
+        const av = m.querySelector(".message-avatar");
+        const ts = m.querySelector(".message-timestamp");
+        const att = m.querySelector(".message-attachments");
+        const cs = getComputedStyle(content);
+        const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.3;
+        const r = m.getBoundingClientRect();
+        return {
+          text: content.innerText.slice(0, 40),
+          h: r.height, lh, right: r.right, contentRight: content.getBoundingClientRect().right,
+          avatar: vis(av) ? av.getBoundingClientRect().width : 0,
+          author: vis(author),
+          authorBefore: author ? getComputedStyle(author, "::before").content : "",
+          authorAfter: author ? getComputedStyle(author, "::after").content : "",
+          tsBefore: ts ? getComputedStyle(ts, "::before").content : "",
+          tsOpacity: ts ? Number(getComputedStyle(ts).opacity) : 0,
+          tsText: ts ? ts.innerText : "",
+          mono: /mono|consolas/i.test(getComputedStyle(m).fontFamily),
+          attBelowAuthor: att && author ? att.getBoundingClientRect().top >= author.getBoundingClientRect().bottom - 1 : null,
+          contrast: contrast(content),
+        };
+      }),
+      listRight: lr.right,
+      sideways: list.scrollWidth > list.clientWidth + 2,
+    };
+  }, tag);
+  const results = {};
+  for (const [label, mode] of [["Normal", "normal"], ["Roomy", "roomy"], ["Compact", "compact"], ["IRC", "irc"], ["Tiny", "tiny"]]) {
+    await check(`density ${label}: chosen in Settings, laid out as described, nothing off the edge`, async () => {
+      await choose(label);
+      const m = await measure();
+      results[mode] = m;
+      await shot(A.page, "density-" + mode);
+      if (m.mode !== mode) throw new Error(`page says ${m.mode}, not ${mode}`);
+      if (m.rows.length < 5) throw new Error(`only ${m.rows.length} test messages on screen`);
+      if (m.sideways) throw new Error("the message list scrolls sideways");
+      for (const r of m.rows) if (r.contentRight > m.listRight + 1) throw new Error(`"${r.text}" runs past the edge`);
+      const short = m.rows.filter((r) => r.text.includes("burst"));
+      const longRow = m.rows.find((r) => r.text.includes(" long "));
+      if (!(longRow.h > short[0].h * 1.5)) throw new Error("the long message did not wrap onto more lines");
+      const named = short.filter((r) => r.author).length;
+      const dense = ["compact", "irc", "tiny"].includes(mode);
+      if (dense) {
+        for (const r of short) if (r.h > r.lh * 2.2) throw new Error(`"${r.text}" is ${Math.round(r.h)}px tall, not one line (${Math.round(r.lh)}px)`);
+        if (named !== 3) throw new Error(`a burst of three shows the name ${named} times, want 3`);
+        const pic = m.rows.find((r) => r.text.includes("picture"));
+        if (pic.attBelowAuthor === false) throw new Error("the picture is not on its own line under the name");
+      } else if (named !== 1) throw new Error(`a burst of three shows the name ${named} times, want 1 (folded)`);
+      if (mode === "compact") {
+        if (!(short[0].avatar > 0 && short[0].avatar <= 20)) throw new Error(`picture is ${short[0].avatar}px, want small`);
+        if (short[0].tsOpacity !== 0) throw new Error("the time shows without pointing at the message");
+      }
+      if (mode === "irc") {
+        const r = short[0];
+        if (r.avatar !== 0) throw new Error("IRC shows pictures");
+        if (!r.mono) throw new Error("IRC is not in a monospace font");
+        if (r.authorBefore !== '"<"' || r.authorAfter !== '">"' || r.tsBefore !== '"["') throw new Error(`not [time] <name>: ${r.tsBefore} ${r.authorBefore} ${r.authorAfter}`);
+        if (!/^\d\d:\d\d$/.test(r.tsText)) throw new Error("IRC clock is not hh:mm: " + r.tsText);
+      }
+      if (mode === "tiny") {
+        const r = short[0];
+        if (r.avatar !== 0) throw new Error("tiny shows pictures");
+        if (r.authorAfter !== '":"') throw new Error("tiny is not name: text");
+        if (r.tsOpacity !== 0) throw new Error("tiny shows a clock");
+      }
+      const low = m.rows.map((r) => r.contrast).filter((c) => c !== null && c < 3);
+      if (low.length) throw new Error("text hard to read, contrast " + low[0].toFixed(1));
+      return `rows ${short.map((r) => Math.round(r.h)).join("/")}px, long ${Math.round(longRow.h)}px` + (short[0].avatar ? `, picture ${Math.round(short[0].avatar)}px` : "");
+    });
+  }
+  await check("Roomy gives each message more room than Normal", async () => {
+    const h = (m) => m.rows.filter((r) => r.text.includes("burst")).reduce((a, r) => a + r.h, 0);
+    if (!results.roomy || !results.normal) throw new Error("a mode failed above");
+    if (!(h(results.roomy) > h(results.normal))) throw new Error(`roomy ${h(results.roomy)}px vs normal ${h(results.normal)}px`);
+    return `${Math.round(h(results.roomy))}px vs ${Math.round(h(results.normal))}px for the burst`;
+  });
+  const original = await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_active_theme").then((t) => t.id));
+  const setTheme = (id) => A.page.evaluate(async (id) => {
+    const css = await window.__TAURI_INTERNALS__.invoke("load_theme_css", { id });
+    document.getElementById("active-theme").textContent = css;
+    document.documentElement.dataset.theme = id;
+  }, id);
+  try {
+    for (const theme of ["velvet", "candy"]) {
+      await check(`theme ${theme}: every density mode stays readable and inside the window`, async () => {
+        await setTheme(theme);
+        const worst = [];
+        for (const label of ["Roomy", "Compact", "IRC", "Tiny", "Normal"]) {
+          await choose(label);
+          const m = await measure();
+          await shot(A.page, `density-${theme}-${m.mode}`);
+          if (m.sideways) throw new Error(`${label}: the list scrolls sideways`);
+          const cs = m.rows.map((r) => r.contrast).filter((c) => c !== null);
+          if (cs.length && Math.min(...cs) < 3) throw new Error(`${label}: contrast ${Math.min(...cs).toFixed(1)}`);
+          worst.push(cs.length ? Math.min(...cs).toFixed(1) : "?");
+        }
+        return "lowest contrast per mode " + worst.join(", ");
+      });
+    }
+  } finally {
+    await setTheme(original);
+  }
+  await check("the chosen mode is still set after the app reloads", async () => {
+    await choose("Compact");
+    await A.page.reload();
+    if (await A.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 8000 }).then(() => true, () => false)) await unlock(A);
+    await A.page.waitForFunction(() => document.documentElement.dataset.density === "compact", null, { timeout: 15000 });
+    await openDensity();
+    const sel = await A.page.locator(".settings-option.selected").innerText();
+    await A.page.locator(".modal-close").first().click();
+    if (!sel.includes("Compact")) throw new Error("Settings shows " + sel.split("\n")[0]);
+  });
+  await choose("Normal").catch(() => {});
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // An ENCRYPTED channel through the real app (run after `ubuntu`): the owner makes it in Server Settings, B is
 // added by the app on its own, both send and read. Whether the server ever held the words is checked by
 // ubuntu-suite.sh `e2ee` on the server's raw database bytes afterwards (E2EE_WORD is the secret marker).
@@ -1854,6 +2022,7 @@ try {
   else if (scenario === "brake") await brake();
   else if (scenario === "failover") await failover();
   else if (scenario === "e2ee") await e2ee();
+  else if (scenario === "density") await density();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();

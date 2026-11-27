@@ -105,7 +105,7 @@ html[data-density="irc"] .linked-widget-embeds,
 html[data-density="tiny"] .linked-widget-embeds,
 html[data-density="compact"] .link-embeds,
 html[data-density="irc"] .link-embeds,
-html[data-density="tiny"] .link-embeds { flex: 0 0 100%; box-sizing: border-box; margin-left: 24px; }
+html[data-density="tiny"] .link-embeds { flex: 0 0 calc(100% - 24px); box-sizing: border-box; margin-left: 24px; }
 html[data-density="irc"] .message-reply-context,
 html[data-density="tiny"] .message-reply-context,
 html[data-density="irc"] .reaction-bar,
@@ -118,6 +118,29 @@ html[data-density="irc"] .invite-embeds,
 html[data-density="tiny"] .invite-embeds,
 html[data-density="irc"] .linked-widget-embeds,
 html[data-density="tiny"] .linked-widget-embeds { margin-left: 8px; }
+html[data-density="irc"] .message > *,
+html[data-density="tiny"] .message > * { max-width: 100%; }
+html[data-density="irc"] .message-reply-context,
+html[data-density="tiny"] .message-reply-context,
+html[data-density="irc"] .reaction-bar,
+html[data-density="tiny"] .reaction-bar,
+html[data-density="irc"] .thread-link,
+html[data-density="tiny"] .thread-link,
+html[data-density="irc"] .message-attachments,
+html[data-density="tiny"] .message-attachments,
+html[data-density="irc"] .invite-embeds,
+html[data-density="tiny"] .invite-embeds,
+html[data-density="irc"] .linked-widget-embeds,
+html[data-density="tiny"] .linked-widget-embeds { flex-basis: calc(100% - 8px); }
+/* The empty "add a reaction" bar that only shows when you point at a message must
+   not cost a line of its own in a one-row mode: it floats over the right end of
+   the row instead (left of compact's pointing clock), like the clock does. */
+html[data-density="compact"] .reaction-bar.hover-only,
+html[data-density="irc"] .reaction-bar.hover-only,
+html[data-density="tiny"] .reaction-bar.hover-only {
+  position: absolute; right: 72px; top: 50%; transform: translateY(-50%);
+  flex: none; margin: 0; width: auto; padding: 0 4px; background: var(--xp-panel-bg); z-index: 1;
+}
 /* link previews are the bulky part; the link itself is still in the text */
 html[data-density="irc"] .link-embeds,
 html[data-density="tiny"] .link-embeds { display: none; }
