@@ -463,6 +463,7 @@ mod tests {
 
     #[test]
     fn fork_theme_creates_new_user_theme() {
+        let _env = crate::test_env::lock();
         let tmp = std::env::temp_dir().join(format!("farder-fork-test-{}", std::process::id()));
         std::env::set_var("FARDER_DATA", &tmp);
 
