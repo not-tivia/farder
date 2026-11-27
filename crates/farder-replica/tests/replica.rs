@@ -361,7 +361,13 @@ async fn the_owner_promotes_a_read_only_copy_to_the_writable_host_and_it_stays_p
     assert!(matches!(m.ask(ServerRequest::GetHostTerm).await.unwrap(), ServerResponse::HostTerm { term: None }), "a copy answers GetHostTerm");
     still_read_only(&mut m, general).await;
 
-    let head = head_of(&db);
+    // What the owner's app asks the copy before signing: its key, its head, its term, read-only.
+    let ServerResponse::PromotionInfo { host_key, head_event, term, read_only } = c.ask(ServerRequest::GetPromotionInfo).await.unwrap() else { panic!("GetPromotionInfo") };
+    assert_eq!(host_key, hex::encode(me), "the copy reports its own host key");
+    assert_eq!(head_event, head_of(&db), "and the head of its log");
+    assert_eq!((term, read_only), (0, true));
+
+    let head = head_event;
     let good = |term: u64| HostTerm::sign(&owner, sid.clone(), term, me, vec!["127.0.0.1:1".into()], head.clone(), now_secs());
     // Each of these is refused, and the copy stays read-only.
     let stranger = Keypair::generate();
@@ -385,6 +391,8 @@ async fn the_owner_promotes_a_read_only_copy_to_the_writable_host_and_it_stays_p
     assert!(matches!(sent, ServerResponse::MessageSent { .. }), "the promoted copy accepts a message: {sent:?}");
     let ServerResponse::HostTerm { term: Some(held) } = m.ask(ServerRequest::GetHostTerm).await.unwrap() else { panic!("GetHostTerm must return the term") };
     assert_eq!(held, t1);
+    let ServerResponse::PromotionInfo { term, read_only, .. } = m.ask(ServerRequest::GetPromotionInfo).await.unwrap() else { panic!() };
+    assert_eq!((term, read_only), (1, false), "after promotion: term 1, writable");
     // Now it is a writable host: it refuses a further promotion.
     refused(&mut c, good(2), "already the writable host").await;
     drop(c); drop(m);

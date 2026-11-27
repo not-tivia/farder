@@ -830,6 +830,35 @@ pub enum ServerRequest {
     /// own host key, is higher than any term the copy holds, and continues after the head of the copy's
     /// log. Answered with `Ok` or `Error`. Appended last.
     PromoteToHost { term: farder_crypto::host_term::HostTerm },
+    /// Any member: what the owner needs to sign a term that promotes THIS server: its host key, the
+    /// newest event of its log, the term it holds, and whether it is a read-only copy. Answered with
+    /// [`ServerResponse::PromotionInfo`]. Read-only. Appended last.
+    GetPromotionInfo,
+}
+
+impl ServerRequest {
+    /// Requests that change nothing: the only ones a read-only copy answers, and the only ones an app
+    /// sends to a host it knows has been replaced (a lower hosting term). The server and the app use
+    /// this one list, so they cannot disagree.
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            ServerRequest::GetServerInfo
+                | ServerRequest::GetServerInfoV2
+                | ServerRequest::GetMembers
+                | ServerRequest::GetMemberProfile { .. }
+                | ServerRequest::GetMembershipStatus
+                | ServerRequest::FetchHistory { .. }
+                | ServerRequest::FetchHistoryV2 { .. }
+                | ServerRequest::Search { .. }
+                | ServerRequest::Subscribe { .. }
+                | ServerRequest::NegotiateProtocol { .. }
+                | ServerRequest::GetOwnChainHead { .. }
+                | ServerRequest::GetHostTerm
+                | ServerRequest::PromoteToHost { .. }
+                | ServerRequest::GetPromotionInfo
+        )
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -996,6 +1025,9 @@ pub enum ServerResponse {
     /// Answer to [`ServerRequest::GetHostTerm`]: the newest term this server holds, or `None` for the
     /// original host (term 0, never signed).
     HostTerm { term: Option<farder_crypto::host_term::HostTerm> },
+    /// Answer to [`ServerRequest::GetPromotionInfo`]. `host_key` is hex of the server's 32-byte
+    /// identity (`<data-dir>/server_id`); `head_event` is the newest event hash ("" for none).
+    PromotionInfo { host_key: String, head_event: String, term: u64, read_only: bool },
 }
 
 /// One accepted event with the server's own bookkeeping, as handed to a copy.

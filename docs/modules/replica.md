@@ -42,6 +42,7 @@ Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir 
 Design: `docs/specs/2026-11-27-promotion-design.md`. Step 1 (server side only) is built: the owner signs a `HostTerm`
 (`farder-crypto::host_term`) and sends `PromoteToHost { term }` to a running read-only copy, which becomes writable
 **without a restart**. `GetHostTerm` returns the stored term on both host and copy (`None` = original host).
+The owner's app builds the term from `GetPromotionInfo` (the copy's host key and log head), signs it, and sends `PromoteToHost` to the copy.
 
 The copy accepts only if ALL hold (each refusal is a plain reason and the copy stays read-only):
 
