@@ -23,6 +23,7 @@ import ReminderBuilderModal from "./ReminderBuilderModal";
 import { toast } from "../lib/toast";
 import { garbleText, makeTransform, MODE_LABELS } from "../lib/garble";
 import { GARBLE_CHANGED, getGarble, setGarble } from "../lib/garbleSettings";
+import { chooseReplyTarget, REPLY_TOO_OLD_NOTE } from "../lib/replyTarget";
 import { useGarbleState } from "../hooks/useGarbleState";
 
 interface MessageInputProps {
@@ -381,8 +382,8 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
     // command instead of the legacy submitEvent/sendMessage paths. The legacy
     // fetchUrl image-embed, DM encryption, inline :emoji: book-item resolution,
     // and attachment paths are all EXCLUDED here — a sealed message is text-only
-    // this rung (sub-6 owns attachments) and replies stay top-level (a numeric
-    // replyTo is not mapped to an event-hash ref yet).
+    // this rung (sub-6 owns attachments) and replies stay top-level (TODO(#19): needs
+    // the sealed envelope to carry the reply ref).
     if (isE2ee) {
       const logServerId = activeServer?.logServerId ?? null;
       if (!logServerId) {
@@ -468,8 +469,10 @@ export default function MessageInput({ channelId, serverId, replyTo, onSent }: M
       // images and inline emoji have no client-side hash and stay on legacy).
       if (logServerId && !dm && !hasUncappableAttachment) {
         const caps = attachedCap ? [attachedCap] : [];
-        // TODO(mesh): replies over the log need event-hash mapping; legacy replyTo is a numeric id, so drop it for now (top-level post).
-        await api.submitEvent(serverId, logServerId, channelId, messageContent, null, caps);
+        // The reply bar holds a numeric id; the log cites the target's event hash.
+        const pick = chooseReplyTarget(replyTo, activeServer?.messages[channelId] ?? []);
+        await api.submitEvent(serverId, logServerId, channelId, messageContent, pick.replyTo, caps);
+        if (pick.tooOld) toast.info(REPLY_TOO_OLD_NOTE);
       } else {
         await api.sendMessage(
           serverId,
