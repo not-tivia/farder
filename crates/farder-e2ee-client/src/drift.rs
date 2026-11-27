@@ -34,11 +34,11 @@
 //!
 //! If two members discharge at once, one wins the fold's epoch CAS and the
 //! other's submit is rejected with the bare `"stale-epoch"`.
-//! [`discharge_drift`] surfaces that as [`E2eeError::StaleEpochDiverged`] —
-//! `remove_members` already merged locally, so the loser's group is one epoch
-//! ahead of the server and must NOT be reused. It deliberately does **not**
-//! loop: the caller re-fetches and retries once via the normal resync
-//! (`crate::resync`). Same divergence caveat as rekey — see finding F1.
+//! [`discharge_drift`] STAGES the removal and only applies it on acceptance, so
+//! the loser's submit is refused, the staged removal discarded, and
+//! [`E2eeError::CommitRefused`] returned with the group unchanged (not a
+//! divergence). It deliberately does **not** loop: the caller catches up from
+//! the log and retries once.
 
 use farder_crypto::event_log::{DeclaredRemove, EventPayload};
 use farder_mls::credential::DeviceSigner;
@@ -117,14 +117,15 @@ pub fn dead_leaves_from_revocation(
 /// via [`MlsChannelGroup::load`] or resume, then pass `&mut` in). The author
 /// must be a remaining confirmed member — never one of `dead_leaves`.
 ///
-/// # Divergence contract (the race)
+/// # No divergence on refusal (the race)
 ///
-/// `remove_members` merges **locally and immediately**, so by the time this fn
-/// submits, the local group is already one epoch ahead. If another member
-/// discharged first, the submit is rejected with the bare `"stale-epoch"` and
-/// this returns [`E2eeError::StaleEpochDiverged`] — the caller must NOT reuse
-/// the advanced group; re-fetch and retry once via the normal resync
-/// (`crate::resync`). It never loops.
+/// The removal is STAGED ([`MlsChannelGroup::remove_members_staged`]) and only
+/// applied once the server accepts it. If another member discharged first the
+/// submit is rejected (`"stale-epoch"`), the staged removal is discarded and
+/// this returns [`E2eeError::CommitRefused`] with the group unchanged
+/// (`is_diverged()` false); catch up and retry once. It never loops. A
+/// transport failure with no answer leaves it staged for
+/// [`crate::rekey::settle_staged_commit`].
 ///
 /// # The commit-rate rule is a discharge-is-wrong signal
 ///
@@ -133,9 +134,9 @@ pub fn dead_leaves_from_revocation(
 /// DOES return `"event rejected: commit-rate rule: …"`, it means the declared
 /// `removes` did NOT intersect `pending_removals` — the dead-leaf set was wrong
 /// (stale, already discharged, or never drift). That surfaces as
-/// [`E2eeError::RekeyRateLimited`] (reusing C2's variant) with the fold's
-/// verbatim reason, so the caller knows the removes discharged nothing. Same
-/// divergence caveat as [`E2eeError::StaleEpochDiverged`] applies.
+/// [`E2eeError::CommitRefused`] (reason verbatim;
+/// it contains `"commit-rate rule:"`), so the caller knows
+/// the removes discharged nothing. The group is unchanged.
 pub async fn discharge_drift<T: E2eeTransport + Sync>(
     transport: &T,
     actor: &Actor<'_>,
@@ -165,13 +166,13 @@ pub async fn discharge_drift<T: E2eeTransport + Sync>(
     //    errors BEFORE any submit when a target leaf is not present (the "no
     //    silent no-op" guarantee — a wrong dead-leaf set never reaches the
     //    wire).
-    let outcome = group
-        .remove_members(ctx.store, &DeviceSigner(actor.device), dead_leaves)
+    let staged = group
+        .remove_members_staged(ctx.store, &DeviceSigner(actor.device), dead_leaves)
         .map_err(|e| E2eeError::Mls(e.context("drift discharge remove-members")))?;
+    let outcome = staged.outcome;
     debug_assert!(outcome.adds.is_empty());
     debug_assert!(!outcome.removes.is_empty());
-    let post_epoch_authenticator = group.epoch_authenticator();
-    debug_assert_eq!(group.epoch(), outcome.epoch + 1);
+    let post_epoch_authenticator = staged.post_epoch_authenticator;
 
     // 2. Build the MlsCommit from the real CommitOutcome: empty adds, removes =
     //    the actually-removed leaves (the declared removes the fold checks
@@ -205,32 +206,23 @@ pub async fn discharge_drift<T: E2eeTransport + Sync>(
         },
     );
 
-    // 3. Submit; map the two load-bearing rejections distinctly and never loop.
+    // 3. Submit. Accepted: apply. ANY refusal (stale-epoch, or the
+    //    commit-rate rule, which for a drift discharge means the dead-leaf set
+    //    was wrong): discard the staged removal, group unchanged. No answer:
+    //    it stays staged for `settle_staged_commit`. Never loop.
     let accepted = match transport.submit_event(&event).await {
         Ok(a) => a,
-        Err(e) if e.is_stale_epoch() => {
-            return Err(E2eeError::StaleEpochDiverged {
-                local_epoch: group.epoch(),
-            });
-        }
-        Err(e) if e.is_commit_rate_limited() => {
-            // A genuine drift discharge is commit-rate-exempt, so reaching here
-            // means the removes did not discharge anything — the dead-leaf set
-            // was wrong. Surface C2's variant with the fold's reason.
-            return Err(E2eeError::RekeyRateLimited {
-                reason: e.rejection_reason().to_string(),
-            });
-        }
         Err(crate::transport::TransportError::ServerRejected { reason }) => {
-            // The local commit already merged (finding F3): any other fold
-            // refusal diverges the group just as a stale-epoch bounce does.
-            return Err(E2eeError::CommitRejectedDiverged {
-                reason,
-                local_epoch: group.epoch(),
-            });
+            group
+                .discard_staged_own_commit(ctx.store)
+                .map_err(|e| E2eeError::Mls(e.context("discard refused drift discharge")))?;
+            return Err(E2eeError::CommitRefused { reason });
         }
         Err(e) => return Err(e.into()),
     };
+    group
+        .merge_staged_own_commit(ctx.store)
+        .map_err(|e| E2eeError::Mls(e.context("apply accepted drift discharge")))?;
     chain.advance(&event);
 
     Ok(DriftDischargeOutcome {
@@ -497,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_epoch_discharge_surfaces_stale_epoch_diverged_and_submits_exactly_once() {
+    async fn a_stale_epoch_discharge_is_refused_cleanly_and_submits_exactly_once() {
         let channel_id = E2EE_CHANNEL_ID_FLOOR + 47;
         let mut g = group_with_others("stale", channel_id, 1).await;
         let a = actor(&g.identity, &g.device);
@@ -518,21 +510,17 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.is_stale_epoch_diverged(), "expected divergence, got {err}");
-        match err {
-            E2eeError::StaleEpochDiverged { local_epoch } => {
-                // The local group already advanced to epoch 3 (ahead of the
-                // server).
-                assert_eq!(local_epoch, 3);
-            }
-            other => panic!("expected StaleEpochDiverged, got {other:?}"),
-        }
+        assert!(!err.is_diverged(), "a refused discharge is not a divergence, got {err}");
+        assert!(matches!(err, E2eeError::CommitRefused { .. }), "got {err:?}");
+        // The group did NOT advance (stays at epoch 2) and nothing is staged.
+        assert_eq!(g.group.epoch(), 2);
+        assert!(!g.group.has_staged_own_commit());
         // Exactly ONE submit — no loop, no spin.
         assert_eq!(g.transport.submit_count(), submits_before + 1);
     }
 
     #[tokio::test]
-    async fn a_second_discharge_on_a_now_stale_group_surfaces_stale_epoch_diverged_not_a_hang() {
+    async fn a_second_discharge_after_a_refusal_is_refused_again_not_a_hang() {
         let channel_id = E2EE_CHANNEL_ID_FLOOR + 49;
         let mut g = group_with_others("race", channel_id, 2).await;
         let a = actor(&g.identity, &g.device);
@@ -540,6 +528,7 @@ mod tests {
         let first = g.others[0].2.clone();
         let second = g.others[1].2.clone();
         let submits_before = g.transport.submit_count();
+        let epoch_before = g.group.epoch();
 
         // First discharge loses the epoch race: another member discharged first.
         g.transport.reject_next("stale-epoch");
@@ -553,11 +542,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err1.is_stale_epoch_diverged(), "first discharge diverges, got {err1}");
+        assert!(!err1.is_diverged(), "first discharge is refused cleanly, got {err1}");
+        assert_eq!(g.group.epoch(), epoch_before);
 
-        // The group is now stale (one epoch ahead of the server). A SECOND
-        // discharge on that stale group must surface the same divergence, not
-        // hang or loop.
+        // The group is unchanged, so a SECOND discharge is simply refused the
+        // same way, not a hang or loop.
         g.transport.reject_next("stale-epoch");
         let err2 = discharge_drift(
             &g.transport,
@@ -569,14 +558,15 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err2.is_stale_epoch_diverged(), "second discharge also diverges, got {err2}");
+        assert!(!err2.is_diverged(), "second discharge also refused cleanly, got {err2}");
+        assert_eq!(g.group.epoch(), epoch_before);
 
         // Two attempts, two submits, no more.
         assert_eq!(g.transport.submit_count(), submits_before + 2);
     }
 
     #[tokio::test]
-    async fn a_commit_rate_rejection_on_discharge_surfaces_rekey_rate_limited_and_does_not_loop() {
+    async fn a_commit_rate_rejection_on_discharge_is_a_clean_refusal_and_does_not_loop() {
         let channel_id = E2EE_CHANNEL_ID_FLOOR + 51;
         let mut g = group_with_others("rate", channel_id, 1).await;
         let a = actor(&g.identity, &g.device);
@@ -595,13 +585,14 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.is_rekey_rate_limited(), "expected rate-limit, got {err}");
+        assert!(!err.is_diverged(), "a refused discharge is not a divergence, got {err}");
         match err {
-            E2eeError::RekeyRateLimited { reason } => {
+            E2eeError::CommitRefused { reason } => {
                 assert!(reason.contains("commit-rate rule:"), "reason preserved: {reason}");
             }
-            other => panic!("expected RekeyRateLimited, got {other:?}"),
+            other => panic!("expected CommitRefused, got {other:?}"),
         }
+        assert_eq!(g.group.epoch(), 2);
         // Exactly ONE submit — no loop.
         assert_eq!(g.transport.submit_count(), submits_before + 1);
     }

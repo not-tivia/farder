@@ -128,11 +128,20 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
   behind); a target matching no leaf is an error.
 - `self_update(provider, signer) -> Result<CommitOutcome>` — the rekey-cadence
   primitive: epoch +1, membership unchanged, authenticator rotates.
-- `self_update_staged(provider, signer) -> Result<StagedSelfUpdate>` — the
+- `self_update_staged(provider, signer) -> Result<StagedOwnCommit>` — the
   same refresh, built and signed but NOT applied: the group stays in its epoch
   until `merge_staged_own_commit` (server accepted) or
   `discard_staged_own_commit` (server refused; a no-op when nothing is staged).
-  `StagedSelfUpdate { outcome: CommitOutcome, post_epoch_authenticator }`.
+  `StagedOwnCommit { outcome: CommitOutcome, post_epoch_authenticator }`
+  (`StagedSelfUpdate` is a type alias of it).
+- `add_members_staged(provider, signer, key_packages) -> Result<StagedOwnCommit>`
+  and `remove_members_staged(provider, signer, members) -> Result<StagedOwnCommit>`
+  — the add / remove variants, same staging contract and same merge/discard/
+  `has_staged_own_commit` API (remove resolves targets exactly like
+  `remove_members`). For an add, `outcome.welcome_bytes` carries the Welcome:
+  send it only after the commit is accepted and merged. `add_members` /
+  `remove_members` (merge immediately) remain for `bootstrap_group` — the first
+  commit of a new group has nothing to race.
   Pinned by unit tests against OpenMLS 0.8.1: while staged the group still seals
   and opens in its current epoch, applying another member's commit drops the
   staged one, the staged commit survives a reload (`has_staged_own_commit`,

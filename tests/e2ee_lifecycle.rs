@@ -1933,3 +1933,214 @@ async fn two_key_refreshes_at_once_do_not_fork_the_channel() {
         other => panic!("the owner could not open the joiner's message: {other:?}"),
     }
 }
+
+/// The same race as `two_key_refreshes_at_once_do_not_fork_the_channel`, for an
+/// ADD. The joiner's refresh wins the epoch; the owner, still authoring in the
+/// old epoch, tries to add a third member and is refused. The add used to be
+/// merged locally BEFORE the server answered (one epoch ahead, `is_diverged()`,
+/// heavy recovery). It is now staged: a refusal leaves the owner's group
+/// untouched, the owner catches up, and the retried add succeeds.
+#[tokio::test]
+async fn an_add_that_loses_the_epoch_race_leaves_the_group_unchanged() {
+    let channel_id = E2EE_CHANNEL_ID_FLOOR + 50_110;
+    let s = setup_owner_joiner(channel_id, true).await;
+    let TwoClientSetup {
+        core:
+            OwnerCore {
+                owner_kp,
+                owner_dev,
+                server_id,
+                owner_transport,
+                mut owner_chain,
+                key,
+                owner_store,
+                owner_hash,
+                mut owner_group,
+                invite_code,
+                addr,
+                _endpoint,
+                ..
+            },
+        joiner_kp,
+        joiner_dev,
+        joiner_transport,
+        joiner_store,
+        mut joiner_group,
+        mut joiner_chain,
+        ..
+    } = s;
+    let owner_actor = actor(&owner_kp, &owner_dev, &server_id);
+    let joiner_actor = actor(&joiner_kp, &joiner_dev, &server_id);
+    let start = owner_group.epoch();
+
+    // A third member: mesh-joins the server and publishes a KeyPackage.
+    let third_kp = Keypair::generate();
+    let third_dev = Keypair::generate();
+    let (third_transport, _third_conn) =
+        connect_identity(&_endpoint, addr, &third_kp, Some(&invite_code), None).await;
+    let now = event_now_secs();
+    let third_da = Event::next(
+        &third_dev,
+        third_kp.public_key(),
+        server_id.clone(),
+        None,
+        owner_chain.lamport,
+        now,
+        EventPayload::DeviceAuthorized {
+            cert: DeviceCert::create(&third_kp, &third_dev.public_key(), now),
+        },
+    );
+    submit_raw(&third_transport, &third_da).await;
+    let invite_event_hash = match request(
+        &third_transport,
+        ServerRequest::ResolveInvite { code: invite_code.clone() },
+    )
+    .await
+    {
+        ServerResponse::InviteResolved { invite_event: Some(h) } => h,
+        other => panic!("expected a resolved invite event, got {other:?}"),
+    };
+    let third_join = Event::next(
+        &third_dev,
+        third_kp.public_key(),
+        server_id.clone(),
+        Some(&third_da),
+        third_da.core.lamport,
+        now,
+        EventPayload::MemberJoined {
+            member: third_kp.public_key(),
+            invite: invite_event_hash,
+        },
+    );
+    submit_raw(&third_transport, &third_join).await;
+    let mut third_chain = ChainState::default();
+    third_chain.advance(&third_da);
+    third_chain.advance(&third_join);
+    let third_actor = actor(&third_kp, &third_dev, &server_id);
+    let (third_store, third_hash) = create_joiner_store(&temp_dir("third"), &key).unwrap();
+    publish_key_package(&third_transport, &third_actor, &mut third_chain, &third_store, &third_hash)
+        .await
+        .unwrap();
+    let third_member = DeclaredMember {
+        identity: third_kp.public_key(),
+        device: device_id(&third_dev.public_key()),
+    };
+
+    // 1. The joiner's refresh wins the epoch.
+    let jhash = joiner_store.store_instance_hash();
+    let jctx = RekeyContext {
+        key: &key,
+        generation: 0,
+        store: &joiner_store,
+        store_instance_hash: &jhash,
+    };
+    rekey_channel(&joiner_transport, &joiner_actor, &mut joiner_chain, &jctx, &mut joiner_group)
+        .await
+        .expect("the joiner's refresh is accepted");
+    assert_eq!(joiner_group.epoch(), start + 1);
+
+    // 2. The owner's add, authored in the old epoch, is refused.
+    let sctx = StewardContext {
+        key: &key,
+        generation: 0,
+        store: &owner_store,
+        store_instance_hash: &owner_hash,
+    };
+    let refused = add_member(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &sctx,
+        &mut owner_group,
+        &third_member,
+    )
+    .await
+    .expect_err("an add authored in a lost epoch is refused");
+    assert!(
+        !refused.is_diverged(),
+        "a refused add must not leave the group diverged, got {refused}"
+    );
+    assert_eq!(owner_group.epoch(), start, "the owner's group is unchanged");
+    assert!(!owner_group.has_staged_own_commit(), "nothing is left staged");
+
+    // 3. The owner catches up, then the add succeeds.
+    assert_eq!(catch_up(&owner_transport, &owner_store, &mut owner_group, channel_id).await, 1);
+    assert_eq!(owner_group.epoch(), joiner_group.epoch());
+    add_member(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &sctx,
+        &mut owner_group,
+        &third_member,
+    )
+    .await
+    .expect("the retried add is accepted");
+
+    // 4. The third member joins; the joiner catches up; all three read each other.
+    let welcomes = fetch_pending_welcomes(&third_transport, &third_actor, Some(channel_id), 0)
+        .await
+        .unwrap();
+    assert_eq!(welcomes.len(), 1);
+    let (mut third_group, info) = join_channel(&third_store, &welcomes[0].welcome).unwrap();
+    confirm_leaf(
+        &third_transport,
+        &third_actor,
+        &mut third_chain,
+        &key,
+        &third_hash,
+        &welcomes[0],
+        &info,
+    )
+    .await
+    .unwrap();
+    assert_eq!(catch_up(&joiner_transport, &joiner_store, &mut joiner_group, channel_id).await, 1);
+    assert_eq!(owner_group.epoch(), joiner_group.epoch());
+    assert_eq!(owner_group.epoch(), third_group.epoch());
+
+    let seal = |store, content| SealContext {
+        key: &key,
+        generation: 0,
+        store,
+        content,
+        reply_to: None,
+        attachments: &[],
+    };
+    send_sealed(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &seal(&owner_store, OWNER_PLAINTEXT),
+        &mut owner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("the owner sends");
+    let ct = fetch_ciphertext_by_author(&joiner_transport, channel_id, &owner_kp.public_key()).await;
+    match receive_sealed(&joiner_store, &mut joiner_group, ct.clone()) {
+        SealedOutcome::Decrypted(env) => assert_eq!(env.content, OWNER_PLAINTEXT),
+        other => panic!("the joiner could not open the owner's message: {other:?}"),
+    }
+    match receive_sealed(&third_store, &mut third_group, ct) {
+        SealedOutcome::Decrypted(env) => assert_eq!(env.content, OWNER_PLAINTEXT),
+        other => panic!("the third member could not open the owner's message: {other:?}"),
+    }
+
+    send_sealed(
+        &joiner_transport,
+        &joiner_actor,
+        &mut joiner_chain,
+        &seal(&joiner_store, JOINER_PLAINTEXT),
+        &mut joiner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("the joiner sends");
+    let ct = fetch_ciphertext_by_author(&owner_transport, channel_id, &joiner_kp.public_key()).await;
+    for (store, group) in [(&owner_store, &mut owner_group), (&third_store, &mut third_group)] {
+        match receive_sealed(store, group, ct.clone()) {
+            SealedOutcome::Decrypted(env) => assert_eq!(env.content, JOINER_PLAINTEXT),
+            other => panic!("could not open the joiner's message: {other:?}"),
+        }
+    }
+}

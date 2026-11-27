@@ -172,10 +172,17 @@ the fold's **verbatim** rejection string (wrapped by the server as
   (async) — the steward path: `fetch_key_packages` → `decode_key_package`
   (fails closed on a non-farder credential, and refuses a package whose
   credential does not claim the exact member being added) →
-  `MlsChannelGroup::add_members` → submit `MlsCommit` (declared adds/removes +
-  the real chaining values) → submit `MlsWelcome` whose `commit` cites the
-  accepted `MlsCommit`'s event hash. A `stale-epoch` rejection surfaces as
-  `E2eeError::StaleEpochDiverged` (the add has already merged locally).
+  `MlsChannelGroup::add_members_staged` → submit `MlsCommit` (declared adds/removes +
+  the real chaining values) → on acceptance merge it, then submit `MlsWelcome`
+  whose `commit` cites the accepted `MlsCommit`'s event hash. ANY server refusal
+  (`stale-epoch` because someone else won the epoch, commit-rate rule, a
+  declared add that is not live, ...) discards the staged add and returns
+  `E2eeError::CommitRefused { reason }`: group unchanged, NOT `is_diverged()`;
+  catch up and retry. A transport failure with no answer leaves the add staged
+  for `settle_staged_commit` (which, if the add WAS accepted, leaves the caller
+  to submit the Welcome). Pinned by
+  `an_add_that_loses_the_epoch_race_leaves_the_group_unchanged` in
+  `tests/e2ee_lifecycle.rs`.
 - `StewardContext<'a> { key, generation, store, store_instance_hash }` — the
   "where am I committing" bundle (keeps `add_member` under the 7-arg clippy
   bound).
@@ -264,8 +271,9 @@ strings) or via a **local cadence**:
   exchange", 2026-11-26; pinned by `two_key_refreshes_at_once_do_not_fork_the_channel`
   in `tests/e2ee_lifecycle.rs`.) A transport failure with no answer leaves it
   staged. It never loops.
-- `settle_staged_refresh(store, group, events, my_device) -> (StagedRefreshSettled, Option<&Event>)`
-  — resolve a refresh left staged by a lost answer from control events fetched
+- `settle_staged_commit(store, group, events, my_device) -> (StagedCommitSettled, Option<&Event>)`
+  (`settle_staged_refresh` / `StagedRefreshSettled` are the old-name alias)
+  — resolve ANY own commit (refresh, add, remove) left staged by a lost answer from control events fetched
   after it: our device's commit in that epoch = `WasAccepted` (merged; the event
   is returned so the caller advances its chain), anyone else's = `LostTheEpoch`
   (dropped), none = `NeverArrived` (dropped), or `NothingStaged`. The app calls
@@ -298,12 +306,13 @@ dead `(identity, device)` leaves.
   (async) — run `remove_members` over `dead_leaves` and submit the `MlsCommit`
   with `removes` = the actually-removed leaves. Mirrors
   `bootstrap_group`/`add_member`/`rekey_channel`'s submit + chain-advance.
-  - A `stale-epoch` rejection → `E2eeError::StaleEpochDiverged` (the discharge
-    race: another member won the epoch CAS; `remove_members` already merged
-    locally, so the caller must resync and retry once — no loop).
-  - A `"commit-rate rule:"` rejection → `E2eeError::RekeyRateLimited` (a
-    genuine discharge is commit-rate-exempt, so this means the removes did NOT
-    intersect `pending_removals` — the dead-leaf set was wrong).
+  - The removal is STAGED (`remove_members_staged`) and applied only on
+    acceptance. ANY refusal → `E2eeError::CommitRefused { reason }`, group
+    unchanged, not `is_diverged()`. A `stale-epoch` is the discharge race
+    (catch up and retry once — no loop); a `"commit-rate rule:"` reason means
+    the removes did NOT intersect `pending_removals` (a genuine discharge is
+    commit-rate-exempt), i.e. the dead-leaf set was wrong. A transport failure
+    with no answer leaves it staged for `settle_staged_commit`.
   - An absent target leaf errors at `remove_members` **before** any submit
     (`E2eeError::Mls`), and an empty `dead_leaves` is refused up front — no
     silent no-op, no spin.
@@ -582,14 +591,18 @@ The crate's one error type. Notable variants:
   own-commit for any OTHER reason (e.g. `"declared add of a device that is not
   live"`). Every own-commit primitive merges locally before it submits, so this
   carries the same divergence contract as `StaleEpochDiverged`; the fold's reason
-  is preserved verbatim. Returned by `bootstrap_group`, `add_member` and
-  `discharge_drift` (finding F3); `rekey_channel` no longer diverges.
+  is preserved verbatim. Returned by `bootstrap_group` only; `add_member` and
+  `discharge_drift` now return `CommitRefused`, `rekey_channel` `RekeyRefused`.
+- `CommitRefused { reason }` — the fold refused an add (`add_member`) or a drift
+  discharge (`discharge_drift`); it was only staged and has been discarded, so
+  NOTHING changed locally. Not a divergence (`is_diverged()` false);
+  `is_commit_refused()`. Catch up from the log and retry once if still wanted.
 - `DeviceCapReached { reason }` — the fold refused a `DeviceAuthorized` under
   the live-device cap (8); surfaced by `device.rs`'s `authorize_device`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.
 
 Predicate methods (machine-readable signals over the fold's rejection strings):
-`is_stale_epoch_diverged()`, `is_rekey_rate_limited()`, `is_rekey_refused()`,
+`is_stale_epoch_diverged()`, `is_rekey_rate_limited()`, `is_rekey_refused()`, `is_commit_refused()`,
 `is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`,
 `is_device_cap_reached()`, `is_diverged()` (the finding-F1 divergence class:
 `StaleEpochDiverged` / `RekeyRateLimited` / `CommitRejectedDiverged` /
@@ -630,9 +643,12 @@ with `E2eeError::NotConfirmed` rather than round-tripping a doomed event.
 
 ## Divergence contract (from Task 2)
 
-`MlsChannelGroup::self_update` / `add_members` / `remove_members` merge a commit
-**locally and immediately**, so by the time the `MlsCommit` is submitted the
-local group is one epoch ahead. If the server rejects that submit with the bare
+`bootstrap_group` (the first commit of a new group, nothing to race) still merges
+**locally and immediately** (`MlsChannelGroup::add_members`), and so did every
+own commit before staging: refresh (`RekeyRefused`), add and drift discharge
+(`CommitRefused`) now stage first and are NOT subject to this contract. For a
+merge-first commit the local group is one epoch ahead by the time the
+`MlsCommit` is submitted. If the server rejects that submit with the bare
 `"stale-epoch"`, the client returns `E2eeError::StaleEpochDiverged { local_epoch }`
 and **must not keep using the group** — it must resync local group state from the
 log (Task 6). This is never silently swallowed and never reported as success.
