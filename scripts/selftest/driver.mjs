@@ -249,6 +249,87 @@ async function buddy() {
   await B.browser.close().catch(() => {});
 }
 
+// The buddy list and a chat window for a server that is NOT the one on screen in the
+// main window. Run after `ubuntu` twice: once for "Ubuntu Server", then for a second
+// server named UBU_NAME (both A and B are members of both).
+async function chatOther() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const other = process.env.UBU_NAME || "Second Server";
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-close").count()) > 0; i++) await c.page.locator(".modal-close").first().click().catch(() => {});
+  }
+  // A looks at the first server; B writes in the other one.
+  await A.page.locator('.server-icon[title="Ubuntu Server"]').click();
+  await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+  await B.page.locator(`.server-icon[title="${other}"]`).click();
+  await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+  let list, chat;
+  if (!(await check(`A: the buddy list shows ${other}'s channels while A's window shows another server`, async () => {
+    await A.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("open_buddy_list"));
+    list = await pageMatching(A, /[?&]buddy=1/);
+    await list.locator(".channel-category", { hasText: other.toUpperCase() }).first().waitFor({ timeout: 30000 });
+  }))) { if (list) await shot(list, "A-buddy-other-fail"); return; }
+  // The row for the other server's #general: the one after that server's heading.
+  const row = () => list.locator(`xpath=//div[contains(@class,"channel-category") and normalize-space()="${other.toUpperCase()}"]/following-sibling::div[contains(@class,"channel-item")][contains(., "general")]`).first();
+  await check(`B writes in ${other}: A's buddy row for it shows an unread count`, async () => {
+    await sendText(B, "before the mini " + stamp);
+    await sendText(B, "second before " + stamp);
+    const badge = row().locator(".buddy-unread");
+    await badge.waitFor({ timeout: 60000 });
+    const n = Number((await badge.innerText()).trim());
+    if (!(n >= 1)) throw new Error("badge reads " + JSON.stringify(await badge.innerText()));
+    const st = await badge.evaluate((el) => { const s = getComputedStyle(el); return { c: s.color, b: s.backgroundColor, w: el.getBoundingClientRect().width }; });
+    if (st.w < 6) throw new Error("badge is not visible: " + JSON.stringify(st));
+    await shot(list, "A-buddy-other-unread");
+    return `count ${n}`;
+  });
+  if (!(await check(`A: clicking it opens a chat window with ${other}'s history`, async () => {
+    await row().click();
+    chat = await chatWithHead(A, "#general", 30000);
+    // Two "#general" windows could exist; make sure this one has the other server's line.
+    await chat.locator(".mini-chat-text", { hasText: "second before " + stamp }).first().waitFor({ timeout: 30000 });
+  }))) { if (chat) await shot(chat, "A-chat-other-fail"); return; }
+  await shot(chat, "A-chat-other");
+  await check("A: a line typed there reaches B on that server", async () => {
+    const box = chat.locator(".mini-chat-input");
+    await box.fill("mini to other " + stamp);
+    await box.press("Enter");
+    await chat.locator(".mini-chat-text", { hasText: "mini to other " + stamp }).first().waitFor({ timeout: 30000 });
+    await seesText(B, "mini to other " + stamp, 60000);
+  });
+  await check("A: a line B sends there appears live in A's chat window", async () => {
+    await sendText(B, "live other " + stamp);
+    const t0 = Date.now();
+    await chat.locator(".mini-chat-text", { hasText: "live other " + stamp }).first().waitFor({ timeout: 90000 });
+    return `after ${Math.round((Date.now() - t0) / 1000)}s`;
+  });
+  await check("A's main window still shows the first server, and the line did not land there", async () => {
+    await A.page.locator('.server-icon[title="Ubuntu Server"].active, .server-icon.active[title="Ubuntu Server"]').first().waitFor({ timeout: 5000 }).catch(() => {});
+    const shown = await A.page.locator(".message-content").allInnerTexts();
+    if (shown.some((t) => t.includes("live other " + stamp))) throw new Error("the other server's line shows in the first server's channel");
+  });
+  const firstRow = () => list.locator(`xpath=//div[contains(@class,"channel-category") and normalize-space()="UBUNTU SERVER"]/following-sibling::div[contains(@class,"channel-item")][contains(., "general")]`).first();
+  await check("a line A read on screen does not come back as unread after A switches to the other server", async () => {
+    await B.page.locator('.server-icon[title="Ubuntu Server"]').click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    await sendText(B, "read on screen " + stamp);
+    await seesText(A, "read on screen " + stamp, 60000);
+    await A.page.locator(`.server-icon[title="${other}"]`).click();
+    await A.page.waitForTimeout(3000);
+    const n = await firstRow().locator(".buddy-unread").count();
+    if (n > 0) { await shot(list, "A-buddy-read-came-back"); throw new Error("Ubuntu Server #general shows " + (await firstRow().locator(".buddy-unread").innerText()) + " unread"); }
+    // ...and a NEW line there after leaving does count.
+    await sendText(B, "after leaving " + stamp);
+    await firstRow().locator(".buddy-unread").waitFor({ timeout: 60000 });
+    return "new line after leaving: " + (await firstRow().locator(".buddy-unread").innerText());
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // The chat window whose heading is `head` (several chat windows can be open).
 async function chatWithHead(c, head, ms = 30000) {
   const end = Date.now() + ms;
@@ -2526,6 +2607,7 @@ try {
   if (scenario === "core") await core();
   else if (scenario === "relaunch") await relaunch();
   else if (scenario === "buddy") await buddy();
+  else if (scenario === "chat-other") await chatOther();
   else if (scenario === "dm") await dm();
   else if (scenario === "edit") await edit();
   else if (scenario === "direct") await direct();
