@@ -7,6 +7,8 @@ import { MessageSearchOverlay } from "./MessageSearchOverlay";
 import MemberSidebar from "./MemberSidebar";
 import DmPanel from "./DmPanel";
 import ServerStrip from "./ServerStrip";
+import CompactList from "./CompactList";
+import { useLayout } from "../hooks/useLayout";
 import KickedBannedDialog from "./KickedBannedDialog";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import { useVoice } from "../hooks/useVoice";
@@ -30,6 +32,7 @@ export default function AppShell() {
   // between the sidebar's Join button and the main-area screen-share stage, and
   // avoids duplicate voice event listeners (which would double-decode video).
   const voice = useVoice();
+  const layout = useLayout();
 
   const [searchOpen, setSearchOpen] = useState(false);
   // Counter that increments every time something tries to open the overlay.
@@ -63,21 +66,7 @@ export default function AppShell() {
     return () => window.removeEventListener("keydown", handler, true);
   }, []);
 
-  // Subscribe to all active channels whenever they change
-  useEffect(() => {
-    if (!serverId || !activeServer?.connected) return;
-    const ids: number[] = [];
-    if (activeServer.currentChannelId) ids.push(activeServer.currentChannelId);
-    if (activeServer.dmPanelChannelId && activeServer.dmPanelChannelId !== activeServer.currentChannelId) {
-      ids.push(activeServer.dmPanelChannelId);
-    }
-    if (activeServer.threadChannelId && !ids.includes(activeServer.threadChannelId)) {
-      ids.push(activeServer.threadChannelId);
-    }
-    if (ids.length > 0) {
-      api.subscribeChannels(serverId, ids).catch((e) => console.error("[subscribe] failed; channel may stop receiving messages:", e));
-    }
-  }, [serverId, activeServer?.connected, activeServer?.currentChannelId, activeServer?.dmPanelChannelId, activeServer?.threadChannelId]);
+  // Channel subscriptions live in hooks/useSubscriptions.ts (mounted in App.tsx).
 
   // Reconnect logic per-server
   useEffect(() => {
@@ -97,9 +86,7 @@ export default function AppShell() {
             const dms = await api.listDms(serverId);
             dispatch({ type: "SET_DMS", serverId, payload: dms });
           } catch {}
-          if (activeServer?.currentChannelId) {
-            await api.subscribeChannels(serverId, [activeServer.currentChannelId]);
-          }
+          // (Channel subscriptions are re-sent by hooks/useSubscriptions.ts.)
           break;
         } catch (e) {
           console.error(`[reconnect] ${serverId}:`, e);
@@ -174,13 +161,14 @@ export default function AppShell() {
       <div className="main-layout" style={{ position: "relative" }}>
         <ServerStrip />
         <ChannelSidebar voice={voice} />
+        {layout === "small" && <CompactList voice={voice} />}
         <ChatPanel />
         <MemberSidebar />
         <ScreenShareStage voice={voice} />
         <DmPanel />
         {activeServer?.connectionLost && (
-          <div className="reconnect-overlay">
-            Connection lost. Reconnecting...
+          <div className="reconnect-overlay" role="status">
+            <span className="reconnect-pill">Connection lost. Reconnecting... You can still read what is here and switch servers.</span>
           </div>
         )}
         {state.kickedBanned && (

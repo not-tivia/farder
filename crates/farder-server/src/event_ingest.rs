@@ -60,6 +60,14 @@ pub(crate) fn payload_type(p: &EventPayload) -> &'static str {
         EventPayload::MessageEditedE2ee { .. } => "MessageEditedE2ee",
         EventPayload::MessageDeleted { .. } => "MessageDeleted",
         EventPayload::DeviceRevoked { .. } => "DeviceRevoked",
+        EventPayload::GarbleSet { .. } => "GarbleSet",
+        EventPayload::GarbleCleared { .. } => "GarbleCleared",
+        EventPayload::GarbleConsent { .. } => "GarbleConsent",
+        EventPayload::PermissionRevoked { .. } => "PermissionRevoked",
+        EventPayload::RecoveryKeySet { .. } => "RecoveryKeySet",
+        EventPayload::RecoveryClaim { .. } => "RecoveryClaim",
+        EventPayload::RecoveryCancel { .. } => "RecoveryCancel",
+        EventPayload::RecoveryFinalize { .. } => "RecoveryFinalize",
     }
 }
 
@@ -273,6 +281,30 @@ pub fn load_events_in_order(conn: &Connection) -> Result<Vec<Event>> {
         out.push(Event::from_bytes(&body).context("decode stored event")?);
     }
     Ok(out)
+}
+
+/// A page of stored events after acceptance position `after`, with the server's bookkeeping, and
+/// whether it reached the end. `limit` is clamped to 1..=500.
+pub fn load_events_page(conn: &Connection, after: u64, limit: u32) -> Result<(Vec<farder_protocol::server::StoredEvent>, bool)> {
+    let limit = limit.clamp(1, 500) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT accept_seq, created_at, event_body FROM events WHERE accept_seq > ?1 ORDER BY accept_seq ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![after as i64, limit + 1], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Vec<u8>>(2)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (seq, at, body) = row?;
+        out.push(farder_protocol::server::StoredEvent {
+            accept_seq: seq as u64,
+            accepted_at: at as u64,
+            event: Event::from_bytes(&body).context("decode stored event")?,
+        });
+    }
+    let done = out.len() as i64 <= limit;
+    out.truncate(limit as usize);
+    Ok((out, done))
 }
 
 /// Rebuild the authorization state from genesis + the stored events (in accept
@@ -675,6 +707,11 @@ pub fn reconcile_messages(conn: &Connection, log_state: Option<&LogState>) -> Re
         }
         if derive_message_row(conn, &event)?.is_some() {
             repaired += 1;
+            // A re-derived row must come back drawn the way the fold says it was.
+            if let Some(ls) = log_state {
+                let hash = event.hash();
+                crate::messages::record_garble(conn, &hash, ls.garble_mark(&hash))?;
+            }
         }
     }
 

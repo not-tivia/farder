@@ -108,7 +108,27 @@ pub struct ServerState {
     /// A `std` lock (like `presences`) rather than a `tokio` one because
     /// `handlers::handle_request` is synchronous and cannot await.
     pub client_protocol: StdRwLock<HashMap<[u8; 32], u32>>,
+
+    /// How long a recovery-key takeover must wait, in seconds, between the claim being
+    /// recorded and the server accepting its completion (see docs/recovery-owner-design.md).
+    /// The server enforces it with its OWN clock, because event timestamps are chosen by
+    /// their author and cannot be trusted to measure a wait.
+    pub recovery_wait_secs: u64,
+
+    /// The bulk-damage brake (see `brake.rs`): a limit on destructive changes per account.
+    pub brake: crate::brake::Brake,
+
+    /// Snapshots handed to replicas, fetched in pieces (id -> file, size, when made). See `snapshot.rs`.
+    pub snapshots: crate::snapshot::Snapshots,
+
+    /// A read-only COPY of a server (`--read-only`): serves history and members from a replica's copy
+    /// while the host is down, and refuses everything that writes. SQLite itself is also told not to
+    /// write (`query_only`), so the copy cannot change even if a code path forgets to check this.
+    pub read_only: bool,
 }
+
+/// Default waiting period for a recovery takeover: 72 hours.
+pub const DEFAULT_RECOVERY_WAIT_SECS: u64 = 72 * 3600;
 
 impl ServerState {
     pub fn new(conn: Connection, server_name: String, storage_dir: String, max_file_size: u64) -> Self {
@@ -135,7 +155,29 @@ impl ServerState {
             log_state: std::sync::Mutex::new(None),
             relay_server_id: std::sync::Mutex::new(None),
             client_protocol: StdRwLock::new(HashMap::new()),
+            recovery_wait_secs: DEFAULT_RECOVERY_WAIT_SECS,
+            brake: crate::brake::Brake::default(),
+            snapshots: crate::snapshot::Snapshots::default(),
+            read_only: false,
         }
+    }
+
+    /// Who the owner is RIGHT NOW. On a server with a signed history the history is the
+    /// truth (a recovery takeover changes the owner inside it, and a restart re-folds the
+    /// same answer); an older server without one uses the in-memory owner.
+    pub async fn current_owner(&self) -> Option<PublicKey> {
+        {
+            let guard = self.log_state.lock().unwrap();
+            if let Some(ls) = guard.as_ref() {
+                return Some(ls.owner().clone());
+            }
+        }
+        self.owner.read().await.clone()
+    }
+
+    /// `current_owner`, as a yes/no about one person.
+    pub async fn is_current_owner(&self, pk: &PublicKey) -> bool {
+        self.current_owner().await.as_ref().map(|o| o == pk).unwrap_or(false)
     }
 
     /// Register an authenticated session by its login token (relay file streams

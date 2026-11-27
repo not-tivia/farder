@@ -146,6 +146,7 @@ Additionally:
 | `KickMember` | base | `KICK_MEMBERS` + member hierarchy |
 | `BanMember` / `UnbanMember` / `ListBanned` | base | `BAN_MEMBERS` (+ hierarchy for ban) |
 | `CreateInvite` | base | `CREATE_INVITES` |
+| `CreateGuestInvite` | base | `CREATE_INVITES` (and the owner switch must be on) |
 | `TimeoutMember` / `RemoveTimeout` | base | `TIMEOUT_MEMBERS` + member hierarchy |
 | `ListAuditEvents` | base | `MANAGE_SERVER` |
 | `JoinChannelMedia` | channel-scoped | `CONNECT` |
@@ -245,3 +246,4 @@ The connection handler (outside these modules) drives the handshake:
 - **`SPEAK` and `STREAM` flags exist but are not yet enforced** — they are defined in `permissions.rs` and included in `ALL_PERMISSIONS`, but no handler branch currently calls `permissions::has(perms, SPEAK)` or similar. Checking for them will require a Phase 4 handler update.
 - **`@everyone` role is builtin = 1** — the resolution helpers fetch it with `WHERE name = '@everyone' AND builtin = 1`. If this row is missing (shouldn't happen on a properly initialized server), the permission query returns 0 and all members silently lose their base permissions. Initialization code must create this role.
 - **Overrides are role-scoped, not member-scoped** — there are no per-member overrides, only per-role. A member's overrides are the union of overrides for all roles they hold. If two roles have conflicting overrides at the same level, allow always wins over deny within that level (the union of allows is applied after the union of denies).
+- **Guests are capped.** A member who joined with a guest link (`members.guest_expires_at` set) never holds more than `GUEST_ALLOWED` (view, read, send), whatever roles or overrides they are given; the cap is applied in all three resolvers in `handlers.rs` (`cap_guest`). Their session ends at the link's expiry (`authenticate_existing_member` refuses an expired guest).  An already-connected guest is refused every request once the link expires.

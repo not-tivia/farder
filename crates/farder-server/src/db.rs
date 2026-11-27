@@ -278,6 +278,23 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Replicas: members the owner allows to keep a full copy of the server (mesh step 2).
+    conn.execute("CREATE TABLE IF NOT EXISTS replicas (public_key BLOB PRIMARY KEY)", [])?;
+
+    // Guest links: an invite can be marked guest, and a member who joined with one has an
+    // expiry (NULL = a normal member).
+    let has_guest_col = |table: &str, col: &str| -> anyhow::Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let cols: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(1))?.filter_map(|r| r.ok()).collect();
+        Ok(cols.iter().any(|c| c == col))
+    };
+    if !has_guest_col("invites", "guest")? {
+        conn.execute("ALTER TABLE invites ADD COLUMN guest INTEGER NOT NULL DEFAULT 0", [])?;
+    }
+    if !has_guest_col("members", "guest_expires_at")? {
+        conn.execute("ALTER TABLE members ADD COLUMN guest_expires_at INTEGER NULL", [])?;
+    }
+
     // Members: add timeout_until + timeout_reason columns (Phase 2 moderation).
     let has_timeout_until: bool = {
         let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
@@ -449,6 +466,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     };
     if !has_event_hash {
         conn.execute("ALTER TABLE messages ADD COLUMN event_hash TEXT", [])?;
+    }
+
+    // Speech garbling: how a message is to be drawn (JSON of the fold's GarbleMark),
+    // written when the message is derived. NULL = draw as written.
+    let has_garble: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "garble")
+    };
+    if !has_garble {
+        conn.execute("ALTER TABLE messages ADD COLUMN garble TEXT", [])?;
     }
 
     // Rung 2: the channel's content class, DERIVED from an accepted `ChannelCreated`

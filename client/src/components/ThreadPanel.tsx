@@ -1,3 +1,4 @@
+import ChatNotices from "./ChatNotices";
 import { useEffect, useRef } from "react";
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
 import * as api from "../lib/tauri-bridge";
@@ -50,6 +51,7 @@ export default function ThreadPanel() {
       <div className="thread-back-btn" onClick={handleBack}>
         ← Back
       </div>
+      <ChatNotices />
       <div className="channel-header">
         <span className="channel-header-name">
           # {threadChannel?.name ?? "Thread"}

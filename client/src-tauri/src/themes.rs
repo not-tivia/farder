@@ -24,6 +24,18 @@ const BUILTIN_THEMES: &[BuiltinTheme] = &[
         css: include_str!("../../src/themes/hello-kitty/theme.css"),
         meta_json: include_str!("../../src/themes/hello-kitty/theme.json"),
     },
+    BuiltinTheme {
+        css: include_str!("../../src/themes/velvet/theme.css"),
+        meta_json: include_str!("../../src/themes/velvet/theme.json"),
+    },
+    BuiltinTheme {
+        css: include_str!("../../src/themes/nocturne/theme.css"),
+        meta_json: include_str!("../../src/themes/nocturne/theme.json"),
+    },
+    BuiltinTheme {
+        css: include_str!("../../src/themes/candy/theme.css"),
+        meta_json: include_str!("../../src/themes/candy/theme.json"),
+    },
 ];
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -330,6 +342,7 @@ pub fn rename_user_theme(id: String, new_name: String) -> Result<(), String> {
     std::fs::write(&meta_path, pretty).map_err(|e| format!("write theme.json failed: {}", e))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
     use std::process::Command;
@@ -374,6 +387,12 @@ pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| format!("explorer failed: {}", e));
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn open_themes_folder(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("not available on this platform".to_string())
 }
 
 #[cfg(target_os = "linux")]

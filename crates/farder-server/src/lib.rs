@@ -1,4 +1,7 @@
 pub mod attachments;
+pub mod backup;
+pub mod brake;
+pub mod snapshot;
 pub mod commands;
 pub mod webhooks;
 pub mod bots;
@@ -24,6 +27,7 @@ pub mod reactions;
 pub mod reports;
 pub mod relay;
 pub mod reminders;
+pub mod reset_owner;
 pub mod retention;
 pub mod ssrf;
 pub mod state;

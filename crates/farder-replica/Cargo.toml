@@ -1,0 +1,27 @@
+[package]
+name = "farder-replica"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Keeps a verified copy of a Farder server on another machine (docs/mesh-hosting-status.md, step 2)"
+
+[dependencies]
+farder-crypto = { workspace = true }
+farder-protocol = { workspace = true }
+farder-server = { workspace = true }
+farder-web = { path = "../farder-web" }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

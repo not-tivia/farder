@@ -5,6 +5,16 @@ name = "farder-client"
 version = "0.1.0"
 edition = "2021"
 
+# The app code is a library so Android and iOS can load it; the desktop program
+# (src/main.rs) is a one-line wrapper around it.
+[lib]
+name = "farder_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "farder-client"
+path = "src/main.rs"
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
@@ -30,7 +40,6 @@ base64 = "0.22"
 dirs = "5"
 sha2 = "0.10"
 flate2 = "1"
-rfd = "0.15"
 cpal = "0.15"
 hound = "3.5"
 tauri-plugin-shell = "2"
@@ -43,6 +52,10 @@ urlencoding = "2"
 # platforms (validated on Linux + Windows 2026-06-12).
 openh264 = "0.9.3"
 
+# Native file dialogs exist on desktop only; phones use their own system pickers.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rfd = "0.15"
+
 [target.'cfg(windows)'.dependencies]
 # Windows Graphics Capture — screen/window/fullscreen capture. Windows-only;
 # on other hosts the mock display backend is used and this isn't compiled.
@@ -50,7 +63,8 @@ windows-capture = "2.0.0"
 wasapi = "0.23.0"
 # GSMTC (Global System Media Transport Controls) — Windows "now playing" source
 # for rich presence.  Cfg-gated; not compiled on Linux/macOS.
-windows = { version = "0.58", features = ["Media_Control", "Foundation"] }
+windows = { version = "0.58", features = ["Media_Control", "Foundation", "Win32_Foundation", "Win32_Graphics_Dwm"] }
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 tempfile = "3"

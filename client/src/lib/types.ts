@@ -98,6 +98,9 @@ export interface MessageInfo {
   /** Server-written widget marker JSON (e.g. `{"type":"poll","id":7}`); null/absent
    *  for normal messages. Treat as untrusted: try/catch parse, numeric id check. */
   widget?: string | null;
+  /** How to DRAW this message when a garble rule covered its author when it was
+   *  accepted (the words are unchanged). Absent/null = draw as written. */
+  garble?: GarbleMark | null;
   /** Rung-2 sealed-row fields, absent on v1/plaintext rows. A sealed row has
    *  empty `content` and ciphertext in `sealed`; `event_hash` cites the log
    *  event for reply/edit/delete. `is_e2ee` undefined = plaintext. */
@@ -284,6 +287,14 @@ export interface SealedAttachmentRef {
   mimeType: string;
 }
 
+/** The `farder_mls::group::BEFORE_JOINED` reason: the message was sealed before this device was added to
+ *  the channel. Expected (MLS gives a newcomer no keys for the past), so it is shown calmly and is not
+ *  counted as "could not be verified". Keep in sync with the Rust constant. */
+export const SEALED_BEFORE_JOINED = "sent before this device could read the channel";
+export function isSealedBeforeJoined(e: SealedDecryptEntry | undefined): boolean {
+  return e?.kind === "undecryptable" && e.reason.includes(SEALED_BEFORE_JOINED);
+}
+
 export type SealedDecryptEntry =
   | { kind: "decrypted"; content: string; eventHash: string | null; attachments?: SealedAttachmentRef[] }
   | { kind: "undecryptable"; reason: string; eventHash: string | null };
@@ -381,4 +392,14 @@ export interface WebhookTokenResult {
   id: number;
   token: string;
   server_id_hex: string | null;
+}
+
+/** A garble rule's effect on one message (mirrors `farder_crypto::GarbleMark`). */
+export interface GarbleMark {
+  mode: string;
+  phrase: string;
+  /** Who set the rule. */
+  by: { bytes: number[] };
+  /** true = a moderation action; false = the author agreed to it. */
+  moderation: boolean;
 }

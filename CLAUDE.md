@@ -32,7 +32,7 @@ Before marking work complete:
 
 `invoke("some_command")` in the client is a **plain string**. Nothing checks at
 compile time that a matching `#[tauri::command]` exists and is registered in the
-`generate_handler!` list in `client/src-tauri/src/main.rs`. A whole feature can
+`generate_handler!` list in `client/src-tauri/src/lib.rs` (the app library; `main.rs` is a one-line wrapper). A whole feature can
 "exist" on both sides yet be dead because the names don't line up or the command
 was never registered (this is exactly how voice-channel join shipped broken).
 

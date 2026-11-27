@@ -309,7 +309,10 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     }
     case "MESSAGE_EDITED": {
       const { channelId, messageId, newContent, editedAt } = action.payload;
-      const msgs = state.messages[channelId] ?? [];
+      // Never create an entry for a channel nobody loaded: an empty list would
+      // read as "history already loaded" to the small chat windows.
+      if (!state.messages[channelId]) return state;
+      const msgs = state.messages[channelId];
       return {
         ...state,
         messages: {
@@ -320,7 +323,8 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
     }
     case "MESSAGE_DELETED": {
       const { channelId, messageId } = action.payload;
-      const msgs = state.messages[channelId] ?? [];
+      if (!state.messages[channelId]) return state;
+      const msgs = state.messages[channelId];
       return {
         ...state,
         messages: { ...state.messages, [channelId]: msgs.filter((m) => m.id !== messageId) },

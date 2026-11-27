@@ -507,6 +507,13 @@ fn read_instance_id(conn: &Connection) -> Result<[u8; 16], StoreResumeError> {
     }
 }
 
+/// The at-rest key is process-wide (`STORE_KEY`), and tests arm and disarm it while
+/// others create and resume stores, so under the default parallel test runner two of
+/// them failed with `KeyMismatch`. Every store test holds this lock for its whole
+/// run, which makes them one-at-a-time without needing `--test-threads=1`.
+#[cfg(test)]
+static KEY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +543,7 @@ mod tests {
 
     #[test]
     fn fresh_store_generates_a_random_instance_id_and_publishable_hash() {
+        let _key_guard = KEY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p1 = temp_db("fresh-1");
         let p2 = temp_db("fresh-2");
 
@@ -556,6 +564,7 @@ mod tests {
 
     #[test]
     fn resume_with_matching_hash_restores_group_state() {
+        let _key_guard = KEY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = temp_db("resume");
         let group_id: &[u8] = b"server-1/channel-1/generation-0";
 
@@ -641,6 +650,7 @@ mod tests {
 
     #[test]
     fn store_instance_mismatch_refuses_to_resume() {
+        let _key_guard = KEY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = temp_db("mismatch");
         let (store, _id) = FarderMlsStore::create(&path).unwrap();
         let hash = store.store_instance_hash();
@@ -662,6 +672,7 @@ mod tests {
 
     #[test]
     fn resume_of_a_store_without_instance_metadata_is_refused_not_recreated() {
+        let _key_guard = KEY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = temp_db("missing-meta");
         let (store, _id) = FarderMlsStore::create(&path).unwrap();
         let hash = store.store_instance_hash();
@@ -719,6 +730,7 @@ mod at_rest_tests {
     /// its absence is a real check rather than a tautology.
     #[test]
     fn the_mls_store_file_holds_no_plaintext_values() {
+        let _key_guard = KEY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = temp_db("observation");
         let group_id: &[u8] = b"NEEDLE-GROUP-ID-must-not-appear-in-the-file";
         let id = Keypair::generate();
@@ -757,6 +769,7 @@ mod at_rest_tests {
     /// not a pile of decode failures from inside OpenMLS.
     #[test]
     fn a_store_sealed_under_another_key_refuses_to_resume() {
+        let _key_guard = KEY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = temp_db("key-mismatch");
         arm_store_key([1u8; 32]);
         let hash = {

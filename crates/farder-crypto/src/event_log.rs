@@ -295,7 +295,73 @@ pub enum EventPayload {
     /// Kills a device: cert dead, chain frozen (history stands, new events
     /// rejected), leaves become pending_removals via the bridge.
     DeviceRevoked { device: DeviceId },
+
+    // ---- Speech garbling (display effect on a member's messages) ----
+    /// Garble `target`'s next `messages` messages, as DISPLAYED by every viewer.
+    /// The original words stay in the log (nothing is destroyed or rewritten);
+    /// clients draw the garbled version and label it. Two flavours, told apart by
+    /// `consensual`:
+    /// - moderation (`false`): the author holds the "garble" capability. Capped
+    ///   at `GARBLE_MODERATION_MAX_MESSAGES`.
+    /// - consensual (`true`): `target` earlier authored a `GarbleConsent` naming
+    ///   the author as a controller; bounded by what that consent allows.
+    /// The limit is a MESSAGE COUNT, never a duration: event timestamps are
+    /// author-chosen and cannot bound anything.
+    GarbleSet { target: PublicKey, mode: String, phrase: String, messages: u32, consensual: bool },
+    /// Stop garbling `target` now. The setter and any holder of "garble" may; the
+    /// target may too, but only for a consensual rule (their kill switch).
+    GarbleCleared { target: PublicKey },
+    /// Authored by the person who would be garbled: let `controller` garble me,
+    /// up to `max_messages` at a time. `0` revokes the consent and ends any rule
+    /// that controller has running on the author.
+    GarbleConsent { controller: PublicKey, max_messages: u32 },
+
+    /// Take a capability away from `member` (the other half of
+    /// `PermissionGranted`). The server owner may revoke any capability from
+    /// anyone; a member may renounce their own. Holding it is required, so a
+    /// revoke is never a silent no-op. Delegation does NOT cascade: revoking a
+    /// holder does not revoke what they granted onward.
+    PermissionRevoked { member: PublicKey, capability: String },
+
+    // ---- Recovery owner (a cold key that can take the server back, slowly) ----
+    // See docs/recovery-owner-design.md. All four are APPENDED here and never reordered.
+    /// Name the recovery key. The OWNER may do this once (while none is set); after that
+    /// only the recovery key itself may change it. Otherwise a thief holding the everyday
+    /// owner key could swap in their own recovery key.
+    RecoveryKeySet { recovery: PublicKey },
+    /// Authored by the recovery key: "ownership moves to `new_owner`". Takes effect only
+    /// after a `RecoveryFinalize`, which the SERVER refuses until a public waiting period
+    /// has passed (the fold cannot measure real time: event timestamps are author-chosen).
+    RecoveryClaim { new_owner: PublicKey },
+    /// Authored by the recovery key: withdraw its own pending claim. The everyday owner
+    /// key can NOT cancel it (a thief with that key would otherwise always win).
+    RecoveryCancel { claim: EventRef },
+    /// Authored by the recovery key once the waiting period is over: `new_owner` becomes
+    /// the owner. The recovery key is spent by this and must be set again.
+    RecoveryFinalize { claim: EventRef },
 }
+
+/// The words a garbled message was drawn with, and why. Computed by the log fold
+/// when the message is accepted, so every viewer agrees on it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GarbleMark {
+    pub mode: String,
+    pub phrase: String,
+    /// Who set the rule (moderator, or the controller the target consented to).
+    pub by: PublicKey,
+    /// `true` = moderation action (labelled as such everywhere); `false` = the
+    /// person consented.
+    pub moderation: bool,
+}
+
+/// Garble modes a `GarbleSet` may name. Mirrors the client's `garble.ts`.
+pub const GARBLE_MODES: &[&str] = &["bark", "meow", "moo", "mumble", "scramble", "shuffle", "custom"];
+/// Longest custom phrase, in characters.
+pub const GARBLE_MAX_PHRASE: usize = 40;
+/// Most messages one moderation `GarbleSet` can cover.
+pub const GARBLE_MODERATION_MAX_MESSAGES: u32 = 50;
+/// Most messages one consent (and so one consensual rule) can cover.
+pub const GARBLE_CONSENT_MAX_MESSAGES: u32 = 500;
 
 /// The signed-over body of an event. `author` is the IDENTITY; `device` says
 /// which of its devices signed; `(author, device)` keys the chain.

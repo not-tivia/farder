@@ -8,9 +8,9 @@ use crate::db::now;
 
 /// Shared SELECT column list for messages — must match `row_to_message_info` index order.
 /// author_name_override is at index 8; author_badge at index 9; widget is appended last
-/// (index 10) so all prior indices stay stable.
+/// (index 10) so all prior indices stay stable; `garble` follows at index 11.
 pub const MSG_SELECT: &str =
-    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned, author_name_override, author_badge, widget";
+    "id, channel_id, author, content, timestamp, edited_at, reply_to, pinned, author_name_override, author_badge, widget, garble";
 
 pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo> {
     let id: i64 = row.get(0)?;
@@ -24,6 +24,10 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
     let author_name_override: Option<String> = row.get(8)?;
     let author_badge: Option<String> = row.get(9)?;
     let widget: Option<String> = row.get(10)?;
+    // JSON of the fold's `GarbleMark`; anything unreadable is "draw as written".
+    let garble: Option<farder_crypto::event_log::GarbleMark> = row
+        .get::<_, Option<String>>(11)?
+        .and_then(|s| serde_json::from_str(&s).ok());
 
     let arr: [u8; 32] = author_bytes
         .try_into()
@@ -45,7 +49,24 @@ pub fn row_to_message_info(row: &rusqlite::Row) -> rusqlite::Result<MessageInfo>
         author_name_override,
         author_badge,
         widget,
+        garble,
     })
+}
+
+/// Record how a message is to be drawn, from the fold's mark. Called from the
+/// same transaction that derives the row, so a message and its mark are never
+/// out of step. Does nothing for an unmarked message.
+pub fn record_garble(
+    conn: &Connection,
+    event_hash: &str,
+    mark: Option<&farder_crypto::event_log::GarbleMark>,
+) -> Result<()> {
+    let Some(mark) = mark else { return Ok(()) };
+    conn.execute(
+        "UPDATE messages SET garble = ?1 WHERE event_hash = ?2",
+        params![serde_json::to_string(mark)?, event_hash],
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +329,7 @@ pub fn get_message_v2(
             params![id as i64],
             |row| {
                 let base = row_to_message_info(row)?;
-                let n = 11; // MSG_SELECT's column count; the three v2 columns follow it.
+                let n = 12; // MSG_SELECT's column count; the three v2 columns follow it.
                 let is_e2ee: i64 = row.get(n)?;
                 Ok(MessageInfoV2 {
                     base,
@@ -530,7 +551,7 @@ pub fn fetch_history_v2(
     };
     let row_to_v2 = |row: &rusqlite::Row| -> rusqlite::Result<MessageInfoV2> {
         let base = row_to_message_info(row)?;
-        let n = 11; // MSG_SELECT's column count; the three v2 columns follow it.
+        let n = 12; // MSG_SELECT's column count; the three v2 columns follow it.
         let is_e2ee: i64 = row.get(n)?;
         Ok(MessageInfoV2 {
             base,

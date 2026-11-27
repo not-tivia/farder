@@ -429,7 +429,11 @@ publishes via the crate's `publish_key_package`, and records a
 `confirmed: false` resume point. A member calls this when it opens an E2EE
 channel it is not yet a confirmed member of (T9/T10 wire the trigger).
 **Parameters:** as `add_members_to_e2ee_channel`.
-**Returns:** `PublishOwnKeyPackageResult { channel_id, event_hash }`.
+**Returns:** `PublishOwnKeyPackageResult { channel_id, event_hash, skipped }`. `skipped: true` (and an
+empty `event_hash`) when this device is already a confirmed member or the channel is poisoned: the
+command refuses to publish over that state, checked under the device-chain lock (2026-11-26; callers
+include the steward and the new-channel early publish in `useServerEvents.ts`, and a Welcome can land
+between their `process` and this call).
 **Side effects:** advances + persists the device chain; persists
 `servers/<log_server_id>/mls/<channel_id>.mls_state.json` with
 `{ generation: 0, epoch: 0, store_instance_hash, confirmed: false }`.
@@ -520,10 +524,14 @@ group and calls the crate's `receive_sealed` **exactly once**; the ciphertext is
 taken by value and the returned `SealedOutcome` carries the bytes in neither
 variant, so a re-open is structurally impossible (the ratchet is consumed on
 open — 4a). Returns a tag-discriminated `DecryptSealedMessageResult`: either
-`{ kind: "decrypted", envelope: MessageEnvelope }` or
-`{ kind: "undecryptable", reason: String }`. A missing store / no local group /
-poisoned group surface as `undecryptable`, never a command error, so the
-frontend renders a fail-closed state rather than garbage. Deliberately NOT
+`{ kind: "decrypted", envelope: MessageEnvelope }`,
+`{ kind: "undecryptable", reason: String }` or `{ kind: "not_ready", reason: String }`.
+A missing store / poisoned group surface as `undecryptable`, never a command error, so the
+frontend renders a fail-closed state rather than garbage. **No local group YET** (this device's
+Welcome not processed) is `not_ready`: nothing was opened and no key consumed, so
+`useSealedDecrypt` does not cache it and opens the row again when the channel's `mlsStates`
+entry changes (2026-11-26: seen live, the first message after a member was added arrived a
+moment before that member's Welcome and used to show "couldn't decrypt" forever). Deliberately NOT
 `run_e2ee`: decryption is a local, read-only open that needs only the device
 subkey + on-disk store (not device authorization). **Since sub-7a H1 it DOES
 require the identity to be unlocked**, because the device subkey is now wrapped
@@ -1875,20 +1883,149 @@ unchanged.
 
 ---
 
-### `show_notification(title, body) -> Result<(), String>`
+### `show_notification(title, body, media_url, reply) -> Result<(), String>`
 
-**What it does:** spawns a native OS desktop notification. Uses `notify-send`
-on Linux, a PowerShell toast on Windows, and `osascript` on macOS. Fully
-fire-and-forget — subprocess spawn errors are silently discarded.
-**Side effects:** spawns a child process.
-**invoke name:** `"show_notification"` → `showNotification()`.
+**What it does:** raises a notification. With `popupStyle: "off"` it does nothing
+at all. By default (`popupStyle` absent or `"skinned"` in `notifications.json`) it hands the text to Farder's own
+notification window (`notify_popup.rs`, see below) and emits `notify:push` to it.
+With `popupStyle: "system"`, or if the window cannot be reached, it spawns a
+native OS notification instead: `notify-send` on Linux, a PowerShell toast on
+Windows, `osascript` on macOS (fire-and-forget; spawn errors discarded). The OS
+route copies the text into the OS notification history, which is why the skinned
+window is the default.
+`reply` (optional `{server_id, channel_id}`) gives the card a Reply button: the
+client sets it only with the themed pop-up, when the pop-up shows who it is from
+and replying is not turned off. `media_url` (optional) is a direct video/image
+link the pop-up may preview; the
+client only passes one for a sender the person trusts (see Autoplay) and the OS
+toast route ignores it.
+**Side effects:** emits an event to the `notify` window, or spawns a child process.
+**invoke name:** `"show_notification"` -> `showNotification()`.
+
+---
+
+### `notify_layout(count, height) -> Result<(), String>`
+
+**What it does:** called by the notification window (`NotifyPopup.tsx`) whenever
+what it shows changes. `0` hides the window; otherwise it is sized to `height`
+logical pixels (the page MEASURES it, since a card with a media preview is taller;
+clamped to 76+16 .. 900), centred at the top of the PRIMARY monitor, and shown
+without taking focus. The geometry is the pure, unit-tested `notify_popup::layout_for`.
+**Errors:** the window is not running, or there is no primary monitor.
+**invoke name:** `"notify_layout"` -> `notifyLayout()`.
+
+---
+
+### `notify_focus(focusable) -> Result<(), String>`
+
+**What it does:** makes the pop-up window focusable (and focuses it) or not. It is
+unfocusable by design so it can never steal your typing; the page asks for focus
+only while a reply box is open and gives it up when it closes. `notify_layout(0,..)`
+also resets it to unfocusable when the window hides.
+**invoke name:** `"notify_focus"` -> `notifyFocus()`.
+
+---
+
+### `notify_activate() -> Result<(), String>`
+
+**What it does:** a notification card was clicked: un-minimises, shows and
+focuses the `main` window.
+**invoke name:** `"notify_activate"` -> `notifyActivate()`.
+
+---
+
+### `set_window_layout(small) -> Result<(), String>`
+
+**What it does:** switches the `main` window between the full layout and the
+small single-window layout (a conversation list and one chat). It changes the
+window's MINIMUM size (full 900 x 560, small 380 x 280) and, only if needed, its
+size (going small shrinks a window bigger than 700 x 520 to 560 x 380; going full
+grows one below the full minimum to 1200 x 800; a window the person already made
+small is left alone). A maximised window is restored first. The page decides what
+to draw (`lib/layout.ts`, `CompactList.tsx`). The planning is the pure,
+unit-tested `window_behavior::plan_layout`.
+**invoke name:** `"set_window_layout"` -> `setWindowLayout()`. See `small-window.md`.
+
+---
+
+### `get_edge_strip() -> StripSettings` / `set_edge_strip(settings) -> Result<StripSettings, String>`
+
+**What it does:** the edge strip's saved settings (`enabled`, `dock` top/bottom,
+`align` left/center/right, `width` 280-900 logical px, `always_visible`), stored
+under `edge_strip` in `settings.json`, OFF by default. `set_edge_strip` clamps the
+values, saves them, builds or destroys the strip window to match (it is an extra
+browser process, so it exists only while enabled) and emits `strip:settings-changed`.
+See `edge-strip.md`.
+**invoke name:** `"get_edge_strip"` -> `getEdgeStrip()`, `"set_edge_strip"` -> `setEdgeStrip()`.
+
+---
+
+### `strip_layout(has_content) -> Result<(), String>`
+
+**What it does:** called by the strip window whenever it has, or no longer has,
+anything to show. With content (or `always_visible`) the window is placed on the
+PRIMARY monitor's WORK AREA (so a bottom strip clears the taskbar) and shown
+without taking focus; otherwise it is hidden and made unfocusable again. Geometry
+is the pure, unit-tested `edge_strip::layout_for`.
+**Errors:** the strip window is not running, or there is no primary monitor.
+**invoke name:** `"strip_layout"` -> `stripLayout()`.
+
+---
+
+### `strip_focus(focusable) -> Result<(), String>`
+
+**What it does:** like `notify_focus`, for the strip: focusable (and focused) only
+while its reply box is open.
+**invoke name:** `"strip_focus"` -> `stripFocus()`.
+
+---
+
+### `strip_open(server_id, channel_id) -> Result<(), String>`
+
+**What it does:** a chip or the preview was clicked: un-minimises, shows and focuses
+the `main` window and emits `strip:open` `{server_id, channel_id}` to it, which
+`useServerEvents.ts` validates against what exists before switching to that server
+and channel or DM. Both ids may be absent (just open the app).
+**invoke name:** `"strip_open"` -> `stripOpen()`.
+
+---
+
+### `get_buddy_settings() -> BuddySettings` / `set_buddy_settings(settings) -> Result<BuddySettings, String>`
+
+**What it does:** reads/writes the buddy list's saved setting (`open_at_start`,
+default off) under the `buddy_list` settings key. Opening at start is done in
+`main.rs` setup.
+**invoke names:** `"get_buddy_settings"` -> `getBuddySettings()`, `"set_buddy_settings"` -> `setBuddySettings()`.
+
+---
+
+### `open_buddy_list() -> Result<(), String>`
+
+**What it does:** builds the `buddy` window (250x480, normal title bar, resizable,
+page `index.html?buddy=1`) or, if it exists, un-minimises and focuses it.
+**invoke name:** `"open_buddy_list"` -> `openBuddyList()`.
+
+---
+
+### `chat_open(server_id, channel_id, title) -> Result<(), String>`
+
+**What it does:** builds (or brings forward) the small chat window for one
+conversation. The label is `chat-<fnv1a(server_id) as 8 hex>-<channel_id>`, so the
+same conversation always maps to the same window. `title` only names the window
+(control characters stripped, 60 chars max); the transcript comes from the main
+window, which checks the conversation exists. A server id longer than 128 bytes is
+refused.
+**invoke name:** `"chat_open"` -> `chatOpen()`.
 
 ---
 
 ### `get_notification_prefs() -> Result<Value, String>` / `save_notification_prefs(prefs) -> Result<(), String>`
 
 **What it does:** reads/writes `~/.farder/notifications.json`. Default prefs
-are inline (DM notifications: `"all"`, mentions: `true`, etc.).
+are inline (DM notifications: `"all"`, mentions: `true`, etc.). Saving also
+manages the pop-up window's lifetime: `popupStyle: "skinned"` builds it, any other
+style destroys it (it is a whole extra browser process). `popupContent`
+(`full` / `sender` / `hidden`) is read by the client, not here.
 **invoke names:** `"get_notification_prefs"` / `"save_notification_prefs"` →
 `getNotificationPrefs()` / `saveNotificationPrefs()`.
 
@@ -2204,10 +2341,12 @@ No disk or network I/O.
 
 **What it does:** called at app startup. Reads `servers.json`, kills any orphan
 `farder-server` processes whose `--db` flag matches each local server's data
-directory (Unix only, via `pgrep -af`), respawns each local server, and
-updates `servers.json` with new ports (ports may differ on restart). Remote
-servers are passed through unchanged.
-**Side effects:** may `kill -9` orphan OS processes; spawns child processes;
+directory (`pgrep -af` on Unix; a PowerShell `Get-CimInstance` + `Stop-Process`
+on Windows, `server_manager::reap_orphans_windows`), respawns each local server,
+and updates `servers.json`. A direct server tries its previous port first
+(`server_manager::pick_port`), so its address stays the same across restarts;
+it only changes if that port is taken. Remote servers are passed through unchanged.
+**Side effects:** may kill orphan OS processes; spawns child processes;
 rewrites `servers.json`.
 **invoke name:** `"restart_local_servers"` → `restartLocalServers()`.
 
@@ -3128,9 +3267,9 @@ channel already sealed by the freshness ceiling. The automatic paths normally
 cover this: a send that hits the ceiling rekeys and retries (K1), and the
 proactive cadence rekeys before the wall (K2).
 **Returns:** `{ event_hash, epoch }`. Persists the new epoch and the cadence.
-**Note:** a REJECTED rekey has already merged locally (finding F1), leaving the
-group one epoch ahead of the server; the error surfaces rather than being
-retried.
+**Note:** a REJECTED rekey changes nothing locally: it is staged, and the
+refusal discards it (`E2eeError::RekeyRefused`). The error surfaces rather
+than being retried.
 **invoke name:** `"rekey_e2ee_channel"` → `rekeyE2eeChannel(...)`.
 
 ### `revoke_own_device(state, server_id, log_server_id) -> Result<String, String>`
@@ -3171,6 +3310,241 @@ cursor and rekey cadence**, which described a group that no longer exists.
 
 Added 2026-09-19 after `scripts/doc_audit.py` compared the handler list against
 this file. Six registered commands had no entry; they are as real as the rest.
+
+### `get_window_behavior() -> WindowBehavior` / `set_window_behavior(close_to_tray, start_minimized) -> Result<(), String>`
+
+**What they do:** read / set how the main window behaves. `close_to_tray` (default
+ON): closing the window hides it and Farder keeps running from the tray; off, closing
+quits (stopping hosted servers). `start_minimized` (default off): start in the tray
+instead of opening the window. `get_window_behavior` also reports `autostart` (asked
+of Windows, never cached), `autostart_unavailable` (the reason, or null) and
+`tray_available`. Neither setting does anything without a tray: closing then quits and
+the window always shows. Stored as `close_to_tray` / `start_minimized` in the
+settings file. See `window-behavior.md`.
+**invoke names:** `"get_window_behavior"` / `"set_window_behavior"` ->
+`getWindowBehavior()` / `setWindowBehavior()`.
+
+---
+
+### `set_autostart(enabled) -> Result<bool, String>`
+
+**What it does:** adds or removes ONE value (`Farder`) in the current user's own
+`HKCU\...\Run` key, whose data is `"<exe>" --minimized`. No admin rights, nothing
+system-wide. Refused (with the reason) in a development build or off Windows. Returns
+the state Windows now reports.
+**invoke name:** `"set_autostart"` -> `setAutostart()`.
+
+---
+
+### `get_audio_limits() -> AudioLimits` / `set_audio_limits(master, max_db) -> Result<AudioLimits, String>`
+
+**What they do:** read / set the universal volume control: `master` (0.0 to 1.5,
+1.0 = unchanged) and `max_db`, a loudness CEILING in dB (-40 to -3; 0 = off).
+`set_audio_limits` clamps both (NaN or garbage means unchanged / off), applies
+them to the running voice mixer at once, saves them (`audio_master_volume`,
+`audio_max_db` in the settings file) and returns what it applied. They are also
+re-applied at startup (`apply_saved_audio_limits`). See `audio-limit.md`.
+**invoke names:** `"get_audio_limits"` / `"set_audio_limits"` ->
+`getAudioLimits()` / `setAudioLimits()`.
+
+---
+
+### `grant_capability(state, server_id, log_server_id, member, capability) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `PermissionGranted`: give `member` a power. `capability`
+must be one of `invite`, `kick`, `ban`, `garble` (`GRANTABLE_CAPABILITIES`; anything
+else is refused here because an unknown power would look real and do nothing). The
+fold refuses unless this identity is the owner or holds the power itself. Recorded
+in the audit log as `capability_granted`.
+**invoke name:** `"grant_capability"` -> `grantCapability()`.
+
+---
+
+### `revoke_capability(state, server_id, log_server_id, member, capability) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `PermissionRevoked`. Only the owner may revoke from
+someone else; a member may give up their own. The member must currently hold it
+(a no-op revoke is refused). Does NOT cascade to what that member granted onward.
+Audited as `capability_revoked`.
+**invoke name:** `"revoke_capability"` -> `revokeCapability()`.
+
+---
+
+### `get_capabilities(state, server_id) -> Result<Vec<CapabilityHolderView>, String>`
+
+**What it does:** `ServerRequest::GetCapabilities`. The owner is told everyone's
+explicit grants; anyone else only their own. The owner's implicit powers are not
+listed. Keys are `vk_<hex>`.
+**invoke name:** `"get_capabilities"` -> `getCapabilities()`.
+
+---
+
+### `recovery_status(state, server_id) -> Result<RecoveryStatusView, String>`
+
+**What it does:** `ServerRequest::GetRecoveryStatus`. Whether the server has a recovery key,
+its public half, how long a takeover must wait on this server (`wait_secs`), and the takeover in
+progress if any (`claim`, `new_owner`, `accepted_at`, `ready_at`, the server's own clock). Any
+member may ask: a takeover is meant to be seen by everyone.
+**invoke name:** `"recovery_status"` -> `recoveryStatus()`. Used by `RecoveryTab.tsx`.
+
+---
+
+### `recovery_create(state, server_id, log_server_id) -> Result<RecoveryCreatedView, String>`
+
+**What it does:** owner only. Makes a random recovery key, signs and submits
+`EventPayload::RecoveryKeySet` naming its public half, and returns the 24-word phrase ONCE
+(`phrase`, `recovery_key`). The words are kept nowhere on this computer.
+**invoke name:** `"recovery_create"` -> `recoveryCreate()`.
+**Side effects:** one event in the server's history; audit-logged; every client is told.
+
+---
+
+### `recovery_claim(state, server_id, log_server_id, phrase, new_owner) -> Result<EventAcceptedResult, String>`
+
+**What it does:** starts a takeover. Derives the recovery key from the 24 words, checks it is THIS
+server's recovery key, registers a throwaway device for it (cert valid one hour), and submits
+`RecoveryClaim { new_owner }`. `new_owner` must already be a member. The words are used once and
+never stored.
+**invoke name:** `"recovery_claim"` -> `recoveryClaim()`.
+
+---
+
+### `set_replica(state, server_id, member, enabled) -> Result<Vec<String>, String>`
+
+**What it does:** owner only: allow (or stop allowing) a member to keep a full copy of the server (`SetReplica`). A replica
+sees EVERYTHING the host sees. Returns the replicas afterwards as `vk_...` keys.
+**invoke name:** `"set_replica"` -> `setReplica()`.
+
+---
+
+### `list_replicas(state, server_id) -> Result<Vec<String>, String>`
+
+**What it does:** owner only: who may keep a full copy (`ListReplicas`).
+**invoke name:** `"list_replicas"` -> `listReplicas()`.
+
+---
+
+### `get_fallback_addresses(address) -> Vec<String>`
+
+**What it does:** this device's backup addresses for a saved server (where to read a saved copy when the host
+does not answer), in the order they are tried. Stored in `servers.json` (`ServerEntry.fallbacks`).
+**invoke name:** `"get_fallback_addresses"` -> `getFallbackAddresses()`.
+
+---
+
+### `set_fallback_addresses(address, addresses) -> Result<(), String>`
+
+**What it does:** sets that list (host:port entries, at most 4, the host's own address and duplicates dropped);
+anything that is not an address is refused. `connect_server` then tries the host first (giving it 5 seconds when
+backups exist) and these after it, keeping the connection under the host's address so everything else is unchanged.
+While on a backup, a probe asks the host every 20 seconds and, when it answers, closes the backup connection so the
+app's normal reconnect returns to the host.
+**invoke name:** `"set_fallback_addresses"` -> `setFallbackAddresses()`.
+
+---
+
+### `get_connection_route(state, server_id) -> Option<String>`
+
+**What it does:** the backup address this server is currently reached through (a read-only saved copy), or `None`
+when connected to the host or not connected. Drives the "reading a saved copy" banner.
+**invoke name:** `"get_connection_route"` -> `getConnectionRoute()`.
+
+---
+
+### `get_guest_links(state, server_id) -> Result<bool, String>`
+
+**What it does:** whether guest links (browser joins) are turned on for this server (`GetGuestLinks`).
+**invoke name:** `"get_guest_links"` -> `getGuestLinks()`.
+
+---
+
+### `set_guest_links(state, server_id, enabled) -> Result<bool, String>`
+
+**What it does:** owner only: turn guest links on or off (`SetGuestLinks`); off by default. Returns the new state.
+**invoke name:** `"set_guest_links"` -> `setGuestLinks()`.
+
+---
+
+### `create_guest_invite(state, server_id, log_server_id, route_name, expires_in_secs, max_uses) -> Result<GuestInviteResult, String>`
+
+**What it does:** makes a temporary guest link (`CreateGuestInvite`; default a day, at most a week, server-clamped).
+On a server with a signed history it also records the invite there as a signed `InviteCreated` event
+(shared helper `record_invite_in_log`, also used by `create_invite`), because a guest must cite it when
+joining. `route_name` is the name the host gave the gateway; it may use only letters, numbers, `-`, `_`.
+Returns `{ code, link }` where `link` is `https://<site>/<route_name>/t#<code>`.
+**invoke name:** `"create_guest_invite"` -> `createGuestInvite()`.
+
+---
+
+### `recovery_rotate(state, server_id, log_server_id, phrase) -> Result<RecoveryCreatedView, String>`
+
+**What it does:** replaces the recovery key. Needs the CURRENT 24 words (the everyday owner key
+cannot do this, or a thief could swap in their own key). Makes a new key, submits
+`RecoveryKeySet { recovery: new }` as the old recovery key (throwaway device, as for a claim) and
+returns the NEW words once. The old words stop working. The server refuses it while a takeover waits.
+**invoke name:** `"recovery_rotate"` -> `recoveryRotate()`.
+
+---
+
+### `recovery_cancel(state, server_id, log_server_id, phrase) -> Result<EventAcceptedResult, String>`
+
+**What it does:** the recovery key withdraws the takeover that is waiting
+(`RecoveryCancel`). The everyday owner key cannot do this.
+**invoke name:** `"recovery_cancel"` -> `recoveryCancel()`.
+
+---
+
+### `recovery_finalize(state, server_id, log_server_id, phrase) -> Result<EventAcceptedResult, String>`
+
+**What it does:** the recovery key finishes the waiting takeover (`RecoveryFinalize`). The SERVER
+refuses it until the waiting period has passed (its own clock); on success the new owner is the
+owner from the very next request and the recovery key is spent.
+**invoke name:** `"recovery_finalize"` -> `recoveryFinalize()`.
+
+---
+
+### `garble_set(state, server_id, log_server_id, target, mode, phrase, messages, consensual) -> Result<EventAcceptedResult, String>`
+
+**What it does:** signs and submits an `EventPayload::GarbleSet` as this device:
+garble `target`'s next `messages` messages as every viewer draws them.
+`consensual: false` is a MODERATION action (the fold requires the `garble`
+capability; the owner holds it implicitly; never the owner as a target; at most
+50 messages). `consensual: true` requires the target's earlier `garble_consent`
+naming this identity and stays inside it. The words are never rewritten in the
+log. The limit is a message COUNT because event timestamps are author-chosen.
+**Errors:** the fold's refusal text (e.g. "missing 'garble' capability", "the
+target has not consented to be garbled by you").
+**invoke name:** `"garble_set"` -> `garbleSet()`.
+
+---
+
+### `garble_clear(state, server_id, log_server_id, target) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `GarbleCleared`. Allowed for whoever set the rule, any
+holder of `garble`, and the target themselves ONLY for a consensual rule (their
+kill switch; they cannot end a moderation rule on themselves).
+**invoke name:** `"garble_clear"` -> `garbleClear()`.
+
+---
+
+### `garble_consent(state, server_id, log_server_id, controller, max_messages) -> Result<EventAcceptedResult, String>`
+
+**What it does:** submits `GarbleConsent`: let `controller` garble ME up to
+`max_messages` at a time (max 500). `0` revokes, and also ends any consensual
+rule that controller has running on me. Does not affect a moderation rule.
+**invoke name:** `"garble_consent"` -> `garbleConsent()`.
+
+---
+
+### `get_garble_state(state, server_id) -> Result<GarbleStateView, String>`
+
+**What it does:** `ServerRequest::GetGarbleState`. Returns `{ rules, consents,
+can_moderate }`, filtered by the server to what concerns the caller: rules on
+them or set by them (every running rule if they hold `garble`) and the consents
+they gave or hold. Nobody else learns that a rule exists. Keys are `vk_<hex>`.
+**invoke name:** `"get_garble_state"` -> `getGarbleState()`.
+
+---
 
 ### `submit_message_deleted(state, server_id, log_server_id, channel_id, target, own_message) -> Result<EventAcceptedResult, String>`
 

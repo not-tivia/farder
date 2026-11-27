@@ -35,8 +35,20 @@ pub struct MixerTaskConfig {
 
 /// Run the mixer. Returns when the playback SyncSender is disconnected.
 pub fn run(cfg: MixerTaskConfig) {
+    run_with_limits(cfg, crate::audio_limit::current);
+}
+
+/// `run`, with the volume/ceiling source injected so tests can set it without
+/// touching the process-wide settings the other mixer tests read.
+fn run_with_limits(cfg: MixerTaskConfig, limits: impl Fn() -> (f32, Option<f32>)) {
+    // The universal volume control (master volume + loudness ceiling). It is the
+    // LAST step, so it covers every voice and shared-screen audio together, and
+    // what the echo canceller sees is what actually reaches the speakers.
+    let mut limiter = crate::audio_limit::Limiter::new(crate::opus_codec::OPUS_SAMPLE_RATE, 150.0);
     loop {
-        let mixed = mix_one_frame(&cfg.peer_rings, &cfg.screen_audio_rings);
+        let mut mixed = mix_one_frame(&cfg.peer_rings, &cfg.screen_audio_rings);
+        let (master, ceiling) = limits();
+        limiter.process(&mut mixed, master, ceiling);
         {
             let mut guard = cfg.aec_ref.lock().expect("aec_ref poisoned");
             *guard = mixed.clone();
@@ -251,6 +263,48 @@ mod tests {
                 "screen audio must sum independently; got {s}, expected {expected}"
             );
         }
+    }
+
+    /// The mixer really applies the ceiling: a screaming peer at triple gain, with
+    /// a -12 dB ceiling, never reaches the speakers louder than -12 dB; the same
+    /// input with no ceiling does (so the check can fail).
+    #[test]
+    fn the_mixer_holds_the_loudness_ceiling_on_a_screaming_peer() {
+        let ceil = crate::audio_limit::db_to_linear(-12.0);
+        let play = |limits: (f32, Option<f32>)| -> f32 {
+            let rings: PeerRings = Arc::new(Mutex::new(HashMap::new()));
+            let ring = Arc::new(PeerPcmRing::new(40));
+            for f in 0..30 {
+                let frame: Vec<f32> = (0..OPUS_FRAME_SAMPLES_MONO)
+                    .map(|i| {
+                        let t = (f * OPUS_FRAME_SAMPLES_MONO + i) as f32 / OPUS_SAMPLE_RATE as f32;
+                        (2.0 * std::f32::consts::PI * 300.0 * t).sin() // full scale
+                    })
+                    .collect();
+                ring.push_frame(&frame);
+            }
+            rings.lock().unwrap().insert([1u8; 16], (ring, gain_bits(3.0)));
+            let (tx, rx) = mpsc::sync_channel::<PcmChunk>(40);
+            let cfg = MixerTaskConfig {
+                peer_rings: rings,
+                screen_audio_rings: Arc::new(Mutex::new(HashMap::new())),
+                playback_tx: tx,
+                aec_ref: Arc::new(Mutex::new(Vec::new())),
+            };
+            let handle = std::thread::spawn(move || run_with_limits(cfg, move || limits));
+            let mut peak = 0.0f32;
+            for _ in 0..25 {
+                let c = rx.recv_timeout(std::time::Duration::from_millis(500)).expect("a frame");
+                peak = c.samples.iter().fold(peak, |m, s| m.max(s.abs()));
+            }
+            drop(rx);
+            let _ = handle.join();
+            peak
+        };
+        let limited = play((1.0, Some(ceil)));
+        let unlimited = play((1.0, None));
+        assert!(limited <= ceil, "limited peak {limited} must not exceed {ceil}");
+        assert!(unlimited > ceil * 1.5, "without a ceiling the same scream is much louder ({unlimited})");
     }
 
     #[test]

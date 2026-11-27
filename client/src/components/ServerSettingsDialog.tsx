@@ -7,6 +7,9 @@ import type { ChannelInfo } from "../lib/types";
 import BannedMembersTab from "./BannedMembersTab";
 import AuditLogTab from "./AuditLogTab";
 import BotsTab from "./BotsTab";
+import PowersTab from "./PowersTab";
+import BackupCopyTab from "./BackupCopyTab";
+import RecoveryTab from "./RecoveryTab";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
 
 // Module-level cache for own public key (same pattern as MemberSidebar)
@@ -54,7 +57,7 @@ export default function ServerSettingsDialog({ onClose }: Props) {
   const [newRoleColor, setNewRoleColor] = useState("#3169C6");
   const [error, setError] = useState<string | null>(null);
   const [serverAvatarUrl, setServerAvatarUrl] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"general" | "banned" | "reports" | "audit" | "bots">("general");
+  const [activeTab, setActiveTab] = useState<"general" | "banned" | "reports" | "audit" | "bots" | "powers" | "recovery" | "backup">("general");
   // -- Retire this device (sub-5b G4) -------------------------------------
   const logServerId = activeServer?.logServerId ?? null;
   const [showRetire, setShowRetire] = useState(false);
@@ -306,6 +309,28 @@ export default function ServerSettingsDialog({ onClose }: Props) {
               Bots
             </button>
           )}
+          {logServerId && ownPk && ownPk === (activeServer?.ownerPublicKey ?? null) && (
+            <button
+              className={`settings-tab${activeTab === "powers" ? " active" : ""}`}
+              onClick={() => setActiveTab("powers")}
+            >
+              Powers
+            </button>
+          )}
+          {logServerId && (
+            <button
+              className={`settings-tab${activeTab === "recovery" ? " active" : ""}`}
+              onClick={() => setActiveTab("recovery")}
+            >
+              Recovery
+            </button>
+          )}
+          <button
+            className={`settings-tab${activeTab === "backup" ? " active" : ""}`}
+            onClick={() => setActiveTab("backup")}
+          >
+            Backup copy
+          </button>
         </div>
 
         <div className="modal-body" style={{ overflowY: "auto", flex: 1 }}>
@@ -320,6 +345,20 @@ export default function ServerSettingsDialog({ onClose }: Props) {
           )}
           {activeTab === "bots" && serverId && (
             <BotsTab serverId={serverId} />
+          )}
+          {activeTab === "powers" && serverId && logServerId && (
+            <PowersTab serverId={serverId} logServerId={logServerId} />
+          )}
+          {activeTab === "backup" && serverId && (
+            <BackupCopyTab serverId={serverId} isOwner={!!ownPk && ownPk === (activeServer?.ownerPublicKey ?? null)} />
+          )}
+          {activeTab === "recovery" && serverId && logServerId && (
+            <RecoveryTab
+              serverId={serverId}
+              logServerId={logServerId}
+              isOwner={!!ownPk && ownPk === (activeServer?.ownerPublicKey ?? null)}
+              ownPk={ownPk ?? null}
+            />
           )}
           {activeTab === "general" && <>
             {/* Encryption & devices (sub-5b G4). Per-server, because device

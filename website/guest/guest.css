@@ -1,0 +1,37 @@
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --text: #1b1f27; --muted: #5b6575; --border: #cfd5df;
+  --accent: #2f6fdb; --accent-text: #ffffff; --me: #e6efff; --err: #b3261e;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171c; --panel: #1d2128; --text: #e6e9ef; --muted: #9aa4b5; --border: #323946;
+          --accent: #5b8def; --accent-text: #0b1220; --me: #243350; --err: #ff8a80; }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+#app { max-width: 960px; margin: 0 auto; padding: 16px; height: 100%; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; max-width: 520px; margin: 8vh auto 0; }
+h1 { font-size: 20px; margin: 0 0 8px; }
+.plain { color: var(--muted); }
+label { display: block; margin: 14px 0 4px; font-weight: 600; }
+input { width: 100%; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+button { padding: 9px 16px; border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }
+#go { margin-top: 12px; }
+button:disabled { opacity: .6; cursor: default; }
+.error { color: var(--err); min-height: 1.4em; }
+details { margin-top: 10px; }
+.chat { display: flex; flex-direction: column; height: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.chat > header { display: flex; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+#status { color: var(--muted); font-size: 13px; }
+.body { display: flex; flex: 1; min-height: 0; }
+#channels { width: 170px; flex: none; border-right: 1px solid var(--border); padding: 8px; overflow: auto; }
+#channels button { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); font-weight: 400; padding: 6px 8px; }
+#channels button[aria-current="true"] { background: var(--me); font-weight: 600; }
+.pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#messages { flex: 1; overflow: auto; padding: 10px 14px; }
+.msg { margin: 0 0 8px; overflow-wrap: anywhere; }
+.msg .who { font-weight: 600; margin-right: 6px; }
+.msg .when { color: var(--muted); font-size: 12px; }
+.msg.mine .who { color: var(--accent); }
+#composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+@media (max-width: 560px) { #channels { width: 110px; } #app { padding: 8px; } }

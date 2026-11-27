@@ -51,6 +51,8 @@ Data crosses several hard boundaries; each is a place bugs hide.
 | `crates/farder-history/` | The local decrypted-history store for E2EE channels — every row sealed at rest under a key derived from the unlocked identity. Without it an E2EE channel has no history at all, because opening a sealed message consumes its ratchet key. See `docs/modules/farder-history.md`. |
 | `crates/farder-node/` | Personal node embedded in the client (DMs). |
 | `crates/farder-relay/` | Relay node (IP masking). |
+| `crates/farder-gateway/` | Browser gateway: WebSocket in, the server's QUIC main stream out (guest links; `docs/modules/gateway.md`). |
+| `crates/farder-replica/` | Keeps a verified copy of a server's database on another machine (owner-allowed); served with `farder-server --read-only` while the host is off, and the client fails over to it (`docs/modules/replica.md`). |
 | `crates/farder-notify/` | Desktop notifications helper. |
 
 ## Two end-to-end flows (the ones worth knowing)

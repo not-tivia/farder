@@ -23,6 +23,9 @@ pub struct ServerConnection {
     /// True if this connection is routed through a relay (so file streams need a
     /// RelayStreamRole::Session marker and voice is unavailable).
     pub relayed: bool,
+    /// `Some(address)` when the host did not answer and this connection is to a backup address (a
+    /// read-only saved copy): the app says so and keeps trying the host in the background.
+    pub on_fallback: Option<String>,
 }
 
 impl ServerConnection {

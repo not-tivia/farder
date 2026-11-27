@@ -310,6 +310,7 @@ mod tests {
                     author_name_override: None,
                     author_badge: None,
                     widget: None,
+                    garble: None,
                 },
                 is_e2ee: true,
                 sealed: Some(vec![9, 9, 9]),

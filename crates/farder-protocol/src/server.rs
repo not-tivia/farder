@@ -177,6 +177,41 @@ pub struct MessageInfo {
     /// only. None for all plain messages; clients parse it as untrusted input.
     #[serde(default)]
     pub widget: Option<String>,
+    /// How this message is to be DRAWN when a garble rule covered its author at
+    /// the moment it was accepted (see `EventPayload::GarbleSet`). The words
+    /// themselves are unchanged; the client draws them garbled and labels it.
+    /// None for every ordinary message. Appended last (positional codec).
+    #[serde(default)]
+    pub garble: Option<farder_crypto::event_log::GarbleMark>,
+}
+
+/// One member and the log capabilities explicitly granted to them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CapabilityHolder {
+    pub member: PublicKey,
+    pub capabilities: Vec<String>,
+}
+
+/// A garble rule that is running right now (see `EventPayload::GarbleSet`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GarbleRuleInfo {
+    pub target: PublicKey,
+    pub mode: String,
+    pub phrase: String,
+    /// Messages still to be garbled.
+    pub remaining: u32,
+    /// Who set it.
+    pub by: PublicKey,
+    /// `true` = a moderation action; `false` = the target agreed to it.
+    pub moderation: bool,
+}
+
+/// "`target` lets `controller` garble them, up to `max_messages` at a time."
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GarbleConsentInfo {
+    pub target: PublicKey,
+    pub controller: PublicKey,
+    pub max_messages: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -737,6 +772,47 @@ pub enum ServerRequest {
     /// stops new rows but does not delete the ones already written (the sweep
     /// does that as they age out).
     SetActivityLogging { enabled: bool, retention_days: u32 },
+    /// What garbling touches the caller: rules running on them, rules they set
+    /// (or, for a holder of "garble", every running rule), and consents they gave
+    /// or hold. Answered with [`ServerResponse::GarbleState`]. Appended last
+    /// (positional codec).
+    GetGarbleState,
+    /// Who holds which log capability. The owner is told everyone's; anyone else
+    /// is told only their own. Answered with [`ServerResponse::Capabilities`].
+    /// Appended last (positional codec).
+    GetCapabilities,
+    /// Whether a recovery key is set and whether a takeover is waiting, with the times
+    /// the app needs for a countdown. Any member may ask: a takeover is meant to be
+    /// SEEN by everyone. Answered with [`ServerResponse::RecoveryStatus`]. Appended last
+    /// (positional codec).
+    GetRecoveryStatus,
+    /// A temporary GUEST invite (for a browser link): short-lived, limited to reading and
+    /// sending in channels, no invites, no powers. Refused unless the owner turned guest links
+    /// on. Answered with [`ServerResponse::InviteCreated`]. Appended last (positional codec).
+    CreateGuestInvite { max_uses: Option<u32>, expires_in_secs: Option<u64> },
+    /// Owner only: turn guest links on or off (off by default). Appended last.
+    SetGuestLinks { enabled: bool },
+    /// Whether guest links are on. Answered with [`ServerResponse::GuestLinks`]. Appended last.
+    GetGuestLinks,
+    /// OWNER ONLY. Hand over the server's signed history after position `after` (0 = from the
+    /// start), at most `limit` events (the server may give fewer), so a second machine can keep a
+    /// verified copy (docs/mesh-hosting-status.md, step 1). Owner-only because the raw history holds
+    /// every channel's messages, including ones a member has no access to. Answered with
+    /// [`ServerResponse::LogPage`]. Appended last (positional codec).
+    FetchLog { after: u64, limit: u32 },
+    /// OWNER ONLY: allow or stop a member keeping a full copy of this server (a "replica", see
+    /// docs/mesh-hosting-status.md). A replica sees EVERYTHING the host sees (all channels, invite codes),
+    /// so only trusted machines. Answered with [`ServerResponse::Replicas`]. Appended last.
+    SetReplica { member: PublicKey, enabled: bool },
+    /// OWNER ONLY: who is a replica. Answered with [`ServerResponse::Replicas`]. Appended last.
+    ListReplicas,
+    /// OWNER or a replica: take a consistent snapshot of the server's database and say how big it is
+    /// and its SHA-256, then fetch it in pieces with `SnapshotChunk`. Answered with
+    /// [`ServerResponse::SnapshotInfo`]. Appended last.
+    SnapshotBegin,
+    /// OWNER or a replica: `len` bytes (at most 1 MiB) of snapshot `id` from `offset`. Answered with
+    /// [`ServerResponse::SnapshotData`]. Appended last.
+    SnapshotChunk { id: u64, offset: u64, len: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -870,6 +946,56 @@ pub enum ServerResponse {
     ReportList { reports: Vec<ReportInfo> },
     /// Answer to [`ServerRequest::GetActivityLogging`].
     ActivityLogging { enabled: bool, retention_days: u32 },
+    /// Answer to [`ServerRequest::GetGarbleState`]. `rules` holds only rules the
+    /// caller may see (on them, set by them, or all of them for a moderator);
+    /// `consents` holds consents the caller gave or was given. `can_moderate` says
+    /// whether the caller may start a moderation garble (holds "garble").
+    GarbleState { rules: Vec<GarbleRuleInfo>, consents: Vec<GarbleConsentInfo>, can_moderate: bool },
+    /// Answer to [`ServerRequest::GetCapabilities`]: explicit grants only (the
+    /// owner holds everything implicitly and is not listed).
+    Capabilities { holders: Vec<CapabilityHolder> },
+    /// Answer to [`ServerRequest::GetRecoveryStatus`]. `wait_secs` is how long a takeover
+    /// must wait on this server; `pending` is the takeover in progress, if any.
+    RecoveryStatus {
+        key_set: bool,
+        recovery_key: Option<PublicKey>,
+        wait_secs: u64,
+        pending: Option<RecoveryPendingInfo>,
+    },
+    /// Answer to [`ServerRequest::GetGuestLinks`] and [`ServerRequest::SetGuestLinks`].
+    GuestLinks { enabled: bool },
+    /// Answer to [`ServerRequest::FetchLog`]: the genesis (so the copy can check the server's id),
+    /// the next events in acceptance order, and whether that is all of them.
+    LogPage { genesis: farder_crypto::event_log::Genesis, events: Vec<StoredEvent>, done: bool },
+    /// Answer to `SetReplica` / `ListReplicas`.
+    Replicas { members: Vec<PublicKey> },
+    /// Answer to `SnapshotBegin`.
+    SnapshotInfo { id: u64, size: u64, sha256: String },
+    /// Answer to `SnapshotChunk`.
+    SnapshotData { data: Vec<u8> },
+}
+
+/// One accepted event with the server's own bookkeeping, as handed to a copy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredEvent {
+    /// The server's acceptance position (a copy resumes after the last one it has).
+    pub accept_seq: u64,
+    /// When the server accepted it (unix seconds, the SERVER's clock: waiting periods use it).
+    pub accepted_at: u64,
+    pub event: farder_crypto::event_log::Event,
+}
+
+/// A takeover started by the recovery key and not yet finished or withdrawn.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RecoveryPendingInfo {
+    /// Hash of the claim record (what a cancel or finish must cite).
+    pub claim: String,
+    /// Who becomes the owner when it completes.
+    pub new_owner: PublicKey,
+    /// When THIS server recorded the claim (unix seconds, the server's clock).
+    pub accepted_at: u64,
+    /// The earliest moment the server will accept its completion.
+    pub ready_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1018,6 +1144,9 @@ pub enum ServerEvent {
     /// a report is not an announcement. v2-only, like every variant added after
     /// v1 shipped.
     ReportCreated { report: ReportInfo },
+    /// A garble rule or consent changed. A bare pointer: clients re-ask
+    /// `GetGarbleState` rather than trusting a server-shaped summary. v2-only.
+    GarbleChanged { target: PublicKey },
 }
 
 /// Whether an event may only be delivered to a connection that negotiated
@@ -1038,7 +1167,8 @@ pub fn event_requires_v2(event: &ServerEvent) -> bool {
         // Variants added after v1 shipped: an old client cannot decode them, so
         // they must be v2-only whatever they carry.
         | ServerEvent::MemberDataDeleted { .. }
-        | ServerEvent::ReportCreated { .. } => true,
+        | ServerEvent::ReportCreated { .. }
+        | ServerEvent::GarbleChanged { .. } => true,
 
         // Every shipped (v1) variant, listed rather than wildcarded. v1 clients
         // keep receiving exactly what they received before.
@@ -1364,6 +1494,7 @@ mod tests {
             author_name_override: None,
             author_badge: None,
             widget: None,
+            garble: None,
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -1406,6 +1537,7 @@ mod tests {
                 author_name_override: None,
                 author_badge: None,
                 widget: None,
+                garble: None,
             },
         };
         let frame = ServerFrame::Event(event);
@@ -1751,6 +1883,7 @@ mod tests {
             author_name_override: None,
             author_badge: None,
             widget: None,
+            garble: None,
         };
         let bytes = codec::encode(&msg).unwrap();
         let decoded: MessageInfo = codec::decode(&bytes).unwrap();

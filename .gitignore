@@ -14,3 +14,4 @@ farder-server.db
 farder-server.db-shm
 farder-server.db-wal
 files/
+website/guest/pkg/

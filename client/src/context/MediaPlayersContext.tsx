@@ -28,9 +28,12 @@ export interface MediaPlayerInfo {
   size: { w: number; h: number };
   opacity: number;
   z: number;
+  /** Started by autoplay, not by a click: muted, never auto-floats on scroll, and
+   *  pauses when scrolled out of view. A click on the controls takes it over. */
+  quiet: boolean;
 }
 
-export interface OpenPlayerInput { kind: PlayerKind; src: string; hostId: string; title?: string; float?: boolean }
+export interface OpenPlayerInput { kind: PlayerKind; src: string; hostId: string; title?: string; float?: boolean; quiet?: boolean }
 export type PlayerPatch = Partial<Pick<MediaPlayerInfo, "pos" | "size" | "opacity">>;
 
 interface State { players: MediaPlayerInfo[]; nextZ: number; nextId: number }
@@ -88,6 +91,7 @@ export function mediaPlayersReducer(state: State, action: Action): State {
         size: { w: a.w, h: a.h },
         opacity: 1,
         z: state.nextZ,
+        quiet: !!action.input.quiet,
       };
       return { players: [...state.players, p], nextZ: state.nextZ + 1, nextId: state.nextId + 1 };
     }
@@ -115,6 +119,8 @@ export function mediaPlayersReducer(state: State, action: Action): State {
         ...state,
         players: state.players.map((p) => {
           if (p.hostId !== action.hostId || p.state === "minimized") return p;
+          // An autoplayed player stays in its card (it pauses off-screen instead).
+          if (p.quiet) return p;
           if (!action.visible && p.state === "docked") return { ...p, state: "floating", autoFloated: true, pos: stackPos(action.anchor, floatingCount) };
           if (action.visible && p.state === "floating" && p.autoFloated) return { ...p, state: "docked", autoFloated: false };
           return p;
@@ -146,7 +152,11 @@ export function MediaPlayersProvider({ children }: { children: ReactNode }) {
   const openPlayer = useCallback((input: OpenPlayerInput) => {
     const s = stateRef.current;
     const dup = s.players.some((p) => p.kind === input.kind && p.src === input.src && p.hostId === input.hostId);
-    if (!dup && s.players.length >= MAX_PLAYERS) { toast.info("Close a player to open another"); return; }
+    if (!dup && s.players.length >= MAX_PLAYERS) {
+      // Autoplay is never worth a message: you did not ask for it.
+      if (!input.quiet) toast.info("Close a player to open another");
+      return;
+    }
     dispatch({ type: "open", input, anchor: getFloatAnchor() });
   }, []);
   const closePlayer = useCallback((id: string) => dispatch({ type: "close", id }), []);

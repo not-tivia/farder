@@ -1,10 +1,18 @@
 import { useEffect, useState } from "react";
 import AppearanceSettings from "../AppearanceSettings";
+import DensitySettings from "./DensitySettings";
+import LayoutSettings from "./LayoutSettings";
+import EdgeStripSettings from "./EdgeStripSettings";
+import BuddySettings from "./BuddySettings";
 import GifSearchSettings from "../GifSearchSettings";
 import { TranslationSettingsTab } from "../TranslationSettingsTab";
 import VoiceSettings from "../VoiceSettings";
 import PrivacyDataSettings from "../PrivacyDataSettings";
 import NotificationSettings from "../NotificationSettings";
+import GarbleSettings from "./GarbleSettings";
+import AutoplaySettings from "./AutoplaySettings";
+import SoundSettings from "./SoundSettings";
+import StartupSettings from "./StartupSettings";
 import AlertSubscriptions from "./AlertSubscriptions";
 import MyReminders from "./MyReminders";
 import HostedServers from "./HostedServers";
@@ -13,14 +21,22 @@ interface Props {
   onClose: () => void;
 }
 
-type SectionId = "appearance" | "gif" | "translation" | "voice" | "notifications" | "privacy" | "hosted" | "alerts" | "reminders";
+type SectionId = "appearance" | "layout" | "density" | "strip" | "buddy" | "gif" | "translation" | "voice" | "notifications" | "garble" | "autoplay" | "sound" | "startup" | "privacy" | "hosted" | "alerts" | "reminders";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "appearance", label: "Appearance" },
+  { id: "layout", label: "Window layout" },
+  { id: "density", label: "Message density" },
+  { id: "strip", label: "Edge strip" },
+  { id: "buddy", label: "Buddy list" },
   { id: "gif", label: "GIF Search" },
   { id: "translation", label: "Translation" },
   { id: "voice", label: "Voice" },
+  { id: "sound", label: "Sound" },
+  { id: "startup", label: "Startup & tray" },
   { id: "notifications", label: "Notifications" },
+  { id: "garble", label: "Speech Garbler" },
+  { id: "autoplay", label: "Autoplay" },
   { id: "privacy", label: "Privacy & Data" },
   { id: "hosted", label: "Hosted Servers" },
   { id: "alerts", label: "Alerts" },
@@ -65,10 +81,18 @@ export default function SettingsModal({ onClose }: Props) {
           </nav>
           <section className="settings-content">
             {active === "appearance" && <AppearanceSettings />}
+            {active === "layout" && <LayoutSettings />}
+            {active === "density" && <DensitySettings />}
+            {active === "strip" && <EdgeStripSettings />}
+            {active === "buddy" && <BuddySettings />}
             {active === "gif" && <GifSearchSettings />}
             {active === "translation" && <TranslationSettingsTab />}
             {active === "voice" && <VoiceSettings />}
+            {active === "sound" && <SoundSettings />}
+            {active === "startup" && <StartupSettings />}
             {active === "notifications" && <NotificationSettings />}
+            {active === "garble" && <GarbleSettings />}
+            {active === "autoplay" && <AutoplaySettings />}
             {active === "privacy" && <PrivacyDataSettings />}
             {active === "hosted" && <HostedServers />}
             {active === "alerts" && <AlertSubscriptions />}

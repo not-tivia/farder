@@ -84,6 +84,16 @@ pub struct CommitOutcome {
     pub removes: Vec<DeclaredMember>,
 }
 
+/// A signed key refresh that is staged but not applied
+/// ([`MlsChannelGroup::self_update_staged`]).
+#[derive(Debug, Clone)]
+pub struct StagedSelfUpdate {
+    /// What the `MlsCommit` event carries; `epoch` is the authoring epoch.
+    pub outcome: CommitOutcome,
+    /// The epoch authenticator the group WILL hold once the refresh is merged.
+    pub post_epoch_authenticator: [u8; 32],
+}
+
 /// The member-side view of someone else's commit, after processing+merging.
 #[derive(Debug, Clone)]
 pub struct ProcessedCommit {
@@ -402,6 +412,110 @@ impl MlsChannelGroup {
         self.finish_own_commit(provider, commit, welcome, prev_auth, epoch)
     }
 
+    /// Build and sign a key refresh WITHOUT applying it: the group stays in
+    /// its current epoch until [`Self::merge_staged_own_commit`] (the server
+    /// accepted it) or [`Self::discard_staged_own_commit`] (the server refused
+    /// it).
+    ///
+    /// [`Self::self_update`] merges immediately, so a refused refresh used to
+    /// leave this device alone in a private epoch: it then skipped the
+    /// commit that DID win as an "old repeat", and no message opened in
+    /// either direction again. Staging makes a refusal cost nothing.
+    ///
+    /// While a refresh is staged the group still seals and opens messages in
+    /// its current epoch, and can still apply someone else's commit (which
+    /// drops the staged one). Every other own commit (add, remove, another
+    /// refresh) fails until it is resolved. The staged commit is persisted, so
+    /// it survives a restart and [`Self::has_staged_own_commit`] still reports
+    /// it.
+    pub fn self_update_staged(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        signer: &DeviceSigner,
+    ) -> Result<StagedSelfUpdate> {
+        let (prev_auth, epoch) = self.pre_commit_state();
+        let bundle = self
+            .inner
+            .self_update(provider, signer, LeafNodeParameters::default())
+            .map_err(|e| anyhow!("self update: {e}"))?;
+        let result = (|| {
+            let staged = self
+                .inner
+                .pending_commit()
+                .context("self update left no pending commit")?;
+            let summary = staged_commit_summary(&self.inner, staged)?;
+            if summary.authored_epoch != epoch {
+                bail!(
+                    "staged commit epoch {} does not match group epoch {epoch}",
+                    summary.authored_epoch
+                );
+            }
+            let post_epoch_authenticator: [u8; 32] = staged
+                .epoch_authenticator()
+                .context("a member's own staged commit carries an epoch authenticator")?
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("epoch authenticator is not 32 bytes"))?;
+            let (commit, _, _) = bundle.into_contents();
+            let commit_bytes = commit
+                .to_bytes()
+                .map_err(|e| anyhow!("serialize commit: {e}"))?;
+            Ok(StagedSelfUpdate {
+                outcome: CommitOutcome {
+                    commit_bytes,
+                    welcome_bytes: None,
+                    prev_epoch_authenticator: prev_auth,
+                    post_tree_hash: summary.post_tree_hash,
+                    epoch,
+                    adds: summary.adds.into_iter().map(|l| l.member).collect(),
+                    removes: summary.removes,
+                },
+                post_epoch_authenticator,
+            })
+        })();
+        if result.is_err() {
+            if let Err(clear_err) = self.inner.clear_pending_commit(provider.storage()) {
+                return result.with_context(|| {
+                    format!("additionally failed to clear the staged pending commit: {clear_err}")
+                });
+            }
+        }
+        result
+    }
+
+    /// True while an own commit is staged but not yet applied or discarded.
+    pub fn has_staged_own_commit(&self) -> bool {
+        self.inner.pending_commit().is_some()
+    }
+
+    /// The epoch a staged own commit was authored in, if one is staged (it
+    /// moves the group to this + 1 once merged).
+    pub fn staged_own_commit_epoch(&self) -> Option<u64> {
+        self.inner.pending_commit().map(|_| self.epoch())
+    }
+
+    /// Apply the staged own commit: the server accepted it.
+    pub fn merge_staged_own_commit(&mut self, provider: &impl OpenMlsProvider) -> Result<()> {
+        let staged = self
+            .inner
+            .pending_commit()
+            .context("no staged own commit to merge")?;
+        let summary = staged_commit_summary(&self.inner, staged)?;
+        self.inner
+            .merge_pending_commit(provider)
+            .map_err(|e| anyhow!("merge pending commit: {e}"))?;
+        self.tree_hash = summary.post_tree_hash;
+        Ok(())
+    }
+
+    /// Throw the staged own commit away: the server refused it, so the group
+    /// stays exactly where it was. A no-op when nothing is staged.
+    pub fn discard_staged_own_commit(&mut self, provider: &impl OpenMlsProvider) -> Result<()> {
+        self.inner
+            .clear_pending_commit(provider.storage())
+            .map_err(|e| anyhow!("clear pending commit: {e}"))
+    }
+
     /// Process someone else's commit: verify + stage via OpenMLS, report the
     /// **actual** adds/removes and post-merge tree hash, then merge.
     ///
@@ -572,8 +686,20 @@ impl MlsChannelGroup {
         let protocol_message = message
             .try_into_protocol_message()
             .map_err(|e| anyhow!("sealed message is not a protocol message: {e}"))?;
-        let processed = process_message_contained(&mut self.inner, provider, protocol_message)
-            .context("open message")?;
+        // The epoch is in the clear header. Read it before processing so a failure can say WHY: a message
+        // from an epoch older than this device's group was sealed before this device was added (MLS gives a
+        // newcomer no keys for the past), which is expected and must not look like tampering.
+        let msg_epoch = protocol_message.epoch().as_u64();
+        let our_epoch = self.epoch();
+        let processed = match process_message_contained(&mut self.inner, provider, protocol_message) {
+            Ok(p) => p,
+            Err(e) if msg_epoch < our_epoch => {
+                return Err(e.context(format!(
+                    "{BEFORE_JOINED}: message epoch {msg_epoch}, this device's group is at {our_epoch}"
+                )));
+            }
+            Err(e) => return Err(e.context("open message")),
+        };
         let ProcessedMessageContent::ApplicationMessage(app) = processed.into_content() else {
             bail!("message is not an application message");
         };
@@ -867,6 +993,116 @@ mod tests {
             b_join,
             c_join,
         )
+    }
+
+    #[test]
+    fn a_message_sealed_before_a_device_joined_says_so_and_later_ones_open() {
+        // Seen live 2026-11-26: the first message in a new encrypted channel was sealed a moment before the
+        // second member was added, and showed as "couldn't decrypt". MLS is right to refuse it; the error
+        // must say WHY so the app can label it calmly instead of looking like tampering.
+        let (a_id, a_dev, a_prov) = member();
+        let (b_id, b_dev, b_prov) = member();
+        let mut alice = MlsChannelGroup::create(&a_prov, &DeviceSigner(&a_dev), credential_with_key(&a_dev, &a_id.public_key()), b"before-joined").unwrap();
+        let env = |t: &str| MessageEnvelope { content: t.into(), attachment_keys: vec![], filenames: vec![], mimes: vec![] };
+        let early = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &env("before bob")).unwrap();
+        let b_bundle = generate_key_package(&b_prov, &b_dev, &b_id.public_key()).unwrap();
+        let add = alice.add_members(&a_prov, &DeviceSigner(&a_dev), &[b_bundle.key_package().clone()]).unwrap();
+        let (mut bob, _) = MlsChannelGroup::join_from_welcome(&b_prov, &add.welcome_bytes.clone().unwrap()).unwrap();
+        let err = format!("{:#}", bob.open_message(&b_prov, &early).unwrap_err());
+        assert!(err.contains(BEFORE_JOINED), "{err}");
+        let later = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &env("after bob")).unwrap();
+        assert_eq!(bob.open_message(&b_prov, &later).unwrap().content, "after bob");
+        // A damaged message from the CURRENT epoch is not dressed up as "before joined".
+        let mut bad = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &env("tampered")).unwrap();
+        let n = bad.len(); bad[n - 5] ^= 0xFF;
+        let err = format!("{:#}", bob.open_message(&b_prov, &bad).unwrap_err());
+        assert!(!err.contains(BEFORE_JOINED), "{err}");
+    }
+
+    /// Two members at the same epoch; returns (alice, bob) with their keys and providers.
+    #[allow(clippy::type_complexity)]
+    fn two_member_group(
+        gid: &[u8],
+    ) -> ((Keypair, OpenMlsRustCrypto, MlsChannelGroup), (Keypair, OpenMlsRustCrypto, MlsChannelGroup)) {
+        let (a_id, a_dev, a_prov) = member();
+        let (b_id, b_dev, b_prov) = member();
+        let mut alice = MlsChannelGroup::create(&a_prov, &DeviceSigner(&a_dev), credential_with_key(&a_dev, &a_id.public_key()), gid).unwrap();
+        let b_bundle = generate_key_package(&b_prov, &b_dev, &b_id.public_key()).unwrap();
+        let add = alice.add_members(&a_prov, &DeviceSigner(&a_dev), &[b_bundle.key_package().clone()]).unwrap();
+        let (bob, _) = MlsChannelGroup::join_from_welcome(&b_prov, &add.welcome_bytes.unwrap()).unwrap();
+        ((a_dev, a_prov, alice), (b_dev, b_prov, bob))
+    }
+
+    fn text(t: &str) -> MessageEnvelope {
+        MessageEnvelope { content: t.into(), attachment_keys: vec![], filenames: vec![], mimes: vec![] }
+    }
+
+    #[test]
+    fn a_staged_refresh_changes_nothing_until_merged_and_a_discarded_one_never_does() {
+        let ((a_dev, a_prov, mut alice), (b_dev, b_prov, mut bob)) = two_member_group(b"staged-refresh");
+        let start = alice.epoch();
+
+        let staged = alice.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+        assert_eq!(staged.outcome.epoch, start, "authored in the current epoch");
+        assert!(alice.has_staged_own_commit());
+        assert_eq!(alice.staged_own_commit_epoch(), Some(start));
+        assert_eq!(alice.epoch(), start, "staging must not move the group");
+
+        // While staged, messages still flow in the current epoch, both ways.
+        let m = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &text("while staged")).unwrap();
+        assert_eq!(bob.open_message(&b_prov, &m).unwrap().content, "while staged");
+        let r = bob.seal_message(&b_prov, &DeviceSigner(&b_dev), &text("reply")).unwrap();
+        assert_eq!(alice.open_message(&a_prov, &r).unwrap().content, "reply");
+
+        // A refusal: discard, and the group is exactly where it was.
+        alice.discard_staged_own_commit(&a_prov).unwrap();
+        assert!(!alice.has_staged_own_commit());
+        assert_eq!(alice.epoch(), start);
+        alice.discard_staged_own_commit(&a_prov).unwrap(); // no-op when nothing is staged
+
+        // An acceptance: merge, and the other side can apply the same commit.
+        let staged = alice.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+        alice.merge_staged_own_commit(&a_prov).unwrap();
+        assert_eq!(alice.epoch(), start + 1);
+        assert_eq!(alice.epoch_authenticator(), staged.post_epoch_authenticator, "the promised authenticator");
+        assert_eq!(alice.tree_hash(), staged.outcome.post_tree_hash);
+        bob.process_commit(&b_prov, &staged.outcome.commit_bytes).unwrap();
+        assert_eq!(bob.epoch(), start + 1);
+        let m = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &text("after merge")).unwrap();
+        assert_eq!(bob.open_message(&b_prov, &m).unwrap().content, "after merge");
+    }
+
+    #[test]
+    fn the_losing_refresh_gives_way_to_the_winning_one() {
+        // Both refresh in the same epoch; bob's wins at the server. Alice still
+        // holds hers staged and must be able to apply bob's, after which both
+        // groups agree and talk.
+        let ((a_dev, a_prov, mut alice), (b_dev, b_prov, mut bob)) = two_member_group(b"race");
+        let start = alice.epoch();
+        let _alice_staged = alice.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+        let bobs = bob.self_update(&b_prov, &DeviceSigner(&b_dev)).unwrap();
+
+        // Applying the winner while our own is still staged.
+        alice.process_commit(&a_prov, &bobs.commit_bytes).unwrap();
+        assert!(!alice.has_staged_own_commit(), "applying the winner drops the loser");
+        assert_eq!(alice.epoch(), start + 1);
+        assert_eq!(alice.epoch_authenticator(), bob.epoch_authenticator(), "same epoch, same keys");
+        let m = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &text("in step")).unwrap();
+        assert_eq!(bob.open_message(&b_prov, &m).unwrap().content, "in step");
+    }
+
+    #[test]
+    fn a_staged_refresh_survives_a_reload_and_blocks_other_own_commits_until_resolved() {
+        let ((a_dev, a_prov, mut alice), _) = two_member_group(b"staged-reload");
+        let start = alice.epoch();
+        alice.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+
+        let mut reloaded = MlsChannelGroup::load(&a_prov, &DeviceSigner(&a_dev), b"staged-reload").unwrap().unwrap();
+        assert!(reloaded.has_staged_own_commit(), "a restart must not forget the staged refresh");
+        assert_eq!(reloaded.epoch(), start);
+        assert!(reloaded.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).is_err(), "one staged commit at a time");
+        reloaded.discard_staged_own_commit(&a_prov).unwrap();
+        reloaded.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).unwrap();
     }
 
     #[test]
@@ -1347,3 +1583,8 @@ mod tests {
         assert_eq!(carol.epoch_authenticator(), alice.epoch_authenticator());
     }
 }
+
+/// Prefix of the error `MlsChannelGroup::open_message` gives for a message sealed in an epoch older than
+/// this device's group: it was sent before this device could read the channel (MLS gives a newcomer no
+/// keys for the past). The client matches it to show a calm label instead of "couldn't decrypt".
+pub const BEFORE_JOINED: &str = "sent before this device could read the channel";

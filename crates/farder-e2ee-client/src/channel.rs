@@ -138,6 +138,14 @@ pub enum E2eeError {
     /// refusal poison the group silently, reported as a plain transport error.
     /// The caller must NOT keep using the group; recover, do not retry.
     CommitRejectedDiverged { reason: String, local_epoch: u64 },
+    /// The server definitively refused our key refresh (`rekey_channel`):
+    /// another member's commit won the epoch (`stale-epoch`), the commit-rate
+    /// rule said "not yet", or another fold refusal. The refresh was only
+    /// STAGED, never applied, and has been discarded: the local group is
+    /// unchanged and still in step with the server. NOT a divergence. Apply
+    /// whatever won the epoch and carry on; when to refresh again is the
+    /// cadence policy's call, never a retry loop.
+    RekeyRefused { reason: String },
     /// A `channel_id` below `E2EE_CHANNEL_ID_FLOOR` — the id must stay clear
     /// of the legacy DB `channels` AUTOINCREMENT space.
     ChannelIdBelowFloor { channel_id: u64 },
@@ -198,7 +206,17 @@ impl E2eeError {
     /// True iff the server refused a rekey under the commit-rate rule — "you
     /// may not rekey yet". See [`E2eeError::RekeyRateLimited`].
     pub fn is_rekey_rate_limited(&self) -> bool {
-        matches!(self, Self::RekeyRateLimited { .. })
+        match self {
+            Self::RekeyRateLimited { .. } => true,
+            Self::RekeyRefused { reason } => reason.contains("commit-rate rule:"),
+            _ => false,
+        }
+    }
+
+    /// True iff the server refused a key refresh and nothing changed locally
+    /// (see [`E2eeError::RekeyRefused`]).
+    pub fn is_rekey_refused(&self) -> bool {
+        matches!(self, Self::RekeyRefused { .. })
     }
 
     /// True iff a sealed send was rejected because the freshness ceiling was
@@ -263,6 +281,11 @@ impl fmt::Display for E2eeError {
                 f,
                 "server rejected our commit ({reason}); the local group is now at epoch \
                  {local_epoch}, one ahead of the server — recover before continuing"
+            ),
+            Self::RekeyRefused { reason } => write!(
+                f,
+                "the server refused our key refresh ({reason}); it was never applied, so \
+                 nothing changed on this device"
             ),
             Self::ChannelIdBelowFloor { channel_id } => write!(
                 f,

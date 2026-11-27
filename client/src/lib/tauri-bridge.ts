@@ -25,6 +25,33 @@ export async function connectServer(address: string, inviteCode?: string, setupT
   });
 }
 
+/** Owner only: allow or stop a member keeping a full copy of the server. A replica sees EVERYTHING the
+ *  host sees. Returns the replicas (as `vk_...` keys) afterwards. */
+export async function setReplica(serverId: string, member: string, enabled: boolean): Promise<string[]> {
+  return invoke<string[]>("set_replica", { serverId, member, enabled });
+}
+
+/** Owner only: who may keep a full copy. */
+export async function listReplicas(serverId: string): Promise<string[]> {
+  return invoke<string[]>("list_replicas", { serverId });
+}
+
+/** Backup addresses (host:port) tried in order when the host does not answer: a replica serving a
+ *  read-only saved copy. Kept on this device only. */
+export async function getFallbackAddresses(address: string): Promise<string[]> {
+  return invoke<string[]>("get_fallback_addresses", { address });
+}
+
+export async function setFallbackAddresses(address: string, addresses: string[]): Promise<void> {
+  await invoke("set_fallback_addresses", { address, addresses });
+}
+
+/** The backup address this server is currently reached through (a read-only saved copy), or null when
+ *  connected to the host (or not connected). */
+export async function getConnectionRoute(serverId: string): Promise<string | null> {
+  return invoke<string | null>("get_connection_route", { serverId });
+}
+
 export async function disconnectServer(serverId: string): Promise<void> {
   return invoke<void>("disconnect_server", { serverId });
 }
@@ -255,7 +282,7 @@ export async function addMembersToE2eeChannel(serverId: string, logServerId: str
   return invoke("add_members_to_e2ee_channel", { serverId, logServerId, channelId });
 }
 
-export async function publishOwnKeyPackage(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; event_hash: string }> {
+export async function publishOwnKeyPackage(serverId: string, logServerId: string, channelId: number): Promise<{ channel_id: number; event_hash: string; skipped: boolean }> {
   return invoke("publish_own_key_package", { serverId, logServerId, channelId });
 }
 
@@ -327,10 +354,13 @@ export async function downloadSealedFile(serverId: string, fileId: number, keyHe
 
 /** The wire shape of `decrypt_sealed_message`: a tag-discriminated result.
  *  `decrypted` carries the opened `MessageEnvelope`; `undecryptable` is the
- *  fail-closed marker (the ratchet is consumed on open — never retry). */
+ *  fail-closed marker (the ratchet is consumed on open — never retry);
+ *  `not_ready` means this device has no group for the channel YET (nothing was
+ *  opened): do not cache it, try again once the channel's state advances. */
 export type SealedDecryptResult =
   | { kind: "decrypted"; envelope: { content: string; attachment_keys: number[][]; filenames: string[]; mimes: string[] } }
-  | { kind: "undecryptable"; reason: string };
+  | { kind: "undecryptable"; reason: string }
+  | { kind: "not_ready"; reason: string };
 
 /** Open ONE sealed ciphertext (T10). The frontend must call this exactly once
  *  per sealed message and cache the result — a second open is impossible (the
@@ -534,6 +564,27 @@ export async function createInvite(serverId: string, logServerId: string | null,
   return invoke<InviteResult>("create_invite", { serverId, logServerId, maxUses: maxUses ?? null, requiresApproval: requiresApproval ?? false });
 }
 
+/** Whether guest links (browser joins, no install) are turned on for this server. */
+export async function getGuestLinks(serverId: string): Promise<boolean> {
+  return invoke<boolean>("get_guest_links", { serverId });
+}
+
+/** Owner only: turn guest links on or off (off by default). */
+export async function setGuestLinks(serverId: string, enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_guest_links", { serverId, enabled });
+}
+
+export interface GuestInviteResult {
+  code: string;
+  /** https://<site>/<web name>/t#<code> */
+  link: string;
+}
+
+/** A temporary guest link. `routeName` is the name the host gave the gateway (`--route name=...`). */
+export async function createGuestInvite(serverId: string, logServerId: string | null, routeName: string, expiresInSecs?: number, maxUses?: number): Promise<GuestInviteResult> {
+  return invoke<GuestInviteResult>("create_guest_invite", { serverId, logServerId, routeName, expiresInSecs: expiresInSecs ?? null, maxUses: maxUses ?? null });
+}
+
 export async function fetchUrl(serverId: string, url: string, channelId: number): Promise<number> {
   return invoke<number>("fetch_url", { serverId, url, channelId });
 }
@@ -724,8 +775,94 @@ export async function playAudioFile(path: string): Promise<void> {
   return invoke<void>("play_audio_file", { path });
 }
 
-export async function showNotification(title: string, body: string): Promise<void> {
-  return invoke<void>("show_notification", { title, body });
+export async function showNotification(
+  title: string, body: string, mediaUrl?: string | null, reply?: { server_id: string; channel_id: number } | null,
+): Promise<void> {
+  return invoke<void>("show_notification", { title, body, mediaUrl: mediaUrl ?? null, reply: reply ?? null });
+}
+
+/**
+ * The skinned notification window reports how many cards it is showing and how
+ * tall they are (logical px) so the native window can be sized, positioned and
+ * shown (or hidden at 0). Only that window calls this.
+ */
+export async function notifyLayout(count: number, height: number): Promise<void> {
+  return invoke<void>("notify_layout", { count, height });
+}
+
+/**
+ * The pop-up never takes focus, except while you are typing a reply in it. The
+ * pop-up page asks for focus when a reply box opens and gives it up when it
+ * closes. Only that window calls this.
+ */
+export async function notifyFocus(focusable: boolean): Promise<void> {
+  return invoke<void>("notify_focus", { focusable });
+}
+
+/** A notification card was clicked: bring the main Farder window forward. */
+export async function notifyActivate(): Promise<void> {
+  return invoke<void>("notify_activate");
+}
+
+/** Switch the main window between the full layout and the small single-window layout (changes its minimum size and, if needed, its size). */
+export async function setWindowLayout(small: boolean): Promise<void> {
+  return invoke<void>("set_window_layout", { small });
+}
+
+/** The edge strip's saved settings (see `edge_strip.rs`). */
+export interface EdgeStripSettings {
+  enabled: boolean;
+  dock: "top" | "bottom";
+  align: "left" | "center" | "right";
+  width: number;
+  always_visible: boolean;
+}
+
+export async function getEdgeStrip(): Promise<EdgeStripSettings> {
+  return invoke<EdgeStripSettings>("get_edge_strip");
+}
+
+/** Save the settings; the strip window is created or destroyed to match. Returns what was saved (clamped). */
+export async function setEdgeStrip(settings: EdgeStripSettings): Promise<EdgeStripSettings> {
+  return invoke<EdgeStripSettings>("set_edge_strip", { settings });
+}
+
+/** Strip window only: tell Rust whether there is anything to show so it can place and show or hide the window. */
+export async function stripLayout(hasContent: boolean): Promise<void> {
+  return invoke<void>("strip_layout", { hasContent });
+}
+
+/** Strip window only: take keyboard focus while a reply box is open, give it back after. */
+export async function stripFocus(focusable: boolean): Promise<void> {
+  return invoke<void>("strip_focus", { focusable });
+}
+
+/** Strip window only: bring Farder forward, showing this conversation if one is given. */
+export async function stripOpen(serverId: string | null, channelId: number | null): Promise<void> {
+  return invoke<void>("strip_open", { serverId, channelId });
+}
+
+/** The buddy list's saved settings (see `buddy.rs`). */
+export interface BuddySettings {
+  open_at_start: boolean;
+}
+
+export async function getBuddySettings(): Promise<BuddySettings> {
+  return invoke<BuddySettings>("get_buddy_settings");
+}
+
+export async function setBuddySettings(settings: BuddySettings): Promise<BuddySettings> {
+  return invoke<BuddySettings>("set_buddy_settings", { settings });
+}
+
+/** Open the buddy list window, or bring it forward if it is already open. */
+export async function openBuddyList(): Promise<void> {
+  return invoke<void>("open_buddy_list");
+}
+
+/** Open (or bring forward) the small chat window for one conversation. `title` only names the window. */
+export async function chatOpen(serverId: string, channelId: number, title: string): Promise<void> {
+  return invoke<void>("chat_open", { serverId, channelId, title });
 }
 
 export interface NotificationPrefs {
@@ -740,6 +877,15 @@ export interface NotificationPrefs {
   notifyOnMemberLeave?: boolean;
   notifyOnReaction?: boolean;
   notifyOnThreadReply?: boolean;
+  /** "skinned" (default): Farder's own themed pop-up. "system": the OS toast.
+   *  "off": no pop-ups at all (and the pop-up window is never created). */
+  popupStyle?: "skinned" | "system" | "off";
+  /** What a pop-up may say: "full" (default), "sender" (only who), "hidden"
+   *  (just "New message"). Applies to both pop-up styles. */
+  popupContent?: "full" | "sender" | "hidden";
+  /** Allow replying by typing into the pop-up (default on). Only offered when the
+   *  pop-up shows who it is from. */
+  popupReply?: boolean;
 }
 
 export async function getNotificationPrefs(): Promise<NotificationPrefs> {
@@ -1473,4 +1619,160 @@ export async function cancelReminder(serverId: string, reminderId: number): Prom
  *  server's opaque "channel not found". */
 export async function listActiveWidgets(serverId: string, channelId: number): Promise<{ polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] }> {
   return invoke<{ polls: PollInfo[]; giveaways: GiveawayInfo[]; events: EventInfo[] }>("list_active_widgets", { serverId, channelId });
+}
+
+// ── Speech garbling over the log ─────────────────────────────────────────────
+
+export interface GarbleRule {
+  target: string;
+  mode: string;
+  phrase: string;
+  remaining: number;
+  by: string;
+  moderation: boolean;
+}
+export interface GarbleConsent {
+  target: string;
+  controller: string;
+  max_messages: number;
+}
+export interface GarbleState {
+  rules: GarbleRule[];
+  consents: GarbleConsent[];
+  /** Whether I may start a moderation garble here. */
+  can_moderate: boolean;
+}
+
+/** Garble `target`'s next `messages` messages as every viewer draws them.
+ *  `consensual: false` is a moderation action; `true` needs their consent. */
+export async function garbleSet(opts: {
+  serverId: string; logServerId: string; target: string; mode: string;
+  phrase: string; messages: number; consensual: boolean;
+}): Promise<void> {
+  await invoke("garble_set", opts);
+}
+
+/** End the garble running on `target`. */
+export async function garbleClear(serverId: string, logServerId: string, target: string): Promise<void> {
+  await invoke("garble_clear", { serverId, logServerId, target });
+}
+
+/** Let `controller` garble ME, up to `maxMessages` at a time; 0 revokes. */
+export async function garbleConsent(serverId: string, logServerId: string, controller: string, maxMessages: number): Promise<void> {
+  await invoke("garble_consent", { serverId, logServerId, controller, maxMessages });
+}
+
+export async function getGarbleState(serverId: string): Promise<GarbleState> {
+  return invoke<GarbleState>("get_garble_state", { serverId });
+}
+
+// ── Delegating powers ────────────────────────────────────────────────────────
+
+/** The powers a screen may hand out (mirrors GRANTABLE_CAPABILITIES in Rust). */
+export const GRANTABLE_POWERS = ["invite", "kick", "ban", "garble"] as const;
+export type Power = (typeof GRANTABLE_POWERS)[number];
+
+export interface CapabilityHolder {
+  member: string;
+  capabilities: string[];
+}
+
+export async function grantCapability(serverId: string, logServerId: string, member: string, capability: Power): Promise<void> {
+  await invoke("grant_capability", { serverId, logServerId, member, capability });
+}
+
+export async function revokeCapability(serverId: string, logServerId: string, member: string, capability: Power): Promise<void> {
+  await invoke("revoke_capability", { serverId, logServerId, member, capability });
+}
+
+export async function getCapabilities(serverId: string): Promise<CapabilityHolder[]> {
+  return invoke<CapabilityHolder[]>("get_capabilities", { serverId });
+}
+
+// ── Recovery owner (docs/recovery-owner-design.md) ───────────────────────────
+
+export interface RecoveryStatus {
+  key_set: boolean;
+  recovery_key: string | null;
+  /** How long a takeover must wait on this server, in seconds. */
+  wait_secs: number;
+  pending: { claim: string; new_owner: string; accepted_at: number; ready_at: number } | null;
+}
+
+/** Whether a recovery key exists and whether a takeover is waiting. Any member may ask. */
+export async function recoveryStatus(serverId: string): Promise<RecoveryStatus> {
+  return invoke<RecoveryStatus>("recovery_status", { serverId });
+}
+
+/** Owner only. Makes a recovery key, names it in the server's history and returns its 24
+ *  words ONCE. Nothing about the words is kept on this computer. */
+export async function recoveryCreate(serverId: string, logServerId: string): Promise<{ phrase: string; recovery_key: string }> {
+  return invoke("recovery_create", { serverId, logServerId });
+}
+
+/** Replace the recovery key using the CURRENT 24 words; returns the NEW words ONCE. The old
+ *  words stop working. Only the recovery key can do this (not the everyday owner key). */
+export async function recoveryRotate(serverId: string, logServerId: string, phrase: string): Promise<{ phrase: string; recovery_key: string }> {
+  return invoke("recovery_rotate", { serverId, logServerId, phrase });
+}
+
+/** Start a takeover with the recovery key's 24 words; `newOwner` must be a member. */
+export async function recoveryClaim(serverId: string, logServerId: string, phrase: string, newOwner: string): Promise<void> {
+  await invoke("recovery_claim", { serverId, logServerId, phrase, newOwner });
+}
+
+export async function recoveryCancel(serverId: string, logServerId: string, phrase: string): Promise<void> {
+  await invoke("recovery_cancel", { serverId, logServerId, phrase });
+}
+
+/** Finish a takeover after the waiting period (the server refuses earlier). */
+export async function recoveryFinalize(serverId: string, logServerId: string, phrase: string): Promise<void> {
+  await invoke("recovery_finalize", { serverId, logServerId, phrase });
+}
+
+// ── Universal volume control ─────────────────────────────────────────────────
+
+export interface AudioLimitsView {
+  /** Master volume, 0..1.5; 1 = unchanged. */
+  master: number;
+  /** Loudness ceiling in dB (-40..-3); 0 = no ceiling. */
+  max_db: number;
+}
+
+export async function getAudioLimits(): Promise<AudioLimitsView> {
+  return invoke<AudioLimitsView>("get_audio_limits");
+}
+
+/** Set and save the master volume and the loudness ceiling (0 = off). The
+ *  backend clamps both and returns what it actually applied. */
+export async function setAudioLimits(master: number, maxDb: number): Promise<AudioLimitsView> {
+  return invoke<AudioLimitsView>("set_audio_limits", { master, maxDb });
+}
+
+// ── Tray, start-up ───────────────────────────────────────────────────────────
+
+export interface WindowBehavior {
+  /** Closing the window keeps Farder running in the tray. */
+  close_to_tray: boolean;
+  /** Start in the tray instead of showing the window. */
+  start_minimized: boolean;
+  /** Start when I sign in to Windows (read from Windows, not cached). */
+  autostart: boolean;
+  /** Why the sign-in option cannot be used here, if it cannot. */
+  autostart_unavailable: string | null;
+  /** Whether the system tray exists (without it, closing quits). */
+  tray_available: boolean;
+}
+
+export async function getWindowBehavior(): Promise<WindowBehavior> {
+  return invoke<WindowBehavior>("get_window_behavior");
+}
+
+export async function setWindowBehavior(closeToTray: boolean, startMinimized: boolean): Promise<void> {
+  await invoke("set_window_behavior", { closeToTray, startMinimized });
+}
+
+/** Returns the state Windows now reports. Rejects with the reason if it cannot be set. */
+export async function setAutostart(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_autostart", { enabled });
 }

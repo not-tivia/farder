@@ -11,8 +11,10 @@ use tracing::info;
 struct Args {
     #[arg(long, default_value = "0.0.0.0:4435")]
     bind: SocketAddr,
-    #[arg(long, default_value = "My Farder Server")]
-    name: String,
+    /// The server's name. Saved in the database, so later starts (and a read-only copy made from the
+    /// database) keep it without the flag; giving the flag again renames the server.
+    #[arg(long)]
+    name: Option<String>,
     #[arg(long, default_value = "farder-server.db")]
     db: String,
     #[arg(long, default_value = "blank")]
@@ -32,6 +34,50 @@ struct Args {
     /// Directory for the server's stable relay identity (server_id).
     #[arg(long, default_value = "./server-data")]
     data_dir: std::path::PathBuf,
+
+    /// Keep automatic backups in this folder (a backup is a plain folder you can copy to
+    /// another machine). One is made at start and then every --backup-interval seconds.
+    #[arg(long)]
+    backup_dir: Option<std::path::PathBuf>,
+    /// Seconds between automatic backups (default 6 hours).
+    #[arg(long, default_value = "21600")]
+    backup_interval: u64,
+    /// How many automatic backups to keep; older ones are deleted (default 14, minimum 1).
+    #[arg(long, default_value = "14")]
+    backup_keep: usize,
+    /// Make ONE backup into this folder and exit. Safe to run while the server is running.
+    #[arg(long)]
+    backup_now: Option<std::path::PathBuf>,
+    /// Restore the backup in this folder (verified first) over --db, --storage-dir and
+    /// --data-dir, then exit. The server must not be running.
+    #[arg(long)]
+    restore_from: Option<std::path::PathBuf>,
+    /// With --restore-from: replace an existing server. The old data is moved aside, not deleted.
+    #[arg(long)]
+    force: bool,
+    /// Host-side owner reset, then exit: make this member (vk_ + 64 hex) the owner. For a
+    /// server whose owner lost the account and has no recovery key. The server must be stopped.
+    /// Takes a backup first, moves the old signed history aside (not deleted). Friends rejoin
+    /// with a fresh invite; channels and plaintext messages stay. See docs/hosting-on-ubuntu.md.
+    #[arg(long)]
+    reset_owner: Option<String>,
+
+    /// How many seconds a recovery-key takeover must wait before it can finish (default 72
+    /// hours). The waiting period is what lets the real owner notice and react, so values
+    /// under 24 hours are for testing only and are warned about at start.
+    #[arg(long, default_value_t = farder_server::state::DEFAULT_RECOVERY_WAIT_SECS)]
+    recovery_wait_secs: u64,
+
+    /// How many destructive changes (deleting channels/categories/roles, kicking, banning, removing
+    /// bots or webhooks) one account may make in 10 minutes before the server says "slow down" (default 5,
+    /// 0 turns it off). Protects the server if an account is stolen. See crates/farder-server/src/brake.rs.
+    #[arg(long, default_value_t = farder_server::brake::DEFAULT_BUDGET)]
+    destructive_budget: usize,
+
+    /// Serve a COPY of a server read-only (history and members; nothing can be sent or changed). For a
+    /// replica's `latest.db` while the host is down. See docs/mesh-hosting-status.md.
+    #[arg(long)]
+    read_only: bool,
 }
 
 fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
@@ -53,6 +99,19 @@ fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
     Ok(Endpoint::server(server_config, bind_addr)?)
 }
 
+/// The name this server shows. A copy (`--read-only`) uses the name the host saved, so friends who fall
+/// back to it still see the same server, and never writes. Otherwise the flag wins and is saved.
+fn server_name(conn: &rusqlite::Connection, flag: Option<&str>, read_only: bool) -> Result<String> {
+    let saved = db::get_setting(conn, "server_name")?;
+    if read_only {
+        return Ok(saved.or_else(|| flag.map(str::to_string)).unwrap_or_else(|| DEFAULT_NAME.to_string()));
+    }
+    let name = flag.map(str::to_string).or(saved).unwrap_or_else(|| DEFAULT_NAME.to_string());
+    db::set_setting(conn, "server_name", &name)?;
+    Ok(name)
+}
+const DEFAULT_NAME: &str = "My Farder Server";
+
 async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
     let conn = db::open_file(&args.db)?;
     let member_count: i64 = conn.query_row("SELECT count(*) FROM members", [], |row| row.get(0))?;
@@ -70,7 +129,17 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
         }
     }
 
-    let state = ServerState::new(conn, args.name.clone(), args.storage_dir.clone(), args.max_file_size);
+    let name = server_name(&conn, args.name.as_deref(), args.read_only)?;
+    let mut state = ServerState::new(conn, name, args.storage_dir.clone(), args.max_file_size);
+    state.recovery_wait_secs = args.recovery_wait_secs;
+    state.read_only = args.read_only;
+    state.brake = farder_server::brake::Brake::new(args.destructive_budget, farder_server::brake::DEFAULT_WINDOW_SECS);
+    if args.recovery_wait_secs < 24 * 3600 {
+        tracing::warn!(
+            "the recovery takeover waiting period is only {} seconds; under 24 hours it gives the real owner little time to notice (fine for testing)",
+            args.recovery_wait_secs
+        );
+    }
     if !first_run {
         // Detect owner: first member by joined_at
         let owner_key: Option<Vec<u8>> = {
@@ -102,6 +171,41 @@ async fn main() -> Result<()> {
         .expect("failed to install rustls crypto provider");
 
     let args = Args::parse();
+
+    // One-shot jobs that do not start the server.
+    if let Some(from) = &args.restore_from {
+        let m = farder_server::backup::restore_backup(
+            from,
+            std::path::Path::new(&args.db),
+            std::path::Path::new(&args.storage_dir),
+            &args.data_dir,
+            args.force,
+        )?;
+        info!("Restored the backup made at unix time {} ({} files). Start the server normally now.", m.created_at, m.files_count);
+        return Ok(());
+    }
+    if let Some(key) = &args.reset_owner {
+        let new_owner = farder_server::reset_owner::parse_member_key(key)?;
+        let mut conn = db::open_file(&args.db)?;
+        let pre = args.backup_dir.clone().unwrap_or_else(|| args.data_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".")).join("farder-pre-reset-backups"));
+        let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&args.storage_dir), &args.data_dir, &pre)?;
+        info!("Backup made first: {}", made.display());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        let r = farder_server::reset_owner::reset_owner(&mut conn, &new_owner, args.force, now)?;
+        info!("Owner reset. Old server history id {} moved aside ({} signed records kept in events_before_reset_{}). New history id {}.",
+              r.old_server_id, r.events_moved_aside, now, r.new_server_id);
+        info!("Start the server normally. The new owner may need to reconnect; other friends rejoin with a fresh invite.");
+        return Ok(());
+    }
+    if let Some(out) = &args.backup_now {
+        let conn = db::open_file(&args.db)?;
+        let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&args.storage_dir), &args.data_dir, out)?;
+        let removed = farder_server::backup::prune(out, args.backup_keep)?;
+        info!("Backup written to {} ({} older backup(s) removed)", made.display(), removed);
+        println!("{}", made.display());
+        return Ok(());
+    }
+
     let (server_state, first_run) = init_server(&args).await?;
 
     // Mesh Rung 1: if a genesis already exists in the DB, rebuild the in-memory
@@ -171,9 +275,44 @@ async fn main() -> Result<()> {
         *state.setup_token.lock().unwrap() = Some(setup_token);
     }
 
-    let _retention = retention::spawn_retention_task(Arc::clone(&state), args.retention_interval);
-    let _bot_poller = farder_server::bots::spawn_bot_poll_task(Arc::clone(&state));
-    let _widget_sweeper = farder_server::widgets::spawn_widget_sweeper(Arc::clone(&state));
+    // Automatic backups: one now, then one every --backup-interval seconds. They use their
+    // own database connection (SQLite lets readers and the writer work side by side), so a
+    // backup never makes the server wait.
+    if let Some(dir) = args.backup_dir.clone().filter(|_| !args.read_only) {
+        let (db_path, storage, data, keep) = (args.db.clone(), args.storage_dir.clone(), args.data_dir.clone(), args.backup_keep);
+        let every = std::time::Duration::from_secs(args.backup_interval.max(60));
+        info!("Automatic backups to {} every {} seconds, keeping {}", dir.display(), every.as_secs(), keep.max(1));
+        tokio::spawn(async move {
+            loop {
+                let (d, s2, dt, k, p) = (dir.clone(), storage.clone(), data.clone(), keep, db_path.clone());
+                let r = tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
+                    let conn = db::open_file(&p)?;
+                    let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&s2), &dt, &d)?;
+                    farder_server::backup::prune(&d, k)?;
+                    Ok(made)
+                })
+                .await;
+                match r {
+                    Ok(Ok(made)) => info!("Backup written to {}", made.display()),
+                    Ok(Err(e)) => tracing::warn!("automatic backup failed: {e:#}"),
+                    Err(e) => tracing::warn!("automatic backup task failed: {e}"),
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
+    }
+
+    // A read-only copy runs none of the background jobs that write (cleanup, bots, widgets), and SQLite
+    // itself is told not to write, which is the guarantee: the copy cannot change.
+    let (_retention, _bot_poller, _widget_sweeper);
+    if args.read_only {
+        state.db.lock().unwrap().pragma_update(None, "query_only", true)?;
+        info!("READ-ONLY copy: history and members can be read; nothing can be sent or changed.");
+    } else {
+        _retention = Some(retention::spawn_retention_task(Arc::clone(&state), args.retention_interval));
+        _bot_poller = Some(farder_server::bots::spawn_bot_poll_task(Arc::clone(&state)));
+        _widget_sweeper = Some(farder_server::widgets::spawn_widget_sweeper(Arc::clone(&state)));
+    }
 
     if let Some(relay_addr) = args.relay {
         let server_id = farder_server::relay::load_or_generate_server_id(&args.data_dir)?;

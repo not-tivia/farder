@@ -52,6 +52,9 @@ pub struct ConnectResult {
     pub owner_public_key: Option<farder_crypto::identity::PublicKey>,
     pub relayed: bool,
     pub server_id: Option<String>,
+    /// Set when the host did not answer and this is a backup address (a read-only saved copy).
+    #[serde(default)]
+    pub on_fallback: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -798,7 +801,9 @@ pub fn get_presence_enabled() -> bool {
 
 #[tauri::command]
 pub fn set_presence_enabled(enabled: bool) -> Result<(), String> {
-    settings_set("presence_enabled", serde_json::json!(enabled))
+    let r = settings_set("presence_enabled", serde_json::json!(enabled));
+    crate::presence::PRESENCE_WAKE.notify_one(); // un-park (or let it clear and re-park)
+    r
 }
 
 #[tauri::command]
@@ -808,7 +813,83 @@ pub fn get_presence_music() -> bool {
 
 #[tauri::command]
 pub fn set_presence_music(enabled: bool) -> Result<(), String> {
-    settings_set("presence_music", serde_json::json!(enabled))
+    let r = settings_set("presence_music", serde_json::json!(enabled));
+    crate::presence::PRESENCE_WAKE.notify_one();
+    r
+}
+
+/// How the window behaves when closed / started, as the settings screen sees it.
+#[derive(serde::Serialize)]
+pub struct WindowBehavior {
+    /// Closing the window keeps Farder running in the tray (default on).
+    pub close_to_tray: bool,
+    /// Start in the tray instead of showing the window (default off).
+    pub start_minimized: bool,
+    /// Start when I sign in to Windows. Read from Windows itself, never cached.
+    pub autostart: bool,
+    /// Why the sign-in option cannot be used here, if it cannot.
+    pub autostart_unavailable: Option<String>,
+    /// Whether the system tray exists (without it, closing quits).
+    pub tray_available: bool,
+}
+
+#[tauri::command]
+pub fn get_window_behavior() -> WindowBehavior {
+    WindowBehavior {
+        close_to_tray: crate::window_behavior::close_to_tray_setting(),
+        start_minimized: crate::window_behavior::start_minimized_setting(),
+        autostart: crate::autostart::is_enabled(),
+        autostart_unavailable: crate::autostart::unavailable_reason().map(str::to_string),
+        tray_available: crate::window_behavior::tray_available(),
+    }
+}
+
+#[tauri::command]
+pub fn set_window_behavior(close_to_tray: bool, start_minimized: bool) -> Result<(), String> {
+    settings_set("close_to_tray", serde_json::json!(close_to_tray))?;
+    settings_set("start_minimized", serde_json::json!(start_minimized))
+}
+
+/// Turn "start when I sign in to Windows" on or off (an entry in the user's own
+/// `Run` key; installed builds only). Returns the state Windows now reports.
+#[tauri::command]
+pub fn set_autostart(enabled: bool) -> Result<bool, String> {
+    crate::autostart::set_enabled(enabled)?;
+    Ok(crate::autostart::is_enabled())
+}
+
+/// The universal volume control, as the settings screen sees it.
+#[derive(serde::Serialize)]
+pub struct AudioLimits {
+    /// Master volume, 0.0 (silent) to 1.5 (150%); 1.0 = unchanged.
+    pub master: f32,
+    /// Loudness ceiling in dB (-40 to -3); 0 = no ceiling.
+    pub max_db: f32,
+}
+
+/// Apply the saved volume + ceiling to the audio path. Called at startup.
+pub(crate) fn apply_saved_audio_limits() {
+    let master = settings_get("audio_master_volume").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    let max_db = settings_get("audio_max_db").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    crate::audio_limit::set(master, max_db);
+}
+
+#[tauri::command]
+pub fn get_audio_limits() -> AudioLimits {
+    let (master, max_db) = crate::audio_limit::current_settings();
+    AudioLimits { master, max_db }
+}
+
+/// Set the master volume and the loudness ceiling (`max_db` 0 = off). Both are
+/// clamped to safe ranges, applied to the running audio immediately, and saved.
+#[tauri::command]
+pub fn set_audio_limits(master: f32, max_db: f32) -> Result<AudioLimits, String> {
+    let master = crate::audio_limit::clamp_master(master);
+    let max_db = crate::audio_limit::clamp_ceiling_db(max_db);
+    crate::audio_limit::set(master, max_db);
+    settings_set("audio_master_volume", serde_json::json!(master))?;
+    settings_set("audio_max_db", serde_json::json!(max_db))?;
+    Ok(AudioLimits { master, max_db })
 }
 
 #[tauri::command]
@@ -983,6 +1064,10 @@ pub struct ServerEntry {
     pub name: String,
     #[serde(default)]
     pub local: Option<LocalServerConfig>,
+    /// Backup addresses to try, in order, when the host does not answer (a replica serving a saved
+    /// read-only copy). Kept on this device only.
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
 }
 
 fn servers_list_path() -> std::path::PathBuf {
@@ -1003,7 +1088,7 @@ fn save_server_entry(address: &str, name: &str) {
 fn save_server_entry_with_config(address: &str, name: &str, local: Option<LocalServerConfig>) {
     let mut entries = load_server_entries();
     if !entries.iter().any(|e| e.id == address) {
-        entries.push(ServerEntry { id: address.to_string(), name: name.to_string(), local });
+        entries.push(ServerEntry { id: address.to_string(), name: name.to_string(), local, fallbacks: Vec::new() });
         let _ = std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap());
     }
 }
@@ -1078,26 +1163,29 @@ pub async fn connect_server(
         }
     };
 
-    let (endpoint, conn, send, recv, session_token, relayed) =
-        if let Some(target) = crate::connection::parse_relay_target(&address) {
-            let endpoint = crate::tls::make_pinned_relay_endpoint(target.cert_fp.clone())
-                .map_err(|e| e.to_string())?;
-            let (conn, send, recv, token) =
-                connect_via_relay(endpoint.clone(), &target, &keypair, setup_token)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            (endpoint, conn, send, recv, token, true)
-        } else {
-            let addr: std::net::SocketAddr = address
-                .parse()
-                .map_err(|e: std::net::AddrParseError| e.to_string())?;
-            let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
-            let (conn, send, recv, token) =
-                connect_and_authenticate(endpoint.clone(), addr, &keypair, invite_code, setup_token)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            (endpoint, conn, send, recv, token, false)
-        };
+    // Try the host first; if it does not answer, try this device's backup addresses in order (a replica
+    // serving a read-only saved copy). The invite code / setup token only make sense for the host itself.
+    let fallbacks: Vec<String> = load_server_entries().into_iter().find(|e| e.id == address).map(|e| e.fallbacks).unwrap_or_default();
+    let patience = if fallbacks.is_empty() { None } else { Some(std::time::Duration::from_secs(5)) };
+    let mut on_fallback: Option<String> = None;
+    let primary = connect_one(&address, &keypair, invite_code.clone(), setup_token.clone(), patience).await;
+    let (endpoint, conn, send, recv, session_token, relayed) = match primary {
+        Ok(t) => t,
+        Err(primary_err) => {
+            let mut found = None;
+            for fb in &fallbacks {
+                if let Ok(t) = connect_one(fb, &keypair, None, None, patience).await {
+                    on_fallback = Some(fb.clone());
+                    found = Some(t);
+                    break;
+                }
+            }
+            match found {
+                Some(t) => t,
+                None => return Err(primary_err),
+            }
+        }
+    };
 
     let media_dispatcher = std::sync::Arc::new(crate::voice::MediaInboundDispatcher::default());
     // Voice datagrams flow over BOTH direct and relayed connections: the relay
@@ -1131,6 +1219,7 @@ pub async fn connect_server(
         media_dispatcher,
         session_token,
         relayed,
+        on_fallback: on_fallback.clone(),
     });
 
     let handle = bridge::spawn_event_reader(app, address.clone(), Arc::clone(&server_conn), recv);
@@ -1166,11 +1255,113 @@ pub async fn connect_server(
             // `UPGRADE_REQUIRED` unless this connection has already negotiated.
             negotiate_protocol(&state, &address).await;
 
-            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed, server_id })
+            if on_fallback.is_some() {
+                spawn_host_probe(address.clone(), Arc::clone(&server_conn), Keypair::from_signing_key_bytes(keypair.signing_key_bytes()));
+            }
+
+            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed, server_id, on_fallback })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
     }
+}
+
+/// One connection attempt to `address` (a relay link or host:port), optionally giving up after `patience`.
+async fn connect_one(
+    address: &str,
+    keypair: &Keypair,
+    invite_code: Option<String>,
+    setup_token: Option<String>,
+    patience: Option<std::time::Duration>,
+) -> Result<(quinn::Endpoint, quinn::Connection, quinn::SendStream, quinn::RecvStream, Vec<u8>, bool), String> {
+    let attempt = async {
+        if let Some(target) = crate::connection::parse_relay_target(address) {
+            let endpoint = crate::tls::make_pinned_relay_endpoint(target.cert_fp.clone()).map_err(|e| e.to_string())?;
+            let (conn, send, recv, token) = connect_via_relay(endpoint.clone(), &target, keypair, setup_token)
+                .await.map_err(|e| e.to_string())?;
+            Ok::<_, String>((endpoint, conn, send, recv, token, true))
+        } else {
+            let addr: std::net::SocketAddr = address.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+            let endpoint = make_client_endpoint().map_err(|e| e.to_string())?;
+            let (conn, send, recv, token) = connect_and_authenticate(endpoint.clone(), addr, keypair, invite_code, setup_token)
+                .await.map_err(|e| e.to_string())?;
+            Ok((endpoint, conn, send, recv, token, false))
+        }
+    };
+    match patience {
+        Some(d) => tokio::time::timeout(d, attempt).await.map_err(|_| format!("{address} did not answer in {} seconds", d.as_secs()))?,
+        None => attempt.await,
+    }
+}
+
+/// While connected to a backup copy, keep asking the host (every 20 s). When it answers, close the
+/// backup connection: the app's normal reconnect then connects to the host first and the copy is left.
+fn spawn_host_probe(address: String, conn: Arc<ServerConnection>, keypair: Keypair) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            if conn.connection.close_reason().is_some() { return; }
+            if let Ok((_e, probe, _s, _r, _t, _rel)) = connect_one(&address, &keypair, None, None, Some(std::time::Duration::from_secs(5))).await {
+                probe.close(0u32.into(), b"probe");
+                conn.connection.close(0u32.into(), b"the host is back");
+                return;
+            }
+        }
+    });
+}
+
+/// Owner only: allow (or stop allowing) a member to keep a full copy of this server. A replica sees
+/// EVERYTHING the host sees (all channels, invite codes). Returns who is a replica afterwards.
+#[tauri::command]
+pub async fn set_replica(state: State<'_, Arc<AppState>>, server_id: String, member: String, enabled: bool) -> Result<Vec<String>, String> {
+    let member = parse_public_key(&member)?;
+    match bridge::send_request(&state, &server_id, ServerRequest::SetReplica { member, enabled }).await.map_err(|e| e.to_string())? {
+        ServerResponse::Replicas { members } => Ok(members.iter().map(|m| m.to_string()).collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Owner only: which members are allowed to keep a full copy.
+#[tauri::command]
+pub async fn list_replicas(state: State<'_, Arc<AppState>>, server_id: String) -> Result<Vec<String>, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::ListReplicas).await.map_err(|e| e.to_string())? {
+        ServerResponse::Replicas { members } => Ok(members.iter().map(|m| m.to_string()).collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Backup addresses for a saved server (this device only).
+#[tauri::command]
+pub fn get_fallback_addresses(address: String) -> Vec<String> {
+    load_server_entries().into_iter().find(|e| e.id == address).map(|e| e.fallbacks).unwrap_or_default()
+}
+
+/// Set the backup addresses for a saved server (host:port, one per entry; at most 4). They are tried in
+/// order when the host does not answer.
+#[tauri::command]
+pub fn set_fallback_addresses(address: String, addresses: Vec<String>) -> Result<(), String> {
+    let mut clean = Vec::new();
+    for a in addresses {
+        let a = a.trim().to_string();
+        if a.is_empty() { continue; }
+        a.parse::<std::net::SocketAddr>().map_err(|_| format!("\"{a}\" is not an address like 192.168.1.20:4435"))?;
+        if a == address { continue; }
+        if !clean.contains(&a) { clean.push(a); }
+    }
+    if clean.len() > 4 { return Err("at most 4 backup addresses".to_string()); }
+    let mut entries = load_server_entries();
+    let Some(e) = entries.iter_mut().find(|e| e.id == address) else { return Err("unknown server".to_string()) };
+    e.fallbacks = clean;
+    std::fs::write(servers_list_path(), serde_json::to_string(&entries).unwrap()).map_err(|e| e.to_string())
+}
+
+/// `Some(address)` when this server is currently reached through a backup address (a read-only saved
+/// copy), `None` when through the host or not connected.
+#[tauri::command]
+pub fn get_connection_route(state: State<'_, Arc<AppState>>, server_id: String) -> Option<String> {
+    state.servers.lock().unwrap().get(&server_id).and_then(|c| c.on_fallback.clone())
 }
 
 /// Disconnect from a specific server and remove it from the map.
@@ -1200,6 +1391,7 @@ pub fn list_servers(state: State<'_, Arc<AppState>>) -> Vec<ServerEntry> {
         id: addr.clone(),
         name: conn.server_name.lock().unwrap().clone(),
         local: None,
+        fallbacks: Vec::new(),
     }).collect()
 }
 
@@ -1214,7 +1406,7 @@ pub async fn get_server_info(
         .map_err(|e| e.to_string())?;
     match response {
         ServerResponse::ServerInfo { name, member_count, channels, categories, roles, owner_public_key, server_id } => {
-            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed: false, server_id })
+            Ok(ConnectResult { server_name: name, member_count, channels, categories, roles, owner_public_key, relayed: false, server_id, on_fallback: None })
         }
         ServerResponse::Error { reason } => Err(reason),
         other => Err(format!("unexpected response: {:?}", other)),
@@ -1526,12 +1718,18 @@ pub struct AttachmentCapInput {
 /// Open a native file picker dialog and return the selected file path.
 #[tauri::command]
 pub async fn pick_file() -> Result<Option<String>, String> {
-    let path = tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new().pick_file()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(path.map(|p| p.to_string_lossy().to_string()))
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let path = tauri::async_runtime::spawn_blocking(|| {
+            rfd::FileDialog::new().pick_file()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(path.map(|p| p.to_string_lossy().to_string()))
+    }
+    // Phones: the system file picker is a Tauri plugin that is not wired in yet.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    Err("choosing a file is not available on this platform yet".to_string())
 }
 
 /// Upload a file via a new QUIC bi-stream and return the upload outcome (file_id + cap fields).
@@ -2348,6 +2546,113 @@ pub struct InviteResult {
     pub deep_link: String,
 }
 
+/// Record an invite code as a signed `InviteCreated` event in the server's history (mesh servers), so
+/// a joiner can cite it in their `MemberJoined`. The first action on a server also authorizes this
+/// device. Serialized against the other writers of this device's chain.
+async fn record_invite_in_log(
+    state: &State<'_, Arc<AppState>>,
+    server_id: &str,
+    log_sid: &str,
+    code: &str,
+    max_uses: u32,
+    expires_at: u64,
+    requires_approval: bool,
+) -> Result<(), String> {
+    let _chain_guard = state.device_chain_lock.lock().await;
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
+    let mut ds = crate::device::DeviceState::load(log_sid)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+    // First action on this server authorizes the device (mirrors submit_event).
+    if !ds.authorized {
+        let cert = crate::device::device_cert(&identity, &device);
+        let da = event_build_next(&device, &identity, log_sid, ds.last_event_hash.clone(), ds.next_seq, ds.lamport,
+            farder_crypto::event_log::EventPayload::DeviceAuthorized { cert });
+        event_send_submit(state, server_id, &da).await?;
+        ds.next_seq = da.core.seq + 1;
+        ds.last_event_hash = Some(da.hash());
+        ds.lamport = da.core.lamport;
+        ds.authorized = true;
+        ds.save(log_sid)?;
+    }
+    let inv = event_build_next(&device, &identity, log_sid, ds.last_event_hash.clone(), ds.next_seq, ds.lamport,
+        farder_crypto::event_log::EventPayload::InviteCreated {
+            code_hash: farder_crypto::event_log::invite_code_hash(code),
+            max_uses,
+            expires_at,
+            requires_approval,
+        });
+    event_send_submit(state, server_id, &inv).await?;
+    ds.next_seq = inv.core.seq + 1;
+    ds.last_event_hash = Some(inv.hash());
+    ds.lamport = inv.core.lamport;
+    ds.save(log_sid)?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct GuestInviteResult {
+    pub code: String,
+    /// `https://<site>/<route name>/t#<code>`: what the guest opens in a browser.
+    pub link: String,
+}
+
+/// Whether guest links (browser joins) are turned on for this server.
+#[tauri::command]
+pub async fn get_guest_links(state: State<'_, Arc<AppState>>, server_id: String) -> Result<bool, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::GetGuestLinks).await.map_err(|e| e.to_string())? {
+        ServerResponse::GuestLinks { enabled } => Ok(enabled),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Owner only: turn guest links on or off (off by default).
+#[tauri::command]
+pub async fn set_guest_links(state: State<'_, Arc<AppState>>, server_id: String, enabled: bool) -> Result<bool, String> {
+    match bridge::send_request(&state, &server_id, ServerRequest::SetGuestLinks { enabled }).await.map_err(|e| e.to_string())? {
+        ServerResponse::GuestLinks { enabled } => Ok(enabled),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected response: {:?}", other)),
+    }
+}
+
+/// Make a temporary guest link: a short-lived invite that lets someone chat from a browser with no
+/// install. `route_name` is the name the server's host gave the gateway (`--route name=...`);
+/// it becomes part of the link. On a server with a signed history the invite is also recorded there.
+#[tauri::command]
+pub async fn create_guest_invite(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: Option<String>,
+    route_name: String,
+    expires_in_secs: Option<u64>,
+    max_uses: Option<u32>,
+) -> Result<GuestInviteResult, String> {
+    let route = route_name.trim().to_string();
+    if route.is_empty() || !route.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("the web name may only use letters, numbers, - and _".to_string());
+    }
+    let response = bridge::send_request(&state, &server_id, ServerRequest::CreateGuestInvite { max_uses, expires_in_secs })
+        .await.map_err(|e| e.to_string())?;
+    let code = match response {
+        ServerResponse::InviteCreated { code } => code,
+        ServerResponse::Error { reason } => return Err(reason),
+        other => return Err(format!("unexpected response: {:?}", other)),
+    };
+    if let Some(log_sid) = log_server_id {
+        // Mirror the server's own clamp (default a day, at most a week).
+        let secs = expires_in_secs.unwrap_or(24 * 3600).clamp(60, 7 * 24 * 3600);
+        record_invite_in_log(&state, &server_id, &log_sid, &code,
+            max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX), event_now_secs() + secs, false).await?;
+    }
+    Ok(GuestInviteResult { link: format!("https://{}/{}/t#{}", crate::connection::WEB_INVITE_HOST, route, code), code })
+}
+
 #[tauri::command]
 pub async fn create_invite(
     state: State<'_, Arc<AppState>>,
@@ -2394,58 +2699,12 @@ pub async fn create_invite(
             // in the log, so a joiner can cite it in their MemberJoined.
             // Instant invite for now (requires_approval = false; approval is sub-project 3).
             if let Some(log_sid) = log_server_id {
-                // Serialize chain writes against submit_event and join_log_server.
-                let _chain_guard = state.device_chain_lock.lock().await;
-
-                let identity = {
-                    let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
-                    let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
-                    Keypair::from_signing_key_bytes(&bytes)
-                };
-                let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
-                let mut ds = crate::device::DeviceState::load(&log_sid)?
-                    .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
-
-                // First action on this server authorizes the device (mirrors submit_event).
-                if !ds.authorized {
-                    let cert = crate::device::device_cert(&identity, &device);
-                    let da = event_build_next(
-                        &device,
-                        &identity,
-                        &log_sid,
-                        ds.last_event_hash.clone(),
-                        ds.next_seq,
-                        ds.lamport,
-                        farder_crypto::event_log::EventPayload::DeviceAuthorized { cert },
-                    );
-                    event_send_submit(&state, &server_id, &da).await?;
-                    ds.next_seq = da.core.seq + 1;
-                    ds.last_event_hash = Some(da.hash());
-                    ds.lamport = da.core.lamport;
-                    ds.authorized = true;
-                    ds.save(&log_sid)?;
-                }
-
-                let expires_at = event_now_secs() + 30 * 24 * 60 * 60;
-                let inv = event_build_next(
-                    &device,
-                    &identity,
-                    &log_sid,
-                    ds.last_event_hash.clone(),
-                    ds.next_seq,
-                    ds.lamport,
-                    farder_crypto::event_log::EventPayload::InviteCreated {
-                        code_hash: farder_crypto::event_log::invite_code_hash(&code),
-                        max_uses: max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX),
-                        expires_at,
-                        requires_approval: requires_approval.unwrap_or(false),
-                    },
-                );
-                event_send_submit(&state, &server_id, &inv).await?;
-                ds.next_seq = inv.core.seq + 1;
-                ds.last_event_hash = Some(inv.hash());
-                ds.lamport = inv.core.lamport;
-                ds.save(&log_sid)?;
+                record_invite_in_log(
+                    &state, &server_id, &log_sid, &code,
+                    max_uses.filter(|n| *n > 0).unwrap_or(u32::MAX),
+                    event_now_secs() + 30 * 24 * 60 * 60,
+                    requires_approval.unwrap_or(false),
+                ).await?;
             }
 
             Ok(InviteResult { code, link, deep_link })
@@ -3834,8 +4093,30 @@ pub async fn play_audio_file(path: String) -> Result<(), String> {
 
 /// Show a desktop notification using notify-send (Linux) or equivalent.
 /// Falls back silently on unsupported platforms or when notify-send is absent.
+// async on purpose (also `save_notification_prefs`, `set_edge_strip`, `chat_open`):
+// these can BUILD a window, and on Windows a window built inside a plain
+// synchronous command can hang and stay blank. Found by the two-client self-test.
 #[tauri::command]
-pub fn show_notification(title: String, body: String) -> Result<(), String> {
+pub async fn show_notification(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+    media_url: Option<String>,
+    reply: Option<crate::notify_popup::ReplyTarget>,
+) -> Result<(), String> {
+    // "off": no pop-ups of any kind. Nothing is built, spawned or sent.
+    if notification_popup_style() == "off" {
+        return Ok(());
+    }
+    // Default: Farder's own skinned pop-up window (drawn locally, themed, never
+    // copied into the OS notification history). `popupStyle: "system"` in the
+    // notification prefs opts back into the OS toast below.
+    if notification_popup_style() != "system" {
+        match crate::notify_popup::push(&app, title.clone(), body.clone(), media_url, reply) {
+            Ok(()) => return Ok(()),
+            Err(e) => eprintln!("[notify] pop-up window unavailable, using the OS toast: {e}"),
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         let _ = std::process::Command::new("notify-send")
@@ -3877,6 +4158,26 @@ pub fn show_notification(title: String, body: String) -> Result<(), String> {
 // Notification preferences commands
 // ---------------------------------------------------------------------------
 
+/// `"skinned"` (default), `"system"` or `"off"`, from `popupStyle` in
+/// notifications.json. Anything unreadable or unrecognised is the default.
+pub(crate) fn notification_popup_style() -> String {
+    popup_style_from(
+        std::fs::read_to_string(farder_data_dir().join("notifications.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .as_ref(),
+    )
+}
+
+/// The decision, separated from the file read so it can be tested.
+pub(crate) fn popup_style_from(prefs: Option<&serde_json::Value>) -> String {
+    match prefs.and_then(|v| v.get("popupStyle")).and_then(|p| p.as_str()) {
+        Some("system") => "system".to_string(),
+        Some("off") => "off".to_string(),
+        _ => "skinned".to_string(),
+    }
+}
+
 #[tauri::command]
 pub fn get_notification_prefs() -> Result<serde_json::Value, String> {
     let path = farder_data_dir().join("notifications.json");
@@ -3896,9 +4197,17 @@ pub fn get_notification_prefs() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn save_notification_prefs(prefs: serde_json::Value) -> Result<(), String> {
+pub async fn save_notification_prefs(app: tauri::AppHandle, prefs: serde_json::Value) -> Result<(), String> {
     let path = farder_data_dir().join("notifications.json");
-    std::fs::write(&path, prefs.to_string()).map_err(|e| e.to_string())
+    std::fs::write(&path, prefs.to_string()).map_err(|e| e.to_string())?;
+    // The pop-up window is a whole extra browser process. Keep it only while the
+    // chosen style needs it: leaving "skinned" frees it now, returning builds it.
+    if popup_style_from(Some(&prefs)) == "skinned" {
+        let _ = crate::notify_popup::ensure_window(&app);
+    } else {
+        crate::notify_popup::close_window(&app);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4415,6 +4724,7 @@ pub async fn create_local_server(
         media_dispatcher,
         session_token,
         relayed,
+        on_fallback: None,
     });
 
     let handle = bridge::spawn_event_reader(app.clone(), address.clone(), Arc::clone(&server_conn), recv);
@@ -4546,7 +4856,7 @@ pub fn list_templates() -> Vec<serde_json::Value> {
 /// kill -9, OOM, crashes). Each orphan against the same SQLite DB is a
 /// concurrency hazard.
 ///
-/// Best-effort: uses `pgrep -af farder-server` on Unix; no-op on Windows.
+/// Best-effort: uses `pgrep -af farder-server` on Unix, PowerShell on Windows.
 fn reap_orphan_servers_for_data_dir(data_dir: &str) {
     #[cfg(unix)]
     {
@@ -4584,7 +4894,14 @@ fn reap_orphan_servers_for_data_dir(data_dir: &str) {
             eprintln!("[restart] Killed orphan farder-server pid {} for data dir {}", pid, data_dir);
         }
     }
-    let _ = data_dir; // silence unused-var on non-unix
+    // Windows has no pgrep: without this a server left running by the last session
+    // keeps its port, so the new one lands on the next port (a NEW address that
+    // everyone who joined the old one can no longer reach) and both share one
+    // database.
+    #[cfg(windows)]
+    crate::server_manager::reap_orphans_windows(data_dir);
+    #[cfg(not(any(unix, windows)))]
+    let _ = data_dir;
 }
 
 /// Restart any locally-managed servers from the saved server list.
@@ -4609,6 +4926,8 @@ pub fn restart_local_servers(
                 &local.template,
                 &local.data_dir,
                 relay_addr,
+                // Keep the address it had, so people who joined can still find it.
+                entry.id.strip_prefix("127.0.0.1:").and_then(|p| p.parse::<u16>().ok()),
             ) {
                 Ok((info, child)) => {
                     let new_id = if relay_addr.is_some() {
@@ -4622,6 +4941,7 @@ pub fn restart_local_servers(
                         id: new_id,
                         name: entry.name.clone(),
                         local: entry.local.clone(),
+                        fallbacks: entry.fallbacks.clone(),
                     });
                 }
                 Err(e) => {
@@ -5017,7 +5337,10 @@ async fn run_create_e2ee_channel(
     ds.save(&log_server_id)?;
 
     // 5. Persist the per-channel MLS state so T9/T10 can resume the group.
-    crate::mls_state::MlsChannelState {
+    //    The bootstrap is this identity's first commit here: record it (in the
+    //    epoch it was authored in, as the server's commit-rate rule counts it)
+    //    so the local refresh policy agrees with the server.
+    let mut fresh = crate::mls_state::MlsChannelState {
         generation: 0,
         epoch: commit.local_epoch,
         store_instance_hash: hex::encode(created.store_instance_hash),
@@ -5025,8 +5348,9 @@ async fn run_create_e2ee_channel(
         cursor: 0,
         poisoned: None,
         ..Default::default()
-    }
-    .save(&log_server_id, channel_id)?;
+    };
+    fresh.note_own_commit(commit.local_epoch.saturating_sub(1));
+    fresh.save(&log_server_id, channel_id)?;
 
     // 6. Auto-add current server members (T8): every current member's device is
     //    added to the group so the fresh channel is usable without another
@@ -5092,7 +5416,12 @@ pub struct SkippedE2eeMember {
 #[derive(serde::Serialize)]
 pub struct PublishOwnKeyPackageResult {
     pub channel_id: u64,
+    /// Empty when `skipped`.
     pub event_hash: String,
+    /// True when nothing was published because this device is already a confirmed member (or the channel
+    /// is frozen after an equivocation): publishing would have reset that state.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 /// Authorize this device on the server (one `DeviceAuthorized` event) the first
@@ -5385,16 +5714,23 @@ async fn add_current_members_to_group(
                     ds.last_event_hash = chain.last_event_hash.clone();
                     ds.lamport = chain.lamport;
                     ds.save(log_server_id)?;
-                    crate::mls_state::MlsChannelState {
-                        generation,
-                        epoch: outcome.local_epoch,
-                        store_instance_hash: hex::encode(store_instance_hash),
-                        confirmed: true,
-                        cursor: 0,
-                        poisoned: None,
-                        ..Default::default()
-                    }
-                    .save(log_server_id, channel_id)?;
+                    // UPDATE the channel record, never rebuild it. Rebuilding
+                    // it from defaults wiped the refresh history and the
+                    // cursor, so right after adding a friend this device
+                    // believed it had never committed and refreshed on its
+                    // very next send, racing the friend's own first refresh.
+                    // One of the two always lost (two-app suite, 2026-11-26).
+                    let mut st =
+                        crate::mls_state::MlsChannelState::load(log_server_id, channel_id)?
+                            .unwrap_or_default();
+                    st.generation = generation;
+                    st.epoch = outcome.local_epoch;
+                    st.store_instance_hash = hex::encode(store_instance_hash);
+                    st.confirmed = true;
+                    st.poisoned = None;
+                    // In the epoch it was authored in, as the server counts it.
+                    st.note_own_commit(outcome.local_epoch.saturating_sub(1));
+                    st.save(log_server_id, channel_id)?;
                     result.added.push(AddedE2eeMember {
                         identity: member_identity.to_string(),
                         device: device_id.clone(),
@@ -5544,6 +5880,16 @@ async fn run_publish_own_key_package(
     let key = ChannelKey::new(log_server_id.clone(), channel_id)?;
     let data_dir = farder_data_dir();
 
+    // Never publish over a confirmed or poisoned state: the save below resets it to `confirmed: false` /
+    // epoch 0. The frontend checks this too, but between its `process` and this call the lock is released,
+    // and a Welcome can be applied in that gap (more likely since members publish as soon as a channel
+    // appears). Checked HERE, under the device-chain lock `run_e2ee` holds, so no interleaving can reset a member.
+    if let Some(existing) = crate::mls_state::MlsChannelState::load(&log_server_id, channel_id)? {
+        if existing.confirmed || existing.poisoned.is_some() {
+            return Ok(PublishOwnKeyPackageResult { channel_id, event_hash: String::new(), skipped: true });
+        }
+    }
+
     // Create-once or resume the joiner store: the KeyPackage's private material
     // must live in the same store that later joins from the Welcome (the store
     // lifecycle contract in `join.rs`).
@@ -5585,6 +5931,7 @@ async fn run_publish_own_key_package(
     Ok(PublishOwnKeyPackageResult {
         channel_id,
         event_hash: published.event_hash,
+        skipped: false,
     })
 }
 
@@ -5672,6 +6019,39 @@ pub async fn process_mls_control_events(
 
 /// The non-Send body of [`process_mls_control_events`], driven on a
 /// current-thread runtime by [`run_e2ee`].
+/// Settle a key refresh left staged by a submit whose answer never arrived
+/// (`farder_e2ee_client::settle_staged_refresh`), and keep the device chain and
+/// the channel record in line with what the log says happened to it.
+#[allow(clippy::too_many_arguments)]
+fn settle_leftover_refresh(
+    store: &farder_mls::store::FarderMlsStore,
+    group: &mut farder_mls::group::MlsChannelGroup,
+    events: &[farder_crypto::event_log::Event],
+    my_device: &str,
+    chain: &mut farder_e2ee_client::ChainState,
+    ds: &mut crate::device::DeviceState,
+    mls: &mut crate::mls_state::MlsChannelState,
+    log_server_id: &str,
+    channel_id: u64,
+) -> Result<(), String> {
+    let (settled, accepted) =
+        farder_e2ee_client::settle_staged_refresh(store, group, events, my_device)
+            .map_err(|e| e.to_string())?;
+    if settled == farder_e2ee_client::StagedRefreshSettled::WasAccepted {
+        if let Some(event) = accepted {
+            chain.advance(event);
+            ds.next_seq = chain.next_seq;
+            ds.last_event_hash = chain.last_event_hash.clone();
+            ds.lamport = chain.lamport;
+            ds.save(log_server_id)?;
+        }
+        mls.note_rekey(group.epoch(), farder_e2ee_client::event_now_secs());
+        mls.epoch = group.epoch();
+        mls.save(log_server_id, channel_id)?;
+    }
+    Ok(())
+}
+
 async fn run_process_mls_control_events(
     state: Arc<AppState>,
     server_id: String,
@@ -5771,6 +6151,18 @@ async fn run_process_mls_control_events(
     let my_device = device_id(&device.public_key());
 
     let mut processed = 0usize;
+
+    // A key refresh whose answer never arrived is still staged. The log now
+    // says what happened to it: ours holds the epoch (accepted: apply it),
+    // someone else's does (ours lost: dropped, theirs applies below), or none
+    // (never arrived: dropped). Before this existed, a refused refresh was
+    // merged anyway and the device forked off alone.
+    if let Some(g) = group.as_mut() {
+        settle_leftover_refresh(
+            &store, g, &events, &my_device, &mut chain, &mut ds, &mut mls, &log_server_id,
+            channel_id,
+        )?;
+    }
 
     // K5: snapshot the ACTUAL leaf view before any commit is applied, so the
     // diff below reports what the tree really gained and lost.
@@ -5925,6 +6317,12 @@ async fn run_process_mls_control_events(
     // run starts after this page (idempotent: an already-applied commit is a
     // replay, an un-joined member skips pre-membership commits).
     mls.cursor = next_cursor;
+    // Report the group's REAL epoch. The saved number is bookkeeping that
+    // other paths can leave behind; the two-app suite once read "epoch 2"
+    // from a device whose group was really somewhere else.
+    if let Some(g) = group.as_ref() {
+        mls.epoch = g.epoch();
+    }
     mls.save(&log_server_id, channel_id)?;
 
     let diff = farder_e2ee_client::leaf_diff(
@@ -6129,6 +6527,21 @@ async fn run_send_sealed_message(
     };
     let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
 
+    // A key refresh left staged by a lost answer must be settled before we
+    // seal, or this message would go out in an epoch the log may already have
+    // moved past.
+    if group.has_staged_own_commit() {
+        let (events, _) =
+            farder_e2ee_client::fetch_mls_control_exhaustive(&transport, channel_id, mls.cursor)
+                .await
+                .map_err(|e| e.to_string())?;
+        let my_device = farder_crypto::event_log::device_id(&device.public_key());
+        settle_leftover_refresh(
+            &store, &mut group, &events, &my_device, &mut chain, &mut ds, &mut mls,
+            &log_server_id, channel_id,
+        )?;
+    }
+
     // The caps describe the CIPHERTEXT (hash, size, octet-stream) and stay
     // outside; the keys, real names and real MIMEs go inside the envelope. The
     // uploader is this identity because the server validates the cap against
@@ -6307,12 +6720,13 @@ async fn run_send_sealed_message(
                 // terminal state for an impostor leaf that is already merged and
                 // cannot be rolled back — it blocks every send AND every decrypt,
                 // permanently. A refused proactive rekey is nothing of the kind:
-                // the local group is one epoch ahead of the server (finding F1),
-                // which the send path's existing bounded resync already recovers
-                // from on the next send. Marking it poisoned PREVENTED that
-                // recovery and bricked the channel for a routine policy refusal —
-                // the exact "over-conservative guard becomes an unexitable state"
-                // shape this codebase keeps rediscovering.
+                // the refresh was only staged and has been thrown away
+                // (`E2eeError::RekeyRefused`), so the group is unchanged and the
+                // steward applies whatever commit won the epoch. (It used to be
+                // merged first, which forked this device off on its own the
+                // moment two members refreshed at once: the two-app suite's
+                // "nothing opens after the first exchange".) A lost answer
+                // leaves it staged; the next steward run or send settles it.
                 //
                 // A rate-limit refusal is also worth LEARNING from: it means the
                 // server has seen a commit from us that our local cadence did not
@@ -6473,10 +6887,16 @@ pub enum DecryptSealedMessageResult {
     Decrypted {
         envelope: farder_mls::envelope::MessageEnvelope,
     },
-    /// The ciphertext could not be opened — tampered, wrong group/epoch, no
-    /// local group yet, or a poisoned group. The generation's decryption key is
-    /// already consumed; a retry on the same bytes is impossible and pointless.
+    /// The ciphertext could not be opened — tampered, wrong group/epoch, or a
+    /// poisoned group. The generation's decryption key is already consumed; a
+    /// retry on the same bytes is impossible and pointless.
     Undecryptable { reason: String },
+    /// This device has no group for the channel YET (its Welcome has not been
+    /// processed). Nothing was opened and no key was consumed, so the caller
+    /// must NOT cache this as final: the same bytes open once the group exists.
+    /// Seen live: the first message after a member is added arrived a moment
+    /// before that member's Welcome, and was shown as "couldn't decrypt" forever.
+    NotReady { reason: String },
 }
 
 #[tauri::command]
@@ -6550,8 +6970,8 @@ pub async fn decrypt_sealed_message(
     ) {
         Ok(Some(group)) => group,
         Ok(None) => {
-            return Ok(DecryptSealedMessageResult::Undecryptable {
-                reason: format!("no MLS group for channel {channel_id} on {server_id}"),
+            return Ok(DecryptSealedMessageResult::NotReady {
+                reason: format!("no MLS group for channel {channel_id} on {server_id} yet"),
             });
         }
         Err(e) => return Err(e.to_string()),
@@ -6705,6 +7125,18 @@ pub async fn join_log_server(
             ds.lamport = join.core.lamport;
             ds.joined = true;
             ds.save(&log_server_id)?;
+            // The connect-time profile push ran BEFORE we were a member, so the
+            // server dropped it and everyone saw this person as "Anonymous" until
+            // their next reconnect. Now that the join went through, send it again.
+            {
+                let state_arc: Arc<AppState> = Arc::clone(state.inner());
+                let sid = server_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::profile_sync::push_profile_on_connect(&state_arc, &sid).await {
+                        eprintln!("[profile-sync] push after join to {} failed: {}", sid, e);
+                    }
+                });
+            }
             Ok(())
         }
         // Already a member (e.g. joined on another device): treat as success so we
@@ -7573,11 +8005,9 @@ pub async fn rekey_e2ee_channel(
 
             let outcome = rekey_channel(&transport, &actor, &mut chain, &ctx, &mut group)
                 .await
-                .map_err(|e| {
-                    // A rejected rekey already merged locally (F1): the group is
-                    // one epoch ahead of the server and must not be reused.
-                    e.to_string()
-                })?;
+                // A refused rekey was only staged and has been discarded: the
+                // group is unchanged (`E2eeError::RekeyRefused`).
+                .map_err(|e| e.to_string())?;
 
             ds.next_seq = chain.next_seq;
             ds.last_event_hash = chain.last_event_hash.clone();
@@ -7917,6 +8347,435 @@ pub async fn submit_message_deleted(
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Speech garbling over the log (moderation + consent)
+// ---------------------------------------------------------------------------
+
+/// Sign and submit one garble payload as this device, advancing its chain on
+/// success. Shared by `garble_set` / `garble_clear` / `garble_consent`, which
+/// differ only in the payload they build.
+async fn submit_garble_payload(
+    state: &State<'_, Arc<AppState>>,
+    server_id: &str,
+    log_server_id: &str,
+    payload: farder_crypto::event_log::EventPayload,
+) -> Result<EventAcceptedResult, String> {
+    let identity = {
+        let lock = state.signing_key_bytes.lock().map_err(|e| e.to_string())?;
+        let bytes = lock.ok_or_else(|| "identity is locked".to_string())?;
+        Keypair::from_signing_key_bytes(&bytes)
+    };
+    let device = crate::device::load_or_create_device_keypair(identity.signing_key_bytes())?;
+
+    let _chain_guard = state.device_chain_lock.lock().await;
+    let mut ds = crate::device::DeviceState::load(log_server_id)?
+        .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
+
+    let event = event_build_next(
+        &device,
+        &identity,
+        log_server_id,
+        ds.last_event_hash.clone(),
+        ds.next_seq,
+        ds.lamport,
+        payload,
+    );
+    let result = event_send_submit(state, server_id, &event).await?;
+
+    ds.next_seq = event.core.seq + 1;
+    ds.last_event_hash = Some(event.hash());
+    ds.lamport = event.core.lamport;
+    ds.save(log_server_id)?;
+    Ok(result)
+}
+
+/// Garble `target`'s next `messages` messages as every viewer draws them.
+/// `consensual: false` is a MODERATION action (needs the "garble" capability;
+/// the fold refuses otherwise); `consensual: true` needs the target's earlier
+/// `garble_consent` naming this identity. The fold is the authority on both.
+#[tauri::command]
+pub async fn garble_set(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    target: String,
+    mode: String,
+    phrase: String,
+    messages: u32,
+    consensual: bool,
+) -> Result<EventAcceptedResult, String> {
+    let target = parse_public_key(&target)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::GarbleSet { target, mode, phrase, messages, consensual },
+    )
+    .await
+}
+
+/// End the garble running on `target` (the target's own kill switch for a
+/// consensual one; a moderator or the setter otherwise).
+#[tauri::command]
+pub async fn garble_clear(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    target: String,
+) -> Result<EventAcceptedResult, String> {
+    let target = parse_public_key(&target)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::GarbleCleared { target },
+    )
+    .await
+}
+
+/// Let `controller` garble ME, up to `max_messages` at a time. `0` revokes.
+#[tauri::command]
+pub async fn garble_consent(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    controller: String,
+    max_messages: u32,
+) -> Result<EventAcceptedResult, String> {
+    let controller = parse_public_key(&controller)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::GarbleConsent { controller, max_messages },
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Delegating powers (log capabilities)
+// ---------------------------------------------------------------------------
+
+/// The log capabilities a screen may hand out. The fold would accept any string,
+/// but an unknown one is a dead power that looks real, so the app only ever sends
+/// these.
+pub const GRANTABLE_CAPABILITIES: &[&str] = &["invite", "kick", "ban", "garble"];
+
+fn check_grantable(capability: &str) -> Result<(), String> {
+    if GRANTABLE_CAPABILITIES.contains(&capability) {
+        Ok(())
+    } else {
+        Err(format!("unknown power {capability:?}"))
+    }
+}
+
+/// Give `member` a power (`invite`, `kick`, `ban` or `garble`). The fold refuses
+/// unless this identity is the owner or holds the power itself.
+#[tauri::command]
+pub async fn grant_capability(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    member: String,
+    capability: String,
+) -> Result<EventAcceptedResult, String> {
+    check_grantable(&capability)?;
+    let member = parse_public_key(&member)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::PermissionGranted { member, capability },
+    )
+    .await
+}
+
+/// Take a power away from `member` (the owner may; a member may give up their own).
+#[tauri::command]
+pub async fn revoke_capability(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    member: String,
+    capability: String,
+) -> Result<EventAcceptedResult, String> {
+    check_grantable(&capability)?;
+    let member = parse_public_key(&member)?;
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::PermissionRevoked { member, capability },
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Recovery owner (docs/recovery-owner-design.md)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct RecoveryCreatedView {
+    /// The 24 words. Shown ONCE and kept nowhere on this computer.
+    pub phrase: String,
+    /// The recovery key's public half (what the server stores).
+    pub recovery_key: String,
+}
+
+/// Make a recovery key for this server and name it in the server's signed history.
+/// Only the owner can. The words are returned for the person to write down and are NOT
+/// stored anywhere here: losing them means this recovery key is gone (make another).
+#[tauri::command]
+pub async fn recovery_create(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+) -> Result<RecoveryCreatedView, String> {
+    let seed: [u8; 32] = rand::random();
+    let phrase = farder_crypto::recovery::phrase_from_key(&seed).map_err(|e| e.to_string())?;
+    let recovery = Keypair::from_signing_key_bytes(&seed);
+    submit_garble_payload(
+        &state,
+        &server_id,
+        &log_server_id,
+        farder_crypto::event_log::EventPayload::RecoveryKeySet { recovery: recovery.public_key() },
+    )
+    .await?;
+    Ok(RecoveryCreatedView { phrase, recovery_key: recovery.public_key().to_string() })
+}
+
+#[derive(serde::Serialize)]
+pub struct RecoveryPendingView {
+    pub claim: String,
+    pub new_owner: String,
+    pub accepted_at: u64,
+    pub ready_at: u64,
+}
+
+#[derive(serde::Serialize)]
+pub struct RecoveryStatusView {
+    pub key_set: bool,
+    pub recovery_key: Option<String>,
+    pub wait_secs: u64,
+    pub pending: Option<RecoveryPendingView>,
+}
+
+/// Whether this server has a recovery key and whether a takeover is waiting (anyone may ask:
+/// a takeover is meant to be seen by everybody).
+#[tauri::command]
+pub async fn recovery_status(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<RecoveryStatusView, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetRecoveryStatus)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::RecoveryStatus { key_set, recovery_key, wait_secs, pending } => Ok(RecoveryStatusView {
+            key_set,
+            recovery_key: recovery_key.map(|k| k.to_string()),
+            wait_secs,
+            pending: pending.map(|p| RecoveryPendingView {
+                claim: p.claim,
+                new_owner: p.new_owner.to_string(),
+                accepted_at: p.accepted_at,
+                ready_at: p.ready_at,
+            }),
+        }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// Sign and send ONE recovery step as the recovery key (made from its 24 words).
+///
+/// The recovery key is not a member of the server and has no device there, so each step
+/// registers a throwaway device (valid for one hour, so it frees its slot afterwards) and then
+/// sends the step from it. The words are used here and never stored.
+async fn submit_as_recovery_key(
+    state: &State<'_, Arc<AppState>>,
+    server_id: &str,
+    log_server_id: &str,
+    phrase: &str,
+    payload: farder_crypto::event_log::EventPayload,
+) -> Result<EventAcceptedResult, String> {
+    use farder_crypto::event_log::{DeviceCert, EventPayload};
+    let seed = farder_crypto::recovery::key_from_phrase(phrase)
+        .map_err(|_| "those 24 words are not a valid recovery phrase (check the spelling and the order)".to_string())?;
+    let recovery = Keypair::from_signing_key_bytes(&seed);
+    // The words must be THIS server's recovery key, or the server would just refuse a signed
+    // step with a confusing message.
+    let status = recovery_status(state.clone(), server_id.to_string()).await?;
+    if status.recovery_key.as_deref() != Some(recovery.public_key().to_string().as_str()) {
+        return Err("these words are not the recovery key of this server".to_string());
+    }
+    let device = Keypair::generate();
+    let now = event_now_secs();
+    let cert = DeviceCert::create_expiring(&recovery, &device.public_key(), now, now + 3600);
+    let authorize = event_build_next(&device, &recovery, log_server_id, None, 0, 0, EventPayload::DeviceAuthorized { cert });
+    event_send_submit(state, server_id, &authorize).await?;
+    let step = event_build_next(&device, &recovery, log_server_id, Some(authorize.hash()), 1, authorize.core.lamport, payload);
+    event_send_submit(state, server_id, &step).await
+}
+
+/// Start a takeover: make `new_owner` (a member of the server) the owner after the waiting
+/// period. Needs the recovery key's 24 words.
+#[tauri::command]
+pub async fn recovery_claim(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+    new_owner: String,
+) -> Result<EventAcceptedResult, String> {
+    let new_owner = parse_public_key(&new_owner)?;
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryClaim { new_owner },
+    ).await
+}
+
+/// Replace the recovery key with a new one, using the CURRENT words (the everyday owner key
+/// cannot: otherwise a thief would swap in their own). Returns the new 24 words, shown once.
+#[tauri::command]
+pub async fn recovery_rotate(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+) -> Result<RecoveryCreatedView, String> {
+    let seed: [u8; 32] = rand::random();
+    let new_phrase = farder_crypto::recovery::phrase_from_key(&seed).map_err(|e| e.to_string())?;
+    let new_key = Keypair::from_signing_key_bytes(&seed);
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryKeySet { recovery: new_key.public_key() },
+    ).await?;
+    Ok(RecoveryCreatedView { phrase: new_phrase, recovery_key: new_key.public_key().to_string() })
+}
+
+/// Withdraw the takeover that is waiting.
+#[tauri::command]
+pub async fn recovery_cancel(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+) -> Result<EventAcceptedResult, String> {
+    let status = recovery_status(state.clone(), server_id.clone()).await?;
+    let claim = status.pending.ok_or_else(|| "there is no takeover waiting".to_string())?.claim;
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryCancel { claim },
+    ).await
+}
+
+/// Finish the takeover once the waiting period is over (the server refuses earlier).
+#[tauri::command]
+pub async fn recovery_finalize(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+    log_server_id: String,
+    phrase: String,
+) -> Result<EventAcceptedResult, String> {
+    let status = recovery_status(state.clone(), server_id.clone()).await?;
+    let claim = status.pending.ok_or_else(|| "there is no takeover waiting".to_string())?.claim;
+    submit_as_recovery_key(
+        &state, &server_id, &log_server_id, &phrase,
+        farder_crypto::event_log::EventPayload::RecoveryFinalize { claim },
+    ).await
+}
+
+#[derive(serde::Serialize)]
+pub struct CapabilityHolderView {
+    pub member: String,
+    pub capabilities: Vec<String>,
+}
+
+/// Who holds which power. The owner is told everyone's; anyone else only their own.
+#[tauri::command]
+pub async fn get_capabilities(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<Vec<CapabilityHolderView>, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetCapabilities)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::Capabilities { holders } => Ok(holders
+            .into_iter()
+            .map(|h| CapabilityHolderView { member: h.member.to_string(), capabilities: h.capabilities })
+            .collect()),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
+/// A garble rule as the frontend sees it (keys as `vk_<hex>` strings).
+#[derive(serde::Serialize)]
+pub struct GarbleRuleView {
+    pub target: String,
+    pub mode: String,
+    pub phrase: String,
+    pub remaining: u32,
+    pub by: String,
+    pub moderation: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct GarbleConsentView {
+    pub target: String,
+    pub controller: String,
+    pub max_messages: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct GarbleStateView {
+    pub rules: Vec<GarbleRuleView>,
+    pub consents: Vec<GarbleConsentView>,
+    /// Whether I may start a moderation garble on this server.
+    pub can_moderate: bool,
+}
+
+/// What garbling touches me: rules on me or set by me (all of them for a
+/// moderator) and the consents I gave or hold. The server filters; this just
+/// reshapes keys.
+#[tauri::command]
+pub async fn get_garble_state(
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<GarbleStateView, String> {
+    let response = bridge::send_request(&state, &server_id, ServerRequest::GetGarbleState)
+        .await
+        .map_err(|e| e.to_string())?;
+    match response {
+        ServerResponse::GarbleState { rules, consents, can_moderate } => Ok(GarbleStateView {
+            can_moderate,
+            rules: rules
+                .into_iter()
+                .map(|r| GarbleRuleView {
+                    target: r.target.to_string(),
+                    mode: r.mode,
+                    phrase: r.phrase,
+                    remaining: r.remaining,
+                    by: r.by.to_string(),
+                    moderation: r.moderation,
+                })
+                .collect(),
+            consents: consents
+                .into_iter()
+                .map(|c| GarbleConsentView {
+                    target: c.target.to_string(),
+                    controller: c.controller.to_string(),
+                    max_messages: c.max_messages,
+                })
+                .collect(),
+        }),
+        ServerResponse::Error { reason } => Err(reason),
+        other => Err(format!("unexpected: {:?}", other)),
+    }
+}
+
 /// The result of sealing and uploading one attachment for an E2EE channel.
 ///
 /// `key` is hex so it can cross the Tauri boundary; the frontend hands it
@@ -8128,5 +8987,42 @@ pub async fn download_sealed_file(
             mime_type,
             saved_path: Some(save_path.to_string_lossy().to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_known_powers_can_be_handed_out() {
+        for c in ["invite", "kick", "ban", "garble"] {
+            assert!(check_grantable(c).is_ok(), "{c}");
+        }
+        for c in ["", "Garble", "admin", "anything", "garble ", "ban,kick"] {
+            assert!(check_grantable(c).is_err(), "{c:?} must be refused");
+        }
+    }
+}
+
+#[cfg(test)]
+mod popup_style_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_default_is_the_themed_popup() {
+        assert_eq!(popup_style_from(None), "skinned");
+        assert_eq!(popup_style_from(Some(&json!({}))), "skinned");
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": 5 }))), "skinned");
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "nonsense" }))), "skinned");
+    }
+
+    #[test]
+    fn system_and_off_are_recognised_exactly() {
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "system" }))), "system");
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "off" }))), "off");
+        // Not case-folded or trimmed: only the exact words the settings screen writes.
+        assert_eq!(popup_style_from(Some(&json!({ "popupStyle": "OFF" }))), "skinned");
     }
 }

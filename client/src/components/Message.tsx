@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useDensity } from "../hooks/useDensity";
+import { foldsRepeatedAuthors, shortClock } from "../lib/density";
 import type { MessageInfo, AttachmentInfo, SealedDecryptEntry, SealedAttachmentRef } from "../lib/types";
-import { publicKeyToString, isDeletedUser, memberDisplayName } from "../lib/types";
+import { publicKeyToString, isDeletedUser, memberDisplayName, isSealedBeforeJoined } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
 import * as bookApi from "../lib/book/client";
@@ -31,6 +33,8 @@ import MemberAvatar from "./MemberAvatar";
 import { useDataSaver } from "../context/DataSaverContext";
 import { imageIsGated, needsDownloadConsent } from "../lib/dataSaver";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
+import { displayGarble } from "../lib/garble";
+import { attachLimiter } from "../lib/audioLimiter";
 
 const INVITE_REGEX = /(?:https?:\/\/)?farder\.gg\/join\/[A-Za-z0-9_-]+|farder:\/\/[^\s]+/gi;
 
@@ -286,7 +290,10 @@ function renderContent(
   });
 }
 
-export default function Message({ message, memberNames, grouped = false, serverId, highlighted = false, onReply, sealedDecrypt }: MessageProps) {
+export default function Message({ message, memberNames, grouped: groupedProp = false, serverId, highlighted = false, onReply, sealedDecrypt }: MessageProps) {
+  // The dense layouts show the name on every line instead of folding repeats.
+  const density = useDensity();
+  const grouped = groupedProp && foldsRepeatedAuthors(density);
   const { dispatch } = useApp();
   const activeServer = useActiveServer();
   const [showPicker, setShowPicker] = useState(false);
@@ -568,6 +575,15 @@ export default function Message({ message, memberNames, grouped = false, serverI
         ? message.content.replace(/https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s]*)?/gi, "").trim()
         : message.content;
 
+  // Speech garbling: when a garble rule covered this author as the message was
+  // accepted, other people's copy is DRAWN garbled (the stored words are never
+  // changed). The author always sees their own words, with a note. The seed is
+  // the event hash so every viewer, and every re-render, draws the same thing.
+  const garbleMark = !deleted && message.garble ? message.garble : null;
+  const shownContent = garbleMark && !isOwnMessage
+    ? displayGarble(displayContent, garbleMark, message.event_hash ?? `m${message.id}`)
+    : displayContent;
+
   async function handleReactionClick(emoji: string, alreadyMe: boolean, fileId?: number) {
     if (reacting) return;
     setReacting(true);
@@ -668,7 +684,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
           {showModBadges && member && (
             <TimedOutBadge untilMs={member.timeout_until} reason={member.timeout_reason} />
           )}
-          <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
+          <span className="message-timestamp">{density === "irc" ? shortClock(message.timestamp) : formatTimestamp(message.timestamp)}</span>
           {message.edited_at && <span className="message-edited">(edited)</span>}
           {/* `pinned` has always been on the row and never shown. Reusing
               `.message-edited` keeps it styled in every theme; a new class with
@@ -705,13 +721,17 @@ export default function Message({ message, memberNames, grouped = false, serverI
       {/* Attachment-only messages (voice notes, captionless images) have empty
           content — the body must still render so the attachments do. */}
       {(deleted || isSealed || undecryptable || displayContent || message.attachments.length > 0) && !showWidget && (
-        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed || undecryptable ? " sealed-content" : ""}${undecryptable ? " sealed-undecryptable" : ""}`}>
+        <div className={`message-content${deleted ? " deleted-content" : ""}${isSealed || undecryptable ? " sealed-content" : ""}${undecryptable && !isSealedBeforeJoined(sealedDecrypt) ? " sealed-undecryptable" : ""}`}>
           {deleted ? (
             <em>This message has been deleted.</em>
           ) : isSealed ? (
             <em title="Encrypted message — awaiting decryption">🔒 Encrypted message</em>
           ) : undecryptable ? (
-            <em title={sealedDecrypt?.kind === "undecryptable" ? sealedDecrypt.reason : undefined}>🔒 Encrypted message — couldn't decrypt</em>
+            isSealedBeforeJoined(sealedDecrypt) ? (
+              <em title={sealedDecrypt?.kind === "undecryptable" ? sealedDecrypt.reason : undefined}>🔒 Sent before you could read this channel</em>
+            ) : (
+              <em title={sealedDecrypt?.kind === "undecryptable" ? sealedDecrypt.reason : undefined}>🔒 Encrypted message — couldn't decrypt</em>
+            )
           ) : editing ? (
             <div className="message-edit-area">
               <textarea
@@ -731,7 +751,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
             </div>
           ) : (
             <RenderedMessageContent
-              text={displayContent}
+              text={shownContent}
               // A sealed row's blobs are ciphertext under a neutral name: the
               // plaintext renderer would show "attachment.bin" and try to
               // download bytes it cannot read. They render below instead.
@@ -764,6 +784,19 @@ export default function Message({ message, memberNames, grouped = false, serverI
                 ) : null
               }
             />
+          )}
+
+          {garbleMark && !editing && (
+            <div
+              style={{ fontSize: 10, color: "var(--xp-text-muted)", marginTop: 2 }}
+              title={garbleMark.moderation ? "A moderator set this" : "They agreed to this"}
+            >
+              {isOwnMessage
+                ? (garbleMark.moderation
+                    ? "Others see this garbled (set by a moderator)."
+                    : "Others see this garbled (as you agreed).")
+                : (garbleMark.moderation ? "garbled by a moderator" : "garbled (they agreed to this)")}
+            </div>
           )}
 
           {reporting && (
@@ -863,7 +896,7 @@ export default function Message({ message, memberNames, grouped = false, serverI
         const urls = detectEmbedUrls(message.content);
         return urls.length > 0 ? (
           <div className="link-embeds">
-            {urls.map((u, i) => <LinkEmbed key={i} url={u} />)}
+            {urls.map((u, i) => <LinkEmbed key={i} url={u} authorPk={pkStr} />)}
           </div>
         ) : null;
       })()}
@@ -1151,7 +1184,7 @@ function SealedAttachmentDisplay({
   if (state.dataUrl && state.mimeType.startsWith("audio/")) {
     return (
       <div className="attachment-audio">
-        <audio controls src={state.dataUrl} />
+        <audio controls src={state.dataUrl} ref={attachLimiter} />
         <div className="attachment-name">🔒 {state.fileName}</div>
       </div>
     );
@@ -1332,7 +1365,7 @@ function AttachmentDisplay({
   if (isAudio && imageUrl) {
     return (
       <div className="attachment-audio">
-        <audio src={imageUrl} controls style={{ width: "100%", maxWidth: 300, height: 32 }} />
+        <audio src={imageUrl} controls ref={attachLimiter} style={{ width: "100%", maxWidth: 300, height: 32 }} />
         <div className="attachment-name">{attachment.name} ({formatSize(attachment.size)})</div>
       </div>
     );

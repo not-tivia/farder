@@ -200,6 +200,8 @@ record of who called whom is a call-detail record and not the server's business.
 | `ReportMessage` | File a report about a message. Gated only by being able to SEE the channel (VIEW_CHANNEL + READ_MESSAGES) — reporting is a member power, not a moderator one. Reason bounded at 500 chars, the optional attached copy at 8 000. | Channel visibility | `reports::create` | `ReportCreated` → `PermissionHolders(MANAGE_MESSAGES)` |
 | `ListReports` | The moderator queue, newest first, names resolved at read time. | MANAGE_MESSAGES | `reports::list` | None |
 | `ResolveReport` | Record an outcome. The row is UPDATED, never deleted: a dismissal has to remain distinguishable from a report nobody read. | MANAGE_MESSAGES | `reports::resolve` | None |
+| `GetCapabilities` | Who holds which explicit log capability. The owner is told everyone's; any other member only their own. Reads the in-memory fold, writes nothing. Grants and revokes themselves arrive as `SubmitEvent` (`PermissionGranted` / `PermissionRevoked`), are audited (`capability_granted` / `capability_revoked`) and announced with `MembershipChanged`. | None | `LogState::all_capabilities` | None |
+| `GetGarbleState` | Garble rules and consents that concern the CALLER, plus `can_moderate`. A rule is visible to its target, to whoever set it, and to a holder of `garble`; a consent only to the two people it names. Reads the in-memory fold, writes nothing. | None | `LogState::garble_rules` / `garble_consents` | None |
 | `ListBlocked` | Who the CALLER has blocked, newest first. Takes no target — the answer is always for the authenticated connection's key, so no request shape asks about anyone else. A block outlives the membership: a member who left is still listed (with `display_name: None`), or the block would become invisible and unrevocable the moment they walked out. | None | `members::list_blocked` | None |
 
 ### Reactions and threads
@@ -272,6 +274,8 @@ WebRTC session.
 | `ServerRequest` variant | What it does |
 |---|---|
 | `CreateInvite` | Generate an invite code; requires `CREATE_INVITES` (base). Returns `InviteCreated { code }`. No events. |
+| `CreateGuestInvite` | Guest invite (24 h default, 7 d max); refused when the `guest_links` setting is not `1`; needs `CREATE_INVITES`. Returns `InviteCreated`. |
+| `SetGuestLinks` / `GetGuestLinks` | Owner-only switch (stored in `server_settings.guest_links`, off by default) and its read-back. Return `GuestLinks`. |
 | `GetServerInfo` | Return channel list, category list, roles, and member count. No permission check. `name` and `owner_public_key` fields are patched by `connection.rs` after this returns. |
 | `GetMembers` | Return full `MemberInfo` list including role IDs and active timeout data. Sourced from `members::list_members_visible` — the server's own system identity is filtered out in SQL, **before** the mesh `is_bot ||` whitelist below can re-admit it. No permission check. `MemberInfo` now includes `profile_hash: Option<String>` (the SHA-256 hex of the member's last pushed profile, or `null` if none). |
 | `Subscribe` | No-op at this layer; channel subscription is managed by `connection.rs` (`subscriptions::apply_subscribe`), which **filters the requested channel ids** — see the `EventTarget` note below. |

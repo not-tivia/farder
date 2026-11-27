@@ -57,8 +57,9 @@ pub use keepalive::{
     KeepaliveAction, KeepaliveOutcome, KeepaliveRepairs, LeafDiff,
 };
 pub use rekey::{
-    rekey_channel, rekey_permitted_by_rate_rule, should_rekey, HoldReason, RekeyCadence,
-    RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger, REKEY_SEALED_SEND_INTERVAL,
+    rekey_channel, rekey_permitted_by_rate_rule, settle_staged_refresh, should_rekey,
+    HoldReason, RekeyCadence, RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger,
+    StagedRefreshSettled, REKEY_SEALED_SEND_INTERVAL,
     REKEY_WALL_CLOCK_SECS,
 };
 pub use reprovision::{

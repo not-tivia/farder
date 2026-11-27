@@ -7,6 +7,10 @@ import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissi
 import BanConfirmDialog from "./BanConfirmDialog";
 import TimeoutDialog from "./TimeoutDialog";
 import UserProfilePopup from "./UserProfilePopup";
+import GarbleMemberDialog from "./GarbleMemberDialog";
+import { useGarbleState } from "../hooks/useGarbleState";
+import { useAutoplaySettings } from "../hooks/useAutoplay";
+import { setAutoplay, setTrusted } from "../lib/autoplay";
 import { getTranslationSettings, setTranslationSettings } from "../lib/translation/api";
 import { SourceLanguagePicker } from "./SourceLanguagePicker";
 import { useClickAnchoredPosition } from "../lib/useClickAnchoredPosition";
@@ -80,6 +84,9 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const [showBanDialog, setShowBanDialog] = useState(false);
   const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [showGarble, setShowGarble] = useState(false);
+  const { state: garbleState } = useGarbleState(serverId);
+  const autoplay = useAutoplaySettings();
   const [error, setError] = useState<string | null>(null);
   const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
   const targetPk = publicKeyToString(target.public_key);
@@ -99,7 +106,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
 
   // When any modal child (Ban/Timeout/Profile) is open, hide the menu and
   // disable its outside-click handler so the modal can be interacted with.
-  const dialogOpen = showBanDialog || showTimeoutDialog || showProfile;
+  const dialogOpen = showBanDialog || showTimeoutDialog || showProfile || showGarble;
 
   useEffect(() => {
     if (dialogOpen) return;
@@ -274,6 +281,26 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     rows.push({ kind: "separator" });
     rows.push({ kind: "item", label: "Encryption devices…", onClick: () => setShowDevices(true) });
   }
+  // Autoplay: trust this person's media to play by itself (muted). Local only.
+  if (!isSelf && !target.is_bot) {
+    const trusted = autoplay.trusted.includes(targetPk);
+    rows.push({
+      kind: "item",
+      label: trusted ? "\u2713 Autoplay their media" : "Autoplay their media",
+      // Trusting someone also switches autoplay on, or the click would seem to do nothing.
+      onClick: () => { setAutoplay(setTrusted({ ...autoplay, enabled: trusted ? autoplay.enabled : true }, targetPk, !trusted)); onClose(); },
+    });
+  }
+  // Garbling: a moderator ("garble" capability) or someone this member has
+  // consented to. Either needs the log (a mesh server), never a bot or yourself.
+  const garbleConsentToMe = garbleState.consents.find(
+    (c) => c.target === targetPk && c.controller === ownPk,
+  )?.max_messages ?? 0;
+  const garbleRunning = garbleState.rules.some((r) => r.target === targetPk);
+  if (!isSelf && !target.is_bot && logServerId && (garbleState.can_moderate || garbleConsentToMe > 0 || garbleRunning)) {
+    rows.push({ kind: "item", label: "Garble\u2026", onClick: () => setShowGarble(true) });
+  }
+
   if (!isSelf && !target.is_bot && (canKick || canBan || canTimeout)) {
     rows.push({ kind: "separator" });
     if (canTimeout) {
@@ -454,6 +481,18 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
           targetName={target.display_name}
           onCancel={() => setShowTimeoutDialog(false)}
           onConfirm={(untilMs, reason) => void timeoutConfirm(untilMs, reason)}
+        />
+      )}
+      {showGarble && logServerId && (
+        <GarbleMemberDialog
+          serverId={serverId}
+          logServerId={logServerId}
+          targetPk={targetPk}
+          targetName={target.display_name}
+          canModerate={garbleState.can_moderate}
+          consentMax={garbleConsentToMe}
+          running={garbleRunning}
+          onClose={() => { setShowGarble(false); onClose(); }}
         />
       )}
       {showProfile && (

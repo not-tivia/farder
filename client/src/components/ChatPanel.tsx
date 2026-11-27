@@ -1,7 +1,8 @@
+import ChatNotices from "./ChatNotices";
 import React, { useEffect, useRef, useState } from "react";
 let cachedOwnPk: string | null = null;
 import { useApp, useActiveServer, useActiveServerId } from "../context/ServerContext";
-import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel } from "../lib/types";
+import { publicKeyToString, flattenMessageInfoV2, isE2eeChannel, isSealedBeforeJoined } from "../lib/types";
 import type { MessageInfo } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import Message from "./Message";
@@ -10,9 +11,12 @@ import ThreadPanel from "./ThreadPanel";
 import ActiveWidgetsBar from "./ActiveWidgetsBar";
 import { openMessageSearch } from "./AppShell";
 import { E2eeLeafNotice } from "./E2eeLeafNotice";
+import { setPhoneView } from "../lib/layout";
+import { useLayout } from "../hooks/useLayout";
 
 export default function ChatPanel() {
   const { dispatch } = useApp();
+  const layout = useLayout();
   const activeServer = useActiveServer();
   const serverId = useActiveServerId();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -49,7 +53,12 @@ export default function ChatPanel() {
     : null;
 
   const channelMessages = currentChannelId !== null ? (messages[currentChannelId] ?? []) : [];
-  const undecryptableCount = channelMessages.filter((m) => activeServer?.sealedDecrypts?.[m.id]?.kind === "undecryptable").length;
+  // Messages sealed before this device joined are expected, not suspicious: they get their own calm label
+  // in the message and are not counted here.
+  const undecryptableCount = channelMessages.filter((m) => {
+    const d = activeServer?.sealedDecrypts?.[m.id];
+    return d?.kind === "undecryptable" && !isSealedBeforeJoined(d);
+  }).length;
   // Leaf-change transparency notices for this channel (G1), oldest-first.
   const channelNotices = (currentChannelId !== null ? activeServer?.notices?.[currentChannelId] : undefined) ?? [];
 
@@ -116,6 +125,7 @@ export default function ChatPanel() {
   if (currentChannelId === null) {
     return (
       <div className="chat-panel">
+        <ChatNotices />
         <div className="message-list-placeholder">
           Select a channel to start chatting.
         </div>
@@ -136,6 +146,7 @@ export default function ChatPanel() {
           <span className="channel-header-name"># {currentChannel?.name ?? "unknown"}</span>
           <span className="channel-header-e2ee" title="End-to-end encrypted channel">🔒 Encrypted</span>
         </div>
+        <ChatNotices />
         <div className="e2ee-interstitial">
           <div className="e2ee-interstitial-heading">Waiting for keys</div>
           <div className="e2ee-interstitial-text">
@@ -162,6 +173,11 @@ export default function ChatPanel() {
   return (
     <div className="chat-panel">
       <div className="channel-header">
+        {/* Phone-width screens show the list OR the chat; this goes back to the list
+            (hidden by lib/layout.ts's stylesheet everywhere else). */}
+        {layout === "small" && (
+          <button className="xp-button phone-back" type="button" aria-label="Back to conversations" onClick={() => setPhoneView("list")}>&#8249;</button>
+        )}
         <span className="channel-header-name">
           {currentChannel?.channel_type === "Dm"
             ? dms.find(d => d.channel.id === currentChannelId)?.participant.display_name ?? "DM"
@@ -193,6 +209,9 @@ export default function ChatPanel() {
           🔍
         </button>
       </div>
+      {/* Server-wide notices sit in the page flow under the header, pushing the messages down rather than
+          covering the channel name or the first message. */}
+      <ChatNotices />
       {equivocated && (
         <div className="e2ee-equivocation-banner">
           <strong>Channel state could not be confirmed.</strong>{" "}This channel's encryption keys failed verification{mlsState && mlsState.reason ? `: ${mlsState.reason}` : ""}. It has been frozen to protect you.

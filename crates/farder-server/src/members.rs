@@ -32,6 +32,43 @@ pub fn register_member(conn: &Connection, pk: &PublicKey, display_name: &str) ->
     Ok(())
 }
 
+/// Whether this member may keep a full copy of the server (the owner designates them).
+pub fn is_replica(conn: &Connection, pk: &PublicKey) -> bool {
+    conn.query_row("SELECT COUNT(*) FROM replicas WHERE public_key = ?1", params![pk.as_bytes().as_slice()], |r| r.get::<_, i64>(0))
+        .map(|n| n > 0).unwrap_or(false)
+}
+
+pub fn set_replica(conn: &Connection, pk: &PublicKey, enabled: bool) -> Result<()> {
+    if enabled {
+        conn.execute("INSERT OR IGNORE INTO replicas (public_key) VALUES (?1)", params![pk.as_bytes().as_slice()])?;
+    } else {
+        conn.execute("DELETE FROM replicas WHERE public_key = ?1", params![pk.as_bytes().as_slice()])?;
+    }
+    Ok(())
+}
+
+pub fn list_replicas(conn: &Connection) -> Result<Vec<PublicKey>> {
+    let mut stmt = conn.prepare("SELECT public_key FROM replicas ORDER BY rowid")?;
+    let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        if let Ok(arr) = <[u8; 32]>::try_from(r?.as_slice()) { out.push(PublicKey::from_bytes(arr)); }
+    }
+    Ok(out)
+}
+
+/// Mark a member as a guest whose session ends at `expires_at` (unix seconds).
+pub fn set_guest_expiry(conn: &Connection, pk: &PublicKey, expires_at: u64) -> Result<()> {
+    conn.execute("UPDATE members SET guest_expires_at = ?2 WHERE public_key = ?1", params![pk.as_bytes().as_slice(), expires_at as i64])?;
+    Ok(())
+}
+
+/// `Some(expiry)` if this member joined as a guest, `None` for a normal member.
+pub fn guest_expiry(conn: &Connection, pk: &PublicKey) -> Option<u64> {
+    conn.query_row("SELECT guest_expires_at FROM members WHERE public_key = ?1", params![pk.as_bytes().as_slice()], |r| r.get::<_, Option<i64>>(0))
+        .ok().flatten().map(|v| v as u64)
+}
+
 /// Register a server-managed bot as a member (is_bot = 1).
 pub fn register_bot_member(conn: &Connection, pk: &PublicKey, display_name: &str) -> Result<()> {
     conn.execute(

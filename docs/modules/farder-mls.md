@@ -128,6 +128,16 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
   behind); a target matching no leaf is an error.
 - `self_update(provider, signer) -> Result<CommitOutcome>` — the rekey-cadence
   primitive: epoch +1, membership unchanged, authenticator rotates.
+- `self_update_staged(provider, signer) -> Result<StagedSelfUpdate>` — the
+  same refresh, built and signed but NOT applied: the group stays in its epoch
+  until `merge_staged_own_commit` (server accepted) or
+  `discard_staged_own_commit` (server refused; a no-op when nothing is staged).
+  `StagedSelfUpdate { outcome: CommitOutcome, post_epoch_authenticator }`.
+  Pinned by unit tests against OpenMLS 0.8.1: while staged the group still seals
+  and opens in its current epoch, applying another member's commit drops the
+  staged one, the staged commit survives a reload (`has_staged_own_commit`,
+  `staged_own_commit_epoch`), and every other own commit fails until it is
+  resolved. `rekey_channel` uses this so a refused refresh cannot fork the device.
 - `process_commit(provider, commit_bytes: &[u8]) -> Result<ProcessedCommit>`
   — OpenMLS-verifies + stages, reports **actual** adds/removes and post tree
   hash, then merges **unconditionally** (a lying commit is only detectable
@@ -153,7 +163,11 @@ Methods (all take `provider: &impl OpenMlsProvider`; mutators also
   via OpenMLS (`process_message`) → strict `unpad` → decode. Fails for
   tampered ciphertext, non-application messages, wrong groups, removed
   members (post-removal epochs), and joiners on pre-join epochs (forward
-  secrecy — covered by observation tests).
+  secrecy — covered by observation tests). When the message's header epoch is
+  OLDER than this device's group, the error contains `BEFORE_JOINED`
+  ("sent before this device could read the channel"), which the client shows as
+  a calm label rather than "couldn't decrypt" (`isSealedBeforeJoined` in
+  `client/src/lib/types.ts`; keep the two strings in sync).
 
 Free functions:
 

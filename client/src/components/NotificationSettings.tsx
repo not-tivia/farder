@@ -57,6 +57,45 @@ export default function NotificationSettings() {
             <h2 className="settings-panel-title">Notifications</h2>
             <div>
 
+                    {/* How a notification looks, and how much it may say */}
+                    <div className="connect-section">
+                        <div className="connect-section-title">Pop-ups</div>
+                        <select className="connect-input" value={prefs.popupStyle ?? "skinned"}
+                            onChange={e => save({ ...prefs, popupStyle: e.target.value as NonNullable<NotificationPrefs["popupStyle"]> })}>
+                            <option value="skinned">Farder pop-up (themed, top of the screen)</option>
+                            <option value="system">System notification</option>
+                            <option value="off">No pop-ups at all</option>
+                        </select>
+                        <div style={{ fontSize: 11, marginTop: 6, color: "var(--xp-text-muted)" }}>
+                            The Farder pop-up is drawn on your screen and never stored anywhere. A system
+                            notification is kept by Windows in its notification history. Choosing
+                            &ldquo;No pop-ups&rdquo; also stops Farder from keeping the pop-up window in memory.
+                        </div>
+                        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+                            <input type="checkbox" checked={prefs.popupReply !== false}
+                                disabled={(prefs.popupStyle ?? "skinned") !== "skinned"}
+                                onChange={e => save({ ...prefs, popupReply: e.target.checked })} />
+                            <span>Let me reply by typing into a pop-up</span>
+                        </label>
+                        <div style={{ fontSize: 11, marginTop: 4, color: "var(--xp-text-muted)" }}>
+                            Adds a Reply button to pop-ups. Only available with the Farder pop-up, and not
+                            when pop-ups show nothing about who sent the message.
+                        </div>
+                        <div style={{ marginTop: 10, fontWeight: "bold" }}>What a pop-up may show</div>
+                        <select className="connect-input" disabled={(prefs.popupStyle ?? "skinned") === "off"}
+                            value={prefs.popupContent ?? "full"}
+                            onChange={e => save({ ...prefs, popupContent: e.target.value as NonNullable<NotificationPrefs["popupContent"]> })}>
+                            <option value="full">Who sent it, where, and the message</option>
+                            <option value="sender">Only who sent it</option>
+                            <option value="hidden">Nothing: just &ldquo;New message&rdquo;</option>
+                        </select>
+                        <div style={{ fontSize: 11, marginTop: 6, color: "var(--xp-text-muted)" }}>
+                            Pop-ups show up over other programs and in screen shares and recordings. Pick
+                            less here if you do not want a message read off your screen. Previews of
+                            videos and images are only ever shown with the full message.
+                        </div>
+                    </div>
+
                     {/* DM Notifications */}
                     <div className="connect-section">
                         <div className="connect-section-title">Direct Messages</div>

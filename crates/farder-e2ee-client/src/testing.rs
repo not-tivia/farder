@@ -50,6 +50,16 @@ impl FakeTransport {
             .push_back(Err(TransportError::rejected(reason)));
     }
 
+    /// Program the next `submit_event` call to get NO answer (the connection
+    /// dropped). The event is still recorded in [`Self::submitted`], so a
+    /// test can serve it back as if the server had taken it.
+    pub fn lose_answer_next(&self) {
+        self.responses
+            .lock()
+            .unwrap()
+            .push_back(Err(TransportError::transport("connection lost before the answer")));
+    }
+
     /// Serve the raw signed `MlsKeyPackagePublished` event bytes that
     /// `fetch_key_packages(member, device)` should return, keyed exactly the
     /// way the server keys them: by the event's `(author, device)`.

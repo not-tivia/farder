@@ -39,7 +39,7 @@ INVOKE = re.compile(r'invoke(?:<[^>]*>)?\(\s*["\']([a-zA-Z0-9_]+)["\']')
 
 
 def registered_commands() -> set[str]:
-    main_rs = (ROOT / "client/src-tauri/src/main.rs").read_text()
+    main_rs = (ROOT / "client/src-tauri/src/lib.rs").read_text()
     block = re.search(r"generate_handler!\[(.*?)\]", main_rs, re.S).group(1)
     names = set()
     for line in block.splitlines():

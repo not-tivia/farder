@@ -97,6 +97,9 @@ export function useSealedDecrypt(): void {
   const sealedDecrypts = server?.sealedDecrypts ?? {};
   const historyHydrated = server?.historyHydrated ?? {};
   const ownSealedSends = server?.ownSealedSends ?? {};
+  // Re-run when a channel's group advances, so a row that was `not_ready` (it
+  // arrived before our Welcome) is opened once the group exists.
+  const mlsStates = server?.mlsStates;
   const [ownPk, setOwnPk] = useState<string | null>(cachedOwnPk);
 
   useEffect(() => {
@@ -213,6 +216,12 @@ export function useSealedDecrypt(): void {
                   attachments: attachments.map(toHistoryAttachment),
                 })
                 .catch((e) => console.warn("[history] put failed:", e));
+            } else if (result.kind === "not_ready") {
+              // Our Welcome has not been processed yet: nothing was opened, so
+              // leave the row uncached. This pass runs again when the channel's
+              // MLS state changes (see `mlsStates` in the deps below), which is
+              // exactly when the group appears.
+              console.info(`[sealed] message ${msg.id} waits for this device's group: ${result.reason}`);
             } else {
               dispatch({
                 type: "SEALED_UNDECRYPTABLE",
@@ -237,5 +246,5 @@ export function useSealedDecrypt(): void {
         inFlight.set(key, promise);
       }
     }
-  }, [activeServerId, logServerId, messages, sealedDecrypts, historyHydrated, ownSealedSends, ownPk, dispatch]);
+  }, [activeServerId, logServerId, messages, sealedDecrypts, historyHydrated, ownSealedSends, ownPk, mlsStates, dispatch]);
 }

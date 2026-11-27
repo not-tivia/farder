@@ -1,12 +1,13 @@
 //! C2 of the 5a lifecycle: the rekey primitive and its cadence policy.
 //!
-//! A *rekey* is [`MlsChannelGroup::self_update`] — the author rotates its own
-//! leaf secrets with an empty add/remove set — submitted as an ordinary
-//! `MlsCommit`. [`rekey_channel`] is that primitive: run `self_update`, submit
-//! the empty-adds/removes commit with the real chaining values, and advance the
-//! chain on acceptance. It deliberately does **not** loop: a commit-rate
-//! rejection is surfaced as [`E2eeError::RekeyRateLimited`] for the caller to
-//! decide when (not whether) to retry.
+//! A *rekey* is a self-update — the author rotates its own leaf secrets with an
+//! empty add/remove set — submitted as an ordinary `MlsCommit`.
+//! [`rekey_channel`] is that primitive: STAGE the self-update
+//! ([`MlsChannelGroup::self_update_staged`]), submit the empty-adds/removes
+//! commit with the real chaining values, and apply it and advance the chain
+//! only on acceptance. A refusal discards it, leaving the group untouched
+//! ([`E2eeError::RekeyRefused`]). It deliberately does **not** loop: the
+//! cadence policy decides when (not whether) to try again.
 //!
 //! # The client has no fold `LogState`
 //!
@@ -227,14 +228,15 @@ pub fn should_rekey(ceiling_signalled: bool, cadence: &RekeyCadence, now_secs: u
 /// via [`MlsChannelGroup::load`] or resume, then pass `&mut` in — see
 /// `bootstrap_group` / [`crate::commit::add_member`]).
 ///
-/// # Divergence contract
+/// # No divergence on refusal
 ///
-/// `self_update` merges **locally and immediately**, so by the time this fn
-/// submits, the local group is already one epoch ahead. A `"stale-epoch"`
-/// rejection therefore surfaces [`E2eeError::StaleEpochDiverged`]; a
-/// `"commit-rate rule:"` rejection surfaces [`E2eeError::RekeyRateLimited`] —
-/// the caller must not reuse either advanced group until it resyncs. Neither
-/// rejection is retried here (no loop); the cadence policy decides the next
+/// The refresh is staged, not merged, until the server accepts it. Any server
+/// refusal (`"stale-epoch"` because another member's commit won the epoch, the
+/// commit-rate rule, or anything else) discards it and surfaces
+/// [`E2eeError::RekeyRefused`]: the group is unchanged and still in step, so
+/// the caller just applies whatever won. A transport failure with no answer
+/// leaves the refresh staged; [`settle_staged_refresh`] resolves it from the
+/// log. Nothing is retried here (no loop); the cadence policy decides the next
 /// attempt.
 pub async fn rekey_channel<T: E2eeTransport + Sync>(
     transport: &T,
@@ -250,13 +252,15 @@ pub async fn rekey_channel<T: E2eeTransport + Sync>(
         .clone()
         .ok_or_else(|| E2eeError::chain("rekey needs a prior event to attest its folded head"))?;
 
-    // 1. Perform the commit locally. self_update merges immediately.
-    let outcome = group
-        .self_update(ctx.store, &DeviceSigner(actor.device))
+    // 1. Build and sign the refresh, but only STAGE it. A refresh merged
+    //    before the server answers is a fork the moment the server says no
+    //    (two members refreshing in the same epoch is routine: only one wins).
+    let staged = group
+        .self_update_staged(ctx.store, &DeviceSigner(actor.device))
         .map_err(|e| E2eeError::Mls(e.context("rekey self-update")))?;
+    let outcome = staged.outcome;
+    let post_epoch_authenticator = staged.post_epoch_authenticator;
     debug_assert!(outcome.adds.is_empty() && outcome.removes.is_empty());
-    let post_epoch_authenticator = group.epoch_authenticator();
-    debug_assert_eq!(group.epoch(), outcome.epoch + 1);
 
     // 2. Build the MlsCommit from the real CommitOutcome: a rekey is empty
     //    adds/removes by definition.
@@ -281,30 +285,23 @@ pub async fn rekey_channel<T: E2eeTransport + Sync>(
         },
     );
 
-    // 3. Submit; surface the two load-bearing rejections distinctly, and never
-    //    loop on either.
+    // 3. Submit. Accepted: apply. Refused: throw the staged refresh away, so
+    //    the group is exactly where it was. No answer at all (the connection
+    //    dropped): we cannot know, so the staged refresh STAYS and
+    //    [`settle_staged_refresh`] decides from the log later. Never loop.
     let accepted = match transport.submit_event(&event).await {
         Ok(a) => a,
-        Err(e) if e.is_stale_epoch() => {
-            return Err(E2eeError::StaleEpochDiverged {
-                local_epoch: group.epoch(),
-            });
-        }
-        Err(e) if e.is_commit_rate_limited() => {
-            return Err(E2eeError::RekeyRateLimited {
-                reason: e.rejection_reason().to_string(),
-            });
-        }
         Err(crate::transport::TransportError::ServerRejected { reason }) => {
-            // The local commit already merged (finding F3): any other fold
-            // refusal diverges the group just as a stale-epoch bounce does.
-            return Err(E2eeError::CommitRejectedDiverged {
-                reason,
-                local_epoch: group.epoch(),
-            });
+            group
+                .discard_staged_own_commit(ctx.store)
+                .map_err(|e| E2eeError::Mls(e.context("discard refused rekey")))?;
+            return Err(E2eeError::RekeyRefused { reason });
         }
         Err(e) => return Err(e.into()),
     };
+    group
+        .merge_staged_own_commit(ctx.store)
+        .map_err(|e| E2eeError::Mls(e.context("apply accepted rekey")))?;
     chain.advance(&event);
 
     Ok(RekeyOutcome {
@@ -313,6 +310,63 @@ pub async fn rekey_channel<T: E2eeTransport + Sync>(
         post_epoch_authenticator,
         post_tree_hash: outcome.post_tree_hash,
     })
+}
+
+/// What [`settle_staged_refresh`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedRefreshSettled {
+    /// Nothing was staged.
+    NothingStaged,
+    /// The log holds our refresh: the server had accepted it, so it is now
+    /// applied. The caller should advance its device chain past `event`.
+    WasAccepted,
+    /// Someone else's commit holds that epoch: ours lost and was dropped. The
+    /// caller applies theirs as usual.
+    LostTheEpoch,
+    /// No commit holds that epoch: the server never took ours. Dropped.
+    NeverArrived,
+}
+
+/// Settle a key refresh left staged because the server's answer never arrived
+/// (see [`rekey_channel`]). `events` must be the channel's control events
+/// fetched AFTER that submit (from the caller's cursor, which is never past an
+/// unfetched event). Our device's commit in the staged epoch means the server
+/// took it; anyone else's means ours lost; none means it never got there.
+///
+/// Returns the accepted event too when ours was accepted, so the caller can
+/// advance its device chain past it.
+pub fn settle_staged_refresh<'e>(
+    store: &FarderMlsStore,
+    group: &mut MlsChannelGroup,
+    events: &'e [farder_crypto::event_log::Event],
+    my_device: &str,
+) -> Result<(StagedRefreshSettled, Option<&'e farder_crypto::event_log::Event>), E2eeError> {
+    let Some(epoch) = group.staged_own_commit_epoch() else {
+        return Ok((StagedRefreshSettled::NothingStaged, None));
+    };
+    let holder = events.iter().find(|e| {
+        matches!(&e.core.payload, EventPayload::MlsCommit { epoch: ce, .. } if *ce == epoch)
+    });
+    match holder {
+        Some(e) if e.core.device.as_str() == my_device => {
+            group
+                .merge_staged_own_commit(store)
+                .map_err(|e| E2eeError::Mls(e.context("apply accepted rekey")))?;
+            Ok((StagedRefreshSettled::WasAccepted, Some(e)))
+        }
+        Some(_) => {
+            group
+                .discard_staged_own_commit(store)
+                .map_err(|e| E2eeError::Mls(e.context("drop losing rekey")))?;
+            Ok((StagedRefreshSettled::LostTheEpoch, None))
+        }
+        None => {
+            group
+                .discard_staged_own_commit(store)
+                .map_err(|e| E2eeError::Mls(e.context("drop unsent rekey")))?;
+            Ok((StagedRefreshSettled::NeverArrived, None))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -469,7 +523,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_epoch_rekey_rejection_surfaces_stale_epoch_diverged() {
+    async fn a_stale_epoch_rekey_rejection_leaves_the_group_where_it_was() {
+        // Another member's commit won the epoch. Our refresh was only staged,
+        // so the refusal must cost nothing: same epoch, nothing staged, and a
+        // later refresh works.
         let channel_id = E2EE_CHANNEL_ID_FLOOR + 23;
         let mut b = bootstrapped("stale", channel_id).await;
         let a = actor(&b.identity, &b.device);
@@ -479,6 +536,8 @@ mod tests {
             store: &b.store,
             store_instance_hash: &b.store_instance_hash,
         };
+        let before = b.group.epoch();
+        let head_before = b.chain.last_event_hash.clone();
 
         b.transport.reject_next("stale-epoch");
 
@@ -486,19 +545,20 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.is_stale_epoch_diverged(), "expected divergence, got {err}");
-        match err {
-            E2eeError::StaleEpochDiverged { local_epoch } => {
-                // The local group already advanced to epoch 2 (ahead of the
-                // server).
-                assert_eq!(local_epoch, 2);
-            }
-            other => panic!("expected StaleEpochDiverged, got {other:?}"),
-        }
+        assert!(err.is_rekey_refused(), "expected a clean refusal, got {err}");
+        assert!(!err.is_diverged(), "a refused refresh is not a divergence: {err}");
+        assert_eq!(b.group.epoch(), before, "the group did not move");
+        assert!(!b.group.has_staged_own_commit(), "nothing left staged");
+        assert_eq!(b.chain.last_event_hash, head_before, "the chain did not advance");
+
+        let ok = rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group)
+            .await
+            .unwrap();
+        assert_eq!(ok.local_epoch, before + 1);
     }
 
     #[tokio::test]
-    async fn a_commit_rate_rejection_surfaces_rekey_rate_limited_and_does_not_loop() {
+    async fn a_commit_rate_rejection_is_a_clean_refusal_and_does_not_loop() {
         let channel_id = E2EE_CHANNEL_ID_FLOOR + 25;
         let mut b = bootstrapped("rate", channel_id).await;
         let a = actor(&b.identity, &b.device);
@@ -508,6 +568,7 @@ mod tests {
             store: &b.store,
             store_instance_hash: &b.store_instance_hash,
         };
+        let before = b.group.epoch();
 
         b.transport.reject_next(
             "event rejected: commit-rate rule: a non-drift-discharging commit \
@@ -520,14 +581,79 @@ mod tests {
             .unwrap_err();
 
         assert!(err.is_rekey_rate_limited(), "expected rate-limit, got {err}");
-        match err {
-            E2eeError::RekeyRateLimited { reason } => {
+        match &err {
+            E2eeError::RekeyRefused { reason } => {
                 assert!(reason.contains("commit-rate rule:"), "reason preserved: {reason}");
             }
-            other => panic!("expected RekeyRateLimited, got {other:?}"),
+            other => panic!("expected RekeyRefused, got {other:?}"),
         }
+        assert!(!err.is_diverged());
+        assert_eq!(b.group.epoch(), before, "the group did not move");
         // Exactly ONE rekey submit happened — no loop, no spin.
         assert_eq!(b.transport.submit_count(), submits_before + 1);
+    }
+
+    /// A commit event by `device` in `epoch`, for serving a fake log.
+    fn commit_by(template: &farder_crypto::event_log::Event, device: &str, epoch: u64) -> farder_crypto::event_log::Event {
+        let mut e = template.clone();
+        e.core.device = device.to_string();
+        if let EventPayload::MlsCommit { epoch: ep, .. } = &mut e.core.payload {
+            *ep = epoch;
+        }
+        e
+    }
+
+    #[tokio::test]
+    async fn a_refresh_whose_answer_was_lost_stays_staged_and_the_log_settles_it() {
+        let channel_id = E2EE_CHANNEL_ID_FLOOR + 29;
+        let mut b = bootstrapped("lost", channel_id).await;
+        let a = actor(&b.identity, &b.device);
+        let ctx = RekeyContext {
+            key: &b.key,
+            generation: 0,
+            store: &b.store,
+            store_instance_hash: &b.store_instance_hash,
+        };
+        let before = b.group.epoch();
+        let me = farder_crypto::event_log::device_id(&b.device.public_key());
+
+        // No answer: we cannot know, so the refresh stays staged.
+        b.transport.lose_answer_next();
+        let err = rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, E2eeError::Transport(_)), "got {err}");
+        assert!(b.group.has_staged_own_commit());
+        assert_eq!(b.group.epoch(), before);
+        let ours = b.transport.submitted().into_iter().last().unwrap();
+
+        // Nothing in the log yet: the server never took it -> dropped.
+        let (how, _) = settle_staged_refresh(&b.store, &mut b.group, &[], &me).unwrap();
+        assert_eq!(how, StagedRefreshSettled::NeverArrived);
+        assert!(!b.group.has_staged_own_commit());
+        assert_eq!(b.group.epoch(), before);
+
+        // Again, and this time the log shows someone else won the epoch.
+        b.transport.lose_answer_next();
+        rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group).await.unwrap_err();
+        let theirs = commit_by(&ours, "someone-elses-device", before);
+        let (how, _) = settle_staged_refresh(&b.store, &mut b.group, &[theirs], &me).unwrap();
+        assert_eq!(how, StagedRefreshSettled::LostTheEpoch);
+        assert!(!b.group.has_staged_own_commit());
+        assert_eq!(b.group.epoch(), before);
+
+        // Again, and the log shows OUR refresh: the server had taken it.
+        b.transport.lose_answer_next();
+        rekey_channel(&b.transport, &a, &mut b.chain, &ctx, &mut b.group).await.unwrap_err();
+        let ours = b.transport.submitted().into_iter().last().unwrap();
+        let (how, event) = settle_staged_refresh(&b.store, &mut b.group, std::slice::from_ref(&ours), &me).unwrap();
+        assert_eq!(how, StagedRefreshSettled::WasAccepted);
+        assert_eq!(event, Some(&ours), "handed back so the caller can advance its chain");
+        assert_eq!(b.group.epoch(), before + 1);
+
+        // Nothing staged: a no-op.
+        let (how, _) = settle_staged_refresh(&b.store, &mut b.group, &[], &me).unwrap();
+        assert_eq!(how, StagedRefreshSettled::NothingStaged);
     }
 
     #[tokio::test]

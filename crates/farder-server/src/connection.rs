@@ -252,7 +252,9 @@ async fn handle_download_stream(
     //    that this file is attached to via a message.
     let has_access = {
         let db = state.db.lock().unwrap();
-        if is_owner {
+        // An allowed replica keeps the WHOLE server (its database copy already holds every channel), so it
+        // may fetch every file too: that is what lets a saved copy show attachments while the host is off.
+        if is_owner || crate::members::is_replica(&db, member_key) {
             true
         } else {
             let channel_ids: Vec<u64> = {
@@ -538,6 +540,7 @@ pub(crate) async fn authenticate(
                 },
             )
             .await;
+            flush_refusal(send).await;
             anyhow::bail!("expected Authenticate frame");
         }
     };
@@ -546,6 +549,7 @@ pub(crate) async fn authenticate(
     if let Err(e) = auth::verify_challenge(&public_key, &nonce, &signed_challenge) {
         let reason = format!("signature verification failed: {}", e);
         let _ = send_server_frame(send, &ServerFrame::AuthError { reason: reason.clone() }).await;
+        flush_refusal(send).await;
         anyhow::bail!("{}", reason);
     }
 
@@ -567,6 +571,10 @@ pub(crate) async fn authenticate(
             }
         } else {
             is_new_member = true;
+            if state.read_only {
+                // A saved copy cannot take on new people (the refusal is sent below like any other).
+                Err(crate::handlers::READ_ONLY_COPY.to_string())
+            } else {
             let display_name = format!("vk_{}", hex::encode(&pk_bytes[..4]));
             let active_setup_token = *state.setup_token.lock().unwrap();
             match auth::authenticate_new_member(
@@ -591,6 +599,7 @@ pub(crate) async fn authenticate(
                     Ok(())
                 }
                 Err(reason) => Err(reason),
+            }
             }
         }
     };
@@ -633,6 +642,7 @@ pub(crate) async fn authenticate(
             },
         )
         .await;
+        flush_refusal(send).await;
         anyhow::bail!("auth rejected: {}", reason);
     }
 
@@ -649,10 +659,7 @@ pub(crate) async fn authenticate(
 
     // Step 8: Check is_owner (computed before registry inserts so the session
     // registry records the correct owner flag in a single insert).
-    let is_owner = {
-        let owner = state.owner.read().await;
-        owner.as_ref().map(|o| o == &public_key).unwrap_or(false)
-    };
+    let is_owner = state.is_current_owner(&public_key).await;
 
     // Step 6: Register client in state.clients
     let (event_tx, event_rx) = mpsc::channel::<ServerEvent>(64);
@@ -816,6 +823,14 @@ pub(crate) async fn cleanup_session(
 // Main handler (public)
 // ---------------------------------------------------------------------------
 
+/// After sending a refusal, let it REACH the person before the connection is torn down:
+/// closing straight away can discard the unread reason (e.g. "this guest link has expired"),
+/// leaving them with a generic "connection lost".
+async fn flush_refusal(send: &mut quinn::SendStream) {
+    let _ = send.finish();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), send.stopped()).await;
+}
+
 pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection) -> Result<()> {
     let (mut send, mut recv) = conn.open_bi().await?;
 
@@ -856,7 +871,9 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
                     let mk = member_clone.clone();
                     tokio::spawn(async move {
                         let _permit = permit; // held until task completes
-                        if let Err(e) = handle_auxiliary_stream(&st, &mk, is_owner, s, r).await {
+                        // Ownership may have changed since this connection opened.
+                        let owner_now = st.is_current_owner(&mk).await;
+                        if let Err(e) = handle_auxiliary_stream(&st, &mk, owner_now, s, r).await {
                             tracing::debug!("auxiliary stream error: {}", e);
                         }
                     });
@@ -931,12 +948,17 @@ pub async fn handle_connection(state: Arc<ServerState>, conn: quinn::Connection)
 pub(crate) async fn main_loop(
     state: Arc<ServerState>,
     member_key: PublicKey,
-    is_owner: bool,
+    is_owner_at_connect: bool,
     send: &mut SendStream,
     recv: &mut RecvStream,
     mut event_rx: mpsc::Receiver<ServerEvent>,
 ) -> Result<()> {
+    let _ = is_owner_at_connect; // only the starting value: ownership is re-read for every request below
     loop {
+        // Ownership can change while a connection is open (a recovery takeover). Reading it
+        // once at connect would let a person who was the owner a minute ago keep owner powers
+        // until they reconnect, so it is asked again for every message.
+        let is_owner = state.is_current_owner(&member_key).await;
         tokio::select! {
             // Client request branch
             frame_result = recv_client_frame(recv) => {
@@ -1532,7 +1554,7 @@ pub(crate) async fn main_loop(
                                                 ..
                                             } => {
                                                 *name = state.server_name.clone();
-                                                *owner_public_key = state.owner.read().await.clone();
+                                                *owner_public_key = state.current_owner().await;
                                             }
                                             _ => {}
                                         }
@@ -1665,7 +1687,7 @@ pub async fn broadcast_event(state: &ServerState, target: EventTarget, event: Se
         }
         EventTarget::PermissionHolders(perm_bit) => {
             let clients = state.clients.read().await;
-            let owner_pk = state.owner.read().await.clone();
+            let owner_pk = state.current_owner().await;
             let conn = state.db.lock().unwrap();
             for (pk_bytes, sender) in clients.iter() {
                 let pk = farder_crypto::identity::PublicKey::from_bytes(*pk_bytes);
@@ -1979,6 +2001,7 @@ mod protocol_version_tests {
                 author_name_override: None,
                 author_badge: None,
                 widget: None,
+                garble: None,
             },
             is_e2ee: true,
             sealed: Some(vec![9, 9, 9]),

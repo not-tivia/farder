@@ -74,8 +74,16 @@ pub fn authenticate_new_member(
     if let Some(code) = invite_code {
         // Invite-code path.
         match crate::invites::use_invite(conn, code)? {
-            Ok(_info) => {
+            Ok(info) => {
+                if info.guest && crate::db::get_setting(conn, "guest_links")?.as_deref() != Some("1") {
+                    return Ok(Err("guest links are turned off on this server".to_string()));
+                }
                 crate::members::register_member(conn, public_key, display_name)?;
+                if info.guest {
+                    // The guest's session ends with the link (or in a day, whichever is first).
+                    let end = info.expires_at.unwrap_or(crate::db::now() + crate::invites::GUEST_DEFAULT_SECS);
+                    crate::members::set_guest_expiry(conn, public_key, end)?;
+                }
                 let everyone_id: Option<u64> = conn.query_row(
                     "SELECT id FROM roles WHERE name = '@everyone' AND builtin = 1",
                     [],
@@ -133,6 +141,11 @@ pub fn authenticate_existing_member(
             }
             if member.revoked {
                 return Ok(Err("member is revoked".to_string()));
+            }
+            if let Some(end) = crate::members::guest_expiry(conn, public_key) {
+                if crate::db::now() >= end {
+                    return Ok(Err("this guest link has expired".to_string()));
+                }
             }
             Ok(Ok(()))
         }

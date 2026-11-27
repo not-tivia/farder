@@ -189,6 +189,9 @@ replies with a matching `ServerFrame::Response { request_id: id, body: ServerRes
 | `ListBanned` | — | Fetch the list of banned members. |
 | `ListAuditEvents` | `before_id: Option<u64>`, `limit: u32` | Page through the audit log. |
 | `CreateInvite` | `max_uses: Option<u32>`, `expires_in_secs: Option<u64>`, `target_channel: Option<u64>` | Generate an invite code with optional use cap and expiry. |
+| `CreateGuestInvite` | `max_uses: Option<u32>`, `expires_in_secs: Option<u64>` | A temporary GUEST invite for a browser link (default 24 h, at most 7 days). Refused unless the owner turned guest links on. Answered with `InviteCreated`. |
+| `SetGuestLinks` | `enabled: bool` | Owner only: turn guest links on or off (off by default). Answered with `GuestLinks`. |
+| `GetGuestLinks` | none | Whether guest links are on. Answered with `GuestLinks`. |
 
 ### Account / deletion
 
@@ -326,6 +329,7 @@ Every request receives exactly one response.
 | `BannedMembers` | `entries: Vec<BannedMember>` | Ban list in response to `ListBanned`. |
 | `AuditEventsList` | `events: Vec<AuditEvent>` | Audit log page in response to `ListAuditEvents`. |
 | `InviteCreated` | `code: String` | The generated invite code in response to `CreateInvite`. |
+| `GuestLinks` | `enabled: bool` | Answer to `GetGuestLinks` / `SetGuestLinks`. |
 | `DeletionStatusResp` | `status: DeletionStatus` | Current deletion state in response to `GetDeletionStatus`. |
 | `UrlFetched` | `file_id: u64` | The server-assigned file ID for the proxied URL in response to `FetchUrl`. |
 | `DmOpened` | `channel: ChannelInfo`, `participant: MemberInfo` | The DM channel and participant info in response to `OpenDm`. |

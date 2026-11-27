@@ -4,6 +4,7 @@ import * as api from "../lib/tauri-bridge";
 import { toast } from "../lib/toast";
 import { publicKeyToString } from "../lib/types";
 import { getActorPermissions, hasPermission, PERMISSIONS } from "../lib/permissions";
+import { visibleInterval } from "../lib/visibleInterval";
 
 interface PollWidgetProps {
   serverId: string;
@@ -77,8 +78,7 @@ export default function PollWidget({ serverId, pollId, onUnavailable, refetch }:
   // (they receive no PollUpdated events); cleared on unmount.
   useEffect(() => {
     if (refetch !== "interval") return;
-    const t = window.setInterval(fetchPoll, 20_000);
-    return () => window.clearInterval(t);
+    return visibleInterval(fetchPoll, 20_000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refetch, serverId, pollId]);
 
@@ -86,8 +86,7 @@ export default function PollWidget({ serverId, pollId, onUnavailable, refetch }:
   useEffect(() => {
     if (!poll || poll.closed || poll.closes_at == null) return;
     setNowSecs(Math.floor(Date.now() / 1000));
-    const t = window.setInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 30_000);
-    return () => window.clearInterval(t);
+    return visibleInterval(() => setNowSecs(Math.floor(Date.now() / 1000)), 30_000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [poll?.closed, poll?.closes_at]);
 

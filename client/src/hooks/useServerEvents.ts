@@ -1,23 +1,49 @@
 import { useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { useApp } from "../context/ServerContext";
+import { emit, listen } from "@tauri-apps/api/event";
+import { useApp, type PerServerState } from "../context/ServerContext";
 import type { MessageInfo, ChannelInfo, CategoryInfo, RoleInfo, Presence, PollInfo, GiveawayInfo, EventInfo, MessageInfoV2, ChannelInfoV2 } from "../lib/types";
 import { publicKeyToString, flattenMessageInfoV2, flattenChannelInfoV2, isE2eeChannel } from "../lib/types";
 import * as api from "../lib/tauri-bridge";
 import { refreshServerClasses } from "../lib/refreshServerClasses";
 import { dismiss as dismissTranslation, clearAll as clearTranslations } from "../lib/translation/store";
 import type { NotificationPrefs, AuditEvent } from "../lib/tauri-bridge";
+import { getAutoplay, shouldAutoplay, firstDirectMediaUrl, prefersReducedMotion } from "../lib/autoplay";
+import { getDataSaver } from "../lib/dataSaver";
+import { buildNotificationText, normalizePopupContent } from "../lib/notificationText";
+import {
+  MIN_REPLY_GAP_MS, REPLY_EVENT, REPLY_RESULT_EVENT, executeReply, planReply,
+  type ReplyRequest, type ReplyResult, type ReplyServerView,
+} from "../lib/quickReply";
+import { getGarble } from "../lib/garbleSettings";
+import {
+  STRIP_OPEN_EVENT, STRIP_READY_EVENT, STRIP_STATE_EVENT, StripModel, parseOpen,
+} from "../lib/edgeStrip";
+import { garbleText, makeTransform } from "../lib/garble";
 
 // Module-level cache for notification prefs and own public key
 let notifPrefs: NotificationPrefs | null = null;
+// How the module-level notification code looks up a server's members/channels
+// (set by the hook below, which owns the app state).
+let serverLookup: ((serverId: string) => PerServerState | undefined) | null = null;
 api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
+// The edge strip (a one-line docked bar, see edge_strip.rs). When it is on it
+// REPLACES the pop-up: the same messages, the same privacy setting, one line.
+const strip = new StripModel();
+let stripEnabled = false;
+export function refreshStripCache(): void {
+  api.getEdgeStrip().then((s) => { stripEnabled = s.enabled; if (!s.enabled) strip.clear(); }).catch(() => {});
+}
+refreshStripCache();
+function publishStrip(): void {
+  void emit(STRIP_STATE_EVENT, strip.state()).catch(() => {});
+}
 // Own public key, fetched LAZILY: at module load the identity is still
 // PIN-locked, so an eager getPublicKey() fails and would leave this null for
 // the whole session (making every own-reaction event look like someone
 // else's — the stacking-reactions bug). A failed fetch retries next call.
 let cachedOwnPk: string | null = null;
 let ownPkPromise: Promise<string | null> | null = null;
-function getOwnPk(): Promise<string | null> {
+export function getOwnPk(): Promise<string | null> {
   if (cachedOwnPk != null) return Promise.resolve(cachedOwnPk);
   if (!ownPkPromise) {
     ownPkPromise = api
@@ -73,6 +99,75 @@ function shouldNotify(serverId: string, message: MessageInfo, prefs: Notificatio
   return true; // default: notify
 }
 
+/**
+ * Raise a pop-up for a message if the person's preferences want one. Never for
+ * our own messages (another device of ours can echo one back). Prefs not loaded
+ * yet fall back to notifying, as before.
+ */
+function notifyIfWanted(serverId: string, message: MessageInfo, text: string): void {
+  if (!text) { console.log("[notify] skipped: empty text"); return; }
+  if (notifPrefs && !shouldNotify(serverId, message, notifPrefs)) { console.log("[notify] skipped: notification settings say no for this server/user"); return; }
+  // "Off" means off: do not even build the text.
+  if (notifPrefs?.popupStyle === "off") { console.log("[notify] skipped: pop-ups are set to off"); return; }
+  void getOwnPk().then((own) => {
+    const author = publicKeyToString(message.author);
+    if (own && author === own) { console.log("[notify] skipped: message is from this identity"); return; }
+
+    // What the pop-up may say is the person's choice (full / sender only / nothing).
+    // Decided here, before the text reaches either pop-up style.
+    const server = serverLookup?.(serverId);
+    const sender = server?.members.find((m) => publicKeyToString(m.public_key) === author)?.display_name ?? null;
+    const channel = server?.channels.find((c) => c.id === message.channel_id)?.name ?? null;
+    const shown = buildNotificationText(normalizePopupContent(notifPrefs?.popupContent), { sender, channel, text });
+
+    // A muted preview of a direct video/image link, but only from someone the
+    // person has chosen to trust (never under Data Saver / reduced motion) and
+    // only when the pop-up is allowed to show the message at all.
+    const media = shown.allowMedia && shouldAutoplay(
+      getAutoplay(), author,
+      { dataSaverOn: getDataSaver().enabled, reducedMotion: prefersReducedMotion() },
+      "popup",
+    ) ? firstDirectMediaUrl(text) : null;
+    // Replying from the pop-up: only with the themed pop-up, only when it shows
+    // who the message is from, and only if the person has not turned it off.
+    const canReply =
+      (notifPrefs?.popupStyle ?? "skinned") === "skinned" &&
+      normalizePopupContent(notifPrefs?.popupContent) !== "hidden" &&
+      notifPrefs?.popupReply !== false;
+    const reply = canReply ? { server_id: serverId, channel_id: message.channel_id } : null;
+    if (stripEnabled) {
+      const mode = normalizePopupContent(notifPrefs?.popupContent);
+      strip.note({
+        serverId,
+        channelId: message.channel_id,
+        mode,
+        sender,
+        channel,
+        isDm: !!server?.dms.some((d) => d.channel.id === message.channel_id),
+        title: shown.title,
+        body: shown.body,
+        // Replying from the strip follows the same rules as from the pop-up,
+        // except that it does not need the pop-up style to be the themed one.
+        reply: mode !== "hidden" && notifPrefs?.popupReply !== false
+          ? { server_id: serverId, channel_id: message.channel_id }
+          : null,
+      });
+      publishStrip();
+      console.log("[notify] showing it on the strip");
+      return; // the strip replaces the pop-up
+    }
+    console.log("[notify] showing a pop-up");
+    api.showNotification(shown.title, shown.body, media, reply).catch((e) => console.warn("[notify] pop-up failed:", e));
+  });
+}
+
+/** True when Farder is minimised, behind another program, or on another desktop. */
+function appIsInBackground(): boolean {
+  const bg = typeof document !== "undefined" && !document.hasFocus();
+  if (!bg) console.log("[notify] no pop-up: Farder is the window in front, so the unread marker shows it instead");
+  return bg;
+}
+
 export function refreshNotifPrefsCache(): void {
   api.getNotificationPrefs().then(p => { notifPrefs = p; }).catch(() => {});
 }
@@ -115,6 +210,10 @@ export function useServerEvents(): void {
   // Keep a live reference to per-server state for use inside event callbacks
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => {
+    serverLookup = (id) => stateRef.current.servers[id];
+    return () => { serverLookup = null; };
+  }, []);
 
   useEffect(() => {
     // Each listen() returns a Promise<UnlistenFn>. Cleanup runs synchronously
@@ -129,10 +228,42 @@ export function useServerEvents(): void {
       else unlisten.push(u);
     };
 
+    // A message for a server that is not the one on screen is normally only counted.
+    // If that conversation's history is already loaded (a buddy-list chat window
+    // opened it), keep it current too, or that window would never see new lines.
+    const keepLoaded = (serverId: string, message: MessageInfo) => {
+      if (stateRef.current.servers[serverId]?.messages[message.channel_id]) {
+        dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
+      }
+    };
+
     listen("server:new_message", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
       const message = data.message as MessageInfo;
+
+      // A message for a conversation this window has never heard of is almost
+      // always the first message of a NEW direct message (the "new DM" event can be
+      // missed): ask for the DM list again so it appears instead of staying hidden.
+      {
+        const known = stateRef.current.servers[serverId];
+        if (known && !known.channels.some((c) => c.id === message.channel_id) && !known.dms.some((d) => d.channel.id === message.channel_id)) {
+          const channelId = message.channel_id;
+          api.listDms(serverId).then(async (dms) => {
+            dispatch({ type: "SET_DMS", serverId, payload: dms });
+            // This very message was just stored as raw ciphertext (the DM was not
+            // known yet): load the conversation again, decrypted, to replace it.
+            const dm = dms.find((d) => d.channel.id === channelId);
+            if (!dm) return;
+            const peer = publicKeyToString(dm.participant.public_key);
+            const raw = await api.fetchHistory(serverId, channelId);
+            const plain = await Promise.all(raw.map(async (m) => {
+              try { return { ...m, content: await api.dmDecrypt(peer, m.content) }; } catch { return m; }
+            }));
+            dispatch({ type: "SET_MESSAGES", serverId, payload: { channelId, messages: plain.reverse() } });
+          }).catch(() => {});
+        }
+      }
 
       // Check if this is a DM channel so we can decrypt the content
       const serverState = stateRef.current.servers[serverId];
@@ -146,13 +277,13 @@ export function useServerEvents(): void {
             const decryptedMsg = { ...message, content: plaintext };
             if (serverId === activeRef.current) {
               dispatch({ type: "NEW_MESSAGE", serverId, payload: decryptedMsg });
+              // Reading it right now needs no pop-up; reading it from behind
+              // another program does.
+              if (appIsInBackground()) notifyIfWanted(serverId, decryptedMsg, plaintext);
             } else {
               dispatch({ type: "INCREMENT_UNREAD", serverId });
-              if (notifPrefs && shouldNotify(serverId, decryptedMsg, notifPrefs)) {
-                api.showNotification("Farder", plaintext.slice(0, 120)).catch(() => {});
-              } else if (!notifPrefs) {
-                api.showNotification("Farder", plaintext.slice(0, 120)).catch(() => {});
-              }
+              keepLoaded(serverId, decryptedMsg);
+              notifyIfWanted(serverId, decryptedMsg, plaintext);
             }
           })
           .catch(() => {
@@ -161,6 +292,7 @@ export function useServerEvents(): void {
               dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
             } else {
               dispatch({ type: "INCREMENT_UNREAD", serverId });
+              keepLoaded(serverId, message);
             }
           });
         return;
@@ -168,22 +300,18 @@ export function useServerEvents(): void {
 
       if (serverId === activeRef.current) {
         dispatch({ type: "NEW_MESSAGE", serverId, payload: message });
+        if (appIsInBackground()) notifyIfWanted(serverId, message, message.content);
       } else {
         dispatch({ type: "INCREMENT_UNREAD", serverId });
-
-        if (message.content && notifPrefs && shouldNotify(serverId, message, notifPrefs)) {
-          api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
-        } else if (message.content && !notifPrefs) {
-          // Prefs not yet loaded — fall back to always notify
-          api.showNotification("Farder", message.content.slice(0, 120)).catch(() => {});
-        }
+        keepLoaded(serverId, message);
+        notifyIfWanted(serverId, message, message.content);
       }
     }).then(safePush);
 
     listen("server:message_edited", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
-      if (serverId !== activeRef.current) return;
+      // Every server, not just the one on screen: a chat window may show it.
       dispatch({ type: "MESSAGE_EDITED", serverId, payload: {
         channelId: data.channel_id as number,
         messageId: data.message_id as number,
@@ -195,7 +323,9 @@ export function useServerEvents(): void {
     listen("server:message_deleted", (e) => {
       const data = e.payload as MessageDeletedPayload;
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      // Every server: the local decrypted copy must be dropped even when this is
+      // not the server on screen (a delete that only worked on screen would leave
+      // the readable text behind everywhere else).
       dispatch({
         type: "MESSAGE_DELETED",
         serverId,
@@ -215,7 +345,7 @@ export function useServerEvents(): void {
     listen("server:sealed_message", (e) => {
       const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      if (serverId !== activeRef.current && !stateRef.current.servers[serverId]?.messages[data.channel_id]) return;
       const message = flattenMessageInfoV2([data.message])[0];
       dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
     }).then(safePush);
@@ -223,7 +353,7 @@ export function useServerEvents(): void {
     listen("server:sealed_message_edited", (e) => {
       const data = e.payload as { server_id: string; channel_id: number; message: MessageInfoV2 };
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      if (serverId !== activeRef.current && !stateRef.current.servers[serverId]?.messages[data.channel_id]) return;
       const message = flattenMessageInfoV2([data.message])[0];
       dispatch({ type: "ADD_OR_UPDATE_MESSAGE", serverId, payload: message });
     }).then(safePush);
@@ -231,7 +361,7 @@ export function useServerEvents(): void {
     listen("server:message_tombstoned", (e) => {
       const data = e.payload as { server_id: string; channel_id: number; message_id: number };
       const serverId = data.server_id;
-      if (serverId !== activeRef.current) return;
+      // Every server (see message_deleted): the local readable copy must go.
       dispatch({
         type: "MESSAGE_DELETED",
         serverId,
@@ -254,6 +384,28 @@ export function useServerEvents(): void {
       if (serverId !== activeRef.current) return;
       const channel = flattenChannelInfoV2([data.channel])[0];
       dispatch({ type: "CHANNEL_CREATED", serverId, payload: channel });
+      // A new ENCRYPTED channel: make this device addable right away instead of waiting until the channel
+      // is opened. The owner's app adds a member when its KeyPackage appears (MlsKeyPackagePublished above),
+      // so publishing now means the member is in the group before anyone writes. Seen live 2026-11-26: the
+      // first message in a new encrypted channel was sealed before the friend was added, so they never got
+      // it. Same steps and guards as the steward (useMlsSteward): never publish over a confirmed or
+      // equivocated state, because publishing resets this device's channel state.
+      const logServerId = stateRef.current.servers[serverId]?.logServerId ?? null;
+      if (isE2eeChannel(channel) && logServerId) {
+        api.processMlsControlEvents(serverId, logServerId, channel.id)
+          .then((result) => {
+            dispatch({
+              type: "MLS_STATE",
+              serverId,
+              payload: { channelId: result.channel_id, confirmed: result.confirmed, outcome: result.outcome as ("advanced" | "equivocation"), reason: result.reason },
+            });
+            if (!result.confirmed && result.outcome !== "equivocation") {
+              return api.publishOwnKeyPackage(serverId, logServerId, channel.id);
+            }
+            return undefined;
+          })
+          .catch((e) => console.warn("[e2ee] early key package for new channel failed:", e));
+      }
     }).then(safePush);
 
     listen("server:mls_control_event", (e) => {
@@ -446,6 +598,8 @@ export function useServerEvents(): void {
     listen("server:membership_changed", (e) => {
       const data = e.payload as { server_id: string; public_key: string };
       const serverId = data.server_id;
+      // A power may have been granted or taken away: screens that show powers re-ask.
+      window.dispatchEvent(new CustomEvent("farder:capabilities-changed", { detail: { serverId } }));
       // Re-fetch my own status (I may have just been approved/denied), the member
       // list, and the pending queue — all derive from the changed log membership.
       api.getMembershipStatus(serverId).then(status => {
@@ -544,6 +698,85 @@ export function useServerEvents(): void {
       });
     }).then(safePush);
 
+    // A reply typed into the notification pop-up. The pop-up only ASKS; this checks
+    // the request against what really exists and sends it the way the message box
+    // does (a DM is encrypted first). The answer goes back so the pop-up can say
+    // "Sent" or show the error.
+    let lastReplyAt = 0;
+    listen(REPLY_EVENT, async (e) => {
+      const req = e.payload as ReplyRequest;
+      const respond = (r: Omit<ReplyResult, "id">) =>
+        emit(REPLY_RESULT_EVENT, { id: typeof req?.id === "string" ? req.id : "", ...r }).catch(() => {});
+      const now = Date.now();
+      if (now - lastReplyAt < MIN_REPLY_GAP_MS) { void respond({ ok: false, error: "Slow down." }); return; }
+      lastReplyAt = now;
+      const server = typeof req?.serverId === "string" ? stateRef.current.servers[req.serverId] : undefined;
+      const view: ReplyServerView | undefined = server && {
+        channels: server.channels.map((c) => ({ id: c.id, class: c.class })),
+        dms: server.dms.map((d) => ({ channel: { id: d.channel.id }, peerKey: publicKeyToString(d.participant.public_key) })),
+        logServerId: server.logServerId,
+      };
+      const planned = planReply(req, view);
+      if (!planned.ok) { void respond({ ok: false, error: planned.error }); return; }
+      // Your own "speak as" setting applies here exactly as it does in the message box.
+      const g = getGarble();
+      const text = g.enabled ? garbleText(planned.text, makeTransform(g.mode, g.phrase)) : planned.text;
+      try {
+        await executeReply(planned.plan, req, text, {
+          sendMessage: (s, c, t) => api.sendMessage(s, c, t),
+          submitEvent: (s, l, c, t, r, caps) => api.submitEvent(s, l, c, t, r, caps),
+          dmEncrypt: (peer, t) => api.dmEncrypt(peer, t),
+        });
+        void respond({ ok: true });
+      } catch (err) {
+        void respond({ ok: false, error: String(err) });
+      }
+    }).then(safePush);
+
+    // --- the edge strip ---------------------------------------------------
+    // The strip window announces itself when its page loads: send it the state.
+    listen(STRIP_READY_EVENT, () => publishStrip()).then(safePush);
+    // A conversation was answered from the strip: it is dealt with.
+    listen("strip:replied", (e) => {
+      const t = e.payload as { server_id?: unknown; channel_id?: unknown } | null;
+      if (t && typeof t.server_id === "string" && typeof t.channel_id === "number") {
+        strip.resolve(t.server_id, t.channel_id);
+        publishStrip();
+      }
+    }).then(safePush);
+    // A chip or the preview was clicked: show that conversation. The payload comes
+    // from another window, so it is checked against what actually exists.
+    listen(STRIP_OPEN_EVENT, (e) => {
+      const o = parseOpen(e.payload);
+      if (!o) return;
+      const server = stateRef.current.servers[o.serverId];
+      if (!server) return;
+      dispatch({ type: "SET_ACTIVE_SERVER", serverId: o.serverId });
+      if (o.channelId === null) return;
+      if (server.dms.some((d) => d.channel.id === o.channelId)) {
+        dispatch({ type: "OPEN_DM_PANEL", serverId: o.serverId, payload: o.channelId });
+      } else if (server.channels.some((c) => c.id === o.channelId)) {
+        dispatch({ type: "SELECT_CHANNEL", serverId: o.serverId, payload: o.channelId });
+      }
+    }).then(safePush);
+    // Settings changed (turned on or off).
+    listen("strip:settings-changed", (e) => {
+      const on = (e.payload as { enabled?: unknown } | null)?.enabled === true;
+      stripEnabled = on;
+      if (!on) strip.clear();
+    }).then(safePush);
+    // Looking at Farder means the unread chips have been seen.
+    const onFocus = () => { if (stripEnabled) { strip.clear(); publishStrip(); } };
+    window.addEventListener("focus", onFocus);
+    safePush(() => window.removeEventListener("focus", onFocus));
+
+    // A garble rule or consent changed somewhere on this server: tell whoever is
+    // showing garble state (message input banner, settings, member menu) to re-ask.
+    listen("server:garble_changed", (e) => {
+      const data = e.payload as { server_id: string };
+      window.dispatchEvent(new CustomEvent("farder:garble-changed", { detail: { serverId: data.server_id } }));
+    }).then(safePush);
+
     listen("server:member_data_deleted", (e) => {
       const data = e.payload as { server_id: string; public_key: string; public_key_bytes: number[] };
       const serverId = data.server_id;
@@ -613,7 +846,7 @@ export function useServerEvents(): void {
     listen("server:dm_created", (e) => {
       const data = e.payload as any;
       const serverId = data.server_id as string;
-      if (serverId !== activeRef.current) return;
+      // Every server, not only the one on screen: the buddy list shows them all.
       dispatch({ type: "DM_CREATED", serverId, payload: { channel: data.channel, participant: data.participant } });
     }).then(safePush);
 

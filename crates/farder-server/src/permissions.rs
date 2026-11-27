@@ -31,7 +31,16 @@ pub const ALL_PERMISSIONS: u64 = VIEW_CHANNEL
     | CREATE_INVITES
     | TIMEOUT_MEMBERS;
 
-pub const DEFAULT_EVERYONE: u64 = VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES | CREATE_INVITES;
+/// What every member of a NEW server may do. CONNECT and SPEAK are included: without
+/// them nobody but the owner could join or talk in a voice channel, which made voice
+/// unusable for a group of friends until the owner built roles by hand (found by the
+/// two-client self-test). STREAM (screen sharing) stays opt-in. Existing servers keep
+/// the permissions stored when they were created.
+pub const DEFAULT_EVERYONE: u64 = VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES | CREATE_INVITES | CONNECT | SPEAK;
+
+/// The ONLY powers a guest (a browser-link joiner) can ever hold, whatever roles they are
+/// given: look at channels, read, and send. No invites, no voice, no moderation, no management.
+pub const GUEST_ALLOWED: u64 = VIEW_CHANNEL | READ_MESSAGES | SEND_MESSAGES;
 
 /// A permission override that can allow or deny specific bits.
 pub struct Override {
@@ -183,6 +192,15 @@ mod tests {
             category_overrides: vec![],
             channel_overrides: vec![],
             is_owner: false,
+        }
+    }
+
+    #[test]
+    fn a_new_member_can_join_and_speak_in_voice_but_cannot_screen_share_or_moderate() {
+        assert_ne!(DEFAULT_EVERYONE & CONNECT, 0);
+        assert_ne!(DEFAULT_EVERYONE & SPEAK, 0);
+        for forbidden in [STREAM, ADMIN, MANAGE_SERVER, MANAGE_CHANNEL, MANAGE_ROLES, KICK_MEMBERS, BAN_MEMBERS] {
+            assert_eq!(DEFAULT_EVERYONE & forbidden, 0, "bit {forbidden:#x} must not be a default");
         }
     }
 

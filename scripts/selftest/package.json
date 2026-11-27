@@ -1,0 +1,7 @@
+{
+  "name": "farder-selftest",
+  "private": true,
+  "description": "Two-client self-test driver (see README.md)",
+  "type": "module",
+  "dependencies": { "playwright-core": "1.49.1" }
+}

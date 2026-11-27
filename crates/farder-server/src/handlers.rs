@@ -8,7 +8,7 @@ use anyhow::Result;
 use farder_crypto::event_log::EventPayload;
 use farder_crypto::identity::PublicKey;
 use farder_protocol::server::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -200,7 +200,13 @@ pub fn resolve_member_server_perms(
         channel_overrides: vec![],
         is_owner,
     };
-    Ok(permissions::resolve(ctx))
+    Ok(cap_guest(conn, member, permissions::resolve(ctx)))
+}
+
+/// A guest (browser-link joiner) never holds more than `GUEST_ALLOWED`, whatever roles or
+/// overrides say. Normal members pass through untouched.
+fn cap_guest(conn: &Connection, member: &PublicKey, perms: u64) -> u64 {
+    if members::guest_expiry(conn, member).is_some() { perms & permissions::GUEST_ALLOWED } else { perms }
 }
 
 fn resolve_member_perms(
@@ -264,7 +270,7 @@ fn resolve_member_perms(
         is_owner,
     };
 
-    Ok(permissions::resolve(ctx))
+    Ok(cap_guest(conn, member, permissions::resolve(ctx)))
 }
 
 fn resolve_base_perms(conn: &Connection, member: &PublicKey, is_owner: bool) -> Result<u64> {
@@ -283,7 +289,7 @@ fn resolve_base_perms(conn: &Connection, member: &PublicKey, is_owner: bool) -> 
     for rp in &role_perms {
         base |= rp;
     }
-    Ok(base)
+    Ok(cap_guest(conn, member, base))
 }
 
 fn require_base_perm(
@@ -587,6 +593,9 @@ pub fn connection_speaks_v2(state: &crate::state::ServerState, member: &PublicKe
     connection_protocol_version(state, member) >= farder_protocol::server::MIN_CLIENT_VERSION_FOR_E2EE
 }
 
+/// What someone is told when the host reset this server's owner and they are not in the new history.
+pub const RESET_BY_HOST: &str = "this server was reset by its host: ask the owner for a fresh invite to rejoin (your old messages are kept)";
+
 /// What a v1 connection is told when it asks for something only a v2 client can
 /// be given. Actionable where `E2EE_REFUSED` would be baffling.
 pub const UPGRADE_REQUIRED: &str = "this channel requires a newer client";
@@ -611,12 +620,87 @@ pub fn content_block_reason(state: &crate::state::ServerState, member: &PublicKe
 // Main dispatch
 // ---------------------------------------------------------------------------
 
+/// What someone is told when they try to change something on a read-only copy.
+pub const READ_ONLY_COPY: &str = "the host of this server is offline, so you are reading a saved copy: you can read the history, but sending and changes wait until the host is back";
+
+/// The requests a read-only copy still answers: reading history, members and info.
+fn is_read_only_request(req: &ServerRequest) -> bool {
+    matches!(
+        req,
+        ServerRequest::GetServerInfo
+            | ServerRequest::GetServerInfoV2
+            | ServerRequest::GetMembers
+            | ServerRequest::GetMemberProfile { .. }
+            | ServerRequest::GetMembershipStatus
+            | ServerRequest::FetchHistory { .. }
+            | ServerRequest::FetchHistoryV2 { .. }
+            | ServerRequest::Search { .. }
+            | ServerRequest::Subscribe { .. }
+            | ServerRequest::NegotiateProtocol { .. }
+    )
+}
+
+/// Changes that destroy something. The bulk-damage brake (`brake.rs`) limits how many of these one
+/// account can make in a short time.
+fn is_destructive(req: &ServerRequest) -> bool {
+    matches!(
+        req,
+        ServerRequest::DeleteChannel { .. }
+            | ServerRequest::DeleteCategory { .. }
+            | ServerRequest::DeleteRole { .. }
+            | ServerRequest::KickMember { .. }
+            | ServerRequest::BanMember { .. }
+            | ServerRequest::RemoveBot { .. }
+            | ServerRequest::DeleteWebhook { .. }
+    )
+}
+
 pub fn handle_request(
     conn: &Connection,
     member: &PublicKey,
     is_owner: bool,
     request: ServerRequest,
-    _storage_dir: &str,
+    storage_dir: &str,
+    state: &Arc<ServerState>,
+) -> Result<HandleResult> {
+    // A read-only copy answers reads and refuses everything else, with a plain reason.
+    if state.read_only && !is_read_only_request(&request) {
+        return err(READ_ONLY_COPY);
+    }
+    if !is_destructive(&request) {
+        return handle_request_inner(conn, member, is_owner, request, storage_dir, state);
+    }
+    let now = crate::db::now();
+    let who = *member.as_bytes();
+    if let Err(wait) = state.brake.check(&who, now) {
+        // Say so in the audit log, for everyone who manages the server.
+        let events = audit_emit(conn, member, None, "destructive_brake", serde_json::json!({
+            "limit": state.brake.budget, "window_secs": state.brake.window_secs, "retry_in_secs": wait,
+        })).into_iter().collect();
+        return Ok(HandleResult {
+            response: ServerResponse::Error {
+                reason: format!(
+                    "slow down: this account already made {} destructive changes (deleting, banning, removing) in the last {} minutes. This limit protects the server if an account is stolen. Try again in about {} minute(s); the host can change it with --destructive-budget.",
+                    state.brake.budget, state.brake.window_secs / 60, (wait + 59) / 60),
+            },
+            events,
+            orphaned_file_ids: vec![],
+        });
+    }
+    let result = handle_request_inner(conn, member, is_owner, request, storage_dir, state)?;
+    // Only a change that actually happened uses up the budget (a refused request costs nothing).
+    if !matches!(result.response, ServerResponse::Error { .. }) {
+        state.brake.record(&who, now);
+    }
+    Ok(result)
+}
+
+fn handle_request_inner(
+    conn: &Connection,
+    member: &PublicKey,
+    is_owner: bool,
+    request: ServerRequest,
+    storage_dir: &str,
     state: &Arc<ServerState>,
 ) -> Result<HandleResult> {
     // Mesh content gate: when this server has an event log, the log is
@@ -625,8 +709,22 @@ pub fn handle_request(
     // server info); everything else is rejected. Legacy servers (no log) skip
     // this entirely.
     if request_requires_membership(&request) {
-        if let Some(reason) = content_block_reason(state, member) {
+        if let Some(mut reason) = content_block_reason(state, member) {
+            // After a host-side owner reset the old members are not in the new history. Say what
+            // happened and what to do, instead of a bare "not a member".
+            if reason == "not a member of this server"
+                && members::get_member(conn, member).ok().flatten().is_some()
+                && crate::db::get_setting(conn, "owner_reset_at").ok().flatten().is_some()
+            {
+                reason = RESET_BY_HOST.to_string();
+            }
             return err(&reason);
+        }
+    }
+    // A guest's session ends with their link, even on a connection that is already open.
+    if let Some(end) = members::guest_expiry(conn, member) {
+        if crate::db::now() >= end {
+            return err("this guest link has expired");
         }
     }
 
@@ -1884,11 +1982,16 @@ pub fn handle_request(
 
             let mut events = Vec::new();
             if was_created {
+                // Tell ONLY the other person, and name the person who opened it as
+                // the "participant" (each side sees the OTHER one). Announcing it to
+                // everyone told the whole server that a private conversation exists
+                // and left the person it was opened with without a conversation.
+                let opener = build_member_info(conn, state, member)?;
                 events.push(BroadcastEvent {
-                    target: EventTarget::All,
+                    target: EventTarget::Members(vec![target_key.clone()]),
                     event: ServerEvent::DmCreated {
                         channel: channel.clone(),
-                        participant: participant.clone(),
+                        participant: opener,
                     },
                 });
             }
@@ -2002,6 +2105,59 @@ pub fn handle_request(
                 return err("no such report");
             }
             ok(ServerResponse::Ok)
+        }
+
+        ServerRequest::GetCapabilities => {
+            let guard = state.log_state.lock().unwrap();
+            let Some(ls) = guard.as_ref() else {
+                return err("server is not running the event log (no genesis yet)");
+            };
+            // The owner manages these, so sees all of them. Anyone else sees only
+            // their own, which is what their own menus need.
+            let see_all = ls.is_owner(member);
+            let holders = ls
+                .all_capabilities()
+                .into_iter()
+                .filter(|(pk, _)| see_all || pk == member)
+                .map(|(member, capabilities)| farder_protocol::server::CapabilityHolder { member, capabilities })
+                .collect();
+            ok(ServerResponse::Capabilities { holders })
+        }
+
+        ServerRequest::GetGarbleState => {
+            // What garbling touches the CALLER. A rule is visible to its target,
+            // to whoever set it, and to a holder of "garble" (a moderator needs
+            // to see what is running to end it); a consent only to the two people
+            // it names. Nobody else learns that a rule exists.
+            let guard = state.log_state.lock().unwrap();
+            let Some(ls) = guard.as_ref() else {
+                return err("server is not running the event log (no genesis yet)");
+            };
+            let moderator = ls.has_capability(member, "garble");
+            let rules = ls
+                .garble_rules()
+                .into_iter()
+                .filter(|(target, r)| moderator || target == member || &r.by == member)
+                .map(|(target, r)| farder_protocol::server::GarbleRuleInfo {
+                    target,
+                    mode: r.mode,
+                    phrase: r.phrase,
+                    remaining: r.remaining,
+                    by: r.by,
+                    moderation: r.moderation,
+                })
+                .collect();
+            let consents = ls
+                .garble_consents()
+                .into_iter()
+                .filter(|(target, controller, _)| target == member || controller == member)
+                .map(|(target, controller, max_messages)| farder_protocol::server::GarbleConsentInfo {
+                    target,
+                    controller,
+                    max_messages,
+                })
+                .collect();
+            ok(ServerResponse::GarbleState { rules, consents, can_moderate: moderator })
         }
 
         ServerRequest::ListBlocked => {
@@ -2489,6 +2645,97 @@ pub fn handle_request(
                 }],
             )
         }
+        ServerRequest::CreateGuestInvite { max_uses, expires_in_secs } => {
+            if crate::db::get_setting(conn, "guest_links")?.as_deref() != Some("1") {
+                return err("guest links are turned off; the owner can turn them on in Server Settings");
+            }
+            if let Some(denied) = require_base_perm(conn, member, is_owner, permissions::CREATE_INVITES, "CREATE_INVITES")? {
+                return Ok(denied);
+            }
+            let code = invites::create_guest_invite(conn, member, max_uses, expires_in_secs)?;
+            ok(ServerResponse::InviteCreated { code })
+        }
+        ServerRequest::SetGuestLinks { enabled } => {
+            if !is_owner {
+                return err("only the owner can turn guest links on or off");
+            }
+            crate::db::set_setting(conn, "guest_links", if enabled { "1" } else { "0" })?;
+            ok(ServerResponse::GuestLinks { enabled })
+        }
+        ServerRequest::GetGuestLinks => {
+            let enabled = crate::db::get_setting(conn, "guest_links")?.as_deref() == Some("1");
+            ok(ServerResponse::GuestLinks { enabled })
+        }
+        ServerRequest::FetchLog { after, limit } => {
+            // Owner only: the raw history holds every channel's messages, including ones a member
+            // cannot see through the normal history request.
+            if !is_owner && !members::is_replica(conn, member) {
+                return err("only the owner (or a replica the owner allowed) can fetch the server's full history");
+            }
+            let Some(genesis) = crate::event_ingest::load_genesis(conn)? else {
+                return err("this server has no signed history yet");
+            };
+            let (events, done) = crate::event_ingest::load_events_page(conn, after, limit)?;
+            ok(ServerResponse::LogPage { genesis, events, done })
+        }
+        ServerRequest::SetReplica { member: target, enabled } => {
+            if !is_owner { return err("only the owner can allow a replica"); }
+            if members::get_member(conn, &target)?.is_none() { return err("that account is not a member of this server"); }
+            members::set_replica(conn, &target, enabled)?;
+            let ev = audit_emit(conn, member, Some(&target), if enabled { "replica_allowed" } else { "replica_removed" }, json!({}));
+            Ok(HandleResult { response: ServerResponse::Replicas { members: members::list_replicas(conn)? }, events: ev.into_iter().collect(), orphaned_file_ids: vec![] })
+        }
+        ServerRequest::ListReplicas => {
+            if !is_owner { return err("only the owner can see the replicas"); }
+            ok(ServerResponse::Replicas { members: members::list_replicas(conn)? })
+        }
+        ServerRequest::SnapshotBegin => {
+            if !is_owner && !members::is_replica(conn, member) {
+                return err("only the owner (or a replica the owner allowed) can take a snapshot");
+            }
+            let dir = if storage_dir.is_empty() { std::env::temp_dir().join("farder-snapshots") } else { std::path::Path::new(storage_dir).join(".snapshots") };
+            match state.snapshots.begin(conn, &dir) {
+                Ok((id, size, sha256)) => ok(ServerResponse::SnapshotInfo { id, size, sha256 }),
+                Err(e) => err(&e.to_string()),
+            }
+        }
+        ServerRequest::SnapshotChunk { id, offset, len } => {
+            if !is_owner && !members::is_replica(conn, member) {
+                return err("only the owner (or a replica the owner allowed) can fetch a snapshot");
+            }
+            match state.snapshots.chunk(id, offset, len) {
+                Ok(data) => ok(ServerResponse::SnapshotData { data }),
+                Err(e) => err(&e.to_string()),
+            }
+        }
+        ServerRequest::GetRecoveryStatus => {
+            let guard = state.log_state.lock().unwrap();
+            let Some(ls) = guard.as_ref() else {
+                return err("this server has no signed history, so it has no recovery key");
+            };
+            let pending = match ls.pending_claim() {
+                Some(p) => {
+                    let accepted: Option<i64> = conn
+                        .query_row("SELECT created_at FROM events WHERE event_hash = ?1", rusqlite::params![p.claim], |r| r.get(0))
+                        .optional()?;
+                    let accepted_at = accepted.unwrap_or(0) as u64;
+                    Some(RecoveryPendingInfo {
+                        claim: p.claim.clone(),
+                        new_owner: p.new_owner.clone(),
+                        accepted_at,
+                        ready_at: accepted_at.saturating_add(state.recovery_wait_secs),
+                    })
+                }
+                None => None,
+            };
+            ok(ServerResponse::RecoveryStatus {
+                key_set: ls.recovery_key().is_some(),
+                recovery_key: ls.recovery_key().cloned(),
+                wait_secs: state.recovery_wait_secs,
+                pending,
+            })
+        }
+
         ServerRequest::SubmitEvent { event } => {
             // 1. The server must be in log mode (genesis established).
             let mut ls_guard = state.log_state.lock().unwrap();
@@ -2496,6 +2743,16 @@ pub fn handle_request(
                 Some(ls) => ls,
                 None => return err("server is not running the event log (no genesis yet)"),
             };
+
+            // 1a. A guest (browser-link joiner) may only join and post. The signed history gives
+            //     ordinary members more (making invites, for one); a guest must not reach any of it,
+            //     or the permission cap on the request side would be a locked door beside an open one.
+            if members::guest_expiry(conn, member).is_some() || members::guest_expiry(conn, &event.core.author).is_some() {
+                let kind = crate::event_ingest::payload_type(&event.core.payload);
+                if !matches!(kind, "DeviceAuthorized" | "MemberJoined" | "MessagePosted") {
+                    return err("guests can only join and post messages");
+                }
+            }
 
             // 1b. INGEST CAPS, before anything allocation-heavy. `LogState::apply`
             //     runs on a CLONE of the whole fold state, so the clone is what a
@@ -2546,6 +2803,74 @@ pub fn handle_request(
                 return err(&format!("event rejected: {}", e));
             }
 
+            // 2a. RECOVERY TAKEOVER WAITING PERIOD. The fold cannot measure real time (event
+            //     timestamps are chosen by their author, and someone who has stolen the recovery
+            //     key could simply claim an early date), so the SERVER enforces it with its own
+            //     clock: a takeover may only be finished once `recovery_wait_secs` have passed
+            //     since THIS server stored the claim. The claim's stored time is the
+            //     `created_at` of its row in `events`.
+            if let EventPayload::RecoveryFinalize { claim } = &event.core.payload {
+                let accepted: Option<i64> = conn
+                    .query_row("SELECT created_at FROM events WHERE event_hash = ?1", rusqlite::params![claim], |r| r.get(0))
+                    .optional()?;
+                let Some(accepted) = accepted else {
+                    return err("event rejected: the takeover claim is not in this server's history");
+                };
+                let ready_at = (accepted as u64).saturating_add(state.recovery_wait_secs);
+                let now = crate::db::now();
+                if now < ready_at {
+                    return err(&format!(
+                        "event rejected: the takeover cannot finish yet: {} more seconds of the waiting period",
+                        ready_at - now
+                    ));
+                }
+            }
+
+            // 2b. Garbling is a display effect on someone else's words, so a
+            //     MODERATION garble is an act of authority and goes in the
+            //     moderation audit log (kept forever). A consensual one is play
+            //     between two people who agreed and is not an act of authority,
+            //     so it is not. `ls` is still the state BEFORE this event, which
+            //     is what tells us whether a clear ended a moderation rule.
+            let garble_audit: Option<(&'static str, PublicKey, serde_json::Value)> = match &event.core.payload {
+                EventPayload::GarbleSet { target, mode, messages, consensual: false, .. } => Some((
+                    "garble_set",
+                    target.clone(),
+                    serde_json::json!({ "mode": mode, "messages": messages }),
+                )),
+                EventPayload::GarbleCleared { target }
+                    if ls.active_garble(target).is_some_and(|r| r.moderation) =>
+                {
+                    Some(("garble_cleared", target.clone(), serde_json::json!({})))
+                }
+                _ => None,
+            };
+            // Granting or taking away a power is an act of authority: audit it.
+            // Every recovery step is an act of authority over the whole server: it goes in the
+            // moderation audit log, which is kept forever.
+            let recovery_audit: Option<(&'static str, PublicKey, serde_json::Value)> = match &event.core.payload {
+                EventPayload::RecoveryKeySet { recovery } => Some(("recovery_key_set", recovery.clone(), serde_json::json!({}))),
+                EventPayload::RecoveryClaim { new_owner } => Some(("recovery_claim", new_owner.clone(), serde_json::json!({ "wait_secs": state.recovery_wait_secs }))),
+                EventPayload::RecoveryCancel { .. } => Some(("recovery_cancel", event.core.author.clone(), serde_json::json!({}))),
+                EventPayload::RecoveryFinalize { .. } => Some(("recovery_finalize", ls.pending_claim().map(|p| p.new_owner.clone()).unwrap_or_else(|| event.core.author.clone()), serde_json::json!({}))),
+                _ => None,
+            };
+            let capability_audit: Option<(&'static str, PublicKey, serde_json::Value)> = match &event.core.payload {
+                EventPayload::PermissionGranted { member, capability } => Some((
+                    "capability_granted", member.clone(), serde_json::json!({ "capability": capability }),
+                )),
+                EventPayload::PermissionRevoked { member, capability } => Some((
+                    "capability_revoked", member.clone(), serde_json::json!({ "capability": capability }),
+                )),
+                _ => None,
+            };
+            // Whose garble state changed, so every client can re-ask for it.
+            let garble_changed: Option<PublicKey> = match &event.core.payload {
+                EventPayload::GarbleSet { target, .. } | EventPayload::GarbleCleared { target } => Some(target.clone()),
+                EventPayload::GarbleConsent { .. } => Some(event.core.author.clone()),
+                _ => None,
+            };
+
             // 3. For a message event, the referenced channel must exist (channels
             //    are still legacy DB state this slice).
             if let EventPayload::MessagePosted { channel_id, content, .. } = &event.core.payload {
@@ -2588,6 +2913,13 @@ pub fn handle_request(
                 };
                 let id = crate::event_ingest::derive_message_row(&tx, &event)
                     .map_err(|e| anyhow::anyhow!("failed to derive message: {}", e))?;
+                if id.is_some() {
+                    // Same transaction as the row, so a message and the mark that
+                    // says how to draw it are never out of step.
+                    let hash = event.hash();
+                    crate::messages::record_garble(&tx, &hash, trial.garble_mark(&hash))
+                        .map_err(|e| anyhow::anyhow!("failed to record garble mark: {}", e))?;
+                }
                 if let (Some(mid), Some(owner)) = (id, owner_pk.as_ref()) {
                     crate::event_ingest::derive_attachments(&tx, mid, &event, owner)
                         .map_err(|e| anyhow::anyhow!("failed to derive attachments: {}", e))?;
@@ -2740,16 +3072,46 @@ pub fn handle_request(
             // Broadcast a membership change so every client re-fetches its own
             // status + the member list + the pending queue.
             let membership_pk: Option<PublicKey> = match &event.core.payload {
+                // A recovery step changes who may do what (and, at the end, who owns the server).
+                EventPayload::RecoveryKeySet { recovery } => Some(recovery.clone()),
+                EventPayload::RecoveryClaim { new_owner } => Some(new_owner.clone()),
+                EventPayload::RecoveryCancel { .. } | EventPayload::RecoveryFinalize { .. } => Some(event.core.author.clone()),
                 EventPayload::MemberJoined { member, .. }
                 | EventPayload::MemberApproved { member }
                 | EventPayload::MemberRemoved { member }
-                | EventPayload::MemberBanned { member } => Some(member.clone()),
+                | EventPayload::MemberBanned { member }
+                // A power granted or taken away changes what that member may
+                // do; clients re-ask (the capability screen, the garble menu).
+                | EventPayload::PermissionGranted { member, .. }
+                | EventPayload::PermissionRevoked { member, .. } => Some(member.clone()),
                 _ => None,
             };
             if let Some(pk) = membership_pk {
                 events.push(BroadcastEvent {
                     target: EventTarget::All,
                     event: ServerEvent::MembershipChanged { public_key: pk },
+                });
+            }
+
+            if let Some((action, target, meta)) = garble_audit {
+                if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
+                    events.push(ev);
+                }
+            }
+            if let Some((action, target, meta)) = capability_audit {
+                if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
+                    events.push(ev);
+                }
+            }
+            if let Some((action, target, meta)) = recovery_audit {
+                if let Some(ev) = audit_emit(conn, &event.core.author, Some(&target), action, meta) {
+                    events.push(ev);
+                }
+            }
+            if let Some(target) = garble_changed {
+                events.push(BroadcastEvent {
+                    target: EventTarget::All,
+                    event: ServerEvent::GarbleChanged { target },
                 });
             }
 
@@ -4407,8 +4769,14 @@ mod tests {
         // DmCreated event should be emitted.
         assert_eq!(result.events.len(), 1);
         match &result.events[0].event {
-            ServerEvent::DmCreated { .. } => {}
+            // The other person is told, and sees the OPENER as their participant.
+            ServerEvent::DmCreated { participant, .. } => assert_eq!(participant.public_key, owner_pk),
             other => panic!("expected DmCreated event, got {:?}", other),
+        }
+        // Only the other person hears about it, not the whole server.
+        match &result.events[0].target {
+            EventTarget::Members(keys) => assert_eq!(keys, &vec![alice.clone()]),
+            _ => panic!("a new DM must be announced only to the person it was opened with"),
         }
     }
 
@@ -6685,6 +7053,226 @@ mod tests {
             )
             .unwrap();
         assert_eq!(att_count, 1, "message_attachments row should still exist");
+    }
+
+    /// Speech garbling end to end through the real request path: a moderator
+    /// garbles a member, that member's next messages carry the mark in the row
+    /// and in the broadcast, the rule ends on schedule, the moderation audit log
+    /// records it, and only the people a rule concerns can see it.
+    #[test]
+    fn a_moderation_garble_reaches_the_row_the_broadcast_the_audit_log_and_only_the_right_eyes() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone_id = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let g = Genesis { version: 1, name: "garble".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        *state.genesis.lock().unwrap() = Some(g.clone());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner.public_key(), everyone_id).unwrap();
+        let channel_id = channels::create_channel(&conn, "general", ChannelType::Text, None, 0).unwrap();
+
+        let submit = |who: &Keypair, is_owner: bool, ev: &Event| {
+            handle_request(&conn, &who.public_key(), is_owner, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap()
+        };
+        let accepted = |r: &HandleResult| matches!(r.response, ServerResponse::EventAccepted { .. });
+
+        // Owner: device, then an open invite.
+        let cert = DeviceCert::create(&owner, &owner_dev.public_key(), 1);
+        let mut owner_prev = Event::next(&owner_dev, owner.public_key(), g.server_id(), None, 0, 1, EP::DeviceAuthorized { cert });
+        assert!(accepted(&submit(&owner, true, &owner_prev)));
+        let inv = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 1, 2,
+            EP::InviteCreated { code_hash: "h".into(), max_uses: 10, expires_at: 9_999_999_999, requires_approval: false });
+        assert!(accepted(&submit(&owner, true, &inv)));
+        owner_prev = inv.clone();
+
+        // Two members join through the real path.
+        let mut join = |name: &str| -> (Keypair, Keypair, Event) {
+            let kp = Keypair::generate();
+            let dev = Keypair::generate();
+            members::register_member(&conn, &kp.public_key(), name).unwrap();
+            members::assign_role(&conn, &kp.public_key(), everyone_id).unwrap();
+            let cert = DeviceCert::create(&kp, &dev.public_key(), 1);
+            let da = Event::next(&dev, kp.public_key(), g.server_id(), None, 0, 3, EP::DeviceAuthorized { cert });
+            assert!(accepted(&submit(&kp, false, &da)));
+            let j = Event::next(&dev, kp.public_key(), g.server_id(), Some(&da), 1, 4,
+                EP::MemberJoined { member: kp.public_key(), invite: inv.hash() });
+            assert!(accepted(&submit(&kp, false, &j)), "{name} joins");
+            (kp, dev, j)
+        };
+        let (alice, alice_dev, mut alice_prev) = join("Alice");
+        let (bob, _bob_dev, _) = join("Bob");
+
+        // Owner garbles Alice for 2 messages.
+        let garble = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 2, 5,
+            EP::GarbleSet { target: alice.public_key(), mode: "bark".into(), phrase: "".into(), messages: 2, consensual: false });
+        let r = submit(&owner, true, &garble);
+        assert!(accepted(&r), "owner may garble: {:?}", r.response);
+        assert!(
+            r.events.iter().any(|e| matches!(&e.event, ServerEvent::GarbleChanged { target } if *target == alice.public_key())),
+            "everyone is told a garble changed"
+        );
+        let audit_ev = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::AuditEventCreated { event } => Some(event.clone()),
+            _ => None,
+        }).expect("a moderation garble is audited");
+        assert_eq!(audit_ev.action, "garble_set");
+
+        // Who may see the rule: the target, the setter (owner) -- not Bob.
+        let state_for = |who: &Keypair, is_owner: bool| -> usize {
+            match handle_request(&conn, &who.public_key(), is_owner, ServerRequest::GetGarbleState, "", &state).unwrap().response {
+                ServerResponse::GarbleState { rules, .. } => rules.len(),
+                other => panic!("expected GarbleState, got {other:?}"),
+            }
+        };
+        assert_eq!(state_for(&alice, false), 1, "the target sees it");
+        assert_eq!(state_for(&owner, true), 1, "the setter sees it");
+        assert_eq!(state_for(&bob, false), 0, "a bystander does not learn it exists");
+        let can_moderate = |who: &Keypair, is_owner: bool| -> bool {
+            match handle_request(&conn, &who.public_key(), is_owner, ServerRequest::GetGarbleState, "", &state).unwrap().response {
+                ServerResponse::GarbleState { can_moderate, .. } => can_moderate,
+                other => panic!("expected GarbleState, got {other:?}"),
+            }
+        };
+        assert!(can_moderate(&owner, true), "the owner may start a moderation garble");
+        assert!(!can_moderate(&alice, false) && !can_moderate(&bob, false), "ordinary members may not");
+
+        // Alice's first two messages are marked, the third is not.
+        let mut post = |text: &str, n: u64| -> MessageInfo {
+            let ev = Event::next(&alice_dev, alice.public_key(), g.server_id(), Some(&alice_prev), 10 + n, 20 + n,
+                EP::MessagePosted { channel_id, content: text.into(), reply_to: None, attachments: vec![] });
+            let r = submit(&alice, false, &ev);
+            assert!(accepted(&r), "{:?}", r.response);
+            alice_prev = ev;
+            r.events.iter().find_map(|e| match &e.event {
+                ServerEvent::NewMessage { message } => Some(message.clone()),
+                _ => None,
+            }).expect("the message is broadcast")
+        };
+        let m1 = post("hello", 1);
+        let m2 = post("again", 2);
+        let m3 = post("free", 3);
+        let mark = m1.garble.as_ref().expect("first message carries the mark in the broadcast");
+        assert_eq!((mark.mode.as_str(), mark.moderation), ("bark", true));
+        assert!(m2.garble.is_some());
+        assert!(m3.garble.is_none(), "the rule ended after two messages");
+        assert_eq!(m1.content, "hello", "the words themselves are never rewritten");
+
+        // The row persisted the mark, so history shows it too.
+        let stored: Option<String> = conn
+            .query_row("SELECT garble FROM messages WHERE id = ?1", [m1.id as i64], |r| r.get(0))
+            .unwrap();
+        assert!(stored.is_some(), "the mark is stored with the row");
+        let fetched = messages::get_message(&conn, m1.id, &alice.public_key()).unwrap().unwrap();
+        assert_eq!(fetched.garble, m1.garble, "history returns the same mark as the broadcast");
+        assert_eq!(state_for(&alice, false), 0, "a finished rule is gone");
+
+    }
+
+    /// Delegating a power end to end: the owner grants "garble", the grant is
+    /// audited and announced, the grantee can then use it, who may see the list
+    /// is limited, and revoking really takes it away.
+    #[test]
+    fn granting_and_revoking_a_capability_is_audited_visible_to_the_right_people_and_real() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone_id = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let g = Genesis { version: 1, name: "caps".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        *state.genesis.lock().unwrap() = Some(g.clone());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner.public_key(), everyone_id).unwrap();
+
+        let submit = |who: &Keypair, is_owner: bool, ev: &Event| {
+            handle_request(&conn, &who.public_key(), is_owner, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap()
+        };
+        let accepted = |r: &HandleResult| matches!(r.response, ServerResponse::EventAccepted { .. });
+
+        let cert = DeviceCert::create(&owner, &owner_dev.public_key(), 1);
+        let da = Event::next(&owner_dev, owner.public_key(), g.server_id(), None, 0, 1, EP::DeviceAuthorized { cert });
+        assert!(accepted(&submit(&owner, true, &da)));
+        let inv = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&da), 1, 2,
+            EP::InviteCreated { code_hash: "h".into(), max_uses: 10, expires_at: 9_999_999_999, requires_approval: false });
+        assert!(accepted(&submit(&owner, true, &inv)));
+        let mut owner_prev = inv.clone();
+
+        let mut join = |name: &str| -> (Keypair, Keypair, Event) {
+            let kp = Keypair::generate();
+            let dev = Keypair::generate();
+            members::register_member(&conn, &kp.public_key(), name).unwrap();
+            members::assign_role(&conn, &kp.public_key(), everyone_id).unwrap();
+            let cert = DeviceCert::create(&kp, &dev.public_key(), 1);
+            let da = Event::next(&dev, kp.public_key(), g.server_id(), None, 0, 3, EP::DeviceAuthorized { cert });
+            assert!(accepted(&submit(&kp, false, &da)));
+            let j = Event::next(&dev, kp.public_key(), g.server_id(), Some(&da), 1, 4,
+                EP::MemberJoined { member: kp.public_key(), invite: inv.hash() });
+            assert!(accepted(&submit(&kp, false, &j)));
+            (kp, dev, j)
+        };
+        let (alice, alice_dev, mut alice_prev) = join("Alice");
+        let (bob, _, _) = join("Bob");
+
+        let holders_seen_by = |who: &Keypair, is_owner: bool| -> Vec<(PublicKey, Vec<String>)> {
+            match handle_request(&conn, &who.public_key(), is_owner, ServerRequest::GetCapabilities, "", &state).unwrap().response {
+                ServerResponse::Capabilities { holders } => holders.into_iter().map(|h| (h.member, h.capabilities)).collect(),
+                other => panic!("expected Capabilities, got {other:?}"),
+            }
+        };
+        assert!(holders_seen_by(&owner, true).is_empty());
+
+        // Owner grants Alice "garble": audited, announced, and listed.
+        let grant = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 2, 5,
+            EP::PermissionGranted { member: alice.public_key(), capability: "garble".into() });
+        let r = submit(&owner, true, &grant);
+        assert!(accepted(&r), "{:?}", r.response);
+        owner_prev = grant;
+        let audited = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::AuditEventCreated { event } => Some(event.action.clone()),
+            _ => None,
+        });
+        assert_eq!(audited.as_deref(), Some("capability_granted"));
+        assert!(r.events.iter().any(|e| matches!(&e.event, ServerEvent::MembershipChanged { public_key } if *public_key == alice.public_key())),
+            "clients are told to re-ask");
+        assert_eq!(holders_seen_by(&owner, true), vec![(alice.public_key(), vec!["garble".to_string()])]);
+        assert_eq!(holders_seen_by(&alice, false).len(), 1, "a holder sees their own powers");
+        assert!(holders_seen_by(&bob, false).is_empty(), "a bystander sees nobody's");
+
+        // The grantee can now garble Bob...
+        let garble = Event::next(&alice_dev, alice.public_key(), g.server_id(), Some(&alice_prev), 10, 20,
+            EP::GarbleSet { target: bob.public_key(), mode: "bark".into(), phrase: "".into(), messages: 1, consensual: false });
+        let r = submit(&alice, false, &garble);
+        assert!(accepted(&r), "{:?}", r.response);
+        alice_prev = garble;
+
+        // ...until the owner revokes it. The revoke is audited and really removes it.
+        let revoke = Event::next(&owner_dev, owner.public_key(), g.server_id(), Some(&owner_prev), 3, 6,
+            EP::PermissionRevoked { member: alice.public_key(), capability: "garble".into() });
+        let r = submit(&owner, true, &revoke);
+        assert!(accepted(&r), "{:?}", r.response);
+        let audited = r.events.iter().find_map(|e| match &e.event {
+            ServerEvent::AuditEventCreated { event } => Some(event.action.clone()),
+            _ => None,
+        });
+        assert_eq!(audited.as_deref(), Some("capability_revoked"));
+        assert!(holders_seen_by(&owner, true).is_empty());
+        let again = Event::next(&alice_dev, alice.public_key(), g.server_id(), Some(&alice_prev), 11, 21,
+            EP::GarbleSet { target: bob.public_key(), mode: "bark".into(), phrase: "".into(), messages: 1, consensual: false });
+        let r = submit(&alice, false, &again);
+        assert!(matches!(r.response, ServerResponse::Error { .. }), "a revoked power is refused: {:?}", r.response);
     }
 
     #[test]
@@ -9924,6 +10512,17 @@ mod tests {
                 | ServerRequest::BanMember { .. }
                 | ServerRequest::BlockUser { .. }
                 | ServerRequest::ListBlocked
+                | ServerRequest::GetGarbleState
+                | ServerRequest::GetCapabilities
+                | ServerRequest::GetRecoveryStatus
+                | ServerRequest::CreateGuestInvite { .. }
+                | ServerRequest::SetGuestLinks { .. }
+                | ServerRequest::GetGuestLinks
+                | ServerRequest::FetchLog { .. }
+                | ServerRequest::SetReplica { .. }
+                | ServerRequest::ListReplicas
+                | ServerRequest::SnapshotBegin
+                | ServerRequest::SnapshotChunk { .. }
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
@@ -11253,4 +11852,365 @@ mod tests {
             !state.log_state.lock().unwrap().as_ref().unwrap().is_tombstoned(&"e".repeat(64))
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Recovery owner: the server's side (waiting period, who the owner is)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_recovery_takeover_is_refused_early_then_accepted_after_the_wait_and_moves_the_owner() {
+        use crate::event_ingest;
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+
+        let mut st = ServerState::new_for_test().unwrap();
+        st.recovery_wait_secs = 3600;
+        let state = Arc::new(st);
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, owner_dev) = (Keypair::generate(), Keypair::generate());
+        let (rec, rec_dev) = (Keypair::generate(), Keypair::generate());
+        let (newo, newo_dev) = (Keypair::generate(), Keypair::generate());
+        for (kp, name) in [(&owner, "Owner"), (&newo, "NewOwner")] {
+            members::register_member(&conn, &kp.public_key(), name).unwrap();
+            members::assign_role(&conn, &kp.public_key(), everyone).unwrap();
+        }
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let sid = g.server_id();
+
+        // One person's chain of events, submitted through the real request handler.
+        struct Chain { dev: Keypair, id: Keypair, last: Option<Event>, n: u64 }
+        impl Chain {
+            fn new(id: &Keypair, dev: &Keypair) -> Self { Chain { dev: Keypair::from_signing_key_bytes(&dev.signing_key_bytes()), id: Keypair::from_signing_key_bytes(&id.signing_key_bytes()), last: None, n: 0 } }
+            fn submit(&mut self, conn: &Connection, state: &Arc<ServerState>, sid: &str, is_owner: bool, p: EP) -> std::result::Result<HandleResult, String> {
+                self.n += 1;
+                let ev = Event::next(&self.dev, self.id.public_key(), sid.to_string(), self.last.as_ref(), self.n, 10 + self.n, p);
+                let r = handle_request(conn, &self.id.public_key(), is_owner, ServerRequest::SubmitEvent { event: ev.clone() }, "", state).unwrap();
+                match &r.response {
+                    ServerResponse::Error { reason } => Err(reason.clone()),
+                    _ => { self.last = Some(ev); Ok(r) }
+                }
+            }
+        }
+        let (mut o, mut r, mut n) = (Chain::new(&owner, &owner_dev), Chain::new(&rec, &rec_dev), Chain::new(&newo, &newo_dev));
+        for (c, id, dev) in [(&mut o, &owner, &owner_dev), (&mut r, &rec, &rec_dev), (&mut n, &newo, &newo_dev)] {
+            c.submit(&conn, &state, &sid, false, EP::DeviceAuthorized { cert: DeviceCert::create(id, &dev.public_key(), 1) }).unwrap();
+        }
+        // The new account joins by an ordinary invite, then the owner names the recovery key.
+        let inv = o.submit(&conn, &state, &sid, true, EP::InviteCreated { code_hash: "h".into(), max_uses: 5, expires_at: u64::MAX, requires_approval: false }).unwrap();
+        let _ = inv;
+        let invite_hash = o.last.as_ref().unwrap().hash();
+        n.submit(&conn, &state, &sid, false, EP::MemberJoined { member: newo.public_key(), invite: invite_hash }).unwrap();
+        let status = |conn: &Connection| match handle_request(conn, &newo.public_key(), false, ServerRequest::GetRecoveryStatus, "", &state).unwrap().response {
+            ServerResponse::RecoveryStatus { key_set, recovery_key, wait_secs, pending } => (key_set, recovery_key, wait_secs, pending),
+            other => panic!("unexpected answer: {other:?}"),
+        };
+        let (set0, ..) = status(&conn);
+        assert!(!set0, "no recovery key yet");
+        o.submit(&conn, &state, &sid, true, EP::RecoveryKeySet { recovery: rec.public_key() }).unwrap();
+        let (set1, key1, wait1, pending1) = status(&conn);
+        assert!(set1 && key1 == Some(rec.public_key()) && wait1 == 3600 && pending1.is_none());
+
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert!(rt.block_on(state.is_current_owner(&owner.public_key())));
+
+        // The claim is accepted and announced; finishing it NOW is refused by the waiting period.
+        let claim = r.submit(&conn, &state, &sid, false, EP::RecoveryClaim { new_owner: newo.public_key() }).unwrap();
+        assert!(claim.events.iter().any(|b| matches!(&b.event, ServerEvent::MembershipChanged { .. })), "everyone is told");
+        let claim_hash = r.last.as_ref().unwrap().hash();
+        // Every member can see the takeover and when it can finish: the countdown.
+        let (_, _, _, pend) = status(&conn);
+        let pend = pend.expect("the takeover is visible");
+        assert_eq!(pend.claim, claim_hash);
+        assert_eq!(pend.new_owner, newo.public_key());
+        assert_eq!(pend.ready_at, pend.accepted_at + 3600);
+        let early = r.submit(&conn, &state, &sid, false, EP::RecoveryFinalize { claim: claim_hash.clone() }).err().expect("an early finish must be refused");
+        assert!(early.contains("waiting period"), "{early}");
+        assert!(rt.block_on(state.is_current_owner(&owner.public_key())), "nothing changed");
+
+        // Backdating the event's own timestamp does not help (the server uses its own clock):
+        // simulate the passage of time by ageing the STORED acceptance time of the claim.
+        conn.execute("UPDATE events SET created_at = created_at - 4000 WHERE event_hash = ?1", rusqlite::params![claim_hash]).unwrap();
+        r.submit(&conn, &state, &sid, false, EP::RecoveryFinalize { claim: claim_hash }).unwrap();
+
+        // The server now treats the new account as the owner, and the old one as an ordinary member,
+        // from the very next request (no reconnect needed), and the answer survives a rebuild
+        // from the stored history.
+        assert!(rt.block_on(state.is_current_owner(&newo.public_key())));
+        assert!(!rt.block_on(state.is_current_owner(&owner.public_key())));
+        let (set2, _, _, pend2) = status(&conn);
+        assert!(!set2 && pend2.is_none(), "the recovery key is spent and nothing is pending");
+        let rebuilt = event_ingest::build_log_state(&conn).unwrap().expect("history rebuilds");
+        assert_eq!(rebuilt.owner(), &newo.public_key());
+        // Every recovery step was written to the permanent audit log.
+        let actions: Vec<String> = conn.prepare("SELECT action FROM audit_events WHERE action LIKE 'recovery_%' ORDER BY id").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().flatten().collect();
+        assert_eq!(actions, vec!["recovery_key_set", "recovery_claim", "recovery_finalize"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Guest links (docs/web-guest-join-design.md, step 1)
+    // -----------------------------------------------------------------------
+
+    fn guest_join(conn: &Connection, code: &str) -> (Keypair, Result<Result<bool, String>>) {
+        let kp = Keypair::generate();
+        let r = crate::auth::authenticate_new_member(conn, &kp.public_key(), "Guest", Some(code), None, None);
+        (kp, r)
+    }
+
+    #[test]
+    fn guest_links_are_off_until_the_owner_turns_them_on_and_only_the_owner_can() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let make = |c: &Connection| handle_request(c, &owner, true, ServerRequest::CreateGuestInvite { max_uses: None, expires_in_secs: None }, "", &st).unwrap().response;
+        assert!(matches!(make(&conn), ServerResponse::Error { .. }), "off by default");
+        let other = Keypair::generate().public_key();
+        members::register_member(&conn, &other, "Friend").unwrap();
+        let r = handle_request(&conn, &other, false, ServerRequest::SetGuestLinks { enabled: true }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { .. }), "a non-owner cannot turn them on");
+        let r = handle_request(&conn, &owner, true, ServerRequest::SetGuestLinks { enabled: true }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::GuestLinks { enabled: true }));
+        match make(&conn) {
+            ServerResponse::InviteCreated { code } => {
+                let info = invites::validate_invite(&conn, &code).unwrap().unwrap();
+                assert!(info.guest);
+                let left = info.expires_at.unwrap() - db::now();
+                assert!(left <= invites::GUEST_DEFAULT_SECS && left > invites::GUEST_DEFAULT_SECS - 10, "defaults to a day");
+            }
+            other => panic!("expected an invite, got {other:?}"),
+        }
+        // An absurdly long request is clamped to a week.
+        let r = handle_request(&conn, &owner, true, ServerRequest::CreateGuestInvite { max_uses: Some(3), expires_in_secs: Some(10_000_000_000) }, "", &st).unwrap().response;
+        let ServerResponse::InviteCreated { code } = r else { panic!("no invite") };
+        assert!(invites::validate_invite(&conn, &code).unwrap().unwrap().expires_at.unwrap() <= db::now() + invites::GUEST_MAX_SECS);
+    }
+
+    #[test]
+    fn a_guest_joins_with_the_link_is_limited_and_expires_but_a_normal_invite_makes_a_normal_member() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let code = invites::create_guest_invite(&conn, &owner, None, Some(3600)).unwrap();
+        // Links turned off: the join is refused, and the use is not consumed as a member.
+        let (_, r) = guest_join(&conn, &code);
+        assert!(r.unwrap().unwrap_err().contains("turned off"));
+        crate::db::set_setting(&conn, "guest_links", "1").unwrap();
+        let (g, r) = guest_join(&conn, &code);
+        assert!(r.unwrap().is_ok());
+        let gpk = g.public_key();
+        let end = members::guest_expiry(&conn, &gpk).expect("marked as a guest");
+        assert!(end > db::now() && end <= db::now() + 3600);
+        // Whatever roles a guest is given, they never hold more than read and send.
+        let admin = members::create_role(&conn, "Admin", permissions::ALL_PERMISSIONS, None, 5, false, false).unwrap();
+        members::assign_role(&conn, &gpk, admin).unwrap();
+        let perms = resolve_member_server_perms(&conn, &gpk, false).unwrap();
+        assert_eq!(perms & !permissions::GUEST_ALLOWED, 0, "a guest holds nothing beyond read and send: {perms:b}");
+        assert!(permissions::has(perms, permissions::SEND_MESSAGES));
+        let r = handle_request(&conn, &gpk, false, ServerRequest::CreateInvite { max_uses: None, expires_in_secs: None, target_channel: None }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { .. }), "a guest cannot make invites");
+        let r = handle_request(&conn, &gpk, false, ServerRequest::CreateGuestInvite { max_uses: None, expires_in_secs: None }, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { .. }), "a guest cannot make guest links either");
+        // A normal invite makes a normal member (no expiry, no cap).
+        let normal = invites::create_invite(&conn, &owner, None, None, None).unwrap();
+        let (n, r) = guest_join(&conn, &normal);
+        assert!(r.unwrap().is_ok());
+        assert!(members::guest_expiry(&conn, &n.public_key()).is_none());
+        assert!(permissions::has(resolve_member_server_perms(&conn, &n.public_key(), false).unwrap(), permissions::CREATE_INVITES));
+        // The guest's session ends with the link.
+        assert!(crate::auth::authenticate_existing_member(&conn, &gpk).unwrap().is_ok());
+        members::set_guest_expiry(&conn, &gpk, db::now() - 1).unwrap();
+        assert!(crate::auth::authenticate_existing_member(&conn, &gpk).unwrap().unwrap_err().contains("expired"));
+        // ...including on a connection that is already open.
+        let r = handle_request(&conn, &gpk, false, ServerRequest::GetGuestLinks, "", &st).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { ref reason } if reason.contains("expired")), "{r:?}");
+    }
+
+
+    #[test]
+    fn a_guest_can_join_and_post_through_the_signed_history_but_nothing_else() {
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, guest, gdev) = (Keypair::generate(), Keypair::generate(), Keypair::generate());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::register_member(&conn, &guest.public_key(), "Guest").unwrap();
+        members::assign_role(&conn, &guest.public_key(), everyone).unwrap();
+        members::set_guest_expiry(&conn, &guest.public_key(), db::now() + 600).unwrap();
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        crate::event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let sid = g.server_id();
+        let submit = |prev: Option<&Event>, n: u64, p: EP| {
+            let ev = Event::next(&gdev, guest.public_key(), sid.clone(), prev, n, 10 + n, p);
+            let r = handle_request(&conn, &guest.public_key(), false, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap();
+            (ev, r.response)
+        };
+        // Joining machinery is NOT refused by the guest guard.
+        let (da, r) = submit(None, 1, EP::DeviceAuthorized { cert: DeviceCert::create(&guest, &gdev.public_key(), 1) });
+        assert!(!matches!(&r, ServerResponse::Error { reason } if reason.contains("guests can only")), "{r:?}");
+        // Anything else is, whatever the fold would have said: a normal invite, a ban, a grant.
+        for p in [
+            EP::InviteCreated { code_hash: "x".into(), max_uses: 1, expires_at: db::now() + 60, requires_approval: false },
+            EP::MemberBanned { member: owner.public_key() },
+        ] {
+            let (_, r) = submit(Some(&da), 2, p);
+            assert!(matches!(&r, ServerResponse::Error { reason } if reason.contains("guests can only join and post")), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn the_bulk_damage_brake_stops_a_sixth_destructive_change_and_says_so_in_the_audit_log() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let ids: Vec<u64> = (0..8).map(|i| channels::create_channel(&conn, &format!("c{i}"), ChannelType::Text, None, i).unwrap()).collect();
+        let del = |id: u64| handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: id }, "", &st).unwrap();
+        // A refused request costs nothing: someone with no power over channels is refused again and
+        // again, and their budget is still whole.
+        let bob = add_member(&conn, "Bob");
+        for id in &ids[6..] {
+            let r = handle_request(&conn, &bob, false, ServerRequest::DeleteChannel { channel_id: *id }, "", &st).unwrap();
+            assert!(matches!(r.response, ServerResponse::Error { .. }));
+        }
+        assert!(st.brake.check(bob.as_bytes(), crate::db::now()).is_ok());
+        for id in &ids[..5] {
+            assert!(!matches!(del(*id).response, ServerResponse::Error { .. }), "the first five are allowed");
+        }
+        let r = del(ids[5]);
+        assert!(matches!(&r.response, ServerResponse::Error { reason } if reason.contains("slow down")), "{:?}", r.response);
+        assert!(!r.events.is_empty(), "managers are told through the audit log");
+        assert!(channels::get_channel(&conn, ids[5]).unwrap().is_some(), "the sixth channel is still there");
+        let actions: Vec<String> = audit::list(&conn, None, 50).unwrap().into_iter().map(|e| e.action).collect();
+        assert!(actions.iter().any(|a| a == "destructive_brake"), "{actions:?}");
+        // Ordinary, non-destructive work is untouched.
+        let r = handle_request(&conn, &owner, true, ServerRequest::CreateChannel { name: "after".into(), channel_type: ChannelType::Text, category_id: None, position: None }, "", &st).unwrap();
+        assert!(!matches!(r.response, ServerResponse::Error { .. }));
+        // Turned off by the host (budget 0): no limit.
+        let mut off = ServerState::new_for_test().unwrap();
+        off.brake = crate::brake::Brake::new(0, 600);
+        let off = Arc::new(off);
+        for id in &ids[5..] {
+            let r = handle_request(&conn, &owner, true, ServerRequest::DeleteChannel { channel_id: *id }, "", &off).unwrap();
+            assert!(!matches!(r.response, ServerResponse::Error { .. }));
+        }
+    }
+
+    #[test]
+    fn after_a_host_reset_old_members_are_told_to_rejoin_not_just_that_they_are_not_members() {
+        use farder_crypto::event_log::Genesis;
+        use farder_crypto::event_log_state::LogState;
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, old) = (Keypair::generate(), Keypair::generate());
+        for (k, n) in [(&owner, "Owner"), (&old, "Old")] {
+            members::register_member(&conn, &k.public_key(), n).unwrap();
+            members::assign_role(&conn, &k.public_key(), everyone).unwrap();
+        }
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        crate::event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let ask = || handle_request(&conn, &old.public_key(), false, ServerRequest::GetMembers, "", &state).unwrap().response;
+        // No reset yet: the plain answer.
+        assert!(matches!(ask(), ServerResponse::Error { reason } if reason == "not a member of this server"));
+        crate::db::set_setting(&conn, "owner_reset_at", "123").unwrap();
+        assert!(matches!(ask(), ServerResponse::Error { reason } if reason == RESET_BY_HOST));
+        // A stranger who was never a member still gets the plain answer, even after a reset.
+        let stranger = Keypair::generate().public_key();
+        let r = handle_request(&conn, &stranger, false, ServerRequest::GetMembers, "", &state).unwrap().response;
+        assert!(matches!(r, ServerResponse::Error { reason } if reason == "not a member of this server"));
+    }
+
+    #[test]
+    fn the_owner_can_page_through_the_whole_signed_history_and_nobody_else_can() {
+        use farder_crypto::event_log::{DeviceCert, Event, EventPayload as EP, Genesis};
+        use farder_crypto::event_log_state::LogState;
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        let conn = state.db.lock().unwrap();
+        let everyone = members::create_role(&conn, "@everyone", permissions::DEFAULT_EVERYONE, None, 0, true, false).unwrap();
+        let (owner, dev) = (Keypair::generate(), Keypair::generate());
+        members::register_member(&conn, &owner.public_key(), "Owner").unwrap();
+        members::assign_role(&conn, &owner.public_key(), everyone).unwrap();
+        let friend = add_member(&conn, "Friend");
+        let g = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        crate::event_ingest::save_genesis(&conn, &g).unwrap();
+        *state.log_state.lock().unwrap() = Some(LogState::from_genesis(&g));
+        let sid = g.server_id();
+        // An owner chain of 7 events: a device, then six invites.
+        let mut last: Option<Event> = None;
+        for n in 0..7u64 {
+            let p = if n == 0 { EP::DeviceAuthorized { cert: DeviceCert::create(&owner, &dev.public_key(), 1) } }
+                    else { EP::InviteCreated { code_hash: format!("h{n}"), max_uses: 1, expires_at: db::now() + 600, requires_approval: false } };
+            let ev = Event::next(&dev, owner.public_key(), sid.clone(), last.as_ref(), n, 10 + n, p);
+            let r = handle_request(&conn, &owner.public_key(), true, ServerRequest::SubmitEvent { event: ev.clone() }, "", &state).unwrap();
+            assert!(!matches!(r.response, ServerResponse::Error { .. }), "{:?}", r.response);
+            last = Some(ev);
+        }
+        // Page through it, 3 at a time: 3 + 3 + 1, done only at the end.
+        let (mut after, mut got, mut pages) = (0u64, Vec::new(), 0);
+        loop {
+            let r = handle_request(&conn, &owner.public_key(), true, ServerRequest::FetchLog { after, limit: 3 }, "", &state).unwrap().response;
+            let ServerResponse::LogPage { genesis, events, done } = r else { panic!("{r:?}") };
+            assert_eq!(genesis.server_id(), sid, "the copy can check the server's id");
+            pages += 1;
+            assert!(events.len() <= 3);
+            for e in &events { assert!(e.accept_seq > after); }
+            after = events.last().map(|e| e.accept_seq).unwrap_or(after);
+            got.extend(events);
+            if done { break; }
+            assert!(pages < 10, "paging must end");
+        }
+        assert_eq!((got.len(), pages), (7, 3));
+        // Same order they were accepted, and every one still verifies against its own device.
+        for (i, e) in got.iter().enumerate() { assert_eq!(e.event.core.seq, i as u64); }
+        // Nobody but the owner: a friend, and (the same rule) a guest.
+        let r = handle_request(&conn, &friend, false, ServerRequest::FetchLog { after: 0, limit: 10 }, "", &state).unwrap().response;
+        assert!(matches!(&r, ServerResponse::Error { .. }), "{r:?}");   // not even a log member here, so the membership gate answers first
+    }
+
+    #[test]
+    fn fetching_the_log_is_the_owners_alone_even_for_someone_the_membership_gate_lets_through() {
+        // No signed history here, so the membership gate does not answer first: the owner-only rule does.
+        let (conn, _owner) = setup();
+        let st = fake_state();
+        let friend = add_member(&conn, "Friend");
+        let r = handle_request(&conn, &friend, false, ServerRequest::FetchLog { after: 0, limit: 10 }, "", &st).unwrap().response;
+        assert!(matches!(&r, ServerResponse::Error { reason } if reason.contains("only the owner")), "{r:?}");
+    }
+
+    #[test]
+    fn only_the_owner_and_a_replica_the_owner_allowed_can_take_a_snapshot_and_a_replica_cannot_make_more_replicas() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let replica = add_member(&conn, "Anchor");
+        let friend = add_member(&conn, "Friend");
+        let ask = |who: &PublicKey, is_owner: bool, r: ServerRequest| handle_request(&conn, who, is_owner, r, "", &st).unwrap().response;
+        // Before the owner allows it, nobody but the owner can.
+        assert!(matches!(ask(&replica, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
+        // The owner allows one account; only the owner can, and it must be a member.
+        assert!(matches!(ask(&friend, false, ServerRequest::SetReplica { member: replica.clone(), enabled: true }), ServerResponse::Error { .. }));
+        let stranger = Keypair::generate().public_key();
+        assert!(matches!(ask(&owner, true, ServerRequest::SetReplica { member: stranger, enabled: true }), ServerResponse::Error { .. }));
+        assert!(matches!(ask(&owner, true, ServerRequest::SetReplica { member: replica.clone(), enabled: true }), ServerResponse::Replicas { members } if members == vec![replica.clone()]));
+        // The replica can snapshot and read it in pieces; the friend still cannot.
+        let ServerResponse::SnapshotInfo { id, size, sha256 } = ask(&replica, false, ServerRequest::SnapshotBegin) else { panic!("snapshot") };
+        assert!(size > 0);
+        let mut all = Vec::new();
+        while (all.len() as u64) < size {
+            let ServerResponse::SnapshotData { data } = ask(&replica, false, ServerRequest::SnapshotChunk { id, offset: all.len() as u64, len: 4096 }) else { panic!("chunk") };
+            assert!(!data.is_empty());
+            all.extend(data);
+        }
+        use sha2::{Digest, Sha256};
+        assert_eq!(hex::encode(Sha256::digest(&all)), sha256, "the copy matches the hash the server gave");
+        assert!(matches!(ask(&friend, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
+        assert!(matches!(ask(&friend, false, ServerRequest::SnapshotChunk { id, offset: 0, len: 10 }), ServerResponse::Error { .. }));
+        // A replica cannot make more replicas, and the owner can take the permission away again.
+        assert!(matches!(ask(&replica, false, ServerRequest::SetReplica { member: friend.clone(), enabled: true }), ServerResponse::Error { .. }));
+        assert!(matches!(ask(&owner, true, ServerRequest::SetReplica { member: replica.clone(), enabled: false }), ServerResponse::Replicas { members } if members.is_empty()));
+        assert!(matches!(ask(&replica, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
+    }
+
 }
