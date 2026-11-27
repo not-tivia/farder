@@ -33,8 +33,9 @@ pub fn must_start_read_only(conn: &Connection, own_identity: &[u8; 32]) -> anyho
     Ok(stored_term(conn)?.is_some_and(|t| &t.host_key != own_identity))
 }
 
-/// Check a term against everything the copy knows. `Err` is a plain reason for the caller.
-fn check(conn: &Connection, state: &ServerState, term: &HostTerm) -> Result<(), String> {
+/// The checks every term must pass, whoever it is for: signed by the owner, this server's id, higher
+/// than the stored term.
+fn check_basic(conn: &Connection, state: &ServerState, term: &HostTerm) -> Result<(), String> {
     let (owner, server_id) = {
         let guard = state.log_state.lock().unwrap();
         let Some(ls) = guard.as_ref() else { return Err("this copy has no signed history, so it cannot tell who the owner is".into()) };
@@ -50,6 +51,12 @@ fn check(conn: &Connection, state: &ServerState, term: &HostTerm) -> Result<(), 
     if term.term <= held {
         return Err(format!("that term ({}) is not higher than the one this copy already holds ({held})", term.term));
     }
+    Ok(())
+}
+
+/// Check a term against everything the copy knows. `Err` is a plain reason for the caller.
+fn check(conn: &Connection, state: &ServerState, term: &HostTerm) -> Result<(), String> {
+    check_basic(conn, state, term)?;
     let own = *state.host_identity.lock().unwrap();
     if own != Some(term.host_key) {
         return Err("that term names a different machine as the host, not this copy".into());
@@ -80,5 +87,24 @@ pub fn promote(conn: &Connection, state: &ServerState, term: HostTerm) -> Result
     if let Some(hook) = state.on_promoted.lock().unwrap().as_ref() {
         hook();
     }
+    Ok(())
+}
+
+/// Handle `NotifyHostTerm`: a newer term that names ANOTHER machine as host means this server was
+/// replaced. Store it, go read-only (also at the database level) and say so in the log.
+pub fn notify(conn: &Connection, state: &ServerState, term: HostTerm) -> Result<(), String> {
+    check_basic(conn, state, &term)?;
+    if *state.host_identity.lock().unwrap() == Some(term.host_key) {
+        return Err("that term names this server as the host: only PromoteToHost can do that".into());
+    }
+    // Lift `query_only` just long enough to save (a copy has it on); it is switched on again below.
+    conn.pragma_update(None, "query_only", false).map_err(|e| format!("could not save the term: {e}"))?;
+    let saved = crate::db::set_setting(conn, SETTING, &hex::encode(term.to_bytes()));
+    let _ = conn.pragma_update(None, "query_only", true);
+    saved.map_err(|e| format!("could not save the term: {e}"))?;
+    let addrs = if term.addresses.is_empty() { "address unknown".to_string() } else { term.addresses.join(", ") };
+    *state.moved_to.lock().unwrap() = Some(addrs.clone());
+    state.read_only.store(true, Ordering::SeqCst);
+    tracing::warn!("REPLACED: this server was replaced by a newer host (term {}) at {addrs}; it is now read-only", term.term);
     Ok(())
 }

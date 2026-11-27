@@ -640,6 +640,7 @@ fn is_read_only_request(req: &ServerRequest) -> bool {
             | ServerRequest::GetOwnChainHead { .. }
             | ServerRequest::GetHostTerm
             | ServerRequest::PromoteToHost { .. }
+            | ServerRequest::NotifyHostTerm { .. }
     )
 }
 
@@ -713,6 +714,9 @@ fn handle_request_dispatch(
 ) -> Result<HandleResult> {
     // A read-only copy answers reads and refuses everything else, with a plain reason.
     if state.is_read_only() && !is_read_only_request(&request) {
+        if let Some(moved) = state.moved_to.lock().unwrap().as_ref() {
+            return err(&format!("this server moved to a new host ({moved})"));
+        }
         return err(READ_ONLY_COPY);
     }
     if !is_destructive(&request) {
@@ -2749,6 +2753,13 @@ fn handle_request_inner(
         ServerRequest::PromoteToHost { term } => {
             // The signed term is the authority, not the sender: anyone connected may carry it.
             match crate::promotion::promote(conn, state, term) {
+                Ok(()) => ok(ServerResponse::Ok),
+                Err(reason) => err(&reason),
+            }
+        }
+        ServerRequest::NotifyHostTerm { term } => {
+            // Like PromoteToHost, the signed term is the authority, not the sender.
+            match crate::promotion::notify(conn, state, term) {
                 Ok(()) => ok(ServerResponse::Ok),
                 Err(reason) => err(&reason),
             }
@@ -10601,6 +10612,7 @@ mod tests {
                 | ServerRequest::GetOwnChainHead { .. }
                 | ServerRequest::GetHostTerm
                 | ServerRequest::PromoteToHost { .. }
+                | ServerRequest::NotifyHostTerm { .. }
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }

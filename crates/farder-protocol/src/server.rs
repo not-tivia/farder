@@ -830,6 +830,12 @@ pub enum ServerRequest {
     /// own host key, is higher than any term the copy holds, and continues after the head of the copy's
     /// log. Answered with `Ok` or `Error`. Appended last.
     PromoteToHost { term: farder_crypto::host_term::HostTerm },
+    /// Any member: tell this server a newer hosting term exists, so a REPLACED host learns it and goes
+    /// read-only. Accepted only if the term verifies against the current owner, names this server, is
+    /// higher than the stored term (none = 0), and its `host_key` is NOT this server's own identity
+    /// (that is a promotion, which only `PromoteToHost` does). Also answered by a read-only copy.
+    /// Answered with `Ok` or `Error`. Appended last.
+    NotifyHostTerm { term: farder_crypto::host_term::HostTerm },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

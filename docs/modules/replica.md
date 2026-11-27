@@ -43,6 +43,11 @@ Design: `docs/specs/2026-11-27-promotion-design.md`. Step 1 (server side only) i
 (`farder-crypto::host_term`) and sends `PromoteToHost { term }` to a running read-only copy, which becomes writable
 **without a restart**. `GetHostTerm` returns the stored term on both host and copy (`None` = original host).
 
+Step 2 (server side): `NotifyHostTerm { term }` (any member, also accepted by a read-only copy) lets a REPLACED host learn the
+newer term: same signature, `server_id` and "higher term" checks, but `host_key` must NOT be its own identity. It stores the term,
+goes read-only at runtime (and stays so after a restart), logs `REPLACED:`, and refuses writes with "this server moved to a new
+host (<addresses>)". The app sending it is separate (app side). Test: `a_replaced_host_learns_the_newer_term_from_a_member_and_goes_read_only`.
+
 The copy accepts only if ALL hold (each refusal is a plain reason and the copy stays read-only):
 
 1. it is read-only (a writable host refuses: "already the writable host");
