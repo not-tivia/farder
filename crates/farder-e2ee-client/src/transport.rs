@@ -91,6 +91,20 @@ impl TransportError {
         matches!(self, Self::ServerRejected { reason } if reason == "stale-epoch")
     }
 
+    /// True iff the server refused an event because it does not extend the
+    /// device's chain head: `"non-contiguous seq (gap or fork)"` or `"prev does
+    /// not link to the chain head (fork)"` (`check_chain` in
+    /// `farder-crypto/src/event_log_state.rs`). The signal that this device's
+    /// local [`crate::chain::ChainState`] is behind the server's, e.g. after a
+    /// lost submit answer. See [`crate::chain::submit_with_chain_recovery`].
+    pub fn is_chain_refused(&self) -> bool {
+        matches!(
+            self,
+            Self::ServerRejected { reason }
+                if reason.contains("non-contiguous seq") || reason.contains("prev does not link to the chain head")
+        )
+    }
+
     /// True iff the server rejected the request with the commit-rate-rule
     /// refusal: `"event rejected: commit-rate rule: ..."` — the fold's
     /// `event_log_state.rs:1187-1203` gate saying a non-drift-discharging
@@ -290,6 +304,21 @@ pub trait E2eeTransport {
         before_id: Option<u64>,
         limit: u32,
     ) -> impl Future<Output = Result<Vec<MessageInfoV2>, TransportError>> + Send;
+
+    /// Fetch the newest accepted event of one of the caller's OWN devices
+    /// (`ServerRequest::GetOwnChainHead`); `None` if that device has none.
+    /// The server's answer is untrusted: the caller verifies the signature
+    /// before adopting it ([`crate::chain::submit_with_chain_recovery`]).
+    ///
+    /// Defaulted to "unsupported" so transports that never need chain recovery
+    /// (test fakes) need not implement it; recovery then surfaces the original
+    /// error.
+    fn fetch_own_chain_head(
+        &self,
+        _device: &str,
+    ) -> impl Future<Output = Result<Option<Event>, TransportError>> + Send {
+        async move { Err(TransportError::transport("fetch_own_chain_head is not supported by this transport")) }
+    }
 }
 
 #[cfg(test)]

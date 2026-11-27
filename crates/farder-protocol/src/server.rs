@@ -813,6 +813,11 @@ pub enum ServerRequest {
     /// OWNER or a replica: `len` bytes (at most 1 MiB) of snapshot `id` from `offset`. Answered with
     /// [`ServerResponse::SnapshotData`]. Appended last.
     SnapshotChunk { id: u64, offset: u64, len: u32 },
+    /// Any member: the newest accepted event of ONE of the caller's OWN devices (`device` is the
+    /// device id), so a device whose submit answer was lost can find the head the server holds and
+    /// re-link its chain. Refused for a device of any other identity. Read-only (also answered by a
+    /// read-only copy). Answered with [`ServerResponse::OwnChainHead`]. Appended last.
+    GetOwnChainHead { device: farder_crypto::event_log::DeviceId },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -973,6 +978,9 @@ pub enum ServerResponse {
     SnapshotInfo { id: u64, size: u64, sha256: String },
     /// Answer to `SnapshotChunk`.
     SnapshotData { data: Vec<u8> },
+    /// Answer to [`ServerRequest::GetOwnChainHead`]: the device's newest accepted event, or `None`
+    /// if it has none. The caller must verify the signature itself; the server's word is not trusted.
+    OwnChainHead { event: Option<farder_crypto::event_log::Event> },
 }
 
 /// One accepted event with the server's own bookkeeping, as handed to a copy.
