@@ -14,7 +14,7 @@ use farder_mls::group::{DeclaredMember, MlsChannelGroup};
 use farder_mls::store::{FarderMlsStore, StoreResumeError};
 use tls_codec::Serialize as TlsSerialize;
 
-use crate::chain::{build_next_event, event_now_secs, Actor, ChainState};
+use crate::chain::{event_now_secs, Actor, ChainState};
 use crate::channel_key::ChannelKey;
 use crate::transport::{E2eeTransport, TransportError};
 
@@ -455,10 +455,9 @@ pub async fn create_e2ee_channel<T: E2eeTransport + Sync>(
 
     // 1. Submit ChannelCreated first: only on acceptance do we mint any local
     //    MLS state.
-    let created = build_next_event(
-        actor.device,
-        actor.identity,
-        &key.log_server_id,
+    let (_created, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
         chain,
         event_now_secs(),
         EventPayload::ChannelCreated {
@@ -468,9 +467,8 @@ pub async fn create_e2ee_channel<T: E2eeTransport + Sync>(
             class: ChannelClass::E2ee,
             parent: spec.parent,
         },
-    );
-    let accepted = transport.submit_event(&created).await?;
-    chain.advance(&created);
+    )
+    .await?;
 
     // 2. Create the store + group, persisting the instance hash.
     let store_path = key.mls_store_path(data_dir).map_err(E2eeError::chain)?;
@@ -532,10 +530,9 @@ pub async fn publish_key_package<T: E2eeTransport + Sync>(
     let expires_at_log_pos = chain.next_seq + 1 + KEY_PACKAGE_LIFETIME_LOG_POSITIONS;
 
     // 3. Build + submit.
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        actor.log_server_id,
+    let (_event, accepted) = crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
         chain,
         event_now_secs(),
         EventPayload::MlsKeyPackagePublished {
@@ -543,9 +540,8 @@ pub async fn publish_key_package<T: E2eeTransport + Sync>(
             store_instance_hash: *store_instance_hash,
             expires_at_log_pos,
         },
-    );
-    let accepted = transport.submit_event(&event).await?;
-    chain.advance(&event);
+    )
+    .await?;
 
     Ok(KeyPackageOutcome {
         event_hash: accepted.event_hash,
@@ -595,13 +591,7 @@ pub async fn bootstrap_group<T: E2eeTransport + Sync>(
     debug_assert_eq!(group.epoch(), outcome.epoch + 1);
 
     // 2. Build the MlsCommit event from the real CommitOutcome.
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        &key.log_server_id,
-        chain,
-        event_now_secs(),
-        EventPayload::MlsCommit {
+    let payload = EventPayload::MlsCommit {
             channel_id: key.channel_id,
             generation: 0,
             epoch: outcome.epoch,
@@ -613,14 +603,21 @@ pub async fn bootstrap_group<T: E2eeTransport + Sync>(
             post_tree_hash: outcome.post_tree_hash,
             authz_head,
             store_instance_hash: *store_instance_hash,
-        },
-    );
+        };
 
     // 3. Submit; the bootstrap commit merged locally already, so surface a
     //    stale-epoch bounce AND any other fold refusal as divergence (finding
     //    F3) rather than a generic transport error.
-    let accepted = match transport.submit_event(&event).await {
-        Ok(a) => a,
+    let accepted = match crate::chain::submit_commit_with_chain_recovery(
+        transport,
+        actor,
+        chain,
+        event_now_secs(),
+        payload,
+    )
+    .await
+    {
+        Ok((_event, a)) => a,
         Err(e) if e.is_stale_epoch() => {
             return Err(E2eeError::StaleEpochDiverged {
                 local_epoch: group.epoch(),
@@ -634,7 +631,6 @@ pub async fn bootstrap_group<T: E2eeTransport + Sync>(
         }
         Err(e) => return Err(e.into()),
     };
-    chain.advance(&event);
 
     Ok(CommitSubmitted {
         event_hash: accepted.event_hash,

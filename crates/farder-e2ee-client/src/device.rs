@@ -38,7 +38,7 @@ use farder_crypto::identity::Keypair;
 use farder_mls::group::{DeclaredMember, MlsChannelGroup};
 use farder_mls::store::FarderMlsStore;
 
-use crate::chain::{build_next_event, event_now_secs, Actor, ChainState};
+use crate::chain::{event_now_secs, Actor, ChainState};
 use crate::channel::{publish_key_package, E2eeError};
 use crate::commit::{add_member, StewardContext};
 use crate::transport::E2eeTransport;
@@ -122,19 +122,19 @@ pub async fn authorize_device<T: E2eeTransport + Sync>(
     let now = event_now_secs();
     let cert = DeviceCert::create(actor.identity, &actor.device.public_key(), now);
 
-    let event = build_next_event(
-        actor.device,
-        actor.identity,
-        actor.log_server_id,
-        chain,
-        now,
-        EventPayload::DeviceAuthorized { cert: cert.clone() },
-    );
 
     // Submit; the fold authorizes (or rejects — notably the live-device cap)
     // by the cert's identity and the event's device. Advance only on accept.
-    let accepted = match transport.submit_event(&event).await {
-        Ok(a) => a,
+    let accepted = match crate::chain::submit_with_chain_recovery(
+        transport,
+        actor,
+        chain,
+        now,
+        EventPayload::DeviceAuthorized { cert: cert.clone() },
+    )
+    .await
+    {
+        Ok((_event, a)) => a,
         Err(e) if e.is_device_cap_reached() => {
             return Err(E2eeError::DeviceCapReached {
                 reason: e.rejection_reason().to_string(),
@@ -142,7 +142,6 @@ pub async fn authorize_device<T: E2eeTransport + Sync>(
         }
         Err(e) => return Err(e.into()),
     };
-    chain.advance(&event);
 
     Ok(DeviceAuthorizedOutcome {
         event_hash: accepted.event_hash,
