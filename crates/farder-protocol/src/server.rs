@@ -183,6 +183,10 @@ pub struct MessageInfo {
     /// None for every ordinary message. Appended last (positional codec).
     #[serde(default)]
     pub garble: Option<farder_crypto::event_log::GarbleMark>,
+    /// Content id of the log event this row was derived from; what a client
+    /// cites as `reply_to` over the log. None for pre-log rows or old peers.
+    #[serde(default)]
+    pub event_hash: Option<String>,
 }
 
 /// One member and the log capabilities explicitly granted to them.
@@ -1503,6 +1507,7 @@ mod tests {
             author_badge: None,
             widget: None,
             garble: None,
+            event_hash: None,
         };
         let frame = ServerFrame::Response {
             request_id: 7,
@@ -1546,6 +1551,7 @@ mod tests {
                 author_badge: None,
                 widget: None,
                 garble: None,
+            event_hash: None,
             },
         };
         let frame = ServerFrame::Event(event);
@@ -1892,6 +1898,7 @@ mod tests {
             author_badge: None,
             widget: None,
             garble: None,
+            event_hash: None,
         };
         let bytes = codec::encode(&msg).unwrap();
         let decoded: MessageInfo = codec::decode(&bytes).unwrap();

@@ -311,6 +311,7 @@ mod tests {
                     author_badge: None,
                     widget: None,
                     garble: None,
+                    event_hash: None,
                 },
                 is_e2ee: true,
                 sealed: Some(vec![9, 9, 9]),
