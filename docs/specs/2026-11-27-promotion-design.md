@@ -51,6 +51,9 @@ Rules:
    sees a higher term, it switches itself to read-only and says so in its log. It may then follow the new host as a copy;
    that is the same replica code with the roles swapped (a later step).
 
+   **Status:** the "asks its copies" part is DONE (issue #37): copies announce their address with `AnnounceCopy`, and the host
+   asks them on start and every 10 minutes (`docs/modules/replica.md`). Following the new host as a copy is not done.
+
 ## What is lost, and how the app says so
 
 Messages the old host accepted after the copy's last pull are not in the copy. `after_event` makes this exact. The app can

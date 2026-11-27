@@ -2755,6 +2755,15 @@ fn handle_request_inner(
                 Err(reason) => err(&reason),
             }
         }
+        ServerRequest::AnnounceCopy { address } => {
+            if !is_owner && !members::is_replica(conn, member) {
+                return err("only the owner (or a replica the owner allowed) can announce a copy");
+            }
+            match crate::promotion::add_known_copy(conn, &address) {
+                Ok(()) => ok(ServerResponse::Ok),
+                Err(reason) => err(&reason),
+            }
+        }
         ServerRequest::SetReplica { member: target, enabled } => {
             if !is_owner { return err("only the owner can allow a replica"); }
             if members::get_member(conn, &target)?.is_none() { return err("that account is not a member of this server"); }
@@ -10605,6 +10614,7 @@ mod tests {
                 | ServerRequest::PromoteToHost { .. }
                 | ServerRequest::GetPromotionInfo
                 | ServerRequest::NotifyHostTerm { .. }
+                | ServerRequest::AnnounceCopy { .. }
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }
@@ -12318,6 +12328,31 @@ mod tests {
         assert!(matches!(ask(&replica, false, ServerRequest::SetReplica { member: friend.clone(), enabled: true }), ServerResponse::Error { .. }));
         assert!(matches!(ask(&owner, true, ServerRequest::SetReplica { member: replica.clone(), enabled: false }), ServerResponse::Replicas { members } if members.is_empty()));
         assert!(matches!(ask(&replica, false, ServerRequest::SnapshotBegin), ServerResponse::Error { .. }));
+    }
+
+    #[test]
+    fn announcing_a_copy_is_for_the_owner_and_replicas_only_and_the_list_is_newest_first_deduplicated_and_capped_at_eight() {
+        let (conn, owner) = setup();
+        let st = fake_state();
+        let replica = add_member(&conn, "Anchor");
+        let friend = add_member(&conn, "Friend");
+        let ask = |who: &PublicKey, is_owner: bool, a: &str| handle_request(&conn, who, is_owner, ServerRequest::AnnounceCopy { address: a.into() }, "", &st).unwrap().response;
+        assert!(matches!(ask(&replica, false, "10.0.0.1:1"), ServerResponse::Error { .. }), "not allowed as a replica yet");
+        assert!(matches!(handle_request(&conn, &owner, true, ServerRequest::SetReplica { member: replica.clone(), enabled: true }, "", &st).unwrap().response, ServerResponse::Replicas { .. }));
+        assert!(matches!(ask(&replica, false, "10.0.0.1:1"), ServerResponse::Ok));
+        assert!(matches!(ask(&friend, false, "10.0.0.9:9"), ServerResponse::Error { .. }), "an ordinary member cannot");
+        assert!(matches!(ask(&owner, true, "10.0.0.2:2"), ServerResponse::Ok));
+        assert!(matches!(ask(&replica, false, "10.0.0.1:1"), ServerResponse::Ok));
+        assert_eq!(crate::promotion::known_copies(&conn).unwrap(), vec!["10.0.0.1:1", "10.0.0.2:2"], "newest first, no duplicate");
+        for a in ["", "nonsense", "host:", ":80", "host:99999", "a b:80"] {
+            assert!(matches!(ask(&owner, true, a), ServerResponse::Error { .. }), "{a:?} must be refused");
+        }
+        for i in 0..12 { assert!(matches!(ask(&owner, true, &format!("10.1.0.{i}:7")), ServerResponse::Ok)); }
+        let list = crate::promotion::known_copies(&conn).unwrap();
+        assert_eq!(list.len(), 8);
+        assert_eq!(list[0], "10.1.0.11:7");
+        // It writes, so a read-only copy refuses it.
+        assert!(!ServerRequest::AnnounceCopy { address: String::new() }.is_read_only());
     }
 
     // -----------------------------------------------------------------------

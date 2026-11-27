@@ -5,7 +5,7 @@ host's computer is off. Design and status: `docs/mesh-hosting-status.md`.
 
 ## Program
 
-`farder-replica [--server host:port] [--invite LINK] [--dir DIR] [--name NAME] [--interval SECS] [--once] [--cert-fp HEX]`
+`farder-replica [--server host:port] [--invite LINK] [--dir DIR] [--name NAME] [--interval SECS] [--once] [--announce HOST:PORT] [--cert-fp HEX]`
 
 - First run needs `--invite`: the link from the app's invite dialog (`https://farder.xyz/join/...`), a
   `farder://host:port/CODE` link, or a bare code. When the link carries the address, `--server` can be left out.
@@ -17,6 +17,10 @@ host's computer is off. Design and status: `docs/mesh-hosting-status.md`.
 - Then the attachments: `files/` is made to hold exactly the files `latest.db` lists (fetched ones are checked against
   their SHA-256; a file on disk that no longer matches is fetched again; files the host redacted or deleted are removed).
   An allowed replica may fetch every file, like the owner (server: `handle_download_stream` in `connection.rs`).
+- `--announce HOST:PORT`: the address where a read-only copy server for this folder can be reached. After each successful
+  pull (and file sync) the replica sends `AnnounceCopy { address }` to the host (`Session::announce_copy`), which keeps the
+  newest 8 in `server_settings.known_copies`. A host that does not know the request, or refuses it, makes the replica log
+  "could not announce ..." ONCE and carry on: the pull never fails because of it. Only the owner or an allowed replica may announce.
 - Exit codes with `--once`: 0 copied, 1 copy failed (old copy kept), 2 could not connect / not joined, 3 not allowed yet.
 
 Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir DIR/files --bind 0.0.0.0:PORT` (no
@@ -48,6 +52,14 @@ Step 2 (server side): `NotifyHostTerm { term }` (any member, also accepted by a 
 newer term: same signature, `server_id` and "higher term" checks, but `host_key` must NOT be its own identity. It stores the term,
 goes read-only at runtime (and stays so after a restart), logs `REPLACED:`, and refuses writes with "this server moved to a new
 host (<addresses>)". The app sending it is separate (app side). Test: `a_replaced_host_learns_the_newer_term_from_a_member_and_goes_read_only`.
+
+Step 4 ("asks its copies"): the host also asks the copies by itself. Copies announce their address (`--announce`, above); on
+start and every 10 minutes while it is the host (not read-only) the server (`promotion::spawn_copy_probe`) asks each known copy for
+its term (each in parallel, 5 s limit; an offline copy is skipped quietly; start-up never waits). A copy has no login for the
+host, so the question is the pre-auth `ClientFrame::GetHostTerm`, answered with `ServerFrame::HostTerm`. A term that passes
+`notify`'s checks and names ANOTHER host key replaces the host exactly like `NotifyHostTerm` (term stored, read-only, `REPLACED`
+in the log). Tests: `a_copy_announces_itself_and_a_restarted_old_host_asks_it_and_learns_it_was_replaced`,
+`a_host_whose_copy_is_offline_starts_normally_and_stays_writable`, `a_pull_still_finishes_when_the_host_refuses_the_announcement`.
 
 The copy accepts only if ALL hold (each refusal is a plain reason and the copy stays read-only):
 

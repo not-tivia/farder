@@ -495,6 +495,11 @@ pub enum ClientFrame {
     /// Pre-auth invite preview: sent INSTEAD of Authenticate after the
     /// Challenge. Valid-code-gated; the connection is throwaway.
     GetInvitePreview { code: String },
+    /// Pre-auth: sent INSTEAD of Authenticate after the Challenge. Asks for the newest hosting term this
+    /// server holds; answered with [`ServerFrame::HostTerm`] and the connection ends. A host asking its
+    /// copies uses this (it is not a member of the copy). The term is owner-signed and meant to be
+    /// relayed, so anyone may read it; whoever asks must verify it. Appended last.
+    GetHostTerm,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -840,6 +845,13 @@ pub enum ServerRequest {
     /// (that is a promotion, which only `PromoteToHost` does). Also answered by a read-only copy.
     /// Answered with `Ok` or `Error`. Appended last.
     NotifyHostTerm { term: farder_crypto::host_term::HostTerm },
+    /// OWNER or a replica (the same permission as `SnapshotBegin`): "a read-only copy of this folder can
+    /// be reached at `address` (`host:port`)". The host keeps the newest 8 in its database
+    /// (`server_settings.known_copies`) and asks them for a newer hosting term on start and every 10
+    /// minutes. It WRITES, so it is not in [`ServerRequest::is_read_only`]. A server that does not know
+    /// this request answers with an error, which a replica must tolerate. Answered with `Ok` or
+    /// `Error`. Appended last.
+    AnnounceCopy { address: String },
 }
 
 impl ServerRequest {
@@ -878,6 +890,9 @@ pub enum ServerFrame {
     InvitePreview { server_name: String, member_count: u32, online_count: u32 },
     /// Uniform for invalid/expired/exhausted codes — reveals nothing.
     InvitePreviewError { reason: String },
+    /// Answer to the pre-auth [`ClientFrame::GetHostTerm`]: the newest term held, `None` = original host.
+    /// Appended last.
+    HostTerm { term: Option<farder_crypto::host_term::HostTerm> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

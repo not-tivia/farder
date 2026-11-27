@@ -532,6 +532,17 @@ pub(crate) async fn authenticate(
             }
             anyhow::bail!("served invite preview (throwaway connection, not an auth failure)");
         }
+        ClientFrame::GetHostTerm => {
+            // Pre-auth, for a host asking its copies whether it was replaced. The term is owner-signed
+            // and meant to be relayed; the asker verifies it. Throwaway connection, like the preview.
+            let term = {
+                let conn_db = state.db.lock().unwrap();
+                crate::promotion::stored_term(&conn_db)?
+            };
+            send_server_frame(send, &ServerFrame::HostTerm { term }).await?;
+            flush_refusal(send).await;
+            anyhow::bail!("served a hosting term (throwaway connection, not an auth failure)");
+        }
         _ => {
             let _ = send_server_frame(
                 send,

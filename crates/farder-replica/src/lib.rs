@@ -129,6 +129,23 @@ impl Session {
         }
     }
 
+    /// Tell the host where a read-only copy of this folder can be reached (`AnnounceCopy`), so a host that
+    /// comes back after being replaced can ask it for the newer term. NEVER fails the pull: a host that
+    /// does not know the request (older server) or refuses it answers with an error, or drops the
+    /// connection; either is logged once per process (`warned`) and the replica carries on.
+    pub async fn announce_copy(&mut self, address: &str, warned: &mut bool) {
+        let why = match self.ask(ServerRequest::AnnounceCopy { address: address.to_string() }).await {
+            Ok(ServerResponse::Ok) => return,
+            Ok(ServerResponse::Error { reason }) => reason,
+            Ok(other) => format!("unexpected {other:?}"),
+            Err(e) => format!("{e:#}"),
+        };
+        if !*warned {
+            *warned = true;
+            eprintln!("could not announce this copy's address to the host ({why}); the copy itself is fine");
+        }
+    }
+
     /// The underlying QUIC connection (tests use it to upload a file on its own stream).
     pub fn connection(&self) -> &quinn::Connection { &self.conn }
 
