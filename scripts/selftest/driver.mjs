@@ -153,7 +153,8 @@ async function unlock(c) {
   const p = c.page;
   await p.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 60000 });
   await p.locator('input[aria-label="PIN entry"]').first().fill(PIN);
-  await p.getByText("general").first().waitFor({ timeout: 90000 });
+  // ANY visible "general": in the small layout the full sidebar's copy is hidden and comes first.
+  await p.waitForFunction(() => [...document.querySelectorAll(".channel-item")].some((e) => e.innerText.includes("general") && e.getBoundingClientRect().width > 0), null, { timeout: 90000 });
 }
 
 // Run AFTER `core`, with both windows quit and started again WITHOUT -Fresh:
@@ -1891,6 +1892,18 @@ async function smallwin() {
     const ps = `Add-Type -Name W -Namespace U -MemberDefinition '[DllImport("user32.dll")] public static extern bool MoveWindow(System.IntPtr h, int x, int y, int w, int g, bool r);'; $p = Get-Process -Id ${pid}; [U.W]::MoveWindow($p.MainWindowHandle, 40, 40, ${w}, ${h}, $true) | Out-Null`;
     execFileSync("powershell.exe", ["-NoProfile", "-Command", ps]);
   };
+  // The smallest size Windows lets a person DRAG the window to (WM_GETMINMAXINFO's ptMinTrackSize, screen
+  // pixels, frame included). A program moving the window is not held to it, so that is what we ask for.
+  const minTrack = async () => {
+    const { execFileSync } = await import("node:child_process");
+    const pathMod = await import("node:path");
+    const pid = fs.readFileSync(pathMod.join(pathMod.dirname(process.env.STATE || "selftest-state.json"), "pids.txt"), "utf8").trim().split(/\s+/)[0];
+    const cs = 'using System; using System.Runtime.InteropServices; public static class M { [StructLayout(LayoutKind.Sequential)] public struct P { public int x; public int y; } [StructLayout(LayoutKind.Sequential)] public struct I { public P a; public P b; public P c; public P minT; public P maxT; } [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, ref I l); public static string Get(IntPtr h) { I i = new I(); SendMessage(h, 0x24, IntPtr.Zero, ref i); return i.minT.x + "x" + i.minT.y; } }';
+    const ps = `Add-Type -TypeDefinition '${cs}'; [M]::Get((Get-Process -Id ${pid}).MainWindowHandle)`;
+    const out = execFileSync("powershell.exe", ["-NoProfile", "-Command", ps]).toString().trim();
+    const [w, h] = out.split("x").map(Number);
+    return { w, h };
+  };
   const settle = () => new Promise((r) => setTimeout(r, 1200));
   // A second channel, and B's direct message to A, so the list has both kinds and something to be unread.
   await check("setup: a second channel, so there is somewhere to be unread", async () => {
@@ -1958,11 +1971,14 @@ async function smallwin() {
     await seesText(B, `${tag} from the small window`, 20000);
   });
   await check("the window cannot be made smaller than about 380x280, and at that size the chat header and message box fit", async () => {
-    await resize(200, 150);
+    const min = await minTrack();
+    const dpr = await A.page.evaluate(() => window.devicePixelRatio);
+    // Allow for the frame and title bar: the INSIDE must still be about 380x280 logical.
+    if (!(min.w / dpr >= 380 && min.h / dpr >= 280)) throw new Error(`Windows lets the window be dragged down to ${min.w}x${min.h} screen px (scale ${dpr})`);
+    await resize(min.w, min.h);
     await settle();
     const w = await win();
     await shot(A.page, "small-window-minimum");
-    if (w.w < 360 || w.h < 260) throw new Error(`window went down to ${w.w}x${w.h}`);
     const cut = await A.page.evaluate(() => {
       const bad = [];
       for (const sel of [".channel-header", ".message-input-textwrap textarea"]) {
@@ -1974,7 +1990,7 @@ async function smallwin() {
       return bad;
     });
     if (cut.length) throw new Error("cut off at the minimum: " + cut.join("; "));
-    return `smallest ${w.w}x${w.h}`;
+    return `drag minimum ${min.w}x${min.h} screen px, inside ${w.w}x${w.h}`;
   });
   await check("Full window brings the window and everything back", async () => {
     if (await A.page.locator(".phone-back").isVisible().catch(() => false)) await A.page.locator(".phone-back").click();
