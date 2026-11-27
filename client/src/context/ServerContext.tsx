@@ -2,6 +2,7 @@ import React, { createContext, useContext, useReducer, ReactNode } from "react";
 import type { ChannelInfo, CategoryInfo, RoleInfo, MemberInfo, MessageInfo, ConnectResult, DmEntry, ServerListEntry, Presence, PollInfo, GiveawayInfo, EventInfo, ServerInfoV2, MlsControlEventInfo, MlsChannelStateInfo, SealedDecryptEntry, SealedAttachmentRef, OwnSealedSend } from "../lib/types";
 import { publicKeyToString, flattenChannelInfoV2 } from "../lib/types";
 import type { NoticeRow } from "../lib/tauri-bridge";
+import { markChannelSeen } from "../lib/buddy";
 
 export interface PerServerState {
   serverName: string;
@@ -258,11 +259,10 @@ function perServerReducer(state: PerServerState, action: AppAction): PerServerSt
         ),
       };
     case "SELECT_CHANNEL": {
-      const chMsgs = state.messages[action.payload] ?? [];
-      const latestId = chMsgs.length > 0 ? Math.max(...chMsgs.map((m) => m.id)) : 0;
-      const newReadState = latestId > 0
-        ? { ...state.readState, [action.payload]: latestId }
-        : state.readState;
+      // Both the channel being left (what arrived while it was on screen was read) and
+      // the one being opened count as read up to their newest loaded message.
+      const left = markChannelSeen(state.readState, state.messages, state.currentChannelId);
+      const newReadState = markChannelSeen(left, state.messages, action.payload);
       return { ...state, currentChannelId: action.payload, threadChannelId: null, readState: newReadState };
     }
     case "HIGHLIGHT_MESSAGE":
@@ -752,8 +752,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, serverList, servers, activeServerId };
     }
 
-    case "SET_ACTIVE_SERVER":
-      return { ...state, activeServerId: action.serverId };
+    case "SET_ACTIVE_SERVER": {
+      // Leaving a server: what arrived in its open channel while it was on screen was read.
+      const prev = state.activeServerId;
+      const left = prev && prev !== action.serverId ? state.servers[prev] : undefined;
+      if (!left) return { ...state, activeServerId: action.serverId };
+      const readState = markChannelSeen(left.readState, left.messages, left.currentChannelId);
+      const servers = readState === left.readState ? state.servers : { ...state.servers, [prev!]: { ...left, readState } };
+      return { ...state, activeServerId: action.serverId, servers };
+    }
 
     case "UPDATE_SERVER_LIST":
       return { ...state, serverList: action.payload };

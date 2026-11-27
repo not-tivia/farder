@@ -39,11 +39,19 @@ The list itself reuses the sidebar classes (`channel-sidebar`, `channel-item`...
 - **Encrypted messages** show their decrypted text from `sealedDecrypts`, or a note
   if not yet decrypted / undecryptable. Nothing is ever decrypted here.
 - **Text only in memory, no network.** Attachments appear as `[file: name]`.
+- **Unread** counts other people's messages newer than the channel's read mark. Only
+  the channel open in the main window, on the server on screen, counts as being read
+  (`buildBuddyState(..., activeServerId)`); another server's last-opened channel does
+  not. Leaving a channel or a server marks what arrived while it was on screen as read
+  (`markChannelSeen`, used by the `SELECT_CHANNEL` / `SET_ACTIVE_SERVER` reducers).
 - **Idle cost:** `useSmallWindows` only builds text for windows that are open.
 - Normal OS title bars and normal focus (unlike the pop-up and the strip, these are
   ordinary windows you type in).
 
 ## Untested on a real display
 
-Window sizing, the look, double-click, focus and the live updates are checked by
-unit tests of the pure parts only; see `docs/testing/2026-11-07-features-checklist.md` Part 11.
+Window sizing, the look, double-click and focus are checked by unit tests of the pure
+parts only; see `docs/testing/2026-11-07-features-checklist.md` Part 11. Checked in the two
+apps: the selftest `buddy` and `dm` scenarios (the server on screen), and
+`ubuntu-suite.sh chatother` (a second server that is NOT on screen: unread count, opening,
+sending, live lines, and read lines not coming back as unread).

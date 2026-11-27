@@ -40,7 +40,7 @@ token_of() { grep -o "token instead: [0-9a-f]*" "$1" | awk '{print $3}'; }
 
 start_direct() { # start_direct <port> <dir> [extra args]
   local port=$1 dir=$2; shift 2
-  setsid nohup "$BIN" --bind 0.0.0.0:$port --name "Ubuntu Server" --db "$dir/u.db" --storage-dir "$dir/files" --data-dir "$dir/sd" "$@" > "$dir/server.log" 2>&1 &
+  setsid nohup "$BIN" --bind 0.0.0.0:$port --name "${SRV_NAME:-Ubuntu Server}" --db "$dir/u.db" --storage-dir "$dir/files" --data-dir "$dir/sd" "$@" > "$dir/server.log" 2>&1 &
   wait_for "$dir/server.log" "Server listening"; sleep 1
 }
 
@@ -198,6 +198,18 @@ suite_only() {  # claim + chat, then ONE scenario: ubuntu-suite.sh only <scenari
   pkill -x farder-server
 }
 
+suite_chatother() {  # buddy list + chat window for a server that is not on screen
+  local D="$TMP/co1" D2="$TMP/co2"; rm -rf "$D" "$D2"; mkdir -p "$D" "$D2"; pkill -x farder-server
+  fresh_pair
+  start_direct 4581 "$D"
+  SRV_NAME="Second Server" start_direct 4582 "$D2"
+  export UBU_LINK=
+  echo "== first server"; UBU_ADDR="$WSLIP:4581" UBU_TOKEN="$(token_of "$D/server.log")" UBU_NAME="Ubuntu Server" winrun ubuntu
+  echo "== second server"; UBU_ADDR="$WSLIP:4582" UBU_TOKEN="$(token_of "$D2/server.log")" UBU_NAME="Second Server" winrun ubuntu
+  echo "== chat window for the server not on screen"; UBU_NAME="Second Server" winrun chat-other
+  pkill -x farder-server
+}
+
 suite_ui() {  # layout features measured in the real apps
   local D="$TMP/ui" PORT=4579; rm -rf "$D"; mkdir -p "$D"; pkill -x farder-server
   fresh_pair
@@ -279,6 +291,7 @@ case "${1:-all}" in
   e2ee) suite_e2ee ;;
   promote) suite_promote ;;
   ui) suite_ui ;;
+  chatother) suite_chatother ;;
   only) suite_only "$2" ;;
   guestlink) suite_guestlink ;;
   reset) suite_reset ;;
@@ -286,6 +299,6 @@ case "${1:-all}" in
   relay) suite_relay ;;
   recovery) suite_recovery ;;
   all) suite_restore; suite_relay; suite_recovery; suite_reset ;;
-  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|e2ee|ui|all]"; exit 2 ;;
+  *) echo "usage: $0 [restore|relay|recovery|reset|guestlink|brake|failover|e2ee|promote|ui|chatother|only <scenario>|all]"; exit 2 ;;
 esac
 echo FINISHED

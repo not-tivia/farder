@@ -38,8 +38,28 @@ test("unread counts other people's newer messages only, and not the channel bein
   const by = Object.fromEntries(s.entries.map((e) => [e.label, e.unread]));
   assert.equal(by.Mara, 2);      // both DM messages are unread
   assert.equal(by.general, 1);   // message 2 is mine, 1 is read, 3 is new
-  const viewing = b.buildBuddyState({ a: view({ currentChannelId: 10 }) }, ["a"], hex(1));
+  const viewing = b.buildBuddyState({ a: view({ currentChannelId: 10 }) }, ["a"], hex(1), "a");
   assert.equal(viewing.entries.find((e) => e.label === "Mara").unread, 0);
+});
+
+test("another server's last-opened channel is not on screen, so its new messages count", () => {
+  // The bug: a server left on #general kept every later #general message at 0 unread.
+  const servers = { a: view(), b: view({ serverName: "Other", currentChannelId: 1 }) };
+  const s = b.buildBuddyState(servers, ["a", "b"], hex(1), "a");
+  const other = s.entries.find((e) => e.server_id === "b" && e.label === "general");
+  assert.equal(other.unread, 1);
+  // ...but once that server is the one on screen, its open channel is being read.
+  const s2 = b.buildBuddyState(servers, ["a", "b"], hex(1), "b");
+  assert.equal(s2.entries.find((e) => e.server_id === "b" && e.label === "general").unread, 0);
+});
+
+test("leaving a channel marks what arrived while it was on screen as read, never backwards", () => {
+  const msgs = { 1: [msg(1, 1, MARA, "a"), msg(7, 1, MARA, "b")], 2: [] };
+  assert.deepEqual(b.markChannelSeen({ 1: 1 }, msgs, 1), { 1: 7 });
+  const rs = { 1: 9 };
+  assert.equal(b.markChannelSeen(rs, msgs, 1), rs);          // already further: unchanged object
+  assert.equal(b.markChannelSeen(rs, msgs, 2), rs);          // nothing loaded
+  assert.equal(b.markChannelSeen(rs, msgs, null), rs);       // no channel open
 });
 
 test("unread stops at 99", () => {

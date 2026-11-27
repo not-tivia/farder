@@ -46,8 +46,10 @@ export interface BuddyState {
   entries: BuddyEntry[];
 }
 
-function unreadCount(view: ServerView, channelId: number, ownPk: string | null): number {
-  if (channelId === view.currentChannelId) return 0;
+/** `viewing`: this server is the one on screen in the main window, so its current
+ *  channel is being read. Another server's last-opened channel is NOT on screen. */
+function unreadCount(view: ServerView, channelId: number, ownPk: string | null, viewing: boolean): number {
+  if (viewing && channelId === view.currentChannelId) return 0;
   const seen = view.readState[channelId] ?? 0;
   let n = 0;
   for (const m of view.messages[channelId] ?? []) {
@@ -56,12 +58,27 @@ function unreadCount(view: ServerView, channelId: number, ownPk: string | null):
   return Math.min(n, UNREAD_CAP);
 }
 
+/** The read marks after the user stops looking at `channelId` (or starts): everything
+ *  loaded in it so far counts as read. Messages that arrive WHILE a channel is on screen
+ *  are read, but nothing else marks them, so without this they came back as unread
+ *  once the user moved to another channel or server. Never moves a mark backwards. */
+export function markChannelSeen(
+  readState: Record<number, number>,
+  messages: Record<number, { id: number }[]>,
+  channelId: number | null,
+): Record<number, number> {
+  if (channelId === null) return readState;
+  const latest = (messages[channelId] ?? []).reduce((m, x) => Math.max(m, x.id), 0);
+  if (latest <= (readState[channelId] ?? 0)) return readState;
+  return { ...readState, [channelId]: latest };
+}
+
 function lastId(view: ServerView, channelId: number): number {
   return (view.messages[channelId] ?? []).reduce((m, x) => Math.max(m, x.id), 0);
 }
 
 /** Every person (direct message) and text channel across the connected servers. */
-export function buildBuddyState(servers: Record<string, ServerView>, order: string[], ownPk: string | null): BuddyState {
+export function buildBuddyState(servers: Record<string, ServerView>, order: string[], ownPk: string | null, activeServerId: string | null = null): BuddyState {
   const people: (BuddyEntry & { last: number })[] = [];
   const channels: BuddyEntry[] = [];
   for (const sid of order) {
@@ -74,7 +91,7 @@ export function buildBuddyState(servers: Record<string, ServerView>, order: stri
         label: memberDisplayName(dm.participant.display_name),
         kind: "person",
         server_name: v.serverName,
-        unread: unreadCount(v, dm.channel.id, ownPk),
+        unread: unreadCount(v, dm.channel.id, ownPk, sid === activeServerId),
         encrypted: false,
         last: lastId(v, dm.channel.id),
       });
@@ -87,7 +104,7 @@ export function buildBuddyState(servers: Record<string, ServerView>, order: stri
         label: ch.name,
         kind: "channel",
         server_name: v.serverName,
-        unread: unreadCount(v, ch.id, ownPk),
+        unread: unreadCount(v, ch.id, ownPk, sid === activeServerId),
         encrypted: (ch.class ?? "Plaintext") === "E2ee",
       });
     }

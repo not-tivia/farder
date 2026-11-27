@@ -50,7 +50,7 @@ export function useSmallWindows(): void {
     const own = await getOwnPk();
     // The buddy list.
     if (await exists("buddy")) {
-      const bs = buildBuddyState(st.servers, st.serverList.map((s) => s.id), own);
+      const bs = buildBuddyState(st.servers, st.serverList.map((s) => s.id), own, st.activeServerId);
       const json = JSON.stringify(bs);
       if (lastSent.current.get("buddy") !== json) {
         lastSent.current.set("buddy", json);
