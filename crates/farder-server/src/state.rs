@@ -132,6 +132,9 @@ pub struct ServerState {
     /// This machine's own host identity: the 32-byte id in `<data_dir>/server_id` (the only stable
     /// identity a server has; its TLS certificate is regenerated on every start). A `HostTerm` is
     /// accepted only if its `host_key` equals this. `None` in unit tests that never set it.
+    /// Set when this server learned (`NotifyHostTerm`) that a newer term moved the host elsewhere:
+    /// the new host's addresses, joined for the refusal message. `None` otherwise.
+    pub moved_to: std::sync::Mutex<Option<String>>,
     pub host_identity: std::sync::Mutex<Option<[u8; 32]>>,
 
     /// Run when a read-only copy becomes the host, to start the background jobs a copy does not run
@@ -171,6 +174,7 @@ impl ServerState {
             brake: crate::brake::Brake::default(),
             snapshots: crate::snapshot::Snapshots::default(),
             read_only: std::sync::atomic::AtomicBool::new(false),
+            moved_to: std::sync::Mutex::new(None),
             host_identity: std::sync::Mutex::new(None),
             on_promoted: std::sync::Mutex::new(None),
         }

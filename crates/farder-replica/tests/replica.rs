@@ -429,3 +429,77 @@ async fn the_owner_promotes_a_read_only_copy_to_the_writable_host_and_it_stays_p
     assert!(matches!(m.ask(ServerRequest::GetHostTerm).await.unwrap(), ServerResponse::HostTerm { term: Some(t) } if t == t1), "the stored term is unchanged");
     let _ = child.kill(); let _ = child.wait();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Promotion, step 2: a replaced host learns the newer term from any member (NotifyHostTerm).
+// ---------------------------------------------------------------------------------------------
+
+async fn notify_refused(s: &mut Session, term: farder_crypto::host_term::HostTerm, expect: &str) {
+    match s.ask(ServerRequest::NotifyHostTerm { term }).await.unwrap() {
+        ServerResponse::Error { reason } => assert!(reason.contains(expect), "wanted a reason containing {expect:?}, got {reason:?}"),
+        other => panic!("the notice must be refused ({expect}), got {other:?}"),
+    }
+}
+
+async fn send(s: &mut Session, general: u64, text: &str) -> ServerResponse {
+    s.ask(ServerRequest::SendMessage { channel_id: general, content: text.into(), reply_to: None, attachment_ids: vec![] }).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_replaced_host_learns_the_newer_term_from_a_member_and_goes_read_only() {
+    use farder_crypto::host_term::HostTerm;
+    let Seeded { srv, owner, mut o, sid, code } = seeded().await;
+    let host_data = srv._dir.path().join("sd");
+    let host_id = identity_of(&host_data);
+    let work = tempfile::tempdir().unwrap();
+    let (rkey, _) = load_or_create_key(&work.path().join("replica.key")).unwrap();
+    let mut r = Session::connect(srv.addr, None, &rkey, Some(code.clone()), None).await.unwrap();
+    r.join_history(&rkey, &code).await.unwrap();
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let out = work.path().join("copies");
+    pull_once(&mut r, &out).await.unwrap();
+    let db = out.join("latest.db");
+    let ServerResponse::ServerInfo { channels, .. } = o.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+
+    // The copy is promoted with term 1 (as in #26). The old host keeps running, unaware.
+    let data = work.path().join("copy-data");
+    let (mut child, addr, _log) = start_at(&db, &data, true).await;
+    let me = identity_of(&data);
+    let mut c = Session::connect(addr, None, &owner, None, None).await.unwrap();
+    let t1 = HostTerm::sign(&owner, sid.clone(), 1, me, vec!["127.0.0.1:4433".into()], head_of(&db), now_secs());
+    assert!(matches!(c.ask(ServerRequest::PromoteToHost { term: t1.clone() }).await.unwrap(), ServerResponse::Ok));
+    assert!(matches!(send(&mut r, general, "old host still writes (nobody told it)").await, ServerResponse::MessageSent { .. }));
+
+    // Refused, and the old host keeps writing.
+    let stranger = Keypair::generate();
+    notify_refused(&mut r, HostTerm::sign(&stranger, sid.clone(), 1, me, vec![], "h".into(), now_secs()), "not signed by the owner").await;
+    notify_refused(&mut r, HostTerm::sign(&owner, "someone-else".into(), 1, me, vec![], "h".into(), now_secs()), "different server").await;
+    notify_refused(&mut r, HostTerm::sign(&owner, sid.clone(), 1, host_id, vec![], "h".into(), now_secs()), "PromoteToHost").await;
+    assert!(matches!(send(&mut r, general, "still the host").await, ServerResponse::MessageSent { .. }), "refused notices must not stop writes");
+    assert!(matches!(r.ask(ServerRequest::GetHostTerm).await.unwrap(), ServerResponse::HostTerm { term: None }));
+
+    // A plain member carries the real term: accepted, then writes are refused.
+    assert!(matches!(r.ask(ServerRequest::NotifyHostTerm { term: t1.clone() }).await.unwrap(), ServerResponse::Ok));
+    match send(&mut r, general, "after the notice").await {
+        ServerResponse::Error { reason } => assert_eq!(reason, "this server moved to a new host (127.0.0.1:4433)"),
+        other => panic!("the replaced host must refuse writes: {other:?}"),
+    }
+    assert!(matches!(r.ask(ServerRequest::GetHostTerm).await.unwrap(), ServerResponse::HostTerm { term: Some(t) } if t == t1));
+    // Same term again is not higher: refused. Reads still work.
+    notify_refused(&mut r, t1.clone(), "not higher").await;
+    assert!(matches!(r.ask(ServerRequest::GetServerInfo).await.unwrap(), ServerResponse::ServerInfo { .. }));
+
+    // It stays read-only after a restart.
+    let host_db = srv._dir.path().join("s.db");
+    drop(o); drop(r); drop(c);
+    let _ = child.kill(); let _ = child.wait();
+    let mut srv = srv;
+    let _ = srv.child.kill(); let _ = srv.child.wait();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (mut child2, addr2, _l) = start_at(&host_db, &host_data, false).await;
+    let mut m = Session::connect(addr2, None, &rkey, None, None).await.unwrap();
+    assert!(matches!(m.ask(ServerRequest::GetHostTerm).await.unwrap(), ServerResponse::HostTerm { term: Some(t) } if t == t1));
+    assert!(matches!(send(&mut m, general, "after restart").await, ServerResponse::Error { .. }), "stays read-only after a restart");
+    let _ = child2.kill(); let _ = child2.wait();
+}
