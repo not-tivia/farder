@@ -1262,15 +1262,18 @@ mod tests {
     ///   `ChannelInfo`/`MessageInfo`.
     #[test]
     fn existing_variants_are_byte_stable_after_the_additions() {
+        // These pin the OLD positional bytes (`rmp_serde::to_vec`) that deployed
+        // peers emit; `codec::decode` must keep reading them. The live encoder is
+        // `codec::encode` (named maps) and is covered by the compat tests below.
         let cases: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
             (
                 "ServerRequest::GetServerInfo",
-                codec::encode(&ServerRequest::GetServerInfo).unwrap(),
+                rmp_serde::to_vec(&ServerRequest::GetServerInfo).unwrap(),
                 vec![173, 71, 101, 116, 83, 101, 114, 118, 101, 114, 73, 110, 102, 111],
             ),
             (
                 "ServerRequest::FetchHistory",
-                codec::encode(&ServerRequest::FetchHistory {
+                rmp_serde::to_vec(&ServerRequest::FetchHistory {
                     channel_id: 7,
                     before_id: None,
                     limit: 50,
@@ -1280,7 +1283,7 @@ mod tests {
             ),
             (
                 "ServerRequest::EditEvent (the last shipped variant)",
-                codec::encode(&ServerRequest::EditEvent {
+                rmp_serde::to_vec(&ServerRequest::EditEvent {
                     event_id: 3,
                     title: "t".to_string(),
                     description: None,
@@ -1293,22 +1296,22 @@ mod tests {
             ),
             (
                 "ServerResponse::Ok",
-                codec::encode(&ServerResponse::Ok).unwrap(),
+                rmp_serde::to_vec(&ServerResponse::Ok).unwrap(),
                 vec![162, 79, 107],
             ),
             (
                 "ServerResponse::MessageSent",
-                codec::encode(&ServerResponse::MessageSent { id: 4, timestamp: 5 }).unwrap(),
+                rmp_serde::to_vec(&ServerResponse::MessageSent { id: 4, timestamp: 5 }).unwrap(),
                 vec![129, 171, 77, 101, 115, 115, 97, 103, 101, 83, 101, 110, 116, 146, 4, 5],
             ),
             (
                 "ServerResponse::Notice",
-                codec::encode(&ServerResponse::Notice { text: "n".to_string() }).unwrap(),
+                rmp_serde::to_vec(&ServerResponse::Notice { text: "n".to_string() }).unwrap(),
                 vec![129, 166, 78, 111, 116, 105, 99, 101, 145, 161, 110],
             ),
             (
                 "ServerEvent::MessageDeleted",
-                codec::encode(&ServerEvent::MessageDeleted { message_id: 1, channel_id: 2 })
+                rmp_serde::to_vec(&ServerEvent::MessageDeleted { message_id: 1, channel_id: 2 })
                     .unwrap(),
                 vec![129, 174, 77, 101, 115, 115, 97, 103, 101, 68, 101, 108, 101, 116, 101, 100, 146, 1, 2],
             ),
@@ -1906,5 +1909,114 @@ mod tests {
         assert_eq!(decoded.attachments.len(), 1);
         assert_eq!(decoded.attachments[0].file_id, 42);
         assert_eq!(decoded.attachments[0].name, "document.pdf");
+    }
+
+    // ---- real-codec compatibility (named-map encoding; see docs/modules/protocol.md) ----
+
+    fn sample_message(content: &str) -> MessageInfo {
+        MessageInfo {
+            id: 1,
+            channel_id: 2,
+            author: Keypair::generate().public_key(),
+            content: content.to_string(),
+            timestamp: 3,
+            edited_at: None,
+            reply_to: None,
+            pinned: false,
+            attachments: vec![],
+            reactions: vec![],
+            thread_id: None,
+            thread_message_count: None,
+            author_name_override: None,
+            author_badge: None,
+            widget: Some("w".to_string()),
+            garble: None,
+            event_hash: None,
+        }
+    }
+
+    /// `MessageInfo` as it was before `widget` and `garble` were appended.
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct OldMessageInfo {
+        id: u64,
+        channel_id: u64,
+        author: farder_crypto::identity::PublicKey,
+        content: String,
+        timestamp: u64,
+        edited_at: Option<u64>,
+        reply_to: Option<u64>,
+        pinned: bool,
+        attachments: Vec<AttachmentInfo>,
+        reactions: Vec<ReactionGroup>,
+        thread_id: Option<u64>,
+        thread_message_count: Option<u32>,
+        #[serde(default)]
+        author_name_override: Option<String>,
+        #[serde(default)]
+        author_badge: Option<String>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    enum OldEvent {
+        NewMessage { message: OldMessageInfo },
+    }
+
+    #[test]
+    fn old_positional_bytes_decode_into_current_message_info() {
+        let m = sample_message("old");
+        let old = OldMessageInfo {
+            id: m.id, channel_id: m.channel_id, author: m.author.clone(), content: m.content.clone(),
+            timestamp: m.timestamp, edited_at: None, reply_to: None, pinned: false,
+            attachments: vec![], reactions: vec![], thread_id: None, thread_message_count: None,
+            author_name_override: None, author_badge: None,
+        };
+        let bytes = rmp_serde::to_vec(&old).unwrap(); // what a deployed peer sent
+        let back: MessageInfo = codec::decode(&bytes).unwrap();
+        assert_eq!(back.content, "old");
+        assert_eq!(back.widget, None);
+        assert_eq!(back.garble, None);
+    }
+
+    #[test]
+    fn current_encoder_output_decodes_into_older_message_info() {
+        let m = sample_message("new");
+        let bytes = codec::encode(&m).unwrap();
+        let old: OldMessageInfo = codec::decode(&bytes).unwrap();
+        assert_eq!(old.content, "new");
+        assert_eq!(old.id, 1);
+    }
+
+    #[test]
+    fn message_info_crosses_server_event_and_frame_both_ways() {
+        let m = sample_message("framed");
+        // New encoder -> old reader, through an enum variant.
+        let bytes = codec::encode(&ServerEvent::NewMessage { message: m.clone() }).unwrap();
+        let OldEvent::NewMessage { message } = codec::decode(&bytes).unwrap();
+        assert_eq!(message.content, "framed");
+        // ...and through the full ServerFrame.
+        let frame = codec::encode(&ServerFrame::Event(ServerEvent::NewMessage { message: m })).unwrap();
+        let ServerFrame::Event(ServerEvent::NewMessage { message }) = codec::decode(&frame).unwrap() else { panic!() };
+        assert_eq!(message.widget.as_deref(), Some("w"));
+        // Old positional event -> current reader.
+        let old = OldEvent::NewMessage { message: OldMessageInfo {
+            id: 9, channel_id: 2, author: Keypair::generate().public_key(), content: "o".into(),
+            timestamp: 1, edited_at: None, reply_to: None, pinned: false, attachments: vec![],
+            reactions: vec![], thread_id: None, thread_message_count: None,
+            author_name_override: None, author_badge: None } };
+        let ServerEvent::NewMessage { message } = codec::decode(&rmp_serde::to_vec(&old).unwrap()).unwrap() else { panic!() };
+        assert_eq!((message.id, message.widget, message.garble), (9, None, None));
+    }
+
+    /// Named maps are bigger than positional arrays; confirm a worst-case history
+    /// page still sits far under the 16 MiB frame cap (server + client connection.rs).
+    #[test]
+    fn named_history_page_fits_the_frame_cap() {
+        let mut m = sample_message(&"x".repeat(4000));
+        m.attachments = vec![];
+        let page = ServerFrame::Response { request_id: 1, body: ServerResponse::History { messages: vec![m; 100] } };
+        let named = codec::encode(&page).unwrap().len();
+        let positional = rmp_serde::to_vec(&page).unwrap().len();
+        eprintln!("100x4000-char history page: named={named} positional={positional}");
+        assert!(named < 16 * 1024 * 1024 / 8, "named page is {named} bytes");
     }
 }
