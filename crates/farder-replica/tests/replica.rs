@@ -406,6 +406,20 @@ async fn the_owner_promotes_a_read_only_copy_to_the_writable_host_and_it_stays_p
     assert_eq!(held, t1, "same term after restart");
     let sent = m.ask(ServerRequest::SendMessage { channel_id: general, content: "written after restart".into(), reply_to: None, attachment_ids: vec![] }).await.unwrap();
     assert!(matches!(sent, ServerResponse::MessageSent { .. }), "still writable after restart: {sent:?}");
+    // The replica must NEVER pull over a promoted copy (#28): the pull is refused before anything is
+    // downloaded, and what the promoted host wrote is still there.
+    assert_eq!(farder_replica::held_term(&db), Some(1));
+    let mut r2 = Session::connect(addr, None, &rkey, None, None).await.unwrap();
+    match pull_once(&mut r2, &out).await {
+        Err(farder_replica::PullError::Promoted(1)) => {}
+        Err(farder_replica::PullError::Promoted(n)) => panic!("refused, but with term {n}"),
+        Err(_) => panic!("refused for the wrong reason"),
+        Ok(_) => panic!("a pull replaced the promoted copy's database"),
+    }
+    let kept: i64 = rusqlite::Connection::open(&db).unwrap()
+        .query_row("SELECT count(*) FROM messages WHERE content = 'written after restart'", [], |r| r.get(0)).unwrap();
+    assert_eq!(kept, 1, "the promoted host's newest message survived the refused pull");
+    drop(r2);
     drop(m);
     let _ = child.kill(); let _ = child.wait();
     tokio::time::sleep(Duration::from_millis(300)).await;
