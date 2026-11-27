@@ -80,6 +80,61 @@ pub fn build_next_event(
     Event::sign(core, device)
 }
 
+/// Adopt `head` (the server's claimed newest event of this device's chain) as the
+/// local chain head, but ONLY if it is genuinely ours and ahead of us. The server's
+/// word is never trusted: the signature is verified against THIS device's key, and
+/// the author, device and log server must all be ours. Returns whether it was adopted.
+pub fn adopt_own_chain_head(actor: &Actor<'_>, chain: &mut ChainState, head: &Event) -> bool {
+    let ours = head.core.author == actor.identity.public_key()
+        && head.core.device == device_id(&actor.device.public_key())
+        && head.core.server_id == actor.log_server_id
+        && head.verify(&actor.device.public_key()).is_ok();
+    // `next_seq` is one past our local head, so "ahead" means seq >= next_seq.
+    if !ours || head.core.seq < chain.next_seq {
+        return false;
+    }
+    chain.advance(head);
+    true
+}
+
+/// Build, sign and submit the next event of this device's chain; if the server
+/// refuses it for a chain reason (our local head is behind the server's, e.g. a
+/// lost acceptance), fetch our own head, adopt it via [`adopt_own_chain_head`],
+/// rebuild + re-sign on it, and submit ONCE more. Never loops; if the head is
+/// missing, forged or not ahead, the ORIGINAL error is returned. On success the
+/// chain is advanced past the accepted event. When the chain was adopted, the
+/// caller must persist `chain` even if the retry fails (it is still correct).
+pub async fn submit_with_chain_recovery<T: crate::transport::E2eeTransport>(
+    transport: &T,
+    actor: &Actor<'_>,
+    chain: &mut ChainState,
+    timestamp: u64,
+    payload: EventPayload,
+) -> Result<(Event, crate::transport::EventAccepted), crate::transport::TransportError> {
+    let event = build_next_event(actor.device, actor.identity, actor.log_server_id, chain, timestamp, payload.clone());
+    let first_err = match transport.submit_event(&event).await {
+        Ok(accepted) => {
+            chain.advance(&event);
+            return Ok((event, accepted));
+        }
+        Err(e) => e,
+    };
+    if !first_err.is_chain_refused() {
+        return Err(first_err);
+    }
+    let device = device_id(&actor.device.public_key());
+    let Ok(Some(head)) = transport.fetch_own_chain_head(&device).await else {
+        return Err(first_err);
+    };
+    if !adopt_own_chain_head(actor, chain, &head) {
+        return Err(first_err);
+    }
+    let retry = build_next_event(actor.device, actor.identity, actor.log_server_id, chain, timestamp, payload);
+    let accepted = transport.submit_event(&retry).await?;
+    chain.advance(&retry);
+    Ok((retry, accepted))
+}
+
 /// The device wall-clock now, in unix seconds — the untrusted `core.timestamp`
 /// claim every event carries (ingest bounds it to 300 s ahead of server time).
 pub fn event_now_secs() -> u64 {
