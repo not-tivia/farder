@@ -246,6 +246,37 @@ pub fn restore_backup(backup: &Path, db_path: &Path, storage_dir: &Path, data_di
     Ok(manifest)
 }
 
+/// Automatic backups: one right away, then one every `every`, pruned to `keep` (minimum 1).
+/// The task uses its OWN database connection (SQLite lets readers and the writer work side by
+/// side), so a backup never makes the server wait. Failures are logged and the loop goes on.
+pub fn spawn_backup_task(
+    db_path: String,
+    storage_dir: String,
+    data_dir: PathBuf,
+    backup_dir: PathBuf,
+    every: std::time::Duration,
+    keep: usize,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let (d, s, dt, p) = (backup_dir.clone(), storage_dir.clone(), data_dir.clone(), db_path.clone());
+            let r = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+                let conn = crate::db::open_file(&p)?;
+                let made = create_backup(&conn, Path::new(&s), &dt, &d)?;
+                prune(&d, keep)?;
+                Ok(made)
+            })
+            .await;
+            match r {
+                Ok(Ok(made)) => tracing::info!("Backup written to {}", made.display()),
+                Ok(Err(e)) => tracing::warn!("automatic backup failed: {e:#}"),
+                Err(e) => tracing::warn!("automatic backup task failed: {e}"),
+            }
+            tokio::time::sleep(every).await;
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
