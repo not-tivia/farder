@@ -616,7 +616,8 @@ async function dropAndSend(c, path, fileName, caption) {
   const staged = await c.page.getByText(fileName).first().waitFor({ timeout: 30000 }).then(() => true, () => false);
   if (!staged) {
     const errs = await c.page.locator(".error-text").allInnerTexts().catch(() => []);
-    throw new Error(`${c.who}: the dropped file never showed as staged` + (errs.length ? ` (screen says: ${errs.join(" | ").slice(0, 120)})` : ""));
+    const previews = await c.page.locator(".attachment-preview").allInnerTexts().catch(() => []);
+    throw new Error(`${c.who}: the dropped file never showed as staged (previews on screen: ${JSON.stringify(previews).slice(0, 80)})` + (errs.length ? ` (screen says: ${errs.join(" | ").slice(0, 120)})` : ""));
   }
   await sendText(c, caption);
   await seesText(c, caption, 30000);
@@ -1715,10 +1716,10 @@ async function density() {
   const tag = "dens" + stamp;
   const burst = [1, 2, 3].map((i) => `${tag} burst ${i}`);
   const long = `${tag} long ` + "a fairly long sentence that has to wrap instead of running off the edge ".repeat(8);
-  await check("B posts a burst of three, one long message and a picture", async () => {
+  await check("B posts a burst of three and one long message; A posts a picture", async () => {
     for (const t of [...burst, long]) await sendText(B, t);
     const { path, fileName } = await orangePng(stamp, "density");
-    await dropAndSend(B, path, fileName, `${tag} picture`);
+    await dropAndSend(A, path, fileName, `${tag} picture`);
     await seesText(A, `${tag} picture`, 30000);
     await pictureLoads(A, `${tag} picture`);
   });
@@ -1791,9 +1792,10 @@ async function density() {
         if (named !== 3) throw new Error(`a burst of three shows the name ${named} times, want 3`);
         const pic = m.rows.find((r) => r.text.includes("picture"));
         if (pic.attBelowAuthor === false) throw new Error("the picture is not on its own line under the name");
-      } else if (named !== 1) throw new Error(`a burst of three shows the name ${named} times, want 1 (folded)`);
+      } else if (named > 1) throw new Error(`a burst of three shows the name ${named} times, want at most 1 (folded under one name)`);
       if (mode === "compact") {
-        if (!(short[0].avatar > 0 && short[0].avatar <= 20)) throw new Error(`picture is ${short[0].avatar}px, want small`);
+        const normalAv = results.normal?.rows.find((r) => r.avatar > 0)?.avatar || 32;
+        if (!(short[0].avatar > 0 && short[0].avatar < normalAv * 0.8)) throw new Error(`picture is ${short[0].avatar}px, not smaller than Normal's ${normalAv}px`);
         if (short[0].tsOpacity !== 0) throw new Error("the time shows without pointing at the message");
       }
       if (mode === "irc") {

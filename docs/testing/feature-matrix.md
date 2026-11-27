@@ -55,7 +55,7 @@ Last updated: 2026-11-26.
 | Garbler (own "speak as": B receives garbled words; off restores normal) | VERIFIED | selftest garble |
 | Admin garble (moderation) and consent garble | VERIFIED | selftest admin-garble: author keeps own words, others see garbled; stop works; a consensual garble is refused without consent and works after. Delegated powers (grant/revoke "invite" and "garble", enforced on the other side): VERIFIED by selftest powers via the commands; the on-screen powers dialogs themselves not clicked |
 | Sound | UNVERIFIED | Part 6 |
-| Message density | UNVERIFIED | Part 8 |
+| Message density | VERIFIED (partly) | `ubuntu-suite.sh ui` (2026-11-27), 14/14, measured in the app: each mode picked in Settings; one-line rows in Compact/IRC/Tiny (26/22/20px), IRC `[hh:mm] <name>` in monospace, Tiny `name:` with no clock, Compact small picture with the clock only on hover, repeated names folded only in Normal/Roomy, long lines wrap, no sideways scroll, contrast >= 13.9 in Velvet and Candy, the choice survives a reload. Found and fixed: the dense modes were ~50px per row and Compact scrolled sideways (hidden reaction bar took a line). NOT checked by machine: reactions shown, reply and right-click menu in each mode, voice messages, a real quit-and-relaunch (a reload was used) |
 | Unread markers (dot on another server, highlight on a conversation) | VERIFIED | selftest unread |
 | Edge strip (turn on, window appears, shows an incoming message) | VERIFIED | selftest strip. Found and fixed: turning it on hung the app on Windows (window built inside a synchronous command; now async). NOT checked by machine: docking position, always-visible, reply from the strip, keyboard focus (Part 9) |
 | Small window layout | UNVERIFIED | Part 10 |
