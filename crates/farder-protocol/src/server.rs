@@ -822,6 +822,14 @@ pub enum ServerRequest {
     /// re-link its chain. Refused for a device of any other identity. Read-only (also answered by a
     /// read-only copy). Answered with [`ServerResponse::OwnChainHead`]. Appended last.
     GetOwnChainHead { device: farder_crypto::event_log::DeviceId },
+    /// Any member: the current hosting term of this server (see `farder_crypto::host_term`). Answered by
+    /// the host AND by a read-only copy, with [`ServerResponse::HostTerm`]. Appended last.
+    GetHostTerm,
+    /// Send the owner-signed term that makes THIS read-only copy the host. Accepted only by a read-only
+    /// copy, and only if the term verifies against the current owner, names this server and this copy's
+    /// own host key, is higher than any term the copy holds, and continues after the head of the copy's
+    /// log. Answered with `Ok` or `Error`. Appended last.
+    PromoteToHost { term: farder_crypto::host_term::HostTerm },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -985,6 +993,9 @@ pub enum ServerResponse {
     /// Answer to [`ServerRequest::GetOwnChainHead`]: the device's newest accepted event, or `None`
     /// if it has none. The caller must verify the signature itself; the server's word is not trusted.
     OwnChainHead { event: Option<farder_crypto::event_log::Event> },
+    /// Answer to [`ServerRequest::GetHostTerm`]: the newest term this server holds, or `None` for the
+    /// original host (term 0, never signed).
+    HostTerm { term: Option<farder_crypto::host_term::HostTerm> },
 }
 
 /// One accepted event with the server's own bookkeeping, as handed to a copy.

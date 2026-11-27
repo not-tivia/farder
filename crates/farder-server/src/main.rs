@@ -129,10 +129,18 @@ async fn init_server(args: &Args) -> Result<(ServerState, bool)> {
         }
     }
 
-    let name = server_name(&conn, args.name.as_deref(), args.read_only)?;
+    // This machine's own host identity (see `promotion.rs`). A database whose stored hosting term
+    // names ANOTHER machine as host starts read-only even without `--read-only`: it was replaced.
+    let identity = farder_server::relay::load_or_generate_server_id(&args.data_dir)?;
+    let read_only = args.read_only || farder_server::promotion::must_start_read_only(&conn, &identity)?;
+    if read_only && !args.read_only {
+        tracing::warn!("this database holds a hosting term that names another machine as the host, so it starts READ-ONLY");
+    }
+    let name = server_name(&conn, args.name.as_deref(), read_only)?;
     let mut state = ServerState::new(conn, name, args.storage_dir.clone(), args.max_file_size);
     state.recovery_wait_secs = args.recovery_wait_secs;
-    state.read_only = args.read_only;
+    state.read_only.store(read_only, std::sync::atomic::Ordering::SeqCst);
+    *state.host_identity.lock().unwrap() = Some(identity);
     state.brake = farder_server::brake::Brake::new(args.destructive_budget, farder_server::brake::DEFAULT_WINDOW_SECS);
     if args.recovery_wait_secs < 24 * 3600 {
         tracing::warn!(
@@ -265,6 +273,7 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&args.storage_dir)?;
     let state = Arc::new(server_state);
+    let read_only = state.is_read_only();
 
     if first_run {
         let setup_token = auth::generate_setup_token();
@@ -278,7 +287,7 @@ async fn main() -> Result<()> {
     // Automatic backups: one now, then one every --backup-interval seconds. They use their
     // own database connection (SQLite lets readers and the writer work side by side), so a
     // backup never makes the server wait.
-    if let Some(dir) = args.backup_dir.clone().filter(|_| !args.read_only) {
+    if let Some(dir) = args.backup_dir.clone().filter(|_| !read_only) {
         let (db_path, storage, data, keep) = (args.db.clone(), args.storage_dir.clone(), args.data_dir.clone(), args.backup_keep);
         let every = std::time::Duration::from_secs(args.backup_interval.max(60));
         info!("Automatic backups to {} every {} seconds, keeping {}", dir.display(), every.as_secs(), keep.max(1));
@@ -305,9 +314,19 @@ async fn main() -> Result<()> {
     // A read-only copy runs none of the background jobs that write (cleanup, bots, widgets), and SQLite
     // itself is told not to write, which is the guarantee: the copy cannot change.
     let (_retention, _bot_poller, _widget_sweeper);
-    if args.read_only {
+    if read_only {
         state.db.lock().unwrap().pragma_update(None, "query_only", true)?;
         info!("READ-ONLY copy: history and members can be read; nothing can be sent or changed.");
+        // If the owner promotes this copy (`PromoteToHost`), it starts the jobs a writable host runs.
+        let weak = Arc::downgrade(&state);
+        let interval = args.retention_interval;
+        *state.on_promoted.lock().unwrap() = Some(Box::new(move || {
+            if let Some(st) = weak.upgrade() {
+                let _ = retention::spawn_retention_task(Arc::clone(&st), interval);
+                let _ = farder_server::bots::spawn_bot_poll_task(Arc::clone(&st));
+                let _ = farder_server::widgets::spawn_widget_sweeper(st);
+            }
+        }));
     } else {
         _retention = Some(retention::spawn_retention_task(Arc::clone(&state), args.retention_interval));
         _bot_poller = Some(farder_server::bots::spawn_bot_poll_task(Arc::clone(&state)));

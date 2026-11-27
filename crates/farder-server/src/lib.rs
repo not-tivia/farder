@@ -23,6 +23,7 @@ pub mod members;
 pub mod messages;
 pub mod permissions;
 pub mod polls;
+pub mod promotion;
 pub mod reactions;
 pub mod reports;
 pub mod relay;

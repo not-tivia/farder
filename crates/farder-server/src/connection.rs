@@ -571,7 +571,7 @@ pub(crate) async fn authenticate(
             }
         } else {
             is_new_member = true;
-            if state.read_only {
+            if state.is_read_only() {
                 // A saved copy cannot take on new people (the refusal is sent below like any other).
                 Err(crate::handlers::READ_ONLY_COPY.to_string())
             } else {
