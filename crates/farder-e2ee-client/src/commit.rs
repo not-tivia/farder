@@ -132,6 +132,104 @@ pub struct StewardContext<'a> {
     pub store_instance_hash: &'a [u8; 32],
 }
 
+/// The Welcome of an add whose commit answer never arrived (see
+/// [`E2eeError::AddAnswerLost`]). It is ciphertext for the joiner, but it must
+/// only be submitted once the log shows the commit as ours and accepted — use
+/// [`submit_unsent_welcome`], which checks exactly that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsentWelcome {
+    /// The MLS Welcome bytes for `member`.
+    pub welcome: Vec<u8>,
+    /// The `(identity, device)` the Welcome is for.
+    pub member: DeclaredMember,
+    /// The channel generation the add was authored in.
+    pub generation: u64,
+    /// The epoch the add commit was authored in (`MlsCommit.epoch`); the epoch
+    /// `settle_staged_commit` matches the log against.
+    pub epoch: u64,
+}
+
+/// Submit the `MlsWelcome` that follows the accepted `MlsCommit` whose event
+/// hash is `commit_event_hash` (the fold rejects a Welcome citing an
+/// unrecorded commit).
+#[allow(clippy::too_many_arguments)]
+async fn submit_welcome<T: E2eeTransport + Sync>(
+    transport: &T,
+    actor: &Actor<'_>,
+    chain: &mut ChainState,
+    key: &ChannelKey,
+    generation: u64,
+    commit_event_hash: String,
+    member: &DeclaredMember,
+    welcome: Vec<u8>,
+) -> Result<crate::transport::EventAccepted, E2eeError> {
+    let welcome_event = build_next_event(
+        actor.device,
+        actor.identity,
+        &key.log_server_id,
+        chain,
+        event_now_secs(),
+        EventPayload::MlsWelcome {
+            channel_id: key.channel_id,
+            generation,
+            commit: commit_event_hash,
+            for_member: member.identity.clone(),
+            for_device: member.device.clone(),
+            welcome,
+        },
+    );
+    let accepted = transport.submit_event(&welcome_event).await?;
+    chain.advance(&welcome_event);
+    Ok(accepted)
+}
+
+/// Submit the Welcome of an add whose commit answer was lost, after
+/// [`crate::rekey::settle_staged_commit`] returned `WasAccepted` with `commit`.
+///
+/// A Welcome is never sent for a commit the log does not show as ours: this
+/// refuses unless `commit` is an `MlsCommit` authored by this device, in the
+/// add's epoch and generation, that declares exactly this member. (A refusal
+/// here is a caller bug or a stale record, so the caller should drop the
+/// Welcome rather than retry.)
+pub async fn submit_unsent_welcome<T: E2eeTransport + Sync>(
+    transport: &T,
+    actor: &Actor<'_>,
+    chain: &mut ChainState,
+    key: &ChannelKey,
+    unsent: &UnsentWelcome,
+    commit: &Event,
+) -> Result<crate::transport::EventAccepted, E2eeError> {
+    let EventPayload::MlsCommit { channel_id, generation, epoch, adds, .. } = &commit.core.payload
+    else {
+        return Err(E2eeError::chain("unsent Welcome: the settled event is not an MlsCommit"));
+    };
+    let ours = commit.core.device == farder_crypto::event_log::device_id(&actor.device.public_key());
+    let declares_member = adds
+        .iter()
+        .any(|a| a.identity == unsent.member.identity && a.device == unsent.member.device);
+    if !ours
+        || *channel_id != key.channel_id
+        || *generation != unsent.generation
+        || *epoch != unsent.epoch
+        || !declares_member
+    {
+        return Err(E2eeError::chain(
+            "unsent Welcome: the log's commit is not our accepted add of this member",
+        ));
+    }
+    submit_welcome(
+        transport,
+        actor,
+        chain,
+        key,
+        unsent.generation,
+        commit.hash(),
+        &unsent.member,
+        unsent.welcome.clone(),
+    )
+    .await
+}
+
 /// The result of [`add_member`]: the steward's own commit and the Welcome that
 /// followed it.
 #[derive(Debug)]
@@ -163,8 +261,10 @@ pub struct AddMemberOutcome {
 /// declared add that is not live, ...) discards it and returns
 /// [`E2eeError::CommitRefused`]: the group is unchanged and still in step
 /// (`is_diverged()` is false), so the caller catches up and may try again. A
-/// transport failure with no answer leaves the add staged;
-/// [`crate::rekey::settle_staged_commit`] resolves it from the log.
+/// transport failure with no answer leaves the add staged and returns
+/// [`E2eeError::AddAnswerLost`] carrying the Welcome;
+/// [`crate::rekey::settle_staged_commit`] resolves the commit from the log and,
+/// if it was accepted, [`submit_unsent_welcome`] sends the Welcome.
 pub async fn add_member<T: E2eeTransport + Sync>(
     transport: &T,
     actor: &Actor<'_>,
@@ -270,7 +370,20 @@ pub async fn add_member<T: E2eeTransport + Sync>(
                 .map_err(|e| E2eeError::Mls(e.context("discard refused add")))?;
             return Err(E2eeError::CommitRefused { reason });
         }
-        Err(e) => return Err(e.into()),
+        // No answer: the add stays staged, and the Welcome would be lost with
+        // this stack frame. Hand it back so the caller can keep it until
+        // `settle_staged_commit` says what the log did with the commit.
+        Err(e) => {
+            return Err(E2eeError::AddAnswerLost {
+                unsent: Box::new(UnsentWelcome {
+                    welcome: welcome_bytes,
+                    member: member.clone(),
+                    generation: ctx.generation,
+                    epoch: outcome.epoch,
+                }),
+                source: e,
+            })
+        }
     };
     group
         .merge_staged_own_commit(ctx.store)
@@ -280,23 +393,17 @@ pub async fn add_member<T: E2eeTransport + Sync>(
     // 5. Submit the Welcome citing the accepted commit's event hash. The fold
     //    rejects a Welcome that cites an unrecorded commit, so this MUST come
     //    after a successful commit submit and MUST cite `accepted.event_hash`.
-    let welcome_event = build_next_event(
-        actor.device,
-        actor.identity,
-        &ctx.key.log_server_id,
+    let welcome_accepted = submit_welcome(
+        transport,
+        actor,
         chain,
-        event_now_secs(),
-        EventPayload::MlsWelcome {
-            channel_id: ctx.key.channel_id,
-            generation: ctx.generation,
-            commit: accepted.event_hash.clone(),
-            for_member: member.identity.clone(),
-            for_device: member.device.clone(),
-            welcome: welcome_bytes,
-        },
-    );
-    let welcome_accepted = transport.submit_event(&welcome_event).await?;
-    chain.advance(&welcome_event);
+        ctx.key,
+        ctx.generation,
+        accepted.event_hash.clone(),
+        member,
+        welcome_bytes,
+    )
+    .await?;
 
     Ok(AddMemberOutcome {
         commit_event_hash: accepted.event_hash,
@@ -833,6 +940,95 @@ mod tests {
         }
         assert_eq!(group.epoch(), 1);
         assert!(!group.has_staged_own_commit());
+    }
+
+    /// An add whose commit answer is lost must hand the Welcome back; once the
+    /// log shows the commit as ours, the caller can submit it, and ONLY then.
+    #[tokio::test]
+    async fn add_member_with_a_lost_answer_returns_the_welcome_and_settling_lets_it_be_sent() {
+        let transport = FakeTransport::new();
+        let (alice_id, alice_dev, k, mut group, store, hash, mut chain) =
+            stewarded_channel(&transport, 1 << 56).await;
+        let a = actor(&alice_id, &alice_dev);
+        let me = device_id(&alice_dev.public_key());
+
+        let bob_id = Keypair::generate();
+        let bob_dev = Keypair::generate();
+        let bob_bundle = generate_key_package(&store, &bob_dev, &bob_id.public_key()).unwrap();
+        let kp_event = build_next_event(
+            &bob_dev,
+            &bob_id,
+            SERVER_ID,
+            &ChainState::default(),
+            event_now_secs(),
+            EP::MlsKeyPackagePublished {
+                key_package: bob_bundle.key_package().tls_serialize_detached().unwrap(),
+                store_instance_hash: [0u8; 32],
+                expires_at_log_pos: u64::MAX,
+            },
+        );
+        transport.serve_key_packages(
+            &bob_id.public_key(),
+            &device_id(&bob_dev.public_key()),
+            vec![kp_event.to_bytes()],
+        );
+        let ctx = StewardContext {
+            key: &k,
+            generation: 0,
+            store: &store,
+            store_instance_hash: &hash,
+        };
+        let start = group.epoch();
+        let before = transport.submit_count();
+
+        transport.lose_answer_next();
+        let err = add_member(&transport, &a, &mut chain, &ctx, &mut group, &declared(&bob_id, &bob_dev))
+            .await
+            .unwrap_err();
+        assert!(err.is_add_answer_lost(), "got {err}");
+        assert!(!err.is_diverged());
+        let E2eeError::AddAnswerLost { unsent, .. } = err else { unreachable!() };
+        assert!(!unsent.welcome.is_empty());
+        assert_eq!(unsent.member, declared(&bob_id, &bob_dev));
+        assert_eq!(unsent.generation, 0);
+        assert_eq!(unsent.epoch, start);
+        assert!(group.has_staged_own_commit());
+        // Only the commit went out; no Welcome yet.
+        assert_eq!(transport.submit_count(), before + 1);
+        let ours = transport.submitted().into_iter().last().unwrap();
+
+        // A commit that is not ours (someone else's) never releases the Welcome.
+        let mut theirs = ours.clone();
+        theirs.core.device = "someone-elses-device".to_string();
+        let refused = submit_unsent_welcome(&transport, &a, &mut chain, &k, &unsent, &theirs)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, E2eeError::Chain(_)), "got {refused}");
+        assert_eq!(transport.submit_count(), before + 1, "no Welcome for a foreign commit");
+
+        // The log shows our commit: settle merges it and the Welcome goes out,
+        // citing that commit.
+        let (how, event) = crate::rekey::settle_staged_commit(
+            &store,
+            &mut group,
+            std::slice::from_ref(&ours),
+            &me,
+        )
+        .unwrap();
+        assert_eq!(how, crate::rekey::StagedCommitSettled::WasAccepted);
+        let commit = event.unwrap();
+        submit_unsent_welcome(&transport, &a, &mut chain, &k, &unsent, commit)
+            .await
+            .unwrap();
+        let sent = transport.submitted().into_iter().last().unwrap();
+        match &sent.core.payload {
+            EP::MlsWelcome { commit: cited, welcome, for_member, .. } => {
+                assert_eq!(cited, &ours.hash());
+                assert_eq!(welcome, &unsent.welcome);
+                assert_eq!(for_member, &bob_id.public_key());
+            }
+            other => panic!("expected an MlsWelcome, got {other:?}"),
+        }
     }
 
     #[tokio::test]

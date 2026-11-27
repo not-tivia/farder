@@ -5756,6 +5756,27 @@ async fn add_current_members_to_group(
                     result.catch_up_needed = true;
                     break 'members;
                 }
+                Err(farder_e2ee_client::E2eeError::AddAnswerLost { unsent, source }) => {
+                    // No answer to the commit: it stays staged, and this is the
+                    // only copy of the Welcome. Keep it beside the channel state;
+                    // the steward sends it once the log shows the commit as ours
+                    // (`settle_leftover_refresh`), or deletes it if it was not.
+                    // Further adds cannot be authored over a staged commit, so
+                    // this pass stops here and the caller catches up.
+                    crate::mls_state::PendingAddWelcome::from_unsent(&unsent)
+                        .save(log_server_id, channel_id)?;
+                    eprintln!(
+                        "E2EE add: no answer for {device_id} ({source}); Welcome kept until the \
+                         log settles the commit"
+                    );
+                    result.skipped.push(SkippedE2eeMember {
+                        identity: member_identity.to_string(),
+                        device: Some(device_id.clone()),
+                        reason: format!("add member: no answer from the server ({source})"),
+                    });
+                    result.catch_up_needed = true;
+                    break 'members;
+                }
                 Err(e) if e.is_stale_epoch_diverged() => {
                     return Err(format!(
                         "add member {member_identity} / {device_id} diverged (stale-epoch): \
@@ -6042,7 +6063,10 @@ pub async fn process_mls_control_events(
 /// (`farder_e2ee_client::settle_staged_refresh`), and keep the device chain and
 /// the channel record in line with what the log says happened to it.
 #[allow(clippy::too_many_arguments)]
-fn settle_leftover_refresh(
+async fn settle_leftover_refresh<T: farder_e2ee_client::E2eeTransport + Sync>(
+    transport: &T,
+    actor: &farder_e2ee_client::Actor<'_>,
+    key: &farder_e2ee_client::ChannelKey,
     store: &farder_mls::store::FarderMlsStore,
     group: &mut farder_mls::group::MlsChannelGroup,
     events: &[farder_crypto::event_log::Event],
@@ -6067,6 +6091,28 @@ fn settle_leftover_refresh(
         mls.note_rekey(group.epoch(), farder_e2ee_client::event_now_secs());
         mls.epoch = group.epoch();
         mls.save(log_server_id, channel_id)?;
+    }
+    // An add whose answer was lost left its Welcome on disk. Only a commit the
+    // log shows as ours and accepted releases it, once; any other outcome (lost
+    // the epoch, never arrived, or nothing staged so the record is stale) drops
+    // it unsent. Delete BEFORE sending: a Welcome goes out at most once, and if
+    // the submit fails the member just waits for a new add.
+    if let Some(pending) = crate::mls_state::PendingAddWelcome::load(log_server_id, channel_id)? {
+        crate::mls_state::PendingAddWelcome::delete(log_server_id, channel_id)?;
+        if let (farder_e2ee_client::StagedCommitSettled::WasAccepted, Some(commit)) =
+            (settled, accepted)
+        {
+            let unsent = pending.to_unsent()?;
+            let sent = farder_e2ee_client::submit_unsent_welcome(
+                transport, actor, chain, key, &unsent, commit,
+            )
+            .await;
+            ds.next_seq = chain.next_seq;
+            ds.last_event_hash = chain.last_event_hash.clone();
+            ds.lamport = chain.lamport;
+            ds.save(log_server_id)?;
+            sent.map_err(|e| format!("send the Welcome of an add whose answer was lost: {e}"))?;
+        }
     }
     Ok(())
 }
@@ -6178,9 +6224,10 @@ async fn run_process_mls_control_events(
     // merged anyway and the device forked off alone.
     if let Some(g) = group.as_mut() {
         settle_leftover_refresh(
-            &store, g, &events, &my_device, &mut chain, &mut ds, &mut mls, &log_server_id,
-            channel_id,
-        )?;
+            &transport, &actor, &key, &store, g, &events, &my_device, &mut chain, &mut ds,
+            &mut mls, &log_server_id, channel_id,
+        )
+        .await?;
     }
 
     // K5: snapshot the ACTUAL leaf view before any commit is applied, so the
@@ -6556,9 +6603,10 @@ async fn run_send_sealed_message(
                 .map_err(|e| e.to_string())?;
         let my_device = farder_crypto::event_log::device_id(&device.public_key());
         settle_leftover_refresh(
-            &store, &mut group, &events, &my_device, &mut chain, &mut ds, &mut mls,
-            &log_server_id, channel_id,
-        )?;
+            &transport, &actor, &key, &store, &mut group, &events, &my_device, &mut chain,
+            &mut ds, &mut mls, &log_server_id, channel_id,
+        )
+        .await?;
     }
 
     // The caps describe the CIPHERTEXT (hash, size, octet-stream) and stay

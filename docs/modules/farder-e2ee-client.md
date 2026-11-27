@@ -179,10 +179,21 @@ the fold's **verbatim** rejection string (wrapped by the server as
   declared add that is not live, ...) discards the staged add and returns
   `E2eeError::CommitRefused { reason }`: group unchanged, NOT `is_diverged()`;
   catch up and retry. A transport failure with no answer leaves the add staged
-  for `settle_staged_commit` (which, if the add WAS accepted, leaves the caller
-  to submit the Welcome). Pinned by
-  `an_add_that_loses_the_epoch_race_leaves_the_group_unchanged` in
+  and returns `E2eeError::AddAnswerLost { unsent, source }`, so the Welcome is
+  not lost: `unsent` is an `UnsentWelcome { welcome, member, generation, epoch }`
+  (`epoch` = the epoch the commit was authored in). Keep it until
+  `settle_staged_commit` says what the log did: `WasAccepted` →
+  `submit_unsent_welcome`; anything else → drop it unsent. Pinned by
+  `an_add_that_loses_the_epoch_race_leaves_the_group_unchanged` and
+  `an_add_whose_answer_was_lost_still_delivers_its_welcome` in
   `tests/e2ee_lifecycle.rs`.
+- `submit_unsent_welcome(transport, actor, chain, key, unsent, commit) -> EventAccepted`
+  (async) — submit the kept Welcome citing `commit`, the accepted event
+  `settle_staged_commit` returned. It refuses (`E2eeError::Chain`, nothing sent)
+  unless `commit` is an `MlsCommit` authored by this device, in `unsent`'s
+  channel/generation/epoch, declaring `unsent.member` — a Welcome is never sent
+  for a commit the log does not show as ours. The desktop client persists
+  `unsent` as `<channel_id>.pending_welcome.json` beside `mls_state.json`.
 - `StewardContext<'a> { key, generation, store, store_instance_hash }` — the
   "where am I committing" bundle (keeps `add_member` under the 7-arg clippy
   bound).
@@ -597,6 +608,9 @@ The crate's one error type. Notable variants:
   discharge (`discharge_drift`); it was only staged and has been discarded, so
   NOTHING changed locally. Not a divergence (`is_diverged()` false);
   `is_commit_refused()`. Catch up from the log and retry once if still wanted.
+- `AddAnswerLost { unsent, source }` — an add's commit got no answer (transport
+  failure, not a refusal). The add stays staged; `unsent` carries the Welcome.
+  Not a divergence; `is_add_answer_lost()`. See `add_member`.
 - `DeviceCapReached { reason }` — the fold refused a `DeviceAuthorized` under
   the live-device cap (8); surfaced by `device.rs`'s `authorize_device`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.

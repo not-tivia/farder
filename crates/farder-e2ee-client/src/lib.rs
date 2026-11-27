@@ -40,7 +40,7 @@ pub use channel::{
 };
 pub use channel_key::{validate_log_server_id, ChannelKey};
 pub use commit::{
-    add_member, process_incoming_commit, AddMemberOutcome, DeclaredCommit, DeviceCertResolver,
+    add_member, process_incoming_commit, submit_unsent_welcome, AddMemberOutcome, UnsentWelcome, DeclaredCommit, DeviceCertResolver,
     IncomingCommitOutcome, StewardContext,
 };
 pub use device::{add_own_device, authorize_device, AddOwnDeviceOutcome, DeviceAuthorizedOutcome, OwnDeviceContext};
@@ -59,7 +59,7 @@ pub use keepalive::{
 pub use rekey::{
     rekey_channel, rekey_permitted_by_rate_rule, settle_staged_refresh, should_rekey,
     HoldReason, RekeyCadence, RekeyContext, RekeyDecision, RekeyOutcome, RekeyTrigger,
-    StagedRefreshSettled, REKEY_SEALED_SEND_INTERVAL,
+    StagedCommitSettled, StagedRefreshSettled, REKEY_SEALED_SEND_INTERVAL,
     REKEY_WALL_CLOCK_SECS,
 };
 pub use reprovision::{

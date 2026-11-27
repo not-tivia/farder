@@ -180,6 +180,144 @@ impl MlsChannelState {
     }
 }
 
+/// The Welcome of an add whose commit answer was lost, kept beside the
+/// channel's MLS state (`<channel_id>.pending_welcome.json`) until the steward
+/// settles that commit from the log: accepted -> submit it once, then delete;
+/// lost or never arrived -> delete without sending. Ciphertext for the joiner,
+/// but kept only as long as that decision takes. At most one per channel: a
+/// lost add stays staged, so the pass that hit it stops.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingAddWelcome {
+    pub generation: u64,
+    /// The epoch the add commit was authored in.
+    pub epoch: u64,
+    pub identity: farder_crypto::identity::PublicKey,
+    pub device: String,
+    /// The MLS Welcome bytes, hex.
+    pub welcome_hex: String,
+}
+
+impl PendingAddWelcome {
+    pub fn from_unsent(u: &farder_e2ee_client::UnsentWelcome) -> Self {
+        Self {
+            generation: u.generation,
+            epoch: u.epoch,
+            identity: u.member.identity.clone(),
+            device: u.member.device.clone(),
+            welcome_hex: hex::encode(&u.welcome),
+        }
+    }
+
+    pub fn to_unsent(&self) -> Result<farder_e2ee_client::UnsentWelcome, String> {
+        Ok(farder_e2ee_client::UnsentWelcome {
+            welcome: hex::decode(&self.welcome_hex).map_err(|e| e.to_string())?,
+            member: farder_mls::group::DeclaredMember {
+                identity: self.identity.clone(),
+                device: self.device.clone(),
+            },
+            generation: self.generation,
+            epoch: self.epoch,
+        })
+    }
+
+    fn path(log_server_id: &str, channel_id: u64) -> Result<PathBuf, String> {
+        farder_e2ee_client::validate_log_server_id(log_server_id)?;
+        Ok(crate::commands::farder_data_dir()
+            .join("servers")
+            .join(log_server_id)
+            .join("mls")
+            .join(format!("{channel_id}.pending_welcome.json")))
+    }
+
+    pub fn save(&self, log_server_id: &str, channel_id: u64) -> Result<(), String> {
+        self.save_at(&Self::path(log_server_id, channel_id)?)
+    }
+
+    pub fn load(log_server_id: &str, channel_id: u64) -> Result<Option<Self>, String> {
+        Self::load_at(&Self::path(log_server_id, channel_id)?)
+    }
+
+    pub fn delete(log_server_id: &str, channel_id: u64) -> Result<(), String> {
+        Self::delete_at(&Self::path(log_server_id, channel_id)?)
+    }
+
+    fn save_at(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let json = serde_json::to_string(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    fn load_at(path: &std::path::Path) -> Result<Option<Self>, String> {
+        match std::fs::read_to_string(path) {
+            Ok(data) => serde_json::from_str(&data).map(Some).map_err(|e| e.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn delete_at(path: &std::path::Path) -> Result<(), String> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_welcome_tests {
+    use super::*;
+
+    fn sample() -> PendingAddWelcome {
+        PendingAddWelcome {
+            generation: 0,
+            epoch: 3,
+            identity: farder_crypto::identity::Keypair::generate().public_key(),
+            device: "dev-1".to_string(),
+            welcome_hex: hex::encode([1u8, 2, 3, 4]),
+        }
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "farder-pending-welcome-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("mls").join("1.pending_welcome.json")
+    }
+
+    #[test]
+    fn a_pending_welcome_survives_a_save_and_load_and_is_gone_after_delete() {
+        let path = temp_file("roundtrip");
+        assert_eq!(PendingAddWelcome::load_at(&path).unwrap(), None);
+        let p = sample();
+        p.save_at(&path).unwrap();
+        let back = PendingAddWelcome::load_at(&path).unwrap().unwrap();
+        assert_eq!(back, p);
+        let unsent = back.to_unsent().unwrap();
+        assert_eq!(unsent.welcome, vec![1, 2, 3, 4]);
+        assert_eq!(unsent.epoch, 3);
+        assert_eq!(PendingAddWelcome::from_unsent(&unsent), p);
+
+        PendingAddWelcome::delete_at(&path).unwrap();
+        assert_eq!(PendingAddWelcome::load_at(&path).unwrap(), None);
+        assert!(!path.exists(), "the Welcome bytes are not kept");
+        // Deleting what is not there is fine (settle may run twice).
+        PendingAddWelcome::delete_at(&path).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_record_is_an_error_not_silently_none() {
+        let path = temp_file("corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not json").unwrap();
+        assert!(PendingAddWelcome::load_at(&path).is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
