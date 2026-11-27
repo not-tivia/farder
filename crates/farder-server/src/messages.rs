@@ -1017,32 +1017,18 @@ mod tests {
     }
 
     #[test]
-    fn test_message_info_decodes_without_widget_field() {
-        // A MessageInfo encoded WITHOUT `widget` (old peer) must decode with
-        // widget: None — the #[serde(default)] guard.
-        let (conn, channel_id, pk) = setup();
-        let id = insert_message(&conn, channel_id, &pk, "old frame", None).unwrap();
-        let msg = get_message(&conn, id, &pk).unwrap().unwrap();
-        // Simulate an old encoder: serialize to a JSON map and strip the field.
-        let mut v = serde_json::to_value(&msg).unwrap();
-        v.as_object_mut().unwrap().remove("widget").expect("widget field present");
-        let decoded: MessageInfo = serde_json::from_value(v).unwrap();
-        assert_eq!(decoded.widget, None);
-        assert_eq!(decoded.content, "old frame");
-    }
-
-    #[test]
-    fn test_message_info_decodes_without_event_hash_field() {
-        // An old peer / stored MessageInfo with no `event_hash` decodes as None.
+    fn a_pre_log_row_has_no_event_hash_and_survives_the_real_codec() {
+        // A row from before the log carries no hash; through the REAL wire codec
+        // (named maps) it comes back unchanged. (The old serde_json stand-in proved
+        // nothing about msgpack; see farder-protocol's compat tests.)
         let (conn, channel_id, pk) = setup();
         let id = insert_message(&conn, channel_id, &pk, "old frame", None).unwrap();
         let msg = get_message(&conn, id, &pk).unwrap().unwrap();
         assert_eq!(msg.event_hash, None, "a pre-log row has no hash");
-        let mut v = serde_json::to_value(&msg).unwrap();
-        v.as_object_mut().unwrap().remove("event_hash").expect("event_hash field present");
-        let decoded: MessageInfo = serde_json::from_value(v).unwrap();
-        assert_eq!(decoded.event_hash, None);
-        assert_eq!(decoded.content, "old frame");
+        let bytes = farder_protocol::codec::encode(&msg).unwrap();
+        let back: MessageInfo = farder_protocol::codec::decode(&bytes).unwrap();
+        assert_eq!(back.event_hash, None);
+        assert_eq!(back.content, "old frame");
     }
 
     #[test]
