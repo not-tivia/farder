@@ -32,6 +32,10 @@ struct Args {
     /// Pull once and exit. Exit code 3 means "waiting for the owner to allow this replica".
     #[arg(long)]
     once: bool,
+    /// Where a read-only copy server for this folder can be reached (host:port). After each pull the host
+    /// is told, so a host that was replaced and restarts can ask the copy for the newer hosting term.
+    #[arg(long)]
+    announce: Option<String>,
 }
 
 #[tokio::main]
@@ -52,6 +56,7 @@ async fn main() -> Result<()> {
     let fp = a.cert_fp.as_deref().map(hex::decode).transpose()?;
     let st = state_path(&a.dir);
     let mut joined = std::fs::read_to_string(&st).map(|t| t.contains("\"joined\":true")).unwrap_or(false);
+    let mut announce_warned = false;
     loop {
         let mut s = match Session::connect(server, fp.clone(), &key, if joined { None } else { a.invite.clone() }, None).await {
             Ok(s) => s,
@@ -72,6 +77,7 @@ async fn main() -> Result<()> {
                     Ok(f) => println!("files: {} fetched, {} already here, {} removed, {} not available", f.fetched, f.already_had, f.removed, f.unavailable),
                     Err(e) => { eprintln!("files: sync stopped (the database copy is saved): {e:#}"); if a.once { std::process::exit(1); } }
                 }
+                if let Some(addr) = &a.announce { s.announce_copy(addr, &mut announce_warned).await; }
             }
             Err(PullError::NotAllowed(why)) => {
                 println!("waiting: the owner has not allowed this key as a replica yet ({why}). Allow {}", key.public_key());

@@ -333,6 +333,10 @@ async fn main() -> Result<()> {
         _widget_sweeper = Some(farder_server::widgets::spawn_widget_sweeper(Arc::clone(&state)));
     }
 
+    // Promotion step 4: while this server is the host, ask the copies that announced themselves whether
+    // a newer hosting term exists (now, then every 10 minutes). Runs in the background: start-up never waits.
+    let _copy_probe = farder_server::promotion::spawn_copy_probe(Arc::clone(&state));
+
     if let Some(relay_addr) = args.relay {
         let server_id = farder_server::relay::load_or_generate_server_id(&args.data_dir)?;
         // Record the relay routing id (hex) so webhook URLs use the value the relay

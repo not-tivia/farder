@@ -517,3 +517,146 @@ async fn a_replaced_host_learns_the_newer_term_from_a_member_and_goes_read_only(
     assert!(matches!(send(&mut m, general, "after restart").await, ServerResponse::Error { .. }), "stays read-only after a restart");
     let _ = child2.kill(); let _ = child2.wait();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Promotion step 4: copies announce their address; a restarted old host asks them for a newer term.
+// ---------------------------------------------------------------------------------------------
+
+fn free_port() -> u16 { std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port() }
+
+/// Run the REAL `farder-replica` binary once against `srv`; returns its exit code and output.
+fn run_replica(srv: SocketAddr, dir: &std::path::Path, invite: &str, announce: Option<&str>) -> (i32, String) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_farder-replica"));
+    cmd.args(["--server", &srv.to_string(), "--once", "--invite", invite, "--dir"]).arg(dir);
+    if let Some(a) = announce { cmd.args(["--announce", a]); }
+    let o = cmd.output().unwrap();
+    (o.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+}
+
+fn known_copies_of(db: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    match conn.query_row("SELECT value FROM server_settings WHERE key = 'known_copies'", [], |r| r.get::<_, String>(0)) {
+        Ok(j) => serde_json::from_str(&j).unwrap(),
+        Err(_) => vec![],
+    }
+}
+
+/// A read-only copy server on `db` at a chosen UDP port (the replica announced that port beforehand).
+async fn start_copy_on(db: &std::path::Path, data: &std::path::Path, port: u16) -> (std::process::Child, std::path::PathBuf) {
+    let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/farder-server");
+    let logdir = tempfile::tempdir().unwrap().keep();
+    let log = logdir.join("copy.log");
+    let out = std::fs::File::create(&log).unwrap();
+    let child = std::process::Command::new(&bin)
+        .args(["--bind", &format!("127.0.0.1:{port}"), "--read-only", "--db"]).arg(db)
+        .arg("--storage-dir").arg(logdir.join("files")).arg("--data-dir").arg(data)
+        .stdout(out.try_clone().unwrap()).stderr(out).spawn().unwrap();
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if std::fs::read_to_string(&log).unwrap_or_default().contains("Server listening") { return (child, log); }
+    }
+    panic!("copy server did not start: {}", std::fs::read_to_string(&log).unwrap_or_default());
+}
+
+async fn wait_for_log(log: &std::path::Path, needle: &str, secs: u64) -> bool {
+    for _ in 0..secs * 10 {
+        if std::fs::read_to_string(log).unwrap_or_default().contains(needle) { return true; }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_copy_announces_itself_and_a_restarted_old_host_asks_it_and_learns_it_was_replaced() {
+    use farder_crypto::host_term::HostTerm;
+    let Seeded { mut srv, owner, mut o, sid, code } = seeded().await;
+    let host_db = srv._dir.path().join("s.db");
+    let host_data = srv._dir.path().join("sd");
+    let ServerResponse::ServerInfo { channels, .. } = o.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+
+    // The real replica binary: first run joins (and waits to be allowed), the owner allows it, the second
+    // run pulls and announces the address the copy server will listen on.
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("replica");
+    let (rkey, _) = load_or_create_key(&dir.join("replica.key")).unwrap();
+    let copy_port = free_port();
+    let copy_addr = format!("127.0.0.1:{copy_port}");
+    let (code1, out1) = run_replica(srv.addr, &dir, &code, Some(&copy_addr));
+    assert_eq!(code1, 3, "waiting for the owner: {out1}");
+    assert!(known_copies_of(&host_db).is_empty(), "nothing is announced before a successful pull");
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let (code2, out2) = run_replica(srv.addr, &dir, &code, Some(&copy_addr));
+    assert_eq!(code2, 0, "{out2}");
+    assert_eq!(known_copies_of(&host_db), vec![copy_addr.clone()], "the HOST's database lists the copy's address");
+    // Pulling again does not duplicate it.
+    let (code3, out3) = run_replica(srv.addr, &dir, &code, Some(&copy_addr));
+    assert_eq!(code3, 0, "{out3}");
+    assert_eq!(known_copies_of(&host_db), vec![copy_addr.clone()]);
+
+    // The read-only copy server on that folder, promoted by the owner (term 1). The old host is not told.
+    let db = dir.join("latest.db");
+    let data = work.path().join("copy-data");
+    let (mut copy, _copy_log) = start_copy_on(&db, &data, copy_port).await;
+    let me = identity_of(&data);
+    let mut c = Session::connect(copy_addr.parse().unwrap(), None, &owner, None, None).await.unwrap();
+    let t1 = HostTerm::sign(&owner, sid.clone(), 1, me, vec![copy_addr.clone()], head_of(&db), now_secs());
+    assert!(matches!(c.ask(ServerRequest::PromoteToHost { term: t1.clone() }).await.unwrap(), ServerResponse::Ok));
+    assert!(matches!(send(&mut o, general, "old host, still running").await, ServerResponse::MessageSent { .. }), "nobody has told the old host yet");
+
+    // Restart the OLD host. No app tells it anything: it asks its copy by itself.
+    drop(o); drop(c);
+    let _ = srv.child.kill(); let _ = srv.child.wait();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (mut host2, _addr2, log2) = start_at(&host_db, &host_data, false).await;
+    assert!(wait_for_log(&log2, "REPLACED", 8).await, "the restarted old host must learn it was replaced:\n{}", std::fs::read_to_string(&log2).unwrap_or_default());
+    let mut m = Session::connect(_addr2, None, &owner, None, None).await.unwrap();
+    match send(&mut m, general, "after the restart").await {
+        ServerResponse::Error { reason } => assert!(reason.contains("moved to a new host") && reason.contains(&copy_addr), "{reason}"),
+        other => panic!("the replaced host must refuse the message: {other:?}"),
+    }
+    assert!(matches!(m.ask(ServerRequest::GetHostTerm).await.unwrap(), ServerResponse::HostTerm { term: Some(t) } if t == t1));
+    let _ = host2.kill(); let _ = host2.wait(); let _ = copy.kill(); let _ = copy.wait();
+}
+
+#[tokio::test]
+async fn a_host_whose_copy_is_offline_starts_normally_and_stays_writable() {
+    let Seeded { mut srv, owner: _owner, mut o, sid: _sid, code: _code } = seeded().await;
+    let host_db = srv._dir.path().join("s.db");
+    let host_data = srv._dir.path().join("sd");
+    let ServerResponse::ServerInfo { channels, .. } = o.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+    let dead = format!("127.0.0.1:{}", free_port());
+    assert!(matches!(o.ask(ServerRequest::AnnounceCopy { address: dead.clone() }).await.unwrap(), ServerResponse::Ok));
+    assert_eq!(known_copies_of(&host_db), vec![dead]);
+    drop(o);
+    let _ = srv.child.kill(); let _ = srv.child.wait();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let started = std::time::Instant::now();
+    let (mut host2, addr2, log2) = start_at(&host_db, &host_data, false).await;
+    assert!(started.elapsed() < Duration::from_secs(4), "an offline copy must not hold up start-up");
+    let mut m = Session::connect(addr2, None, &_owner, None, None).await.unwrap();
+    assert!(matches!(send(&mut m, general, "right away").await, ServerResponse::MessageSent { .. }));
+    // Past the 5 s per-copy limit: still the host, nothing about being replaced.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(matches!(send(&mut m, general, "after the probe gave up").await, ServerResponse::MessageSent { .. }));
+    assert!(!std::fs::read_to_string(&log2).unwrap_or_default().contains("REPLACED"));
+    let _ = host2.kill(); let _ = host2.wait();
+}
+
+#[tokio::test]
+async fn a_pull_still_finishes_when_the_host_refuses_the_announcement() {
+    // The same path an OLD host takes: it answers the unknown request with an error. Here the real host
+    // refuses the address, which reaches the replica as the same `ServerResponse::Error`.
+    let Seeded { srv, owner: _owner, mut o, sid: _sid, code } = seeded().await;
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("replica");
+    let (rkey, _) = load_or_create_key(&dir.join("replica.key")).unwrap();
+    assert_eq!(run_replica(srv.addr, &dir, &code, None).0, 3);
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let (c, out) = run_replica(srv.addr, &dir, &code, Some("not an address"));
+    assert_eq!(c, 0, "the pull must finish: {out}");
+    assert!(out.contains("copy saved") && out.contains("could not announce"), "{out}");
+    assert_eq!(out.matches("could not announce").count(), 1, "logged once");
+    assert!(dir.join("latest.db").exists());
+}
