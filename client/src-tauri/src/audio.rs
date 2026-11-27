@@ -410,9 +410,8 @@ mod tests {
         // Set FARDER_MOCK_AUDIO_HZ=880, capture 1 second of mono 48kHz audio,
         // count zero crossings, divide by 2 → measured Hz. Assert ±10% of 880.
         //
-        // NOTE: env vars are process-global. If other tests in this module
-        // ever read FARDER_MOCK_AUDIO_HZ, this test must serialize with them
-        // (currently it's the only reader).
+        // NOTE: env vars are process-global; hold `crate::test_env::lock()`.
+        let _env = crate::test_env::lock();
         let prev = std::env::var("FARDER_MOCK_AUDIO_HZ").ok();
         std::env::set_var("FARDER_MOCK_AUDIO_HZ", "880");
 
@@ -458,6 +457,7 @@ mod tests {
 
     #[test]
     fn make_audio_backend_mock_env_returns_mock() {
+        let _env = crate::test_env::lock();
         let prev = std::env::var("FARDER_AUDIO_BACKEND").ok();
         std::env::set_var("FARDER_AUDIO_BACKEND", "mock");
         let backend = make_audio_backend();

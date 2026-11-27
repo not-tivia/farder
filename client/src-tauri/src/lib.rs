@@ -17,7 +17,7 @@ pub(crate) mod test_env {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Hold this for as long as the test touches `FARDER_DATA`.
+    /// Hold this for as long as the test touches `FARDER_DATA`, `FARDER_DISPLAY_BACKEND`, `FARDER_AUDIO_BACKEND` or `FARDER_MOCK_AUDIO_HZ`.
     pub fn lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }

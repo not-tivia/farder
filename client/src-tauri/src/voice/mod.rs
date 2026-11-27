@@ -2156,6 +2156,7 @@ mod controller_tests {
     // backend so it runs headless in WSL (same as the Task 3 share test).
     #[tokio::test]
     async fn on_peer_stream_joined_reoffers_video_key_and_forces_keyframe_mid_share() {
+        let _env = crate::test_env::lock();
         std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
         let (ctrl, _emitter) = make_controller();
 
@@ -2410,6 +2411,7 @@ mod controller_tests {
     // this runs without a GPU/display in WSL.
     #[tokio::test]
     async fn start_then_stop_screen_share_offers_enables_and_disables_video() {
+        let _env = crate::test_env::lock();
         std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
         let (ctrl, _emitter) = make_controller();
 
@@ -2458,6 +2460,7 @@ mod controller_tests {
     // recording emitter for the self-frame event the encode loop produces.
     #[tokio::test]
     async fn sharing_emits_self_video_frames() {
+        let _env = crate::test_env::lock();
         std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
         let (ctrl, emitter) = make_controller();
 
@@ -2500,6 +2503,7 @@ mod controller_tests {
     // must disable it. Mirrors the Video share test exactly, asserting ScreenAudio.
     #[tokio::test]
     async fn start_then_stop_screen_share_offers_enables_and_disables_screen_audio() {
+        let _env = crate::test_env::lock();
         std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
         let (ctrl, _emitter) = make_controller();
 
@@ -2545,6 +2549,7 @@ mod controller_tests {
     // leave) would carry over and a fresh start would have to overwrite it.
     #[tokio::test]
     async fn leave_while_sharing_tears_down_share_no_stale_state() {
+        let _env = crate::test_env::lock();
         std::env::set_var("FARDER_DISPLAY_BACKEND", "mock");
         let (ctrl, _emitter) = make_controller();
 
