@@ -1772,6 +1772,13 @@ async function density() {
       sideways: list.scrollWidth > list.clientWidth + 2,
     };
   }, tag);
+  await check("A reacts to burst 1 (so every mode has a reaction to show)", async () => {
+    const row = A.page.locator(".message", { hasText: burst[0] }).first();
+    await row.hover();
+    await row.locator(".reaction-add-btn").click();
+    await A.page.locator(".reaction-picker .reaction-picker-btn").first().click();
+    await row.locator(".reaction-count").first().waitFor({ timeout: 15000 });
+  });
   const results = {};
   for (const [label, mode] of [["Normal", "normal"], ["Roomy", "roomy"], ["Compact", "compact"], ["IRC", "irc"], ["Tiny", "tiny"]]) {
     await check(`density ${label}: chosen in Settings, laid out as described, nothing off the edge`, async () => {
@@ -1815,6 +1822,35 @@ async function density() {
       const low = m.rows.map((r) => r.contrast).filter((c) => c !== null && c < 3);
       if (low.length) throw new Error("text hard to read, contrast " + low[0].toFixed(1));
       return `rows ${short.map((r) => Math.round(r.h)).join("/")}px, long ${Math.round(longRow.h)}px` + (short[0].avatar ? `, picture ${Math.round(short[0].avatar)}px` : "");
+    });
+  }
+  for (const [label] of [["Compact"], ["IRC"], ["Tiny"]]) {
+    await check(`density ${label}: the reaction shows, and right-click > Reply works`, async () => {
+      await choose(label);
+      const r = await A.page.evaluate((t) => {
+        const row = [...document.querySelectorAll(".message")].find((m) => (m.querySelector(".message-content")?.innerText || "").includes(t));
+        const c = row?.querySelector(".reaction-count");
+        const list = document.querySelector(".message-list").getBoundingClientRect();
+        if (!c) return { err: "no reaction on the row" };
+        const b = c.getBoundingClientRect();
+        return { w: b.width, inside: b.left >= list.left - 1 && b.right <= list.right + 1, visible: getComputedStyle(c).visibility !== "hidden" && b.width > 0 };
+      }, burst[0]);
+      if (r.err) throw new Error(r.err);
+      if (!r.visible || !r.inside) throw new Error("the reaction is hidden or outside the list: " + JSON.stringify(r));
+      const row2 = A.page.locator(".message", { hasText: burst[1] }).first();
+      await row2.click({ button: "right" });
+      const menu = A.page.locator(".context-menu").first();
+      await menu.waitFor({ timeout: 5000 });
+      const mb = await menu.boundingBox();
+      const vw = await A.page.evaluate(() => [innerWidth, innerHeight]);
+      if (mb.x + mb.width > vw[0] + 1 || mb.y + mb.height > vw[1] + 1) throw new Error("the menu runs off the window");
+      await menu.locator(".context-menu-item", { hasText: "Reply" }).first().click();
+      const bar = A.page.locator(".reply-preview");
+      await bar.waitFor({ timeout: 5000 });
+      const txt = await bar.innerText();
+      await A.page.locator(".reply-cancel").click();
+      if (!txt.includes("burst 2")) throw new Error("the reply bar quotes: " + txt.slice(0, 60));
+      return "reaction visible, menu inside the window, reply bar quotes burst 2";
     });
   }
   await check("Roomy gives each message more room than Normal", async () => {
@@ -2151,6 +2187,25 @@ async function autoplay() {
       await A.page.emulateMedia({ reducedMotion: "no-preference" });
       await post(B, `${tag} again`, VIDEO);
       await until(`${tag} again`, (x) => x.video && x.paused === false, 60000, "did not start");
+    });
+    await check("pop-up: a direct video link from Bob shows a muted, playing preview in A's pop-up", async () => {
+      // A direct media file on an allowlisted media host (the tweet's own mp4), with A's app in the background.
+      const DIRECT = process.env.AUTOPLAY_DIRECT || "https://video.twimg.com/ext_tw_video/1585341912877146112/pu/vid/1920x1080/aeoVUvTgj4wHShhN.mp4";
+      await A.page.evaluate(() => { document.hasFocus = () => false; });
+      try {
+        await sendText(B, `${tag} popup ${DIRECT}`);
+        const pop = await pageMatching(A, /[?&]notify=1/, 30000);
+        const card = pop.locator(".notify-popup-card", { hasText: `${tag} popup` }).first();
+        await card.waitFor({ timeout: 30000 });
+        const v = card.locator("video.notify-popup-media");
+        await v.waitFor({ timeout: 45000 });
+        const st = await pop.waitForFunction((sel) => { const e = document.querySelector(sel); return e && !e.paused && e.currentTime > 0.2 ? { muted: e.muted, loop: e.loop } : null; }, "video.notify-popup-media", { timeout: 30000 }).then((h) => h.jsonValue());
+        await shot(pop, "A-popup-preview");
+        if (!st.muted) throw new Error("the preview plays with sound");
+        return `playing, muted${st.loop ? ", looping" : ""}`;
+      } finally {
+        await A.page.evaluate(() => { delete document.hasFocus; }).catch(() => {});
+      }
     });
   } finally {
     await A.page.emulateMedia({ reducedMotion: null }).catch(() => {});
