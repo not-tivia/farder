@@ -21,7 +21,7 @@ only when the answer is not an error does it `record` the change, so a refused r
 | Budget | 5 per account per 600 s (`--destructive-budget N`, `0` = off) |
 | Storage | In memory only: a thief cannot reset it by restarting the server |
 | Scope | Per account (the owner is not exempt); other requests are untouched |
-| Not covered | It does not undo anything and does not involve the recovery key. `DeleteChannel` of a channel that does not exist counts as a success in the handler, so it uses budget |
+| Not covered | It does not undo anything and does not involve the recovery key. `DeleteChannel` of a channel that does not exist is refused (`Error("that channel no longer exists")`) and, being an error, uses no budget |
 
 ## Tested
 
