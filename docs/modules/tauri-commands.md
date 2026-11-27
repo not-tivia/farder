@@ -3267,9 +3267,9 @@ channel already sealed by the freshness ceiling. The automatic paths normally
 cover this: a send that hits the ceiling rekeys and retries (K1), and the
 proactive cadence rekeys before the wall (K2).
 **Returns:** `{ event_hash, epoch }`. Persists the new epoch and the cadence.
-**Note:** a REJECTED rekey has already merged locally (finding F1), leaving the
-group one epoch ahead of the server; the error surfaces rather than being
-retried.
+**Note:** a REJECTED rekey changes nothing locally: it is staged, and the
+refusal discards it (`E2eeError::RekeyRefused`). The error surfaces rather
+than being retried.
 **invoke name:** `"rekey_e2ee_channel"` → `rekeyE2eeChannel(...)`.
 
 ### `revoke_own_device(state, server_id, log_server_id) -> Result<String, String>`

@@ -254,10 +254,22 @@ and the freshness ceiling are only observable reactively (the fold's rejection
 strings) or via a **local cadence**:
 
 - `rekey_channel(transport, actor, chain, ctx, group) -> RekeyOutcome` (async) —
-  run `self_update`, submit the empty-adds/removes `MlsCommit` with the real
-  chaining values, advance the chain on accept. A `stale-epoch` rejection is
-  `E2eeError::StaleEpochDiverged`; a `"commit-rate rule:"` rejection is
-  `E2eeError::RekeyRateLimited`. It never loops.
+  STAGE the refresh (`self_update_staged`), submit the empty-adds/removes
+  `MlsCommit` with the real chaining values, and only on acceptance merge it and
+  advance the chain. ANY server refusal (`stale-epoch` because another member's
+  commit won the epoch, `"commit-rate rule:"`, anything else) discards it and is
+  `E2eeError::RekeyRefused`: the group is unchanged and still in step, so the
+  caller just applies whatever won. (It used to merge first, so a refusal forked
+  the device off alone: the two-app suite's "nothing opens after the first
+  exchange", 2026-11-26; pinned by `two_key_refreshes_at_once_do_not_fork_the_channel`
+  in `tests/e2ee_lifecycle.rs`.) A transport failure with no answer leaves it
+  staged. It never loops.
+- `settle_staged_refresh(store, group, events, my_device) -> (StagedRefreshSettled, Option<&Event>)`
+  — resolve a refresh left staged by a lost answer from control events fetched
+  after it: our device's commit in that epoch = `WasAccepted` (merged; the event
+  is returned so the caller advances its chain), anyone else's = `LostTheEpoch`
+  (dropped), none = `NeverArrived` (dropped), or `NothingStaged`. The app calls
+  it at the start of every steward run and before every sealed send.
 - `RekeyContext<'a> { key, generation, store, store_instance_hash }` /
   `RekeyOutcome { event_hash, local_epoch, post_epoch_authenticator,
   post_tree_hash }`.
@@ -559,21 +571,25 @@ The crate's one error type. Notable variants:
 - `ResyncPoisoned { member, reason }` — F4, terminal: resync processed a commit
   that failed leaf binding, so the impostor leaf is already merged and the
   local group is poisoned.
-- `RekeyRateLimited { reason }` — the fold refused a commit under the
-  commit-rate rule (a rekey, or a drift discharge whose removes did not
-  discharge anything). Same divergence caveat as `StaleEpochDiverged`.
+- `RekeyRefused { reason }` — the fold refused a key refresh; it was only
+  staged and has been discarded, so NOTHING changed locally. Not a divergence
+  (`is_diverged()` is false). `is_rekey_rate_limited()` is true when the reason
+  is the commit-rate rule.
+- `RekeyRateLimited { reason }` — the fold refused a drift discharge under the
+  commit-rate rule (its removes did not discharge anything). Same divergence
+  caveat as `StaleEpochDiverged`. (A refused rekey is `RekeyRefused` instead.)
 - `CommitRejectedDiverged { reason, local_epoch }` — the fold refused an
   own-commit for any OTHER reason (e.g. `"declared add of a device that is not
   live"`). Every own-commit primitive merges locally before it submits, so this
   carries the same divergence contract as `StaleEpochDiverged`; the fold's reason
-  is preserved verbatim. Returned by `bootstrap_group`, `add_member`,
-  `rekey_channel` and `discharge_drift` (finding F3).
+  is preserved verbatim. Returned by `bootstrap_group`, `add_member` and
+  `discharge_drift` (finding F3); `rekey_channel` no longer diverges.
 - `DeviceCapReached { reason }` — the fold refused a `DeviceAuthorized` under
   the live-device cap (8); surfaced by `device.rs`'s `authorize_device`.
 - `ChannelIdBelowFloor`, `Chain(String)`, `Mls(anyhow::Error)`, `Transport(TransportError)`.
 
 Predicate methods (machine-readable signals over the fold's rejection strings):
-`is_stale_epoch_diverged()`, `is_rekey_rate_limited()`,
+`is_stale_epoch_diverged()`, `is_rekey_rate_limited()`, `is_rekey_refused()`,
 `is_freshness_ceiling_reached()`, `is_sealed_pending_removals()`,
 `is_device_cap_reached()`, `is_diverged()` (the finding-F1 divergence class:
 `StaleEpochDiverged` / `RekeyRateLimited` / `CommitRejectedDiverged` /

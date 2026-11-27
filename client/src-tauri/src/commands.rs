@@ -5337,7 +5337,10 @@ async fn run_create_e2ee_channel(
     ds.save(&log_server_id)?;
 
     // 5. Persist the per-channel MLS state so T9/T10 can resume the group.
-    crate::mls_state::MlsChannelState {
+    //    The bootstrap is this identity's first commit here: record it (in the
+    //    epoch it was authored in, as the server's commit-rate rule counts it)
+    //    so the local refresh policy agrees with the server.
+    let mut fresh = crate::mls_state::MlsChannelState {
         generation: 0,
         epoch: commit.local_epoch,
         store_instance_hash: hex::encode(created.store_instance_hash),
@@ -5345,8 +5348,9 @@ async fn run_create_e2ee_channel(
         cursor: 0,
         poisoned: None,
         ..Default::default()
-    }
-    .save(&log_server_id, channel_id)?;
+    };
+    fresh.note_own_commit(commit.local_epoch.saturating_sub(1));
+    fresh.save(&log_server_id, channel_id)?;
 
     // 6. Auto-add current server members (T8): every current member's device is
     //    added to the group so the fresh channel is usable without another
@@ -5710,16 +5714,23 @@ async fn add_current_members_to_group(
                     ds.last_event_hash = chain.last_event_hash.clone();
                     ds.lamport = chain.lamport;
                     ds.save(log_server_id)?;
-                    crate::mls_state::MlsChannelState {
-                        generation,
-                        epoch: outcome.local_epoch,
-                        store_instance_hash: hex::encode(store_instance_hash),
-                        confirmed: true,
-                        cursor: 0,
-                        poisoned: None,
-                        ..Default::default()
-                    }
-                    .save(log_server_id, channel_id)?;
+                    // UPDATE the channel record, never rebuild it. Rebuilding
+                    // it from defaults wiped the refresh history and the
+                    // cursor, so right after adding a friend this device
+                    // believed it had never committed and refreshed on its
+                    // very next send, racing the friend's own first refresh.
+                    // One of the two always lost (two-app suite, 2026-11-26).
+                    let mut st =
+                        crate::mls_state::MlsChannelState::load(log_server_id, channel_id)?
+                            .unwrap_or_default();
+                    st.generation = generation;
+                    st.epoch = outcome.local_epoch;
+                    st.store_instance_hash = hex::encode(store_instance_hash);
+                    st.confirmed = true;
+                    st.poisoned = None;
+                    // In the epoch it was authored in, as the server counts it.
+                    st.note_own_commit(outcome.local_epoch.saturating_sub(1));
+                    st.save(log_server_id, channel_id)?;
                     result.added.push(AddedE2eeMember {
                         identity: member_identity.to_string(),
                         device: device_id.clone(),
@@ -6008,6 +6019,39 @@ pub async fn process_mls_control_events(
 
 /// The non-Send body of [`process_mls_control_events`], driven on a
 /// current-thread runtime by [`run_e2ee`].
+/// Settle a key refresh left staged by a submit whose answer never arrived
+/// (`farder_e2ee_client::settle_staged_refresh`), and keep the device chain and
+/// the channel record in line with what the log says happened to it.
+#[allow(clippy::too_many_arguments)]
+fn settle_leftover_refresh(
+    store: &farder_mls::store::FarderMlsStore,
+    group: &mut farder_mls::group::MlsChannelGroup,
+    events: &[farder_crypto::event_log::Event],
+    my_device: &str,
+    chain: &mut farder_e2ee_client::ChainState,
+    ds: &mut crate::device::DeviceState,
+    mls: &mut crate::mls_state::MlsChannelState,
+    log_server_id: &str,
+    channel_id: u64,
+) -> Result<(), String> {
+    let (settled, accepted) =
+        farder_e2ee_client::settle_staged_refresh(store, group, events, my_device)
+            .map_err(|e| e.to_string())?;
+    if settled == farder_e2ee_client::StagedRefreshSettled::WasAccepted {
+        if let Some(event) = accepted {
+            chain.advance(event);
+            ds.next_seq = chain.next_seq;
+            ds.last_event_hash = chain.last_event_hash.clone();
+            ds.lamport = chain.lamport;
+            ds.save(log_server_id)?;
+        }
+        mls.note_rekey(group.epoch(), farder_e2ee_client::event_now_secs());
+        mls.epoch = group.epoch();
+        mls.save(log_server_id, channel_id)?;
+    }
+    Ok(())
+}
+
 async fn run_process_mls_control_events(
     state: Arc<AppState>,
     server_id: String,
@@ -6107,6 +6151,18 @@ async fn run_process_mls_control_events(
     let my_device = device_id(&device.public_key());
 
     let mut processed = 0usize;
+
+    // A key refresh whose answer never arrived is still staged. The log now
+    // says what happened to it: ours holds the epoch (accepted: apply it),
+    // someone else's does (ours lost: dropped, theirs applies below), or none
+    // (never arrived: dropped). Before this existed, a refused refresh was
+    // merged anyway and the device forked off alone.
+    if let Some(g) = group.as_mut() {
+        settle_leftover_refresh(
+            &store, g, &events, &my_device, &mut chain, &mut ds, &mut mls, &log_server_id,
+            channel_id,
+        )?;
+    }
 
     // K5: snapshot the ACTUAL leaf view before any commit is applied, so the
     // diff below reports what the tree really gained and lost.
@@ -6261,6 +6317,12 @@ async fn run_process_mls_control_events(
     // run starts after this page (idempotent: an already-applied commit is a
     // replay, an un-joined member skips pre-membership commits).
     mls.cursor = next_cursor;
+    // Report the group's REAL epoch. The saved number is bookkeeping that
+    // other paths can leave behind; the two-app suite once read "epoch 2"
+    // from a device whose group was really somewhere else.
+    if let Some(g) = group.as_ref() {
+        mls.epoch = g.epoch();
+    }
     mls.save(&log_server_id, channel_id)?;
 
     let diff = farder_e2ee_client::leaf_diff(
@@ -6465,6 +6527,21 @@ async fn run_send_sealed_message(
     };
     let transport = crate::e2ee_transport::E2eeTransportImpl::new(&state, server_id.clone());
 
+    // A key refresh left staged by a lost answer must be settled before we
+    // seal, or this message would go out in an epoch the log may already have
+    // moved past.
+    if group.has_staged_own_commit() {
+        let (events, _) =
+            farder_e2ee_client::fetch_mls_control_exhaustive(&transport, channel_id, mls.cursor)
+                .await
+                .map_err(|e| e.to_string())?;
+        let my_device = farder_crypto::event_log::device_id(&device.public_key());
+        settle_leftover_refresh(
+            &store, &mut group, &events, &my_device, &mut chain, &mut ds, &mut mls,
+            &log_server_id, channel_id,
+        )?;
+    }
+
     // The caps describe the CIPHERTEXT (hash, size, octet-stream) and stay
     // outside; the keys, real names and real MIMEs go inside the envelope. The
     // uploader is this identity because the server validates the cap against
@@ -6643,12 +6720,13 @@ async fn run_send_sealed_message(
                 // terminal state for an impostor leaf that is already merged and
                 // cannot be rolled back — it blocks every send AND every decrypt,
                 // permanently. A refused proactive rekey is nothing of the kind:
-                // the local group is one epoch ahead of the server (finding F1),
-                // which the send path's existing bounded resync already recovers
-                // from on the next send. Marking it poisoned PREVENTED that
-                // recovery and bricked the channel for a routine policy refusal —
-                // the exact "over-conservative guard becomes an unexitable state"
-                // shape this codebase keeps rediscovering.
+                // the refresh was only staged and has been thrown away
+                // (`E2eeError::RekeyRefused`), so the group is unchanged and the
+                // steward applies whatever commit won the epoch. (It used to be
+                // merged first, which forked this device off on its own the
+                // moment two members refreshed at once: the two-app suite's
+                // "nothing opens after the first exchange".) A lost answer
+                // leaves it staged; the next steward run or send settles it.
                 //
                 // A rate-limit refusal is also worth LEARNING from: it means the
                 // server has seen a commit from us that our local cadence did not
@@ -7927,11 +8005,9 @@ pub async fn rekey_e2ee_channel(
 
             let outcome = rekey_channel(&transport, &actor, &mut chain, &ctx, &mut group)
                 .await
-                .map_err(|e| {
-                    // A rejected rekey already merged locally (F1): the group is
-                    // one epoch ahead of the server and must not be reused.
-                    e.to_string()
-                })?;
+                // A refused rekey was only staged and has been discarded: the
+                // group is unchanged (`E2eeError::RekeyRefused`).
+                .map_err(|e| e.to_string())?;
 
             ds.next_seq = chain.next_seq;
             ds.last_event_hash = chain.last_event_hash.clone();

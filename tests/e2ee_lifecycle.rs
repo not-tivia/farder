@@ -626,6 +626,7 @@ struct TwoClientSetup {
     _joiner_conn: Connection,
     joiner_store: FarderMlsStore,
     joiner_group: MlsChannelGroup,
+    joiner_chain: ChainState,
 }
 
 async fn setup_owner_joiner(channel_id: u64, confirm_joiner: bool) -> TwoClientSetup {
@@ -764,6 +765,7 @@ async fn setup_owner_joiner(channel_id: u64, confirm_joiner: bool) -> TwoClientS
         _joiner_conn: joiner_conn,
         joiner_store,
         joiner_group,
+        joiner_chain,
     }
 }
 
@@ -1745,4 +1747,189 @@ async fn a_ban_does_not_brick_a_channel() {
     )
     .await
     .expect("discharging the drift un-seals the channel");
+}
+
+
+// ---------------------------------------------------------------------------
+// Test 9 — two key refreshes at the same moment do not fork the channel
+// ---------------------------------------------------------------------------
+
+/// Apply, in order, every commit in the control plane that moves `group` on
+/// from its current epoch — what the app's steward does.
+async fn catch_up(
+    t: &QuicE2eeTransport,
+    store: &FarderMlsStore,
+    group: &mut MlsChannelGroup,
+    channel_id: u64,
+) -> usize {
+    use farder_e2ee_client::{
+        fetch_mls_control_exhaustive, process_incoming_commit, DeclaredCommit,
+        IncomingCommitOutcome,
+    };
+    let (events, _) = fetch_mls_control_exhaustive(t, channel_id, 0).await.unwrap();
+    let mut applied = 0;
+    for event in &events {
+        if let EventPayload::MlsCommit {
+            epoch,
+            mls_message,
+            adds,
+            removes,
+            post_tree_hash,
+            ..
+        } = &event.core.payload
+        {
+            if *epoch != group.epoch() {
+                continue;
+            }
+            let declared = DeclaredCommit {
+                epoch: *epoch,
+                adds: adds.clone(),
+                removes: removes.clone(),
+                post_tree_hash: *post_tree_hash,
+            };
+            let members: Vec<DeclaredMember> = adds
+                .iter()
+                .map(|a| DeclaredMember {
+                    identity: a.identity.clone(),
+                    device: a.device.clone(),
+                })
+                .collect();
+            let certs = build_cert_resolver(t, &members).await.unwrap();
+            match process_incoming_commit(store, group, mls_message, &declared, &certs).unwrap() {
+                IncomingCommitOutcome::Applied { .. } => applied += 1,
+                other => panic!("commit at epoch {epoch} did not apply: {other:?}"),
+            }
+        }
+    }
+    applied
+}
+
+/// The bug the two-app suite found: right after the owner adds a friend, both
+/// apps refresh their keys on their next send. Only one refresh can win an
+/// epoch. The loser's refresh used to be merged locally BEFORE the server
+/// answered, so the refused device sat on a private epoch nobody else had,
+/// skipped the winner's commit as an "old repeat", and from then on no message
+/// opened in either direction.
+///
+/// A refused refresh must leave the group exactly where it was, so the loser
+/// simply applies the winner's commit and both sides keep talking.
+#[tokio::test]
+async fn two_key_refreshes_at_once_do_not_fork_the_channel() {
+    let channel_id = E2EE_CHANNEL_ID_FLOOR + 50_109;
+    let s = setup_owner_joiner(channel_id, true).await;
+    let TwoClientSetup {
+        core:
+            OwnerCore {
+                owner_kp,
+                owner_dev,
+                server_id,
+                owner_transport,
+                mut owner_chain,
+                key,
+                owner_store,
+                owner_hash,
+                mut owner_group,
+                ..
+            },
+        joiner_kp,
+        joiner_dev,
+        joiner_transport,
+        joiner_store,
+        mut joiner_group,
+        mut joiner_chain,
+        ..
+    } = s;
+    let owner_actor = actor(&owner_kp, &owner_dev, &server_id);
+    let joiner_actor = actor(&joiner_kp, &joiner_dev, &server_id);
+    let start = owner_group.epoch();
+    assert_eq!(joiner_group.epoch(), start, "both sides start in step");
+
+    // 1. The joiner's refresh wins the epoch (its first commit: exempt).
+    let joiner_hash = joiner_store.store_instance_hash();
+    let jctx = RekeyContext {
+        key: &key,
+        generation: 0,
+        store: &joiner_store,
+        store_instance_hash: &joiner_hash,
+    };
+    rekey_channel(&joiner_transport, &joiner_actor, &mut joiner_chain, &jctx, &mut joiner_group)
+        .await
+        .expect("the joiner's refresh is accepted");
+    assert_eq!(joiner_group.epoch(), start + 1);
+
+    // 2. The owner's refresh, authored in the same epoch, loses.
+    let octx = RekeyContext {
+        key: &key,
+        generation: 0,
+        store: &owner_store,
+        store_instance_hash: &owner_hash,
+    };
+    let refused = rekey_channel(&owner_transport, &owner_actor, &mut owner_chain, &octx, &mut owner_group)
+        .await
+        .expect_err("only one commit can win an epoch");
+    assert!(
+        !refused.is_diverged(),
+        "a refused refresh must not leave the group diverged, got {refused}"
+    );
+    assert_eq!(
+        owner_group.epoch(),
+        start,
+        "a refused refresh must leave the owner's group where it was"
+    );
+
+    // 3. The owner applies the winner's commit and is back in step.
+    assert_eq!(catch_up(&owner_transport, &owner_store, &mut owner_group, channel_id).await, 1);
+    assert_eq!(owner_group.epoch(), joiner_group.epoch());
+
+    // 4. Messages open both ways. Reload each group from its store first, as
+    //    the app does on every command, so the refusal left nothing stale on
+    //    disk either.
+    let mut owner_group = MlsChannelGroup::load(
+        &owner_store,
+        &farder_mls::credential::DeviceSigner(&owner_dev),
+        farder_e2ee_client::channel_group_id(&server_id, channel_id, 0).as_bytes(),
+    )
+    .unwrap()
+    .expect("owner group persists");
+    assert_eq!(owner_group.epoch(), joiner_group.epoch(), "the store agrees");
+
+    let seal = |store, content| SealContext {
+        key: &key,
+        generation: 0,
+        store,
+        content,
+        reply_to: None,
+        attachments: &[],
+    };
+    send_sealed(
+        &owner_transport,
+        &owner_actor,
+        &mut owner_chain,
+        &seal(&owner_store, OWNER_PLAINTEXT),
+        &mut owner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("the owner can send after catching up");
+    let ct = fetch_ciphertext_by_author(&joiner_transport, channel_id, &owner_kp.public_key()).await;
+    match receive_sealed(&joiner_store, &mut joiner_group, ct) {
+        SealedOutcome::Decrypted(env) => assert_eq!(env.content, OWNER_PLAINTEXT),
+        other => panic!("the joiner could not open the owner's message: {other:?}"),
+    }
+
+    send_sealed(
+        &joiner_transport,
+        &joiner_actor,
+        &mut joiner_chain,
+        &seal(&joiner_store, JOINER_PLAINTEXT),
+        &mut joiner_group,
+        &SendEligibility::confirmed(),
+    )
+    .await
+    .expect("the joiner can send");
+    let ct = fetch_ciphertext_by_author(&owner_transport, channel_id, &joiner_kp.public_key()).await;
+    match receive_sealed(&owner_store, &mut owner_group, ct) {
+        SealedOutcome::Decrypted(env) => assert_eq!(env.content, JOINER_PLAINTEXT),
+        other => panic!("the owner could not open the joiner's message: {other:?}"),
+    }
 }
