@@ -753,6 +753,13 @@ export function useServerEvents(): void {
       if (!server) return;
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: o.serverId });
       if (o.channelId === null) return;
+      // Opening it deals with it, like replying does. (The main window's focus event
+      // cleared it only when Farder was NOT already the window in front: the strip never
+      // takes focus, so clicking it while Farder was in front left the chip there.)
+      if (server.dms.some((d) => d.channel.id === o.channelId) || server.channels.some((c) => c.id === o.channelId)) {
+        strip.resolve(o.serverId, o.channelId);
+        publishStrip();
+      }
       if (server.dms.some((d) => d.channel.id === o.channelId)) {
         dispatch({ type: "OPEN_DM_PANEL", serverId: o.serverId, payload: o.channelId });
       } else if (server.channels.some((c) => c.id === o.channelId)) {

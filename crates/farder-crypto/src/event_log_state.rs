@@ -1152,11 +1152,16 @@ impl LogState {
             }
 
             EventPayload::MessageDeleted { channel_id, target, reason } => {
-                // Log deletes are for log channels: a channel with no
-                // ChannelCreated is unknown to the log and cannot be moderated
-                // through it.
+                // Log deletes are for channels the log has messages in: a declared
+                // channel, or a legacy plaintext channel the log has seen posts in
+                // (the carve-out in `MessagePosted`). Without the second, a message
+                // posted through the log into a template channel such as #general
+                // could never be deleted through it, and the legacy delete brings
+                // it back at the next start. A channel the log has never seen is
+                // still refused.
                 ensure!(
-                    self.channels.contains_key(channel_id),
+                    self.channels.contains_key(channel_id)
+                        || self.plaintext_history_channels.contains(channel_id),
                     "MessageDeleted cites a channel unknown to the log"
                 );
                 ensure!(!self.tombstones.contains(target), "target already tombstoned");
@@ -4772,6 +4777,32 @@ mod tests {
         );
         let post = sealed_post(&f.owner_dev, &owner_pk, &f.sid, &f.owner_prev, CH, 0, 2, vec![]);
         f.st.apply(&post).expect("the channel is still writable after tombstone spam");
+    }
+
+    /// A message posted through the log into a legacy channel (no ChannelCreated, e.g. the
+    /// template's #general) can be deleted through the log by its author; a channel the log
+    /// has never seen still refuses deletes. Found in the app: Delete on #general failed with
+    /// "MessageDeleted cites a channel unknown to the log".
+    #[test]
+    fn a_message_in_a_legacy_channel_can_be_deleted_through_the_log() {
+        let owner = Keypair::generate();
+        let owner_dev = Keypair::generate();
+        let (mut st, da) = bootstrapped(&owner, &owner_dev);
+        let sid = st.server_id().clone();
+        let owner_pk = owner.public_key();
+
+        let legacy = post_in(&owner_dev, &owner_pk, &sid, &da, 9);
+        st.apply(&legacy).expect("legacy plaintext post folds (the carve-out)");
+
+        let del = Ev::next(&owner_dev, owner_pk.clone(), sid.clone(), Some(&legacy),
+            legacy.core.lamport + 1, legacy.core.timestamp + 1,
+            EP::MessageDeleted { channel_id: 9, target: legacy.hash(), reason: DeleteReason::Author });
+        let unseen = Ev::next(&owner_dev, owner_pk.clone(), sid.clone(), Some(&legacy),
+            legacy.core.lamport + 1, legacy.core.timestamp + 1,
+            EP::MessageDeleted { channel_id: 77, target: legacy.hash(), reason: DeleteReason::Author });
+        assert_rejected_for(&st, &unseen, "unknown to the log");
+        st.apply(&del).expect("the author deletes a message in a legacy channel through the log");
+        assert!(st.is_tombstoned(&legacy.hash()));
     }
 
     /// The legacy carve-out is one-way: a channel that already carried

@@ -446,8 +446,14 @@ async function edit() {
   await check("A: delete it (right-click, Delete Message); it disappears for both", async () => {
     await A.page.locator(".message", { hasText: edited }).first().click({ button: "right" });
     await A.page.locator(".context-menu-item.delete").click();
-    await A.page.locator(".message-content", { hasText: edited }).first().waitFor({ state: "detached", timeout: 20000 });
-    await B.page.locator(".message-content", { hasText: edited }).first().waitFor({ state: "detached", timeout: 20000 });
+    for (const [c, who] of [[A, "A"], [B, "B"]]) {
+      try { await c.page.locator(".message-content", { hasText: edited }).first().waitFor({ state: "detached", timeout: 20000 }); }
+      catch (e) {
+        await shot(c.page, who + "-not-deleted");
+        const toasts = await A.page.locator("[data-sonner-toast], .toast, [role=status]").allInnerTexts().catch(() => []);
+        throw new Error(`${who} still shows the deleted line; A's toasts: ${JSON.stringify(toasts)}`);
+      }
+    }
   });
   await A.browser.close().catch(() => {});
   await B.browser.close().catch(() => {});
@@ -809,6 +815,44 @@ async function strip() {
       await sendText(A, "strip ping " + stamp);
       await st.locator(".edge-strip", { hasText: "strip ping " + stamp }).waitFor({ timeout: 30000 });
       await shot(st, "B-strip-message");
+    });
+    await check("Reply from the strip: a box appears, Enter sends, and A sees the reply", async () => {
+      await st.locator(".edge-strip-btn", { hasText: "Reply" }).click();
+      const box = st.locator(".edge-strip-input");
+      await box.waitFor({ timeout: 10000 });
+      await box.fill("strip reply " + stamp);
+      await box.press("Enter");
+      await seesText(A, "strip reply " + stamp, 30000);
+      // After sending, the strip goes back to its line (no box left open).
+      await box.waitFor({ state: "detached", timeout: 15000 });
+    });
+    await check("dismissing the preview (x) leaves the conversation on the strip with its unread count", async () => {
+      // Replying handed the keyboard back to B's main window, and looking at Farder clears the
+      // strip (by design). Let that settle, then look away from Farder the way a person would.
+      await B.page.waitForTimeout(3000);
+      await B.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:window|minimize", { label: "main" })).catch(() => {});
+      await B.page.waitForTimeout(1500);
+      await sendText(A, "strip unread " + stamp);
+      await st.locator(".edge-strip", { hasText: "strip unread " + stamp }).waitFor({ timeout: 30000 });
+      // The preview stays while the mouse is over the strip (it is, after the clicks above),
+      // so close it the way a person would.
+      await st.locator(".edge-strip-close").click();
+      const chip = st.locator(".edge-strip-chip", { hasText: "general" }).first();
+      try { await chip.waitFor({ timeout: 25000 }); } catch (e) {
+        await shot(st, "B-strip-no-chip");
+        throw new Error("the strip shows " + JSON.stringify(await st.locator(".edge-strip").innerText()) + " " + e.message.split("\n")[0]);
+      }
+      const n = (await chip.locator(".edge-strip-count").innerText()).trim();
+      if (!(Number(n) >= 1)) throw new Error("count reads " + JSON.stringify(n));
+      await shot(st, "B-strip-chips");
+      return "count " + n;
+    });
+    await check("clicking the chip opens that conversation in B's main window", async () => {
+      await st.locator(".edge-strip-chip", { hasText: "general" }).first().click();
+      await B.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:window|unminimize", { label: "main" })).catch(() => {});
+      await B.page.locator(`${first}.active, .server-icon.active[title="SelfTest ${stamp}"]`).first().waitFor({ timeout: 15000 }).catch(() => {});
+      await seesText(B, "strip unread " + stamp, 20000);
+      await st.locator(".edge-strip-chip", { hasText: "general" }).waitFor({ state: "detached", timeout: 15000 });
     });
   } finally {
     await setStrip(false).catch(() => {});
