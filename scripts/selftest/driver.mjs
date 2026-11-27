@@ -1716,7 +1716,7 @@ async function density() {
   }
   const tag = "dens" + stamp;
   const burst = [1, 2, 3].map((i) => `${tag} burst ${i}`);
-  const long = `${tag} long ` + "a fairly long sentence that has to wrap instead of running off the edge ".repeat(8);
+  const long = `${tag} long ` + "a fairly long sentence that has to wrap instead of running off the edge ".repeat(30);  // wraps even in a 2500px-wide window
   await check("B posts a burst of three and one long message; A posts a picture", async () => {
     for (const t of [...burst, long]) await sendText(B, t);
     const { path, fileName } = await orangePng(stamp, "density");
@@ -1772,6 +1772,19 @@ async function density() {
       sideways: list.scrollWidth > list.clientWidth + 2,
     };
   }, tag);
+  await check("A reacts to burst 1 (so every mode has a reaction to show)", async () => {
+    const row = A.page.locator(".message", { hasText: burst[0] }).first();
+    await row.hover();
+    // The add button lives in the hover-only bar (opacity 0 until pointed at), so Playwright
+    // calls it invisible even while hovered; a person pointing at the message sees it.
+    await row.locator(".reaction-add-btn").click({ force: true });
+    // The picker must be wholly inside the window and laid out as a grid, not one tall column.
+    const pk = await A.page.evaluate(() => { const p = document.querySelector(".reaction-picker"); const r = p.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height, vw: innerWidth, vh: innerHeight }; });
+    if (pk.y < 0 || pk.x < 0 || pk.x + pk.w > pk.vw || pk.y + pk.h > pk.vh) throw new Error("the picker runs outside the window: " + JSON.stringify(pk));
+    if (pk.w < 200) throw new Error(`the picker is squeezed to ${Math.round(pk.w)}px wide`);
+    await A.page.locator(".reaction-picker .reaction-picker-btn").first().click();
+    await row.locator(".reaction-count").first().waitFor({ timeout: 15000 });
+  });
   const results = {};
   for (const [label, mode] of [["Normal", "normal"], ["Roomy", "roomy"], ["Compact", "compact"], ["IRC", "irc"], ["Tiny", "tiny"]]) {
     await check(`density ${label}: chosen in Settings, laid out as described, nothing off the edge`, async () => {
@@ -1784,12 +1797,14 @@ async function density() {
       if (m.sideways) throw new Error("the message list scrolls sideways");
       for (const r of m.rows) if (r.contentRight > m.listRight + 1) throw new Error(`"${r.text}" runs past the edge`);
       const short = m.rows.filter((r) => r.text.includes("burst"));
+      // Burst 1 carries a reaction (its own line), so the one-line yardstick is bursts 2 and 3.
+      const plain = short.filter((r) => !r.text.includes("burst 1"));
       const longRow = m.rows.find((r) => r.text.includes(" long "));
-      if (!(longRow.h > short[0].h * 1.5)) throw new Error("the long message did not wrap onto more lines");
+      if (!(longRow.h > Math.min(...plain.map((r) => r.h)) * 1.5)) throw new Error("the long message did not wrap onto more lines");
       const named = short.filter((r) => r.author).length;
       const dense = ["compact", "irc", "tiny"].includes(mode);
       if (dense) {
-        for (const r of short) if (r.h > r.lh * 2.2) throw new Error(`"${r.text}" is ${Math.round(r.h)}px tall, not one line (${Math.round(r.lh)}px)`);
+        for (const r of plain) if (r.h > r.lh * 2.2) throw new Error(`"${r.text}" is ${Math.round(r.h)}px tall, not one line (${Math.round(r.lh)}px)`);
         if (named !== 3) throw new Error(`a burst of three shows the name ${named} times, want 3`);
         const pic = m.rows.find((r) => r.text.includes("picture"));
         if (pic.attBelowAuthor === false) throw new Error("the picture is not on its own line under the name");
@@ -1814,7 +1829,36 @@ async function density() {
       }
       const low = m.rows.map((r) => r.contrast).filter((c) => c !== null && c < 3);
       if (low.length) throw new Error("text hard to read, contrast " + low[0].toFixed(1));
-      return `rows ${short.map((r) => Math.round(r.h)).join("/")}px, long ${Math.round(longRow.h)}px` + (short[0].avatar ? `, picture ${Math.round(short[0].avatar)}px` : "");
+      return `rows ${short.map((r) => Math.round(r.h)).join("/")}px (1st has a reaction), long ${Math.round(longRow.h)}px` + (short[0].avatar ? `, picture ${Math.round(short[0].avatar)}px` : "");
+    });
+  }
+  for (const [label] of [["Compact"], ["IRC"], ["Tiny"]]) {
+    await check(`density ${label}: the reaction shows, and right-click > Reply works`, async () => {
+      await choose(label);
+      const r = await A.page.evaluate((t) => {
+        const row = [...document.querySelectorAll(".message")].find((m) => (m.querySelector(".message-content")?.innerText || "").includes(t));
+        const c = row?.querySelector(".reaction-count");
+        const list = document.querySelector(".message-list").getBoundingClientRect();
+        if (!c) return { err: "no reaction on the row" };
+        const b = c.getBoundingClientRect();
+        return { w: b.width, inside: b.left >= list.left - 1 && b.right <= list.right + 1, visible: getComputedStyle(c).visibility !== "hidden" && b.width > 0 };
+      }, burst[0]);
+      if (r.err) throw new Error(r.err);
+      if (!r.visible || !r.inside) throw new Error("the reaction is hidden or outside the list: " + JSON.stringify(r));
+      const row2 = A.page.locator(".message", { hasText: burst[1] }).first();
+      await row2.click({ button: "right" });
+      const menu = A.page.locator(".context-menu").first();
+      await menu.waitFor({ timeout: 5000 });
+      const mb = await menu.boundingBox();
+      const vw = await A.page.evaluate(() => [innerWidth, innerHeight]);
+      if (mb.x + mb.width > vw[0] + 1 || mb.y + mb.height > vw[1] + 1) throw new Error("the menu runs off the window");
+      await menu.locator(".context-menu-item", { hasText: "Reply" }).first().click();
+      const bar = A.page.locator(".reply-preview");
+      await bar.waitFor({ timeout: 5000 });
+      const txt = await bar.innerText();
+      await A.page.locator(".reply-cancel").click();
+      if (!txt.includes("burst 2")) throw new Error("the reply bar quotes: " + txt.slice(0, 60));
+      return "reaction visible, menu inside the window, reply bar quotes burst 2";
     });
   }
   await check("Roomy gives each message more room than Normal", async () => {
@@ -2151,6 +2195,25 @@ async function autoplay() {
       await A.page.emulateMedia({ reducedMotion: "no-preference" });
       await post(B, `${tag} again`, VIDEO);
       await until(`${tag} again`, (x) => x.video && x.paused === false, 60000, "did not start");
+    });
+    await check("pop-up: a direct video link from Bob shows a muted, playing preview in A's pop-up", async () => {
+      // A direct media file on an allowlisted media host (the tweet's own mp4), with A's app in the background.
+      const DIRECT = process.env.AUTOPLAY_DIRECT || "https://video.twimg.com/ext_tw_video/1585341912877146112/pu/vid/1920x1080/aeoVUvTgj4wHShhN.mp4";
+      await A.page.evaluate(() => { document.hasFocus = () => false; });
+      try {
+        await sendText(B, `${tag} popup ${DIRECT}`);
+        const pop = await pageMatching(A, /[?&]notify=1/, 30000);
+        const card = pop.locator(".notify-popup-card", { hasText: `${tag} popup` }).first();
+        await card.waitFor({ timeout: 30000 });
+        const v = card.locator("video.notify-popup-media");
+        await v.waitFor({ timeout: 45000 });
+        const st = await pop.waitForFunction((sel) => { const e = document.querySelector(sel); return e && !e.paused && e.currentTime > 0.2 ? { muted: e.muted, loop: e.loop } : null; }, "video.notify-popup-media", { timeout: 30000 }).then((h) => h.jsonValue());
+        await shot(pop, "A-popup-preview");
+        if (!st.muted) throw new Error("the preview plays with sound");
+        return `playing, muted${st.loop ? ", looping" : ""}`;
+      } finally {
+        await A.page.evaluate(() => { delete document.hasFocus; }).catch(() => {});
+      }
     });
   } finally {
     await A.page.emulateMedia({ reducedMotion: null }).catch(() => {});

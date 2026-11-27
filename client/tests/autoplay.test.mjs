@@ -57,3 +57,14 @@ test("a pop-up previews only direct media links over https", () => {
   assert.equal(a.firstDirectMediaUrl("no links here"), null);
   assert.equal(a.firstDirectMediaUrl("https://x.test/notes.mp4.exe"), null, "the extension must be the end");
 });
+
+test("a direct media link is classed video or picture from its extension (the pop-up fetches it directly)", () => {
+  // The pop-up used to look such a link up as a PAGE preview, which never exists for a
+  // direct media link, so the preview never appeared.
+  assert.equal(a.directMediaKind("https://video.twimg.com/x/vid/1.mp4"), "video");
+  assert.equal(a.directMediaKind("https://video.twimg.com/x/vid/1.mp4?tag=14"), "video");
+  assert.equal(a.directMediaKind("https://i.redd.it/abc.webm"), "video");
+  assert.equal(a.directMediaKind("https://pbs.twimg.com/media/x.jpg"), "image");
+  assert.equal(a.directMediaKind("https://i.redd.it/x.gif"), "image");
+  assert.equal(a.directMediaKind("https://x.com/someone/status/1"), null);
+});

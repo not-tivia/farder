@@ -93,6 +93,15 @@ export function firstDirectMediaUrl(text: string): string | null {
   return null;
 }
 
+/** Whether a direct media link (see `firstDirectMediaUrl`) is a video or a picture,
+ *  from its file extension. The pop-up fetches such a link straight through the
+ *  relay's media proxy: it is not a page, so there is no preview to look up. */
+export function directMediaKind(url: string): "video" | "image" | null {
+  const m = url.match(MEDIA_EXT);
+  if (!m) return null;
+  return /\.(?:mp4|webm|mov|m4v)(?:\?|$)/i.test(url) ? "video" : "image";
+}
+
 export function prefersReducedMotion(): boolean {
   try {
     return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as api from "../lib/tauri-bridge";
-import { useLinkEmbed } from "../hooks/useLinkEmbed";
+import { directMediaKind } from "../lib/autoplay";
 import { useProxiedMedia } from "../hooks/useProxiedMedia";
 import { useReplySender } from "../hooks/useReplySender";
 import { MAX_REPLY_CHARS, type ReplyTarget } from "../lib/quickReply";
@@ -190,11 +190,14 @@ export default function NotifyPopup() {
  * sees the viewer's address, and it renders nothing at all if anything fails.
  */
 function PopupMedia({ url }: { url: string }) {
-  const state = useLinkEmbed(url, true);
-  const media = state.status === "ok" && state.embed.media?.playable_inline ? state.embed.media : null;
-  const isVideo = !!media?.mime.startsWith("video/");
-  const blob = useProxiedMedia(media?.url ?? null, !!media);
-  if (!media || !blob) return null;
+  // A direct media link is fetched straight through the relay's media proxy (which
+  // only serves allowlisted media hosts). It used to be sent to the PAGE preview
+  // lookup first, which answers "Unavailable" for every direct media link, so the
+  // preview could never appear at all.
+  const kind = directMediaKind(url);
+  const blob = useProxiedMedia(kind ? url : null, !!kind);
+  if (!kind || !blob) return null;
+  const isVideo = kind === "video";
   return isVideo
     ? <video className="notify-popup-media" src={blob} autoPlay muted loop playsInline />
     : <img className="notify-popup-media" src={blob} alt="" />;
