@@ -84,15 +84,21 @@ pub struct CommitOutcome {
     pub removes: Vec<DeclaredMember>,
 }
 
-/// A signed key refresh that is staged but not applied
-/// ([`MlsChannelGroup::self_update_staged`]).
+/// A signed own commit that is staged but not applied
+/// ([`MlsChannelGroup::self_update_staged`], [`MlsChannelGroup::add_members_staged`],
+/// [`MlsChannelGroup::remove_members_staged`]).
 #[derive(Debug, Clone)]
-pub struct StagedSelfUpdate {
+pub struct StagedOwnCommit {
     /// What the `MlsCommit` event carries; `epoch` is the authoring epoch.
+    /// `welcome_bytes` is set for an add (send it only after the commit is
+    /// accepted).
     pub outcome: CommitOutcome,
-    /// The epoch authenticator the group WILL hold once the refresh is merged.
+    /// The epoch authenticator the group WILL hold once the commit is merged.
     pub post_epoch_authenticator: [u8; 32],
 }
+
+/// The staged key refresh type (a [`StagedOwnCommit`] with no adds/removes).
+pub type StagedSelfUpdate = StagedOwnCommit;
 
 /// The member-side view of someone else's commit, after processing+merging.
 #[derive(Debug, Clone)]
@@ -370,23 +376,7 @@ impl MlsChannelGroup {
         signer: &DeviceSigner,
         members: &[DeclaredMember],
     ) -> Result<CommitOutcome> {
-        let mut indices = Vec::with_capacity(members.len());
-        for target in members {
-            let matched: Vec<_> = self
-                .inner
-                .members()
-                .filter_map(|m| {
-                    let declared = declared_member(&m.credential).ok()?;
-                    (&declared == target).then_some(m.index)
-                })
-                .collect();
-            if matched.is_empty() {
-                bail!("no group member matches declared device {}", target.device);
-            }
-            indices.extend(matched);
-        }
-        indices.sort_unstable_by_key(|i| i.u32());
-        indices.dedup();
+        let indices = self.resolve_leaf_indices(members)?;
         let (prev_auth, epoch) = self.pre_commit_state();
         let (commit, welcome, _group_info) = self
             .inner
@@ -438,11 +428,61 @@ impl MlsChannelGroup {
             .inner
             .self_update(provider, signer, LeafNodeParameters::default())
             .map_err(|e| anyhow!("self update: {e}"))?;
+        let (commit, _, _) = bundle.into_contents();
+        self.stage_own_commit(provider, commit, None, prev_auth, epoch)
+    }
+
+    /// Build and sign an add WITHOUT applying it (see [`Self::self_update_staged`]
+    /// for the staging contract). The Welcome is in
+    /// `outcome.welcome_bytes`; it is only valid once the commit is merged, so
+    /// submit it only after the server accepts the commit.
+    pub fn add_members_staged(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        signer: &DeviceSigner,
+        key_packages: &[KeyPackage],
+    ) -> Result<StagedOwnCommit> {
+        let (prev_auth, epoch) = self.pre_commit_state();
+        let (commit, welcome, _group_info) = self
+            .inner
+            .add_members(provider, signer, key_packages)
+            .map_err(|e| anyhow!("add members: {e}"))?;
+        self.stage_own_commit(provider, commit, Some(welcome), prev_auth, epoch)
+    }
+
+    /// Build and sign a remove WITHOUT applying it (see
+    /// [`Self::self_update_staged`] for the staging contract; target
+    /// resolution as in [`Self::remove_members`]).
+    pub fn remove_members_staged(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        signer: &DeviceSigner,
+        members: &[DeclaredMember],
+    ) -> Result<StagedOwnCommit> {
+        let indices = self.resolve_leaf_indices(members)?;
+        let (prev_auth, epoch) = self.pre_commit_state();
+        let (commit, welcome, _group_info) = self
+            .inner
+            .remove_members(provider, signer, &indices)
+            .map_err(|e| anyhow!("remove members: {e}"))?;
+        self.stage_own_commit(provider, commit, welcome, prev_auth, epoch)
+    }
+
+    /// Summarise the commit OpenMLS just left pending, WITHOUT merging it. On
+    /// any error the pending commit is cleared so the group is never wedged.
+    fn stage_own_commit(
+        &mut self,
+        provider: &impl OpenMlsProvider,
+        commit: MlsMessageOut,
+        welcome: Option<MlsMessageOut>,
+        prev_auth: [u8; 32],
+        epoch: u64,
+    ) -> Result<StagedOwnCommit> {
         let result = (|| {
             let staged = self
                 .inner
                 .pending_commit()
-                .context("self update left no pending commit")?;
+                .context("commit operation left no pending commit")?;
             let summary = staged_commit_summary(&self.inner, staged)?;
             if summary.authored_epoch != epoch {
                 bail!(
@@ -456,14 +496,17 @@ impl MlsChannelGroup {
                 .as_slice()
                 .try_into()
                 .map_err(|_| anyhow!("epoch authenticator is not 32 bytes"))?;
-            let (commit, _, _) = bundle.into_contents();
             let commit_bytes = commit
                 .to_bytes()
                 .map_err(|e| anyhow!("serialize commit: {e}"))?;
-            Ok(StagedSelfUpdate {
+            let welcome_bytes = welcome
+                .map(|w| w.to_bytes())
+                .transpose()
+                .map_err(|e| anyhow!("serialize welcome: {e}"))?;
+            Ok(StagedOwnCommit {
                 outcome: CommitOutcome {
                     commit_bytes,
-                    welcome_bytes: None,
+                    welcome_bytes,
                     prev_epoch_authenticator: prev_auth,
                     post_tree_hash: summary.post_tree_hash,
                     epoch,
@@ -705,6 +748,32 @@ impl MlsChannelGroup {
         };
         let encoded = unpad(&app.into_bytes())?;
         MessageEnvelope::decode(&encoded)
+    }
+
+    /// Resolve declared members to every leaf index claiming them (sorted,
+    /// deduplicated); a target matching no leaf is an error.
+    fn resolve_leaf_indices(
+        &self,
+        members: &[DeclaredMember],
+    ) -> Result<Vec<openmls::prelude::LeafNodeIndex>> {
+        let mut indices = Vec::with_capacity(members.len());
+        for target in members {
+            let matched: Vec<_> = self
+                .inner
+                .members()
+                .filter_map(|m| {
+                    let declared = declared_member(&m.credential).ok()?;
+                    (&declared == target).then_some(m.index)
+                })
+                .collect();
+            if matched.is_empty() {
+                bail!("no group member matches declared device {}", target.device);
+            }
+            indices.extend(matched);
+        }
+        indices.sort_unstable_by_key(|i| i.u32());
+        indices.dedup();
+        Ok(indices)
     }
 
     fn pre_commit_state(&self) -> ([u8; 32], u64) {
@@ -1103,6 +1172,87 @@ mod tests {
         assert!(reloaded.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).is_err(), "one staged commit at a time");
         reloaded.discard_staged_own_commit(&a_prov).unwrap();
         reloaded.self_update_staged(&a_prov, &DeviceSigner(&a_dev)).unwrap();
+    }
+
+    #[test]
+    fn a_staged_add_changes_nothing_until_merged_and_the_welcome_joins_a_reader() {
+        let ((a_dev, a_prov, mut alice), (_b_dev, b_prov, mut bob)) = two_member_group(b"staged-add");
+        let start = alice.epoch();
+        let (c_id, c_dev, c_prov) = member();
+        let c_bundle = generate_key_package(&c_prov, &c_dev, &c_id.public_key()).unwrap();
+
+        let staged = alice
+            .add_members_staged(&a_prov, &DeviceSigner(&a_dev), &[c_bundle.key_package().clone()])
+            .unwrap();
+        assert_eq!(staged.outcome.epoch, start);
+        assert_eq!(staged.outcome.adds, vec![declared(&c_id, &c_dev)]);
+        assert!(staged.outcome.welcome_bytes.is_some());
+        assert!(alice.has_staged_own_commit());
+        assert_eq!(alice.epoch(), start, "staging must not move the group");
+        assert_eq!(alice.members().unwrap().len(), 2, "the new member is not in the tree yet");
+
+        // Discard restores it; a fresh staging works afterwards.
+        alice.discard_staged_own_commit(&a_prov).unwrap();
+        assert!(!alice.has_staged_own_commit());
+        assert_eq!(alice.epoch(), start);
+        assert_eq!(alice.members().unwrap().len(), 2);
+
+        let staged = alice
+            .add_members_staged(&a_prov, &DeviceSigner(&a_dev), &[c_bundle.key_package().clone()])
+            .unwrap();
+        alice.merge_staged_own_commit(&a_prov).unwrap();
+        assert_eq!(alice.epoch(), start + 1);
+        assert_eq!(alice.epoch_authenticator(), staged.post_epoch_authenticator);
+        assert_eq!(alice.tree_hash(), staged.outcome.post_tree_hash);
+        assert_eq!(alice.members().unwrap().len(), 3);
+
+        bob.process_commit(&b_prov, &staged.outcome.commit_bytes).unwrap();
+        let (mut carol, _) =
+            MlsChannelGroup::join_from_welcome(&c_prov, &staged.outcome.welcome_bytes.unwrap()).unwrap();
+        let m = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &text("hello carol")).unwrap();
+        assert_eq!(carol.open_message(&c_prov, &m).unwrap().content, "hello carol");
+        assert_eq!(bob.open_message(&b_prov, &m).unwrap().content, "hello carol");
+    }
+
+    #[test]
+    fn a_staged_remove_changes_nothing_until_merged() {
+        let ((a_dev, a_prov, mut alice), (b_dev, _b_prov, bob)) = two_member_group(b"staged-remove");
+        let start = alice.epoch();
+        let b_member = bob.members().unwrap().into_iter().find(|m| m.device == device_id(&b_dev.public_key())).unwrap();
+
+        let staged = alice.remove_members_staged(&a_prov, &DeviceSigner(&a_dev), &[b_member.clone()]).unwrap();
+        assert_eq!(staged.outcome.removes, vec![b_member.clone()]);
+        assert!(staged.outcome.welcome_bytes.is_none());
+        assert_eq!(alice.epoch(), start);
+        assert_eq!(alice.members().unwrap().len(), 2, "bob is still in the tree");
+
+        alice.discard_staged_own_commit(&a_prov).unwrap();
+        assert_eq!(alice.epoch(), start);
+        assert_eq!(alice.members().unwrap().len(), 2);
+
+        let staged = alice.remove_members_staged(&a_prov, &DeviceSigner(&a_dev), &[b_member]).unwrap();
+        alice.merge_staged_own_commit(&a_prov).unwrap();
+        assert_eq!(alice.epoch(), start + 1);
+        assert_eq!(alice.epoch_authenticator(), staged.post_epoch_authenticator);
+        assert_eq!(alice.members().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn applying_another_members_commit_drops_our_staged_add() {
+        let ((a_dev, a_prov, mut alice), (b_dev, b_prov, mut bob)) = two_member_group(b"staged-add-race");
+        let start = alice.epoch();
+        let (c_id, c_dev, c_prov) = member();
+        let c_bundle = generate_key_package(&c_prov, &c_dev, &c_id.public_key()).unwrap();
+
+        alice.add_members_staged(&a_prov, &DeviceSigner(&a_dev), &[c_bundle.key_package().clone()]).unwrap();
+        let bobs = bob.self_update(&b_prov, &DeviceSigner(&b_dev)).unwrap();
+
+        alice.process_commit(&a_prov, &bobs.commit_bytes).unwrap();
+        assert!(!alice.has_staged_own_commit(), "applying the winner drops the loser");
+        assert_eq!(alice.epoch(), start + 1);
+        assert_eq!(alice.members().unwrap().len(), 2, "the dropped add never happened");
+        let m = alice.seal_message(&a_prov, &DeviceSigner(&a_dev), &text("in step")).unwrap();
+        assert_eq!(bob.open_message(&b_prov, &m).unwrap().content, "in step");
     }
 
     #[test]
