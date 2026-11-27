@@ -37,6 +37,17 @@ export default function BackupCopyTab({ serverId, isOwner }: Props) {
     finally { setBusy(false); }
   }
 
+  const [promoteTo, setPromoteTo] = useState("");
+  async function promote() {
+    const target = promoteTo.trim();
+    if (!target) return;
+    if (!window.confirm(`Make the copy at ${target} the host of this server?\n\nUse this only when the host's computer is gone for a long time. Messages the old host took after the copy last saved are not carried over, and the old host becomes read-only for everyone who has seen the move.`)) return;
+    setBusy(true); setError(null); setNote(null);
+    try { setNote(await api.promoteCopy(serverId, target)); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  }
+
   async function save() {
     setBusy(true); setError(null); setNote(null);
     try {
@@ -84,6 +95,19 @@ export default function BackupCopyTab({ serverId, isOwner }: Props) {
               </label>
             );
           })}
+        </div>
+      )}
+      {isOwner && (
+        <div className="connect-section" style={{ marginTop: 16 }}>
+          <label className="connect-label" htmlFor="promote-copy">Make a copy the host</label>
+          <div style={{ fontSize: 11, marginBottom: 6 }}>
+            When the host's computer is gone for a long time, a machine keeping a copy can take over. Type its
+            address (one of the backup addresses above). Only one machine is ever the host: the old one becomes
+            read-only for everyone who has seen the move.
+          </div>
+          <input id="promote-copy" className="connect-input" value={promoteTo} aria-label="Copy to make the host"
+            placeholder="host:port of the copy" onChange={(e) => setPromoteTo(e.target.value)} />
+          <button className="xp-button" style={{ marginTop: 6 }} disabled={busy || !promoteTo.trim()} onClick={promote}>Make it the host</button>
         </div>
       )}
       {note && <div style={{ marginTop: 8 }}>{note}</div>}

@@ -625,22 +625,8 @@ pub const READ_ONLY_COPY: &str = "the host of this server is offline, so you are
 
 /// The requests a read-only copy still answers: reading history, members and info.
 fn is_read_only_request(req: &ServerRequest) -> bool {
-    matches!(
-        req,
-        ServerRequest::GetServerInfo
-            | ServerRequest::GetServerInfoV2
-            | ServerRequest::GetMembers
-            | ServerRequest::GetMemberProfile { .. }
-            | ServerRequest::GetMembershipStatus
-            | ServerRequest::FetchHistory { .. }
-            | ServerRequest::FetchHistoryV2 { .. }
-            | ServerRequest::Search { .. }
-            | ServerRequest::Subscribe { .. }
-            | ServerRequest::NegotiateProtocol { .. }
-            | ServerRequest::GetOwnChainHead { .. }
-            | ServerRequest::GetHostTerm
-            | ServerRequest::PromoteToHost { .. }
-    )
+    // One list for the server and the app: see `ServerRequest::is_read_only`.
+    req.is_read_only()
 }
 
 /// Changes that destroy something. The bulk-damage brake (`brake.rs`) limits how many of these one
@@ -2745,6 +2731,12 @@ fn handle_request_inner(
         ServerRequest::GetHostTerm => {
             // Any member; the host and a read-only copy answer the same way. `None` = original host.
             ok(ServerResponse::HostTerm { term: crate::promotion::stored_term(conn)? })
+        }
+        ServerRequest::GetPromotionInfo => {
+            let host_key = state.host_identity.lock().unwrap().map(hex::encode).unwrap_or_default();
+            let head_event = crate::promotion::log_head(conn)?;
+            let term = crate::promotion::stored_term(conn)?.map_or(0, |t| t.term);
+            ok(ServerResponse::PromotionInfo { host_key, head_event, term, read_only: state.is_read_only() })
         }
         ServerRequest::PromoteToHost { term } => {
             // The signed term is the authority, not the sender: anyone connected may carry it.
@@ -10601,6 +10593,7 @@ mod tests {
                 | ServerRequest::GetOwnChainHead { .. }
                 | ServerRequest::GetHostTerm
                 | ServerRequest::PromoteToHost { .. }
+                | ServerRequest::GetPromotionInfo
                 | ServerRequest::ReportMessage { .. }
                 | ServerRequest::ListReports { .. }
                 | ServerRequest::ResolveReport { .. }

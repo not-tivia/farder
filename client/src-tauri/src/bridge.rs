@@ -12,6 +12,12 @@ use tokio::task::JoinHandle;
 /// Send a request to the server identified by `server_id` and await the response.
 pub async fn send_request(state: &AppState, server_id: &str, request: ServerRequest) -> Result<ServerResponse> {
     let conn = state.get_server(server_id).map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Fencing (promotion): never write to a host that has been replaced, or the history would fork.
+    if let Some(to) = conn.moved_to.lock().unwrap().clone() {
+        if !request.is_read_only() {
+            anyhow::bail!("this server moved to a new host ({to}). This machine is the old host, so you can only read here; the app keeps trying the new host.");
+        }
+    }
     let id = conn.next_id();
     let (tx, rx) = tokio::sync::oneshot::channel();
     conn.pending_requests.lock().unwrap().insert(id, tx);

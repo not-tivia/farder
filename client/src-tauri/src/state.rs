@@ -25,7 +25,11 @@ pub struct ServerConnection {
     pub relayed: bool,
     /// `Some(address)` when the host did not answer and this connection is to a backup address (a
     /// read-only saved copy): the app says so and keeps trying the host in the background.
-    pub on_fallback: Option<String>,
+    pub on_fallback: Mutex<Option<String>>,
+    /// `Some(where the server moved)` when THIS machine is a host the owner has replaced (it holds a lower
+    /// hosting term than one this app has seen). The app only reads from it: `bridge::send_request`
+    /// refuses every request that is not `ServerRequest::is_read_only`.
+    pub moved_to: Mutex<Option<String>>,
 }
 
 impl ServerConnection {
