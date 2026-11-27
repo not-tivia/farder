@@ -62,7 +62,11 @@ Client-crate tests that point `FARDER_DATA` at a temp dir (themes, book, history
 device, profile_sync, translation, voice settings) hold the single shared
 `crate::test_env::lock()` (defined in `lib.rs`) for their whole body. We chose
 the shared lock over `_in(dir)` function variants because it changes no
-production signatures. Any new test that sets or reads `FARDER_DATA` must take it.
+production signatures. Any new test that sets or reads `FARDER_DATA` must take it. The same lock covers
+the other process-wide variables tests set: `FARDER_DISPLAY_BACKEND` (voice
+screen-share controller tests in `voice/mod.rs`), `FARDER_AUDIO_BACKEND` and
+`FARDER_MOCK_AUDIO_HZ` (`audio.rs`). Lock choice (not passing the backend in) keeps
+production signatures unchanged. Any test calling `set_var`/`remove_var` must take it.
 
 The display mock tests (`display.rs`) assert behaviour with generous bounds
 (frames keep arriving, never faster than the configured fps; stop returns in
