@@ -3,6 +3,7 @@ pub mod backup;
 pub mod brake;
 pub mod snapshot;
 pub mod commands;
+pub mod copy_reload;
 pub mod webhooks;
 pub mod bots;
 pub mod event_ingest;
