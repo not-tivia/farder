@@ -79,7 +79,7 @@ Start-up: a database with a stored term whose `host_key` is not this machine's i
 `--read-only` (it was replaced). A promoted copy restarted from its `--db` with the same `--data-dir` stays writable with the
 same term. Since built: asking the copies for a higher term (step 4, above), the owner's UI (Server Settings > Backup copy,
 which learns the copy's `host_key` from `GetPromotionInfo`), and the apps following the move (`ubuntu-suite.sh promote`).
-Not yet: the old host following the new host as a copy, and `--relay` registration on promotion (the relay routes by the
+Not yet: `--relay` registration on promotion (the relay routes by the
 old host's own id, so a promoted copy cannot take over relay invite links).
 
 Test: `cargo test -p farder-replica --test replica promotes` (real server binary: promote, every refusal, restart).
@@ -97,3 +97,19 @@ verified hosting term per server and fences on it: the new host first, and a rep
 promoted server owns `latest.db`. The replica refuses anyway (#28): if `latest.db` holds a hosting term
 (`held_term`), `pull_once` returns `PullError::Promoted(term)` before downloading anything (and again at install
 time), and the program exits with code **4** (`--once`) or stops.
+
+## The old host follows the new host
+
+A replaced host (it logged `REPLACED:`) keeps its own database untouched as an ARCHIVE: it holds the messages the copy never
+got (its "tail"), and serving or promoting it would fork the history. To follow the new host instead, on the old machine:
+
+1. stop the old `farder-server`;
+2. `farder-replica --server <new host> --invite <link from the new host> --dir FOLLOW` (the owner allows its key in
+   Server Settings > Backup copy, like any copy), then keep it pulling (`--interval`);
+3. serve `FOLLOW/latest.db` read-only with the old machine's OWN `--data-dir` (its identity):
+   `farder-server --read-only --db FOLLOW/latest.db --storage-dir FOLLOW/files --data-dir <old data dir>`.
+
+If the new host is lost later, the owner can make the old machine the host again from that copy (term 2): the new host's
+messages are kept and the old tail does not come back. Test: `a_replaced_old_host_follows_the_new_host_and_can_be_made_the_host_again_without_forking`
+(real binaries: archive hash unchanged, followed copy read-only, promote-back accepted, no tail). A running copy server does
+not yet pick up the replica's later pulls without a restart (issue #46).

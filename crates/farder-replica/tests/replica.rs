@@ -660,3 +660,97 @@ async fn a_pull_still_finishes_when_the_host_refuses_the_announcement() {
     assert_eq!(out.matches("could not announce").count(), 1, "logged once");
     assert!(dir.join("latest.db").exists());
 }
+
+/// A signed invite made by the owner on `s` (a fresh device of the owner signs the record), for a second replica.
+async fn signed_invite(s: &mut Session, owner: &Keypair, sid: &str) -> String {
+    let dev = Keypair::generate();
+    let now = now_secs();
+    let da = Event::next(&dev, owner.public_key(), sid.to_string(), None, 0, now, EventPayload::DeviceAuthorized { cert: DeviceCert::create(owner, &dev.public_key(), now) });
+    let r = s.ask(ServerRequest::SubmitEvent { event: da.clone() }).await.unwrap();
+    assert!(!matches!(r, ServerResponse::Error { .. }), "device: {r:?}");
+    let ServerResponse::InviteCreated { code } = s.ask(ServerRequest::CreateInvite { max_uses: Some(1), expires_in_secs: None, target_channel: None }).await.unwrap() else { panic!() };
+    let inv = Event::next(&dev, owner.public_key(), sid.to_string(), Some(&da), da.core.lamport, now, EventPayload::InviteCreated { code_hash: invite_code_hash(&code), max_uses: 1, expires_at: now + 3600, requires_approval: false });
+    let r = s.ask(ServerRequest::SubmitEvent { event: inv }).await.unwrap();
+    assert!(!matches!(r, ServerResponse::Error { .. }), "invite: {r:?}");
+    code
+}
+
+async fn history_has(s: &mut Session, channel: u64, text: &str) -> bool {
+    let ServerResponse::History { messages } = s.ask(ServerRequest::FetchHistory { channel_id: channel, before_id: None, limit: 100 }).await.unwrap() else { panic!("history") };
+    messages.iter().any(|m| m.content == text)
+}
+
+// The old host, after it was replaced, follows the new host as a copy (docs/specs/2026-11-27-promotion-design.md, step 4):
+// it pulls the NEW host's history into a separate folder and serves THAT read-only, keeping its own database untouched as
+// an archive (its tail, the messages the copy never got, stays there). If the new host is lost later, the owner can make
+// the old machine the host again, from the followed copy, so the history continues without forking.
+#[tokio::test]
+async fn a_replaced_old_host_follows_the_new_host_and_can_be_made_the_host_again_without_forking() {
+    use farder_crypto::host_term::HostTerm;
+    let Seeded { mut srv, owner, mut o, sid, code } = seeded().await;
+    let host_db = srv._dir.path().join("s.db");
+    let host_data = srv._dir.path().join("sd");
+    let ServerResponse::ServerInfo { channels, .. } = o.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+
+    // A copy on another machine, pulled while the host is up.
+    let work = tempfile::tempdir().unwrap();
+    let (rkey, _) = load_or_create_key(&work.path().join("replica.key")).unwrap();
+    let mut r = Session::connect(srv.addr, None, &rkey, Some(code.clone()), None).await.unwrap();
+    r.join_history(&rkey, &code).await.unwrap();
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let copy_dir = work.path().join("copy");
+    pull_once(&mut r, &copy_dir).await.unwrap();
+    drop(r);
+    // The old host takes one more message the copy never gets: its tail.
+    assert!(matches!(send(&mut o, general, "tail on the old host").await, ServerResponse::MessageSent { .. }));
+    drop(o);
+    let _ = srv.child.kill(); let _ = srv.child.wait();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let archive_before = logical_hash(&host_db);
+
+    // The owner makes the copy the host (term 1) and the group carries on there.
+    let copy_port = free_port();
+    let copy_addr = format!("127.0.0.1:{copy_port}");
+    let copy_data = work.path().join("copy-data");
+    let (mut new_host, _nlog) = start_copy_on(&copy_dir.join("latest.db"), &copy_data, copy_port).await;
+    let mut n = Session::connect(copy_addr.parse().unwrap(), None, &owner, None, None).await.unwrap();
+    let t1 = HostTerm::sign(&owner, sid.clone(), 1, identity_of(&copy_data), vec![copy_addr.clone()], head_of(&copy_dir.join("latest.db")), now_secs());
+    assert!(matches!(n.ask(ServerRequest::PromoteToHost { term: t1 }).await.unwrap(), ServerResponse::Ok));
+    assert!(matches!(send(&mut n, general, "written on the new host").await, ServerResponse::MessageSent { .. }));
+
+    // The old machine follows: the real replica binary, with the old machine's own key, pulls from the NEW host into a
+    // separate folder. The owner allows that key like any copy.
+    let follow = work.path().join("follow");
+    let invite = signed_invite(&mut n, &owner, &sid).await;
+    let (c1, out1) = run_replica(copy_addr.parse().unwrap(), &follow, &invite, None);
+    assert_eq!(c1, 3, "waiting for the owner: {out1}");
+    let (fkey, _) = load_or_create_key(&follow.join("replica.key")).unwrap();
+    assert!(matches!(n.ask(ServerRequest::SetReplica { member: fkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let (c2, out2) = run_replica(copy_addr.parse().unwrap(), &follow, &invite, None);
+    assert_eq!(c2, 0, "the follow pull: {out2}");
+
+    // The old machine serves the FOLLOWED copy, read-only, with its own identity (its --data-dir).
+    let old_port = free_port();
+    let old_addr = format!("127.0.0.1:{old_port}");
+    let (mut old, old_log) = start_copy_on(&follow.join("latest.db"), &host_data, old_port).await;
+    let mut m = Session::connect(old_addr.parse().unwrap(), None, &owner, None, None).await.unwrap();
+    assert!(history_has(&mut m, general, "written on the new host").await, "the followed copy has the new host's messages");
+    assert!(!history_has(&mut m, general, "tail on the old host").await, "the tail is not mixed in");
+    still_read_only(&mut m, general).await;
+    assert_eq!(logical_hash(&host_db), archive_before, "the old database is kept untouched as an archive");
+    let archived = rusqlite::Connection::open_with_flags(&host_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
+        .query_row("SELECT count(*) FROM messages WHERE content = 'tail on the old host'", [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(archived, 1, "the tail is still in the archive");
+
+    // Later the new host is lost. The owner makes the old machine the host again (term 2), from the followed copy.
+    drop(n);
+    let _ = new_host.kill(); let _ = new_host.wait();
+    let t2 = HostTerm::sign(&owner, sid.clone(), 2, identity_of(&host_data), vec![old_addr.clone()], head_of(&follow.join("latest.db")), now_secs());
+    let r2 = m.ask(ServerRequest::PromoteToHost { term: t2 }).await.unwrap();
+    assert!(matches!(r2, ServerResponse::Ok), "promote back: {r2:?}\n{}", std::fs::read_to_string(&old_log).unwrap_or_default());
+    assert!(matches!(send(&mut m, general, "back on the old machine").await, ServerResponse::MessageSent { .. }));
+    assert!(history_has(&mut m, general, "written on the new host").await, "nothing from the new host's era is lost");
+    assert!(!history_has(&mut m, general, "tail on the old host").await, "the old tail does not come back (no fork)");
+    let _ = old.kill(); let _ = old.wait();
+}
