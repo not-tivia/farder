@@ -68,6 +68,41 @@ fn check(conn: &Connection, state: &ServerState, term: &HostTerm) -> Result<(), 
     Ok(())
 }
 
+/// Where and how often a server makes automatic backups (`--backup-dir` and friends).
+#[derive(Clone)]
+pub struct BackupPlan {
+    pub db_path: String,
+    pub storage_dir: String,
+    pub data_dir: std::path::PathBuf,
+    pub backup_dir: std::path::PathBuf,
+    pub every: std::time::Duration,
+    pub keep: usize,
+}
+
+impl BackupPlan {
+    /// Log the "Automatic backups to ..." line and start the backup loop (one backup right away).
+    pub fn start(&self) -> tokio::task::JoinHandle<()> {
+        tracing::info!("Automatic backups to {} every {} seconds, keeping {}", self.backup_dir.display(), self.every.as_secs(), self.keep.max(1));
+        crate::backup::spawn_backup_task(self.db_path.clone(), self.storage_dir.clone(), self.data_dir.clone(), self.backup_dir.clone(), self.every, self.keep)
+    }
+}
+
+/// The hook a read-only copy runs when it is promoted: it starts the jobs a writable host runs
+/// (retention, bots, widgets) and, if `--backup-dir` was given, the automatic backups.
+pub fn promoted_hook(state: &std::sync::Arc<ServerState>, retention_interval: u64, backup: Option<BackupPlan>) -> Box<dyn Fn() + Send + Sync> {
+    let weak = std::sync::Arc::downgrade(state);
+    Box::new(move || {
+        if let Some(st) = weak.upgrade() {
+            let _ = crate::retention::spawn_retention_task(std::sync::Arc::clone(&st), retention_interval);
+            let _ = crate::bots::spawn_bot_poll_task(std::sync::Arc::clone(&st));
+            let _ = crate::widgets::spawn_widget_sweeper(st);
+            if let Some(plan) = &backup {
+                let _ = plan.start();
+            }
+        }
+    })
+}
+
 /// Handle `PromoteToHost`. Called with the database connection already locked by the caller.
 pub fn promote(conn: &Connection, state: &ServerState, term: HostTerm) -> Result<(), String> {
     if !state.is_read_only() {
@@ -231,4 +266,76 @@ pub fn spawn_copy_probe(state: std::sync::Arc<ServerState>) -> tokio::task::Join
             tokio::time::sleep(PROBE_INTERVAL).await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use farder_crypto::event_log::Genesis;
+    use farder_crypto::identity::Keypair;
+    use std::sync::Arc;
+
+    /// Poll `dir` for up to 5 s until `list_backups` sees at least one backup.
+    async fn wait_for_backup(dir: &std::path::Path) -> bool {
+        for _ in 0..50 {
+            if !crate::backup::list_backups(dir).is_empty() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    fn plan(root: &std::path::Path) -> (BackupPlan, std::path::PathBuf) {
+        let (files, data, backups) = (root.join("files"), root.join("data"), root.join("backups"));
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let plan = BackupPlan {
+            db_path: root.join("server.db").to_string_lossy().to_string(),
+            storage_dir: files.to_string_lossy().to_string(),
+            data_dir: data,
+            backup_dir: backups.clone(),
+            every: std::time::Duration::from_secs(3600),
+            keep: 3,
+        };
+        (plan, backups)
+    }
+
+    #[tokio::test]
+    async fn spawn_backup_task_writes_a_backup_right_away() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plan, backups) = plan(tmp.path());
+        drop(crate::db::open_file(&plan.db_path).unwrap());
+        let h = plan.start();
+        assert!(wait_for_backup(&backups).await, "no backup appeared");
+        let all = crate::backup::list_backups(&backups);
+        crate::backup::verify_backup(&all[0].0).unwrap();
+        h.abort();
+    }
+
+    #[tokio::test]
+    async fn a_promoted_copy_starts_its_automatic_backups_at_once_and_not_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plan, backups) = plan(tmp.path());
+        let conn = crate::db::open_file(&plan.db_path).unwrap();
+        let owner = Keypair::generate();
+        let genesis = Genesis { version: 1, name: "t".into(), owner: owner.public_key(), created_at: 1, nonce: [0u8; 16] };
+        let server_id = genesis.server_id();
+        let host = [5u8; 32];
+
+        let state = Arc::new(ServerState::new_for_test().unwrap());
+        state.read_only.store(true, Ordering::SeqCst);
+        *state.host_identity.lock().unwrap() = Some(host);
+        *state.log_state.lock().unwrap() = Some(farder_crypto::event_log_state::LogState::from_genesis(&genesis));
+        *state.on_promoted.lock().unwrap() = Some(promoted_hook(&state, 3600, Some(plan)));
+
+        // Read-only and never promoted: no backup.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(crate::backup::list_backups(&backups).is_empty());
+
+        let term = HostTerm::sign(&owner, server_id, 1, host, vec![], log_head(&conn).unwrap(), 1);
+        promote(&conn, &state, term).unwrap();
+        assert!(wait_for_backup(&backups).await, "promotion did not start the automatic backups");
+        crate::backup::verify_backup(&crate::backup::list_backups(&backups)[0].0).unwrap();
+    }
 }

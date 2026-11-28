@@ -287,29 +287,16 @@ async fn main() -> Result<()> {
     // Automatic backups: one now, then one every --backup-interval seconds. They use their
     // own database connection (SQLite lets readers and the writer work side by side), so a
     // backup never makes the server wait.
-    if let Some(dir) = args.backup_dir.clone().filter(|_| !read_only) {
-        let (db_path, storage, data, keep) = (args.db.clone(), args.storage_dir.clone(), args.data_dir.clone(), args.backup_keep);
-        let every = std::time::Duration::from_secs(args.backup_interval.max(60));
-        info!("Automatic backups to {} every {} seconds, keeping {}", dir.display(), every.as_secs(), keep.max(1));
-        tokio::spawn(async move {
-            loop {
-                let (d, s2, dt, k, p) = (dir.clone(), storage.clone(), data.clone(), keep, db_path.clone());
-                let r = tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
-                    let conn = db::open_file(&p)?;
-                    let made = farder_server::backup::create_backup(&conn, std::path::Path::new(&s2), &dt, &d)?;
-                    farder_server::backup::prune(&d, k)?;
-                    Ok(made)
-                })
-                .await;
-                match r {
-                    Ok(Ok(made)) => info!("Backup written to {}", made.display()),
-                    Ok(Err(e)) => tracing::warn!("automatic backup failed: {e:#}"),
-                    Err(e) => tracing::warn!("automatic backup task failed: {e}"),
-                }
-                tokio::time::sleep(every).await;
-            }
-        });
-    }
+    let backup_plan = args.backup_dir.clone().map(|dir| farder_server::promotion::BackupPlan {
+        db_path: args.db.clone(),
+        storage_dir: args.storage_dir.clone(),
+        data_dir: args.data_dir.clone(),
+        backup_dir: dir,
+        every: std::time::Duration::from_secs(args.backup_interval.max(60)),
+        keep: args.backup_keep,
+    });
+    // A read-only copy starts them only when it is promoted (see `promoted_hook`).
+    let _backups = backup_plan.as_ref().filter(|_| !read_only).map(|p| p.start());
 
     // A read-only copy runs none of the background jobs that write (cleanup, bots, widgets), and SQLite
     // itself is told not to write, which is the guarantee: the copy cannot change.
@@ -318,15 +305,7 @@ async fn main() -> Result<()> {
         state.db.lock().unwrap().pragma_update(None, "query_only", true)?;
         info!("READ-ONLY copy: history and members can be read; nothing can be sent or changed.");
         // If the owner promotes this copy (`PromoteToHost`), it starts the jobs a writable host runs.
-        let weak = Arc::downgrade(&state);
-        let interval = args.retention_interval;
-        *state.on_promoted.lock().unwrap() = Some(Box::new(move || {
-            if let Some(st) = weak.upgrade() {
-                let _ = retention::spawn_retention_task(Arc::clone(&st), interval);
-                let _ = farder_server::bots::spawn_bot_poll_task(Arc::clone(&st));
-                let _ = farder_server::widgets::spawn_widget_sweeper(st);
-            }
-        }));
+        *state.on_promoted.lock().unwrap() = Some(farder_server::promotion::promoted_hook(&state, args.retention_interval, backup_plan));
     } else {
         _retention = Some(retention::spawn_retention_task(Arc::clone(&state), args.retention_interval));
         _bot_poller = Some(farder_server::bots::spawn_bot_poll_task(Arc::clone(&state)));
