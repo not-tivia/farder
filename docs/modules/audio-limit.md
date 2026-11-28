@@ -29,6 +29,12 @@ Stereo is limited together so the balance does not wobble.
 At 100% / no ceiling the web-view code touches no element at all. Settings from
 outside (a file, a slider) are clamped; garbage means unchanged / off.
 
+`attachLimiter` marks every player it is given (`data-farder-limit`), even at the
+defaults. When a ceiling or volume is then set, `applyAudioLimits` routes the
+players already on screen too, so an older voice message or video does not keep
+playing at full loudness until the app is reloaded (bug found by the self-test,
+fixed 2026-11-27).
+
 ## Tests
 - Rust: `cargo test audio_limit` (9, incl. screams, square waves, noise, steps,
   frame boundaries, recovery) and `cargo test mixer` (the mixer itself holds a
@@ -36,5 +42,11 @@ outside (a file, a slider) are clamped; garbage means unchanged / off.
 - Web: `bash client/scripts/run-unit-tests.sh` runs the SHIPPED worklet source
   against the same properties.
 
-Not verified until run on Windows: that sound actually comes out of speakers
-through the worklet (autoplay-policy / context resume), and the sliders.
+- Windows: `node scripts/selftest/driver.mjs sound` (after `core`). A posts a
+  full-scale tone as a voice message; B sets the ceiling in Settings > Sound and
+  plays it, and a tap on everything connected to the speakers reads the real
+  output: peak 0.063 at -24 dB and 0.501 at -6 dB (the file is 1.0). With the
+  worklet told "no ceiling" the same check reads 1.0 and fails. A second run plays
+  the message that was on screen before the ceiling was set (the bug above).
+
+Still not checked: voice-call limiting by ear (the Rust side has its own tests).

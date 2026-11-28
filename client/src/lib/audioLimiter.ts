@@ -80,7 +80,10 @@ const attached = new WeakSet<HTMLMediaElement>();
  * unprocessed in the gap.
  */
 export function attachLimiter(el: HTMLMediaElement | null): void {
-  if (!el || attached.has(el) || !limiterNeeded(limits)) return;
+  if (!el) return;
+  // Remember that this element wants the limiter, so a setting changed while it is on screen still reaches it.
+  el.dataset.farderLimit = "1";
+  if (attached.has(el) || !limiterNeeded(limits)) return;
   attached.add(el);
   const wasMuted = el.muted;
   if (!graph) el.muted = true;
@@ -102,6 +105,11 @@ export function applyAudioLimits(l: AudioLimits): void {
   limits = { master: l.master, maxDb: l.maxDb };
   if (graph) graph.node.port.postMessage(workletMessage(limits));
   else if (limiterNeeded(limits)) void ensureGraph(); // warm it up so the first play is not held
+  // Players already on screen were left alone while the settings were at their defaults; route them now,
+  // or an older voice message or video would still play at full loudness until the app is reloaded.
+  if (limiterNeeded(limits) && typeof document !== "undefined") {
+    document.querySelectorAll<HTMLMediaElement>("audio[data-farder-limit], video[data-farder-limit]").forEach(attachLimiter);
+  }
 }
 
 /** Read the saved limits once at startup and keep in step with the settings screen. */
