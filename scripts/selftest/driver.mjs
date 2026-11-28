@@ -2444,6 +2444,113 @@ async function autoplay() {
   await B.browser.close().catch(() => {});
 }
 
+// Sound (run after `core`): the loudness ceiling, measured. A posts a full-volume tone as a voice message; B sets
+// Settings > Sound > Max loudness and plays it. A tap on everything that reaches the speakers reads the real
+// output level: it must stay under the ceiling and still be audible, and moving the ceiling must move it.
+async function sound() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    await c.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  // A 3-second 440 Hz tone at full scale (the loudest a file can be).
+  const rate = 22050, n = rate * 3, wav = Buffer.alloc(44 + n * 2);
+  wav.write("RIFF", 0); wav.writeUInt32LE(36 + n * 2, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(rate, 24); wav.writeUInt32LE(rate * 2, 28);
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) wav.writeInt16LE(Math.round(32767 * Math.sin((2 * Math.PI * 440 * i) / rate)), 44 + i * 2);
+  const dir = process.env.SHOTS || "selftest-shots";
+  fs.mkdirSync(dir, { recursive: true });
+  const fileName = `loud-${stamp}.wav`;
+  const path = (await import("node:path")).resolve(dir, fileName);
+  fs.writeFileSync(path, wav);
+  const caption = "loud tone " + stamp;
+  // Tap: whatever connects to the speakers is also fed to an analyser we can read. B is reloaded first so the
+  // limiter's audio graph is built after the tap is in place (a graph from an earlier run would bypass it).
+  await B.page.reload(); await new Promise((r) => setTimeout(r, 5000));
+  if (await B.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(B);
+  await B.page.locator(`.server-icon[title="SelfTest ${stamp}"]`).click().catch(() => {});
+  await B.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  await B.page.evaluate(() => {
+    if (window.__soundTap) return;
+    window.__soundTap = [];
+    const orig = AudioNode.prototype.connect;
+    AudioNode.prototype.connect = function (dest, ...rest) {
+      const r = orig.call(this, dest, ...rest);
+      if (dest instanceof AudioDestinationNode) {
+        const an = this.context.createAnalyser(); an.fftSize = 2048;
+        orig.call(this, an);
+        window.__soundTap.push(an);
+      }
+      return r;
+    };
+  });
+  const setCeiling = async (db) => {
+    await B.page.getByRole("button", { name: "Your settings" }).click();
+    await B.page.locator(".settings-nav-item", { hasText: "Sound" }).click();
+    const box = B.page.locator(".settings-panel input[type=checkbox]").first();
+    await box.waitFor({ timeout: 10000 });
+    if (!(await box.isChecked())) await box.check();
+    await B.page.locator('input[aria-label="Max loudness in decibels"]').fill(String(db));
+    await new Promise((r) => setTimeout(r, 800)); // saved after 200 ms of quiet
+    const saved = await B.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_audio_limits"));
+    for (let i = 0; i < 3 && (await B.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await B.page.locator(".modal-dialog:visible .modal-close").first().click();
+    return saved;
+  };
+  // Play the tone on B and report the loudest sample that reached the speakers, over ~1.5 s.
+  const playAndMeasure = async () => B.page.evaluate(async (caption) => {
+    const m = [...document.querySelectorAll(".message")].find((x) => x.innerText.includes(caption));
+    const el = m?.querySelector("audio");
+    if (!el) return { error: "no audio player in the message" };
+    el.currentTime = 0;
+    try { await el.play(); } catch (e) { return { error: "play() refused: " + e }; }
+    await new Promise((r) => setTimeout(r, 400));
+    let peak = 0; const buf = new Float32Array(2048);
+    const t0 = performance.now();
+    while (performance.now() - t0 < 1500) {
+      for (const an of window.__soundTap) { an.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    el.pause();
+    return { peak, taps: window.__soundTap.length, ctx: window.__soundTap[0]?.context.state, t: el.currentTime };
+  }, caption);
+  try {
+    await check("B: Settings > Sound: tick the ceiling and set it to -24 dB; it is saved", async () => {
+      const saved = await setCeiling(-24);
+      if (saved.max_db !== -24) throw new Error("saved limits: " + JSON.stringify(saved));
+      return JSON.stringify(saved);
+    });
+    await check("A posts a full-volume tone; B gets it as a voice message with a player", async () => {
+      await dropAndSend(A, path, fileName, caption);
+      await seesText(B, caption, 30000);
+      await B.page.locator(".message", { hasText: caption }).locator("audio").first().waitFor({ timeout: 30000 });
+    });
+    await check("with the ceiling at -24 dB the tone plays, and what reaches the speakers stays under the ceiling", async () => {
+      const r = await playAndMeasure();
+      if (r.error) throw new Error(r.error);
+      const ceil = Math.pow(10, -24 / 20);
+      if (!(r.peak > 0.2 * ceil)) throw new Error("almost silent: " + JSON.stringify(r));
+      if (!(r.peak <= ceil * 1.12)) throw new Error(`louder than the ceiling (${ceil.toFixed(3)}): ` + JSON.stringify(r));
+      return `peak ${r.peak.toFixed(3)} vs ceiling ${ceil.toFixed(3)} (the file is 1.0)`;
+    });
+    await check("moving the ceiling to -6 dB makes the same tone louder, still under the new ceiling", async () => {
+      await setCeiling(-6);
+      const r = await playAndMeasure();
+      if (r.error) throw new Error(r.error);
+      const ceil = Math.pow(10, -6 / 20);
+      if (!(r.peak > 0.5 * ceil && r.peak <= ceil * 1.12)) throw new Error(`peak ${r.peak} for ceiling ${ceil.toFixed(3)}: ` + JSON.stringify(r));
+      return `peak ${r.peak.toFixed(3)} vs ceiling ${ceil.toFixed(3)}`;
+    });
+  } finally {
+    await B.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("set_audio_limits", { master: 1, maxDb: 0 })).catch(() => {});
+  }
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // Reply (run after `ubuntu`): B answers A's message with right-click > Reply; the answer must be linked
 // to it (not posted as a plain message) on both screens and in the server's history.
 async function reply() {
@@ -2675,6 +2782,7 @@ try {
   else if (scenario === "smallwin") await smallwin();
   else if (scenario === "autoplay") await autoplay();
   else if (scenario === "reply") await reply();
+  else if (scenario === "sound") await sound();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();
