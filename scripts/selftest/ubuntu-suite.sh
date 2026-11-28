@@ -239,14 +239,16 @@ suite_promote() {  # a copy becomes the host; the old host is fenced (docs/specs
   FAILOVER_PHASE=allow winrun failover
   "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once --announce "$WSLIP:$CPORT" > "$D/rep2.log" 2>&1; echo "replica exit: $? (want 0)"
   echo "host knows the copy: $(python3 -c "import sqlite3; print(sqlite3.connect('$D/u.db').execute(\"select value from server_settings where key='known_copies'\").fetchone())") (want ['$WSLIP:$CPORT'])"
-  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
+  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" --backup-dir "$D/copy/bk" > "$D/copy.log" 2>&1 &
   local COPYPID=$!
   wait_for "$D/copy.log" "Server listening"
   kill -9 "$HOSTPID"; sleep 1
   FAILOVER_PHASE=down winrun failover
   echo "== the owner makes the copy the host"
+  echo "backups on the copy before it is the host: $(grep -c "Backup written" "$D/copy.log") (want 0)"
   FAILOVER_PHASE=promote winrun failover
   echo "copy log: $(grep -c PROMOTED "$D/copy.log") PROMOTED line(s) (want 1)"
+  sleep 3; echo "backups on the copy after it became the host: $(grep -c "Backup written" "$D/copy.log") in the log, $(ls "$D/copy/bk" 2>/dev/null | wc -l) in $D/copy/bk (want 1 or more, #43)"
   echo "== the OLD host is started again"
   start_direct $PORT "$D"; local OLDPID=$!
   # Step 4: before any app talks to it, the old host asks the copy it knows and goes read-only by itself.
