@@ -49,18 +49,14 @@ export default function BanConfirmDialog({ targetName, onCancel, onConfirm }: Pr
           {reason.length}/200
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 12 }}>
-          <button onClick={onCancel} style={{ font: "inherit", padding: "4px 12px" }}>
+          <button className="xp-button" onClick={onCancel}>
             Cancel
           </button>
+          {/* Themed button; the danger is said in the theme's own red, not a fixed colour. */}
           <button
+            className="xp-button"
             onClick={() => onConfirm(reason.trim())}
-            style={{
-              font: "inherit",
-              padding: "4px 12px",
-              background: "#a00",
-              color: "#fff",
-              border: "1px solid #800",
-            }}
+            style={{ color: "var(--xp-red, #a00)", borderColor: "var(--xp-red, #a00)", fontWeight: "bold" }}
           >
             Ban
           </button>

@@ -7413,7 +7413,14 @@ pub async fn join_log_server(
         .unwrap_or_else(|| crate::device::DeviceState::fresh(&device));
 
     if ds.joined {
-        return Ok(()); // already a log member on this server
+        // The local note can be stale: a kick (MemberRemoved) ends the membership on the server, and coming
+        // back with a new invite must then post a new MemberJoined. Trusting the note skipped it, so a kicked
+        // friend who rejoined was in the member table but not in the signed history, and kept a "vk_..." name.
+        // Ask the server; only "none" means join again (the device stays authorized: a kick does not revoke it).
+        match bridge::send_request(&state, &server_id, ServerRequest::GetMembershipStatus).await {
+            Ok(ServerResponse::MembershipStatus { status }) if status == "none" => { ds.joined = false; }
+            _ => return Ok(()), // a member (or pending), or the server cannot say: as before
+        }
     }
 
     // 1. Authorize this device if needed (mirrors submit_event / create_invite).

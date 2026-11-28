@@ -15,6 +15,7 @@ import AppShell from "./components/AppShell";
 import IdentityGate from "./components/IdentityGate";
 import { TranslationFirstRunModal } from "./components/TranslationFirstRunModal";
 import ToastContainer from "./components/ToastContainer";
+import { toast } from "./lib/toast";
 import JoinConfirmModal from "./components/JoinConfirmModal";
 import * as api from "./lib/tauri-bridge";
 import { parseInviteLink } from "./lib/invite";
@@ -101,10 +102,17 @@ function AppInner() {
     init().catch(() => setInitializing(false));
   }, [unlocked]);
 
+  /** A refused join in plain words; the server's own reason otherwise. */
+  function joinErrorText(reason: string): string {
+    if (/banned/i.test(reason)) return "You are banned from this server, so you cannot join it again. Ask its owner if you think that is a mistake.";
+    return `Could not join that server: ${reason}`;
+  }
+
   async function joinFromInvite(url: string) {
     const parsed = parseInviteLink(url);
     if (!parsed.address) {
       console.error("[deep-link] unrecognized invite:", url);
+      toast.error("That invite link is not one Farder can read. Ask for a new one.");
       return;
     }
     try {
@@ -114,12 +122,18 @@ function AppInner() {
       dispatch({ type: "SET_ACTIVE_SERVER", serverId: parsed.address });
       if (parsed.inviteCode && result.server_id) {
         try { await api.joinLogServer(parsed.address, result.server_id, parsed.inviteCode); }
-        catch (e) { console.error("[mesh] join_log_server failed:", e); }
+        catch (e) {
+          console.error("[mesh] join_log_server failed:", e);
+          toast.error(`Joined, but the server did not take your membership: ${e}. You may not be able to post until you rejoin.`);
+        }
       }
       try { const members = await api.getMembers(parsed.address); dispatch({ type: "SET_MEMBERS", serverId: parsed.address, payload: members }); } catch {}
       try { const dms = await api.listDms(parsed.address); dispatch({ type: "SET_DMS", serverId: parsed.address, payload: dms }); } catch {}
     } catch (e) {
       console.error("[deep-link] failed to join from invite:", e);
+      // This used to go to the console only, so a refused join (banned, expired link, server off) looked like
+      // nothing happened at all.
+      toast.error(joinErrorText(String(e)));
     }
   }
 

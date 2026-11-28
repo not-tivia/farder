@@ -2661,6 +2661,90 @@ async function everyday() {
   await B.browser.close().catch(() => {});
 }
 
+// Moderation (ubuntu-suite.sh only moderation): the owner kicks, bans and unbans a member from the member list, the
+// way they would, and the member's own app shows what happened and what they can still do.
+async function moderation() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await c.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  // The app asks "Kick Bob from this server?" with the browser's own confirm box: say yes.
+  A.page.on("dialog", (d) => { void d.accept(); });
+  const bobOnA = () => A.page.locator(".member-item", { hasText: "Bob" });
+  const gone = async (loc, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if ((await loc.count()) === 0) return true; await new Promise((r) => setTimeout(r, 500)); } return false; };
+  const memberMenu = async (label) => {
+    await bobOnA().first().click({ button: "right" });
+    await new Promise((r) => setTimeout(r, 500)); // a person reads the menu before clicking
+    await A.page.getByText(label, { exact: true }).first().click();
+  };
+  const notice = async (verb) => {
+    const h = B.page.getByText(new RegExp(`You were ${verb} from`));
+    await h.waitFor({ timeout: 20000 });
+    await B.page.getByRole("button", { name: "OK", exact: true }).click();
+  };
+  const rejoin = async () => {
+    const link = await makeInvite(A);
+    await B.page.getByTitle("Add Server").click();
+    await joinWithLink(B, link);
+    await B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 30000 });
+    await bobOnA().first().waitFor({ timeout: 30000 });
+  };
+  await check("A kicks Bob (right-click Bob > Kick, yes); Bob's app says he was kicked and the server leaves his list", async () => {
+    await bobOnA().first().waitFor({ timeout: 20000 });
+    await memberMenu("Kick");
+    await notice("kicked");
+    if (!(await gone(B.page.locator(`.server-icon[title="${name}"]`), 10000))) throw new Error("the server is still on Bob's list");
+    if (!(await gone(bobOnA(), 15000))) throw new Error("Bob is still in A's member list");
+  });
+  await check("a kicked member can come back with a new invite, under his own name, and post again", async () => {
+    await rejoin();
+    await B.page.locator(`.server-icon[title="${name}"]`).click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    const line = "back after the kick " + Date.now();
+    await sendText(B, line);
+    await seesText(A, line, 30000);
+  });
+  await check("A bans Bob (right-click Bob > Ban > Ban); Bob's app says he was banned", async () => {
+    await memberMenu("Ban");
+    await A.page.getByRole("button", { name: "Ban", exact: true }).last().click();
+    await notice("banned");
+    if (!(await gone(bobOnA(), 15000))) throw new Error("Bob is still in A's member list");
+  });
+  await check("a banned member cannot come back, even with a new invite, and is told why", async () => {
+    const link = await makeInvite(A);
+    const p = B.page;
+    await p.getByTitle("Add Server").click();
+    await p.getByText("Join a Server").click();
+    await p.getByPlaceholder("farder://server/invite-code").fill(link);
+    await p.getByRole("button", { name: "Join", exact: true }).click();
+    const confirm = p.getByText(/Join it\?/);
+    if (await confirm.waitFor({ timeout: 8000 }).then(() => true, () => false)) await p.getByRole("button", { name: "Join", exact: true }).last().click();
+    const err = p.locator(".error-text, .toast-message").filter({ hasText: /ban/i }).first();
+    const said = await err.waitFor({ timeout: 30000 }).then(() => err.innerText(), () => null);
+    const shown = await p.locator(".modal-dialog:visible, .error-text, .toast-message, [role=alert]").allInnerTexts().catch(() => []);
+    const inList = await p.locator(`.server-icon[title="${name}"]`).count();
+    for (let i = 0; i < 3 && (await p.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await p.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    if (inList) throw new Error("a banned member got back in");
+    if (!said) throw new Error("refused, but nothing on screen says it is because of a ban; on screen: " + JSON.stringify(shown).slice(0, 300));
+    return said.slice(0, 120);
+  });
+  await check("A unbans Bob (Server Settings > Banned > Unban, yes); Bob can join again", async () => {
+    await A.page.locator("button[title='Server Settings']").click();
+    await A.page.locator(".settings-tab", { hasText: /Ban/ }).first().click();
+    await A.page.getByRole("button", { name: "Unban" }).first().click();
+    await new Promise((r) => setTimeout(r, 1500));
+    for (let i = 0; i < 3 && (await A.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await A.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await rejoin();
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // Reply (run after `ubuntu`): B answers A's message with right-click > Reply; the answer must be linked
 // to it (not posted as a plain message) on both screens and in the server's history.
 async function reply() {
@@ -2894,6 +2978,7 @@ try {
   else if (scenario === "reply") await reply();
   else if (scenario === "sound") await sound();
   else if (scenario === "everyday") await everyday();
+  else if (scenario === "moderation") await moderation();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();

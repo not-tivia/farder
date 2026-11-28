@@ -1,3 +1,4 @@
+import { toast } from "../lib/toast";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import * as api from "../lib/tauri-bridge";
 import type { MemberInfo, RoleInfo } from "../lib/types";
@@ -85,7 +86,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
   const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showGarble, setShowGarble] = useState(false);
-  const { state: garbleState } = useGarbleState(serverId);
+  const { state: garbleState, loaded: garbleLoaded } = useGarbleState(serverId);
   const autoplay = useAutoplaySettings();
   const [error, setError] = useState<string | null>(null);
   const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
@@ -156,7 +157,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     try {
       await api.openDm(serverId, targetPk);
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e)); // the menu closes next, so an error shown in it would never be seen
     }
     onClose();
   }
@@ -176,7 +177,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     try {
       await api.kickMember(serverId, targetPk, activeServer?.logServerId ?? null);
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e)); // the menu closes next, so an error shown in it would never be seen
     }
     onClose();
   }
@@ -186,7 +187,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     try {
       await api.banMember(serverId, targetPk, activeServer?.logServerId ?? null, reason || undefined);
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e)); // the menu closes next, so an error shown in it would never be seen
     }
     onClose();
   }
@@ -196,7 +197,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     try {
       await api.timeoutMember(serverId, targetPk, untilMs, reason);
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e)); // the menu closes next, so an error shown in it would never be seen
     }
     onClose();
   }
@@ -205,7 +206,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     try {
       await api.removeTimeout(serverId, targetPk);
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e)); // the menu closes next, so an error shown in it would never be seen
     }
     onClose();
   }
@@ -215,7 +216,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
     try {
       await api.blockUser(serverId, targetPk);
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e)); // the menu closes next, so an error shown in it would never be seen
     }
     onClose();
   }
@@ -240,7 +241,7 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
         setIsSubscribed(true);
       }
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e)); // the menu closes next, so an error shown in it would never be seen
     }
     onClose();
   }
@@ -342,8 +343,10 @@ export default function MemberContextMenu({ target, serverId, position, ownPk, o
 
   return (
     <>
+      {/* The menu is hidden (not absent, so it keeps its measured place) until the garble state is in: the Garble
+          row is added ABOVE Timeout / Kick / Ban, and a click aimed at Kick used to land on Timeout as the rows moved. */}
       {!dialogOpen && (
-      <div ref={ref} style={{ ...menuStyle, ...menuPosStyle }}>
+      <div ref={ref} style={{ ...menuStyle, ...menuPosStyle, visibility: garbleLoaded ? undefined : "hidden" }}>
         {cleaned.map((row, i) => {
           if (row.kind === "separator") {
             return <div key={`sep-${i}`} style={separatorStyle} />;

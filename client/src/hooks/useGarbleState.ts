@@ -11,13 +11,15 @@ const EMPTY: GarbleState = { rules: [], consents: [], can_moderate: false };
  * useServerEvents). Fails closed: if the server cannot be asked (a v1 server, a
  * dropped connection) there is simply no garble state.
  */
-export function useGarbleState(serverId: string | null): { state: GarbleState; ownPk: string | null; refresh: () => void } {
+/** `loaded`: the first answer (or failure) is in, so a menu built from `state` will not change shape under the pointer. */
+export function useGarbleState(serverId: string | null): { state: GarbleState; ownPk: string | null; refresh: () => void; loaded: boolean } {
   const [state, setState] = useState<GarbleState>(EMPTY);
+  const [loaded, setLoaded] = useState(false);
   const [ownPk, setOwnPk] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    if (!serverId) { setState(EMPTY); return; }
-    api.getGarbleState(serverId).then(setState).catch(() => setState(EMPTY));
+    if (!serverId) { setState(EMPTY); setLoaded(true); return; }
+    api.getGarbleState(serverId).then(setState).catch(() => setState(EMPTY)).finally(() => setLoaded(true));
   }, [serverId]);
 
   useEffect(() => {
@@ -41,5 +43,5 @@ export function useGarbleState(serverId: string | null): { state: GarbleState; o
     return () => { alive = false; };
   }, []);
 
-  return { state, ownPk, refresh };
+  return { state, ownPk, refresh, loaded };
 }
