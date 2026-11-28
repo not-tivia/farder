@@ -115,8 +115,20 @@ suite_guestlink() {
   export UBU_ADDR="$WSLIP:$PORT" UBU_TOKEN="$(token_of "$D/server.log")" UBU_LINK= UBU_NAME="Ubuntu Server"
   echo "== claim, invite, chat"; winrun ubuntu
   setsid nohup "$ROOT/target/debug/farder-gateway" --listen 127.0.0.1:8480 --route ubuntu=127.0.0.1:$PORT > "$D/gateway.log" 2>&1 &
-  ( cd "$ROOT/website" && exec setsid python3 -m http.server 8099 --bind 127.0.0.1 > "$D/static.log" 2>&1 ) &
-  local STATIC_PID=$!
+  local STATIC_PID= SITE_ENV=
+  if [ -n "${GUEST_CADDY:-}" ]; then
+    # The real deploy/website/Caddyfile in Docker, over TLS (Caddy's own local certificate for localhost):
+    # checks the /<name>/t rewrite and the /ws/* proxy to the gateway, which the static server skips.
+    docker rm -f farder-caddy-test >/dev/null 2>&1
+    docker run -d --name farder-caddy-test --network host -e FARDER_SITE_DOMAIN=localhost:8443 \
+      -v "$ROOT/website:/srv:ro" -v "$ROOT/deploy/website/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine >/dev/null
+    for i in $(seq 1 30); do curl -sk -o /dev/null https://localhost:8443/ && break; sleep 1; done
+    echo "caddy: $(curl -sk -o /dev/null -w '%{http_code} %{content_type}' https://localhost:8443/ubuntu/t) for /ubuntu/t (want 200 text/html)"
+    SITE_ENV="\$env:GUEST_SITE='https://localhost:8443';"
+  else
+    ( cd "$ROOT/website" && exec setsid python3 -m http.server 8099 --bind 127.0.0.1 > "$D/static.log" 2>&1 ) &
+    STATIC_PID=$!
+  fi
   cp -r "$ROOT/website/guest" "$WIN_COPY/website/" 2>/dev/null
   cp "$ROOT/scripts/selftest/guest-browser.mjs" "$WIN_COPY/scripts/selftest/"
   sleep 2
@@ -126,13 +138,14 @@ suite_guestlink() {
   local LINK; LINK=$(tr -d '\r\n' < /mnt/c/Users/Deez/farder-selftest-data/guest-link.txt)
   echo "link: $LINK"
   echo "== a real browser joins with that link"
-  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; \$env:SHOTS='$DATA\\shots-guest'; \$env:GUEST_SERVER_NAME='Ubuntu Server'; \$env:GUEST_WELCOME='hello from A to ubuntu'; node scripts\\selftest\\guest-browser.mjs '$LINK' 2>&1" | tr -d '\r' | cut -c1-240
+  powershell.exe -NoProfile -Command "Set-Location $WIN_PATH; $SITE_ENV\$env:SHOTS='$DATA\\shots-guest'; \$env:GUEST_SERVER_NAME='Ubuntu Server'; \$env:GUEST_WELCOME='hello from A to ubuntu'; node scripts\\selftest\\guest-browser.mjs '$LINK' 2>&1" | tr -d '\r' | cut -c1-240
   echo "== the app sees the browser guest"
   GUEST_PHASE=seen winrun guest-link
   python3 -c "
 import sqlite3; c=sqlite3.connect('$D/u.db')
 print('server: guest members:', c.execute('select display_name from members where guest_expires_at is not null').fetchall())"
-  pkill -x farder-server; pkill -x farder-gateway; kill $STATIC_PID 2>/dev/null
+  [ -n "${GUEST_CADDY:-}" ] && { echo "caddy log (last lines):"; docker logs farder-caddy-test 2>&1 | tail -3 | cut -c1-200; docker rm -f farder-caddy-test >/dev/null; }
+  pkill -x farder-server; pkill -x farder-gateway; [ -n "$STATIC_PID" ] && kill $STATIC_PID 2>/dev/null
 }
 
 suite_brake() {
@@ -239,14 +252,16 @@ suite_promote() {  # a copy becomes the host; the old host is fenced (docs/specs
   FAILOVER_PHASE=allow winrun failover
   "$REP" --server "$WSLIP:$PORT" --dir "$D/rep" --once --announce "$WSLIP:$CPORT" > "$D/rep2.log" 2>&1; echo "replica exit: $? (want 0)"
   echo "host knows the copy: $(python3 -c "import sqlite3; print(sqlite3.connect('$D/u.db').execute(\"select value from server_settings where key='known_copies'\").fetchone())") (want ['$WSLIP:$CPORT'])"
-  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" > "$D/copy.log" 2>&1 &
+  setsid nohup "$BIN" --bind 0.0.0.0:$CPORT --read-only --db "$D/rep/latest.db" --storage-dir "$D/rep/files" --data-dir "$D/copy/sd" --backup-dir "$D/copy/bk" > "$D/copy.log" 2>&1 &
   local COPYPID=$!
   wait_for "$D/copy.log" "Server listening"
   kill -9 "$HOSTPID"; sleep 1
   FAILOVER_PHASE=down winrun failover
   echo "== the owner makes the copy the host"
+  echo "backups on the copy before it is the host: $(grep -c "Backup written" "$D/copy.log") (want 0)"
   FAILOVER_PHASE=promote winrun failover
   echo "copy log: $(grep -c PROMOTED "$D/copy.log") PROMOTED line(s) (want 1)"
+  sleep 3; echo "backups on the copy after it became the host: $(grep -c "Backup written" "$D/copy.log") in the log, $(ls "$D/copy/bk" 2>/dev/null | wc -l) in $D/copy/bk (want 1 or more, #43)"
   echo "== the OLD host is started again"
   start_direct $PORT "$D"; local OLDPID=$!
   # Step 4: before any app talks to it, the old host asks the copy it knows and goes read-only by itself.

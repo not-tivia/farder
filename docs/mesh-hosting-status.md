@@ -19,8 +19,8 @@ this setup: A's PC hosts, B connects through the relay.)
 | Single host + relay | One computer hosts, the relay hides addresses | DONE and tested (self-test, 70 checks) |
 | Signed log foundation ("Rung 1") | Everything that happens in a server (messages, joins, bans, invites, devices) is a signed, hash-chained event. Anyone holding the events can verify them, so a copy can't be forged | DONE (spec 2026-06-25, plus invites/approvals, attachments, takedowns) |
 | Encrypted channels ("Rung 2") | A member's computer can hold a copy without being able to read encrypted channels (OpenMLS) | DONE as code, server-side tests green; the GUI path is only lightly exercised |
-| **Copying the server to another computer** | A second machine follows the host and keeps a verified copy | **BUILT 2026-11-15 (steps 1-2): `FetchLog` + replicas + verified snapshots + the `farder-replica` tool; tested against the real server. Not yet: serving the copy while the host is down, client failover, promotion** |
-| **Failover** | If the host is off, clients switch to a copy; a copy can take over | **NOT STARTED** |
+| **Copying the server to another computer** | A second machine follows the host and keeps a verified copy | **BUILT 2026-11-15 (steps 1-2): `FetchLog` + replicas + verified snapshots + the `farder-replica` tool; tested against the real server. Serving the copy while the host is down: DONE (`ubuntu-suite.sh failover`)** |
+| **Failover** | If the host is off, clients switch to a copy; a copy can take over | **DONE 2026-11-27**: apps switch to a saved copy (`ubuntu-suite.sh failover`); the owner promotes a copy to host from Server Settings > Backup copy, and a restarted old host learns it was replaced and goes read-only (`ubuntu-suite.sh promote`, design `docs/specs/2026-11-27-promotion-design.md`). Not done: the old host following the new host as a copy; a promoted copy does not take over the old host's relay address |
 | **Members hosting together (the real mesh)** | Several machines accept new messages and merge them | **NOT STARTED** (the log was designed so merging is possible: per-device chains, Lamport clock; never built) |
 | **Relay turning into a mesh** | The server's address list grows from "relay" to "relay + member copies" | **NOT STARTED** |
 
@@ -95,5 +95,5 @@ and removes files the host redacted or deleted; the read-only copy serves them w
 `cargo test -p farder-replica` against the real server (and proven to fail without the server's replica download rule), and through the app in `ubuntu-suite.sh failover`: a picture
 posted before the host is killed comes from the copy byte for byte and loads on screen.
 
-Not done: promotion (a copy becomes the host), and running the replica plus
-its read-only server as a service on the Beelink.
+Promotion is done (see the Failover row). Not done: running the replica plus
+its read-only server as a service on the Beelink (ask chris first).

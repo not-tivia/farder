@@ -49,7 +49,10 @@ script errors). The owner in that test is the Rust fixture `crates/farder-gatewa
 The invite dialog has a "Guest link" section: the owner switches guest links on, picks how long the link
 works (1 hour to 7 days) and the web name (what the host called the server on the gateway), and gets
 `https://<site>/<web name>/t#<code>`. Commands: `get_guest_links`, `set_guest_links`, `create_guest_invite`
-(`docs/modules/tauri-commands.md`). Verified end to end by `bash scripts/selftest/ubuntu-suite.sh guestlink`.
+(`docs/modules/tauri-commands.md`). Verified end to end by `bash scripts/selftest/ubuntu-suite.sh guestlink`; with `GUEST_CADDY=1` the page is served by the real
+`deploy/website/Caddyfile` in Docker over TLS and opened at `/<name>/t` (so the rewrite and the `/ws/*` proxy are on the path).
+The page's own files are linked by absolute path (`/guest/guest.js`, `/guest/guest.css`): it is served at `/<name>/t`, where
+relative links would point into `/<name>/`.
 
 ## Not done
 
