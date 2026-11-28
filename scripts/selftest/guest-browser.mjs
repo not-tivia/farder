@@ -14,7 +14,11 @@ const m = code.match(/^https?:\/\/[^/]+\/([A-Za-z0-9_-]+)\/t#(.+)$/);
 if (m) { route = m[1]; code = m[2]; }
 const EXPECT_SERVER = process.env.GUEST_SERVER_NAME || "Friends Server";
 const EXPECT_WELCOME = process.env.GUEST_WELCOME || "Welcome to the friends server!";
-const BASE = `http://127.0.0.1:8099/guest/index.html?server=${route}&gateway=ws://127.0.0.1:8480/ws/${route}`;
+// GUEST_SITE (e.g. https://localhost:8443): open the link the way a friend does, through the real Caddyfile
+// (`/<name>/t` rewrite and the `/ws/*` proxy, over TLS), instead of the static server with the gateway in the query.
+const SITE = process.env.GUEST_SITE || "";
+const BASE = SITE ? `${SITE}/${route}/t` : `http://127.0.0.1:8099/guest/index.html?server=${route}&gateway=ws://127.0.0.1:8480/ws/${route}`;
+const TLS = SITE ? { ignoreHTTPSErrors: true } : {}; // Caddy's local test certificate is not trusted by Windows
 const SHOTS = process.env.SHOTS || ".";
 fs.mkdirSync(SHOTS, { recursive: true });
 let pass = 0, fail = 0;
@@ -23,7 +27,7 @@ async function check(name, fn) {
   catch (e) { fail++; console.log("FAIL " + name + "  -- " + String(e.message || e).split("\n")[0].slice(0, 200)); return false; }
 }
 const browser = await chromium.launch({ executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", headless: true });
-const ctx = await browser.newContext({ viewport: { width: 1000, height: 700 } });
+const ctx = await browser.newContext({ viewport: { width: 1000, height: 700 }, ...TLS });
 const page = await ctx.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
@@ -71,7 +75,7 @@ await check("a refresh keeps the same guest (key in this browser): straight back
   await page.locator(".msg", { hasText: "hello from a browser guest" }).waitFor({ timeout: 30000 });
 });
 await check("a second person (new browser profile) joins with the same link and sees the first guest's line", async () => {
-  const ctx2 = await browser.newContext();
+  const ctx2 = await browser.newContext({ ...TLS });
   const p2 = await ctx2.newPage();
   await p2.goto(BASE + "#" + code);
   await p2.locator("#name").fill("Second");
@@ -84,7 +88,7 @@ await check("a second person (new browser profile) joins with the same link and 
   await ctx2.close();
 });
 await check("a wrong link code is refused with a plain explanation", async () => {
-  const ctx3 = await browser.newContext();
+  const ctx3 = await browser.newContext({ ...TLS });
   const p3 = await ctx3.newPage();
   await p3.goto(BASE + "#WRONGCODE");
   await p3.locator("#name").fill("Nobody");
@@ -100,7 +104,7 @@ await check("a wrong link code is refused with a plain explanation", async () =>
 // buttons too small to tap.
 await check("on a phone-sized screen: joins, nothing runs off the side, the box and Send fit and are big enough to tap, sending works", async () => {
   const { devices } = await import("playwright-core");
-  const ctxP = await browser.newContext({ ...devices["iPhone 13"] });
+  const ctxP = await browser.newContext({ ...devices["iPhone 13"], ...TLS });
   const pp = await ctxP.newPage();
   pp.on("pageerror", (e) => errors.push("phone: " + String(e)));
   await pp.goto(BASE + "#" + code);
