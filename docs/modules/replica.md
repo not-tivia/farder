@@ -26,6 +26,15 @@ host's computer is off. Design and status: `docs/mesh-hosting-status.md`.
 Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir DIR/files --bind 0.0.0.0:PORT` (no
 `--name` needed: the name the host saved is used).
 
+The running copy FOLLOWS the replica's pulls: the replica installs each pull by renaming a new file over `latest.db`,
+and a read-only server (`copy_reload::spawn_copy_watcher`) checks that path every 2 seconds (device+inode on Unix,
+size+mtime elsewhere). When the file was replaced it opens the new one (`query_only`), loads its signed log, and only
+then swaps it into `ServerState::db` and rebuilds `genesis`, `log_state`, `owner` and `server_name`, logging
+`copy reloaded: <path> (<n> events)`. A file that does not open or whose log does not load (or has none) is skipped
+with one warning and the old copy keeps serving. Sessions survive: the next request reads the new copy. A writable
+server (the host, or a promoted copy) never reloads. It does not re-run the start-up repair passes, since a verified
+pull is already consistent.
+
 ## Library (`farder_replica`)
 
 | Item | What it does |
@@ -111,5 +120,5 @@ got (its "tail"), and serving or promoting it would fork the history. To follow 
 
 If the new host is lost later, the owner can make the old machine the host again from that copy (term 2): the new host's
 messages are kept and the old tail does not come back. Test: `a_replaced_old_host_follows_the_new_host_and_can_be_made_the_host_again_without_forking`
-(real binaries: archive hash unchanged, followed copy read-only, promote-back accepted, no tail). A running copy server does
-not yet pick up the replica's later pulls without a restart (issue #46).
+(real binaries: archive hash unchanged, followed copy read-only, promote-back accepted, no tail). The copy server keeps up
+with the replica's later pulls by itself (#46, "follows the replica's pulls" above), so steps 2 and 3 can run as long-lived services.

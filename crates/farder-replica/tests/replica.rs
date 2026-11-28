@@ -661,6 +661,103 @@ async fn a_pull_still_finishes_when_the_host_refuses_the_announcement() {
     assert!(dir.join("latest.db").exists());
 }
 
+// ---------------------------------------------------------------------------------------------
+// A running read-only copy follows the replica's newer pulls without a restart (#46).
+// ---------------------------------------------------------------------------------------------
+
+/// Poll `FetchHistory` until `text` is served (true) or `secs` pass (false).
+async fn serves(c: &mut Session, general: u64, text: &str, secs: u64) -> bool {
+    for _ in 0..secs * 5 {
+        if let ServerResponse::History { messages } = c.ask(ServerRequest::FetchHistory { channel_id: general, before_id: None, limit: 50 }).await.unwrap() {
+            if messages.iter().any(|m| m.content == text) { return true; }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_running_copy_serves_the_replicas_next_pull_without_a_restart() {
+    let Seeded { srv, owner, mut o, sid: _sid, code } = seeded().await;
+    let work = tempfile::tempdir().unwrap();
+    let (rkey, _) = load_or_create_key(&work.path().join("replica.key")).unwrap();
+    let mut r = Session::connect(srv.addr, None, &rkey, Some(code.clone()), None).await.unwrap();
+    r.join_history(&rkey, &code).await.unwrap();
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let out = work.path().join("copies");
+    pull_once(&mut r, &out).await.unwrap();
+    let (mut child, addr, _d) = start_read_only(&out.join("latest.db")).await;
+    let ServerResponse::ServerInfo { channels, .. } = o.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+    // A connection opened BEFORE the second pull: its session must survive the switch.
+    let mut early = Session::connect(addr, None, &owner, None, None).await.unwrap();
+    assert!(!serves(&mut early, general, "posted after the first pull", 0).await);
+    assert!(matches!(send(&mut o, general, "posted after the first pull").await, ServerResponse::MessageSent { .. }));
+    pull_once(&mut r, &out).await.unwrap();
+    let mut c = Session::connect(addr, None, &owner, None, None).await.unwrap();
+    assert!(serves(&mut c, general, "posted after the first pull", 10).await, "a new connection reads the new copy");
+    assert!(serves(&mut early, general, "posted after the first pull", 2).await, "the earlier session reads it too");
+    let _ = child.kill(); let _ = child.wait();
+}
+
+#[tokio::test]
+async fn a_file_that_is_not_a_valid_copy_is_not_switched_to() {
+    let Seeded { srv, owner, mut o, sid: _sid, code } = seeded().await;
+    let work = tempfile::tempdir().unwrap();
+    let (rkey, _) = load_or_create_key(&work.path().join("replica.key")).unwrap();
+    let mut r = Session::connect(srv.addr, None, &rkey, Some(code.clone()), None).await.unwrap();
+    r.join_history(&rkey, &code).await.unwrap();
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let out = work.path().join("copies");
+    pull_once(&mut r, &out).await.unwrap();
+    let (mut child, addr, _d) = start_read_only(&out.join("latest.db")).await;
+    let mut c = Session::connect(addr, None, &owner, None, None).await.unwrap();
+    let ServerResponse::ServerInfo { channels, .. } = c.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+    assert!(serves(&mut c, general, "history that must survive", 2).await);
+    // Installed the way the replica installs a pull: a new file renamed over the old one.
+    std::fs::write(out.join("junk.tmp"), b"not a database, just a few bytes").unwrap();
+    std::fs::rename(out.join("junk.tmp"), out.join("latest.db")).unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await; // more than one check
+    assert!(serves(&mut c, general, "history that must survive", 2).await, "the old history is still served");
+    assert!(child.try_wait().unwrap().is_none(), "the server keeps running");
+    let _ = child.kill(); let _ = child.wait();
+}
+
+#[tokio::test]
+async fn a_promoted_copy_does_not_switch_when_the_file_is_replaced() {
+    use farder_crypto::host_term::HostTerm;
+    let Seeded { srv, owner, mut o, sid, code } = seeded().await;
+    let work = tempfile::tempdir().unwrap();
+    let (rkey, _) = load_or_create_key(&work.path().join("replica.key")).unwrap();
+    let mut r = Session::connect(srv.addr, None, &rkey, Some(code.clone()), None).await.unwrap();
+    r.join_history(&rkey, &code).await.unwrap();
+    assert!(matches!(o.ask(ServerRequest::SetReplica { member: rkey.public_key(), enabled: true }).await.unwrap(), ServerResponse::Replicas { .. }));
+    let out = work.path().join("copies");
+    pull_once(&mut r, &out).await.unwrap();
+    let db = out.join("latest.db");
+    let ServerResponse::ServerInfo { channels, .. } = o.ask(ServerRequest::GetServerInfo).await.unwrap() else { panic!() };
+    let general = channels.iter().find(|c| c.name == "general").unwrap().id;
+    // A newer pull, kept in another directory until after the promotion.
+    assert!(matches!(send(&mut o, general, "only in the newer file").await, ServerResponse::MessageSent { .. }));
+    let out2 = work.path().join("copies2");
+    pull_once(&mut r, &out2).await.unwrap();
+
+    let data = work.path().join("copy-data");
+    let (mut child, addr, _log) = start_at(&db, &data, true).await;
+    let me = identity_of(&data);
+    let mut c = Session::connect(addr, None, &owner, None, None).await.unwrap();
+    let head = head_of(&db);
+    let term = HostTerm::sign(&owner, sid.clone(), 1, me, vec!["127.0.0.1:1".into()], head, now_secs());
+    assert!(matches!(c.ask(ServerRequest::PromoteToHost { term }).await.unwrap(), ServerResponse::Ok));
+    assert!(matches!(send(&mut c, general, "written by the promoted copy").await, ServerResponse::MessageSent { .. }));
+    std::fs::rename(out2.join("latest.db"), &db).unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(serves(&mut c, general, "written by the promoted copy", 2).await, "the promoted copy keeps its own database");
+    assert!(!serves(&mut c, general, "only in the newer file", 0).await, "and did not switch to the replaced file");
+    let _ = child.kill(); let _ = child.wait();
+}
+
 /// A signed invite made by the owner on `s` (a fresh device of the owner signs the record), for a second replica.
 async fn signed_invite(s: &mut Session, owner: &Keypair, sid: &str) -> String {
     let dev = Keypair::generate();

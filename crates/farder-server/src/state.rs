@@ -82,7 +82,8 @@ pub struct ServerState {
     pub subscriptions: RwLock<HashMap<u64, HashSet<[u8; 32]>>>,
     pub owner: RwLock<Option<PublicKey>>,
     pub setup_token: Mutex<Option<[u8; 32]>>,
-    pub server_name: String,
+    /// The name this server shows. A `Mutex` because a read-only copy re-reads it when it reloads (`copy_reload.rs`); read with [`ServerState::server_name`].
+    pub server_name: Mutex<String>,
     pub storage_dir: String,
     pub max_file_size: u64,
     pub upload_limiter: RateLimiter,    // 10/min per user
@@ -147,6 +148,9 @@ pub struct ServerState {
 pub const DEFAULT_RECOVERY_WAIT_SECS: u64 = 72 * 3600;
 
 impl ServerState {
+    /// The name this server shows (a copy of the current value).
+    pub fn server_name(&self) -> String { self.server_name.lock().unwrap().clone() }
+
     pub fn new(conn: Connection, server_name: String, storage_dir: String, max_file_size: u64) -> Self {
         Self {
             db: Mutex::new(conn),
@@ -157,7 +161,7 @@ impl ServerState {
             subscriptions: RwLock::new(HashMap::new()),
             owner: RwLock::new(None),
             setup_token: Mutex::new(None),
-            server_name,
+            server_name: Mutex::new(server_name),
             storage_dir,
             max_file_size,
             upload_limiter: RateLimiter::new(10, 60),

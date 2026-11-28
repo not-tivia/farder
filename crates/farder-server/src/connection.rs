@@ -519,7 +519,7 @@ pub(crate) async fn authenticate(
                 Some(member_count) => {
                     let online_count = state.clients.read().await.len() as u32;
                     send_server_frame(send, &ServerFrame::InvitePreview {
-                        server_name: state.server_name.clone(),
+                        server_name: state.server_name(),
                         member_count,
                         online_count,
                     }).await?;
@@ -628,7 +628,7 @@ pub(crate) async fn authenticate(
             if g_guard.is_none() {
                 let genesis = farder_crypto::event_log::Genesis {
                     version: 1,
-                    name: state.server_name.clone(),
+                    name: state.server_name(),
                     owner: public_key.clone(),
                     created_at: crate::db::now(),
                     nonce: rand::random::<[u8; 16]>(),
@@ -1564,7 +1564,7 @@ pub(crate) async fn main_loop(
                                                 ref mut owner_public_key,
                                                 ..
                                             } => {
-                                                *name = state.server_name.clone();
+                                                *name = state.server_name();
                                                 *owner_public_key = state.current_owner().await;
                                             }
                                             _ => {}
