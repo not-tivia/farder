@@ -2572,8 +2572,10 @@ and submits a `MemberJoined { member, invite }` event. Chain state — `next_seq
 `last_event_hash`, `lamport`, `authorized`, `joined` — is persisted in
 `~/.farder/servers/<log_server_id>/device_state.json` and is advanced ONLY after
 `EventAccepted` is returned. An "already a member" rejection is treated as success
-(idempotent). If `ds.joined` is already true the command returns immediately without
-sending any events.
+(idempotent). If `ds.joined` is already true it asks the server (`GetMembershipStatus`): a member or pending
+joiner returns at once without sending events; "none" (the member was KICKED since, which ends membership
+in the log but does not revoke the device) clears the note and posts a new `MemberJoined`. Before 2026-11-28
+the note was trusted, so a kicked friend who rejoined was outside the signed history and kept a `vk_...` name.
 
 **Params:**
 - `server_id: String` — connection key (address) — routes requests to the right server.

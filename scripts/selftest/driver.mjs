@@ -2551,6 +2551,200 @@ async function sound() {
   await B.browser.close().catch(() => {});
 }
 
+// Everyday chat (run after `core`): what a Discord user does without thinking, clicked the way they would. Reactions,
+// pins, an @mention, search, and a channel made, renamed and deleted by the owner, each seen on the OTHER app.
+async function everyday() {
+  const { stamp } = JSON.parse(fs.readFileSync(process.env.STATE || "selftest-state.json", "utf8"));
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await c.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${process.env.UBU_NAME || "SelfTest " + stamp}"]`).click().catch(() => {});
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click().catch(() => {});
+  }
+  const t = "ev" + stamp;
+  const msgOf = (c, text) => c.page.locator(".message", { hasText: text }).last();
+  const closeDialogs = async (c) => { for (let i = 0; i < 3 && (await c.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await c.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {}); };
+  await check("setup: B posts a line for A to react to and pin", async () => {
+    await sendText(B, `${t} react to me`);
+    await seesText(A, `${t} react to me`, 30000);
+  });
+  await check("A reacts with a thumbs up (hover, +, pick it); B sees the reaction with count 1", async () => {
+    const m = msgOf(A, `${t} react to me`);
+    await m.hover();
+    await m.locator(".reaction-add-btn").click();
+    await A.page.locator(".reaction-picker .reaction-picker-btn[title='👍']").first().click();
+    await msgOf(B, `${t} react to me`).locator(".reaction-count", { hasText: "1" }).waitFor({ timeout: 20000 });
+  });
+  await check("B clicks the same reaction: the count goes to 2 on A's screen", async () => {
+    await msgOf(B, `${t} react to me`).locator("button:has(.reaction-count)").first().click();
+    await msgOf(A, `${t} react to me`).locator(".reaction-count", { hasText: "2" }).waitFor({ timeout: 20000 });
+  });
+  await check("A pins B's line (right-click > Pin Message); B sees it marked pinned", async () => {
+    await msgOf(A, `${t} react to me`).click({ button: "right" });
+    const toasts = [];
+    const onToast = (m) => { const x = m.text(); if (/pin/i.test(x)) toasts.push(x.slice(0, 160)); };
+    A.page.on("console", onToast);
+    await A.page.evaluate(() => { window.__toasts = []; window.addEventListener("farder:toast", (e) => window.__toasts.push(JSON.stringify(e.detail).slice(0, 200))); });
+    const pinId = await msgOf(A, `${t} react to me`).getAttribute("id");
+    await A.page.getByText("Pin Message", { exact: true }).click();
+    const onA = await msgOf(A, `${t} react to me`).locator("[title='Pinned message']").waitFor({ timeout: 15000 }).then(() => true, () => false);
+    const screenToast = [pinId, ...(await A.page.evaluate(() => window.__toasts || []))];
+    A.page.off("console", onToast);
+    const onB = await msgOf(B, `${t} react to me`).locator("[title='Pinned message']").waitFor({ timeout: onA ? 20000 : 1000 }).then(() => true, () => false);
+    let afterReload = null;
+    if (!onA) {
+      const other = A.page.locator(".channel-item").filter({ hasNotText: "general" }).first();
+      await other.click().catch(() => {});
+      await new Promise((r) => setTimeout(r, 1500));
+      await A.page.locator(".channel-item", { hasText: "general" }).first().click();
+      afterReload = await msgOf(A, `${t} react to me`).locator("[title='Pinned message']").waitFor({ timeout: 10000 }).then(() => true, () => false);
+    }
+    if (!onA || !onB) throw new Error(`pinned on A: ${onA}, on B: ${onB}, on A after reopening the channel: ${afterReload}; toasts: ${JSON.stringify(screenToast)} console: ${JSON.stringify(toasts)}`);
+  });
+  await check("A mentions B by name; on B's screen the mention is marked as being about B", async () => {
+    const bName = await B.page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_identity").then((i) => i?.display_name || null).catch(() => null));
+    const who = bName || "Bob";
+    await sendText(A, `${t} hey @${who} look`);
+    await seesText(B, `${t} hey`, 30000);
+    const self = await msgOf(B, `${t} hey`).locator(".mention-self").count();
+    const any = await msgOf(B, `${t} hey`).locator(".mention").count();
+    if (!self) throw new Error(`no self-mention mark on B (mentions: ${any}, name used: ${who})`);
+    return `as @${who}`;
+  });
+  await check("B searches (the magnifier) for A's line and finds it", async () => {
+    await B.page.locator("button.search-toggle").click();
+    const box = B.page.locator('input[placeholder^="Type to search"]');
+    await box.fill(`${t} hey`);
+    const found = await (async () => {
+      for (let i = 0; i < 20; i++) {
+        const txt = await box.evaluate((el) => { let p = el; while (p && !p.querySelector('[aria-label="Close search"]')) p = p.parentElement; return p?.innerText || ""; });
+        if (txt.split("\n").some((l) => l.includes("look") && !l.includes("Type to search"))) return txt;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return null;
+    })();
+    await B.page.locator('[aria-label="Close search"]').click().catch(() => {});
+    if (!found) throw new Error("no result for a line on screen");
+  });
+  const chName = `ev-${stamp}`.toLowerCase().slice(0, 20);
+  await check("A (owner) makes a channel in Server Settings; it appears on B's channel list", async () => {
+    await A.page.locator("button[title='Server Settings']").click();
+    await A.page.locator(".settings-tab", { hasText: /Channels/ }).first().click().catch(() => {});
+    await A.page.locator('input[placeholder="Channel name"]').fill(chName);
+    await A.page.locator(".organizer-create button.xp-button", { hasText: "Add" }).first().click();
+    await closeDialogs(A);
+    await B.page.locator(".channel-item", { hasText: chName }).first().waitFor({ timeout: 20000 });
+  });
+  const renamed = chName + "-x";
+  await check("A renames it (right-click > Edit Channel > Save Changes); B sees the new name", async () => {
+    await A.page.locator(".channel-item", { hasText: chName }).first().click({ button: "right" });
+    await A.page.getByText("Edit Channel", { exact: true }).click();
+    const name = A.page.locator(".modal-dialog:visible input.connect-input").first();
+    await name.fill(renamed);
+    await A.page.getByRole("button", { name: "Save Changes" }).click();
+    await A.page.locator(".success-text", { hasText: "Saved" }).waitFor({ timeout: 10000 }).catch(() => {});
+    await closeDialogs(A);
+    await B.page.locator(".channel-item", { hasText: renamed }).first().waitFor({ timeout: 20000 });
+  });
+  await check("A deletes it (right-click > Delete Channel, confirm); it goes from B's list", async () => {
+    await A.page.locator(".channel-item", { hasText: renamed }).first().click({ button: "right" });
+    await A.page.getByText("Delete Channel", { exact: true }).click();
+    await A.page.getByRole("button", { name: "Delete channel" }).click();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000 && (await B.page.locator(".channel-item", { hasText: renamed }).count()) > 0) await new Promise((r) => setTimeout(r, 500));
+    if (await B.page.locator(".channel-item", { hasText: renamed }).count()) throw new Error("still on B's list");
+    if (await A.page.locator(".channel-item", { hasText: renamed }).count()) throw new Error("still on A's list");
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
+// Moderation (ubuntu-suite.sh only moderation): the owner kicks, bans and unbans a member from the member list, the
+// way they would, and the member's own app shows what happened and what they can still do.
+async function moderation() {
+  const name = process.env.UBU_NAME || "Ubuntu Server";
+  const A = await attach(PORT_A, "A");
+  const B = await attach(PORT_B, "B");
+  for (const c of [A, B]) {
+    if (await c.page.locator('input[aria-label="PIN entry"]').first().waitFor({ timeout: 3000 }).then(() => true, () => false)) await unlock(c);
+    for (let i = 0; i < 3 && (await c.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await c.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await c.page.locator(`.server-icon[title="${name}"]`).click();
+    await c.page.locator(".channel-item", { hasText: "general" }).first().click();
+  }
+  // The app asks "Kick Bob from this server?" with the browser's own confirm box: say yes.
+  A.page.on("dialog", (d) => { void d.accept(); });
+  const bobOnA = () => A.page.locator(".member-item", { hasText: "Bob" });
+  const gone = async (loc, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if ((await loc.count()) === 0) return true; await new Promise((r) => setTimeout(r, 500)); } return false; };
+  const memberMenu = async (label) => {
+    await bobOnA().first().click({ button: "right" });
+    await new Promise((r) => setTimeout(r, 500)); // a person reads the menu before clicking
+    await A.page.getByText(label, { exact: true }).first().click();
+  };
+  const notice = async (verb) => {
+    const h = B.page.getByText(new RegExp(`You were ${verb} from`));
+    await h.waitFor({ timeout: 20000 });
+    await B.page.getByRole("button", { name: "OK", exact: true }).click();
+  };
+  const rejoin = async () => {
+    const link = await makeInvite(A);
+    await B.page.getByTitle("Add Server").click();
+    await joinWithLink(B, link);
+    await B.page.locator(`.server-icon[title="${name}"]`).waitFor({ timeout: 30000 });
+    await bobOnA().first().waitFor({ timeout: 30000 });
+  };
+  await check("A kicks Bob (right-click Bob > Kick, yes); Bob's app says he was kicked and the server leaves his list", async () => {
+    await bobOnA().first().waitFor({ timeout: 20000 });
+    await memberMenu("Kick");
+    await notice("kicked");
+    if (!(await gone(B.page.locator(`.server-icon[title="${name}"]`), 10000))) throw new Error("the server is still on Bob's list");
+    if (!(await gone(bobOnA(), 15000))) throw new Error("Bob is still in A's member list");
+  });
+  await check("a kicked member can come back with a new invite, under his own name, and post again", async () => {
+    await rejoin();
+    await B.page.locator(`.server-icon[title="${name}"]`).click();
+    await B.page.locator(".channel-item", { hasText: "general" }).first().click();
+    const line = "back after the kick " + Date.now();
+    await sendText(B, line);
+    await seesText(A, line, 30000);
+  });
+  await check("A bans Bob (right-click Bob > Ban > Ban); Bob's app says he was banned", async () => {
+    await memberMenu("Ban");
+    await A.page.getByRole("button", { name: "Ban", exact: true }).last().click();
+    await notice("banned");
+    if (!(await gone(bobOnA(), 15000))) throw new Error("Bob is still in A's member list");
+  });
+  await check("a banned member cannot come back, even with a new invite, and is told why", async () => {
+    const link = await makeInvite(A);
+    const p = B.page;
+    await p.getByTitle("Add Server").click();
+    await p.getByText("Join a Server").click();
+    await p.getByPlaceholder("farder://server/invite-code").fill(link);
+    await p.getByRole("button", { name: "Join", exact: true }).click();
+    const confirm = p.getByText(/Join it\?/);
+    if (await confirm.waitFor({ timeout: 8000 }).then(() => true, () => false)) await p.getByRole("button", { name: "Join", exact: true }).last().click();
+    const err = p.locator(".error-text, .toast-message").filter({ hasText: /ban/i }).first();
+    const said = await err.waitFor({ timeout: 30000 }).then(() => err.innerText(), () => null);
+    const shown = await p.locator(".modal-dialog:visible, .error-text, .toast-message, [role=alert]").allInnerTexts().catch(() => []);
+    const inList = await p.locator(`.server-icon[title="${name}"]`).count();
+    for (let i = 0; i < 3 && (await p.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await p.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    if (inList) throw new Error("a banned member got back in");
+    if (!said) throw new Error("refused, but nothing on screen says it is because of a ban; on screen: " + JSON.stringify(shown).slice(0, 300));
+    return said.slice(0, 120);
+  });
+  await check("A unbans Bob (Server Settings > Banned > Unban, yes); Bob can join again", async () => {
+    await A.page.locator("button[title='Server Settings']").click();
+    await A.page.locator(".settings-tab", { hasText: /Ban/ }).first().click();
+    await A.page.getByRole("button", { name: "Unban" }).first().click();
+    await new Promise((r) => setTimeout(r, 1500));
+    for (let i = 0; i < 3 && (await A.page.locator(".modal-dialog:visible .modal-close").count()) > 0; i++) await A.page.locator(".modal-dialog:visible .modal-close").first().click().catch(() => {});
+    await rejoin();
+  });
+  await A.browser.close().catch(() => {});
+  await B.browser.close().catch(() => {});
+}
+
 // Reply (run after `ubuntu`): B answers A's message with right-click > Reply; the answer must be linked
 // to it (not posted as a plain message) on both screens and in the server's history.
 async function reply() {
@@ -2783,6 +2977,8 @@ try {
   else if (scenario === "autoplay") await autoplay();
   else if (scenario === "reply") await reply();
   else if (scenario === "sound") await sound();
+  else if (scenario === "everyday") await everyday();
+  else if (scenario === "moderation") await moderation();
   else if (scenario === "e2ee-diag") await e2eeDiag();
   else if (scenario === "voice") await voice();
   else if (scenario === "popup-size") await popupSize();

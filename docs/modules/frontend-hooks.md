@@ -119,6 +119,7 @@ of key to filename.
 | `useDensity` | `()` | The message density (`roomy`/`normal`/`compact`/`irc`/`tiny`), re-read when `farder:density-changed` fires. Stored in `localStorage` only; see `density.md`. |
 | `useSmallWindows` | `()` | Main window only (mounted in `App.tsx`). Feeds the buddy list and chat windows: pushes `buddy:state` and a per-window `chat:state` (via `emitTo`) whenever app state changes, but only to windows that are open. Handles `buddy:ready`, `chat:ready` and `chat:read`, checking each against real servers/channels first. See `buddy-list.md`. |
 | `useReplySender` | `(onSent)` | Sends a one-line reply from a small window (pop-up or edge strip) by ASKING the main window (`notify:reply`), then waits for `notify:reply-result`. Returns `{ state, error, send(target, text), reset }` (`reset` returns it to idle, for the chat window which stays open). |
+| `useGarbleState` | `(serverId)` | Garble rules, consents and `can_moderate` for one server; re-asks on `farder:garble-changed` / `farder:capabilities-changed`. Returns `{ state, ownPk, refresh, loaded }`: `loaded` turns true after the first answer (or failure), and the member menu stays hidden until then, because its Garble row would otherwise appear above Timeout/Kick/Ban and move them under the pointer. |
 
 ---
 

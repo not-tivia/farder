@@ -816,6 +816,14 @@ export default function Message({ message, memberNames, grouped: groupedProp = f
                 : (garbleMark.moderation ? "garbled by a moderator" : "garbled (they agreed to this)")}
             </div>
           )}
+          {/* A message grouped under the one before has no header, which is where "(edited)" and the pin
+              marker live: without this a pinned or edited follow-up line showed neither. */}
+          {grouped && !editing && (message.edited_at || message.pinned) && (
+            <div style={{ marginTop: 1 }}>
+              {message.edited_at && <span className="message-edited">(edited)</span>}
+              {message.pinned && <span className="message-edited" title="Pinned message">📌 pinned</span>}
+            </div>
+          )}
 
           {reporting && (
         <ReportMessageDialog
@@ -976,59 +984,15 @@ export default function Message({ message, memberNames, grouped: groupedProp = f
         <>
           <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setContextMenu(null)} />
           <div ref={contextMenuRef} className="context-menu" style={contextMenuPos}>
-            <div className="context-menu-item" onClick={() => {
-              if (onReply) onReply(message);
-              setContextMenu(null);
-            }}>Reply</div>
-            {isOwnMessage && (
-              <div className="context-menu-item" onClick={() => {
-                setEditing(true);
-                setEditContent(message.content);
-                setContextMenu(null);
-              }}>Edit Message</div>
-            )}
-            <div className="context-menu-item" onClick={() => {
-              navigator.clipboard.writeText(message.content);
-              setContextMenu(null);
-            }}>Copy Text</div>
-            {translationSettings?.enabled && (
-              <div className="context-menu-item" onClick={async () => {
-                setContextMenu(null);
-                if (!translationSettings) return;
-                await translateMessage({
-                  messageId: String(message.id),
-                  content: message.content,
-                  defaultTarget: translationSettings.default_target,
-                  authorPublicKeyHex: pkStr,
-                  confirmDownload: async (pair) =>
-                    new Promise<void>((resolve, reject) => {
-                      setPendingDownload({ pair, resolve, reject, inProgress: false });
-                    }),
-                });
-              }}>Translate</div>
-            )}
-            {!message.thread_id && (
-              <div className="context-menu-item" onClick={async () => {
-                try { await api.createThread(serverId, message.id); }
-                catch (e) { toast.error(`Couldn't create thread: ${e}`); }
-                setContextMenu(null);
-              }}>Create Thread</div>
-            )}
-            {isOwnMessage && (
-              <div className="context-menu-item delete" onClick={async () => {
-                try {
-                  await api.deleteMessageAnywhere({
-                    serverId,
-                    logServerId: activeServer?.logServerId ?? null,
-                    channelId: message.channel_id,
-                    messageId: message.id,
-                    eventHash: message.event_hash ?? null,
-                    ownMessage: isOwnMessage,
-                  });
-                } catch (e) { toast.error(`Couldn't delete message: ${e}`); }
-                setContextMenu(null);
-              }}>Delete Message</div>
-            )}
+            {/* The ONE list of message actions (also used by the attachment menu). This menu used to be a
+                hand-made copy that lacked Pin and Report, so neither could be reached from a right-click. */}
+            {messageActions.map((action) => (
+              <div
+                key={action.label}
+                className={`context-menu-item${action.label === "Delete Message" ? " delete" : ""}`}
+                onClick={() => { setContextMenu(null); action.onClick(); }}
+              >{action.label}</div>
+            ))}
           </div>
         </>
       )}
