@@ -71,8 +71,9 @@ The copy accepts only if ALL hold (each refusal is a plain reason and the copy s
 6. `after_event` is the hash of the newest event in the copy's log.
 
 On accept the term is saved in `server_settings` (`host_term`), SQLite `query_only` is lifted, the server turns writable, the
-retention/bot/widget jobs start, and one `PROMOTED:` line is logged. Not restarted by promotion: automatic backups
-(`--backup-dir`) and `--relay` registration begin at the next start.
+retention/bot/widget jobs start (plus automatic backups, if `--backup-dir` was given: one at once, then every
+`--backup-interval`; a copy never promoted writes none), and one `PROMOTED:` line is logged. Not restarted by
+promotion: `--relay` registration begins at the next start.
 
 Start-up: a database with a stored term whose `host_key` is not this machine's identity starts READ-ONLY even without
 `--read-only` (it was replaced). A promoted copy restarted from its `--db` with the same `--data-dir` stays writable with the
