@@ -77,7 +77,10 @@ promotion: `--relay` registration begins at the next start.
 
 Start-up: a database with a stored term whose `host_key` is not this machine's identity starts READ-ONLY even without
 `--read-only` (it was replaced). A promoted copy restarted from its `--db` with the same `--data-dir` stays writable with the
-same term. Not yet: asking peers for a higher term, client-side fencing, the UI, and a way for the app to learn the copy's `host_key`.
+same term. Since built: asking the copies for a higher term (step 4, above), the owner's UI (Server Settings > Backup copy,
+which learns the copy's `host_key` from `GetPromotionInfo`), and the apps following the move (`ubuntu-suite.sh promote`).
+Not yet: the old host following the new host as a copy, and `--relay` registration on promotion (the relay routes by the
+old host's own id, so a promoted copy cannot take over relay invite links).
 
 Test: `cargo test -p farder-replica --test replica promotes` (real server binary: promote, every refusal, restart).
 
