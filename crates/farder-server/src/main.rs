@@ -306,6 +306,8 @@ async fn main() -> Result<()> {
         info!("READ-ONLY copy: history and members can be read; nothing can be sent or changed.");
         // If the owner promotes this copy (`PromoteToHost`), it starts the jobs a writable host runs.
         *state.on_promoted.lock().unwrap() = Some(farder_server::promotion::promoted_hook(&state, args.retention_interval, backup_plan));
+        // The replica installs each pull by renaming a new file over this path: follow it without a restart.
+        farder_server::copy_reload::spawn_copy_watcher(Arc::clone(&state), args.db.clone());
     } else {
         _retention = Some(retention::spawn_retention_task(Arc::clone(&state), args.retention_interval));
         _bot_poller = Some(farder_server::bots::spawn_bot_poll_task(Arc::clone(&state)));

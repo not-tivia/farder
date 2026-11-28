@@ -26,6 +26,15 @@ host's computer is off. Design and status: `docs/mesh-hosting-status.md`.
 Serve the copy with `farder-server --read-only --db DIR/latest.db --storage-dir DIR/files --bind 0.0.0.0:PORT` (no
 `--name` needed: the name the host saved is used).
 
+The running copy FOLLOWS the replica's pulls: the replica installs each pull by renaming a new file over `latest.db`,
+and a read-only server (`copy_reload::spawn_copy_watcher`) checks that path every 2 seconds (device+inode on Unix,
+size+mtime elsewhere). When the file was replaced it opens the new one (`query_only`), loads its signed log, and only
+then swaps it into `ServerState::db` and rebuilds `genesis`, `log_state`, `owner` and `server_name`, logging
+`copy reloaded: <path> (<n> events)`. A file that does not open or whose log does not load (or has none) is skipped
+with one warning and the old copy keeps serving. Sessions survive: the next request reads the new copy. A writable
+server (the host, or a promoted copy) never reloads. It does not re-run the start-up repair passes, since a verified
+pull is already consistent.
+
 ## Library (`farder_replica`)
 
 | Item | What it does |
